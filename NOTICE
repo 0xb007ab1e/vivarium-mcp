@@ -1,0 +1,11 @@
+ghidra-mcp
+Copyright 2026 ghidra-mcp authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This software integrates with Ghidra (https://ghidra-sre.org/), a software
+reverse engineering (SRE) framework developed by the National Security Agency,
+which is itself distributed under the Apache License, Version 2.0. Ghidra is not
+distributed as part of this repository; it is obtained and run separately (see
+PLAN.md / docs). Third-party dependency attributions are generated with the SBOM
+on release (see docs / std-supplychain).
