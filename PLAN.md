@@ -88,7 +88,9 @@ Contract changes route through the PM (batch-atomicity mandate).
   ADR-004 Isolation tier (rootless podman baseline; gVisor for worker) (F8). ADR-005 Untrusted-data
   envelope for binary-derived output (F3). ADR-006 stdio-first; HTTP gated v1.1 (F9).
 
-## 9. Open items for architect / SME (resolve during WS0)
-- Confirm exact Ghidra 11.x version + headless integration method against target javadoc (SME).
-- Finalize worker RPC mechanism (e.g. JSON-RPC over local socket vs gRPC) + serialization.
-- Confirm project-store location (session-scoped volume vs tmpfs) + verified-wipe on eviction.
+## 9. Open items
+- ✅ **RESOLVED (WS0):** worker RPC = **JSON-RPC 2.0 over per-session UDS** (ratified 2026-06-03;
+  see `docs/contracts/rpc-protocol.md`).
+- ⏳ **WS3:** confirm exact Ghidra 11.x patch version + digest (SME) at worker-image build; confirm
+  project-store location (session-scoped volume vs tmpfs) + verified-wipe mechanism (ADR-002 fixes
+  kill-then-verified-wipe).

@@ -1,0 +1,120 @@
+# CI security gates (workflow-cicd). Every gate is MERGE-BLOCKING via branch protection
+# (see docs/ci-cd.md). Fail closed: an errored/skipped security stage counts as failure.
+#
+# SUPPLY CHAIN (std-supplychain): all third-party actions are pinned BY COMMIT DIGEST (@<sha>),
+# never by floating tag; the tag is kept in a trailing comment for readability. The pinned SHAs
+# below are PLACEHOLDERS (`REPLACE_WITH_DIGEST_FOR_<tag>`) — a maintainer resolves each tag to its
+# commit SHA and pins it as a GATED supply-chain step before this workflow runs (no network in WS0).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read   # least privilege; raise per-job only when a step needs it.
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # 1-4. Build, lint+format, type-check, unit+coverage (>=90% line+branch baseline).
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@REPLACE_WITH_DIGEST_FOR_v4  # actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@REPLACE_WITH_DIGEST_FOR_v5  # actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install (hash-pinned lockfile — GATED; see pyproject lockfile-intent note)
+        run: |
+          python -m pip install --upgrade pip
+          # Install from the committed hash-pinned lockfile only (require-hashes). No floating resolve.
+          # pip install --require-hashes -r requirements-dev.lock   # <- enable once the lock exists
+          pip install -e ".[dev]"
+      - name: Lint + format (ruff)          # gate 2
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Type-check (mypy --strict)    # gate 3
+        run: mypy
+      - name: Unit tests + coverage         # gate 3 (master §4: >=90% line+branch baseline)
+        run: pytest -m "not integration"
+      - name: Critical-path coverage 100%   # master §4: 100% on designated critical paths
+        run: |
+          # Critical modules (see pyproject [tool.coverage] note): validation, envelope, errors,
+          # sessions.manager, security.limits. Enforce 100% scoped to these.
+          pytest -m "not integration" \
+            --cov=ghidra_mcp.core.validation \
+            --cov=ghidra_mcp.core.envelope \
+            --cov=ghidra_mcp.core.errors \
+            --cov=ghidra_mcp.sessions.manager \
+            --cov=ghidra_mcp.security.limits \
+            --cov-fail-under=100
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@REPLACE_WITH_DIGEST_FOR_v4  # actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+
+  # 5. SAST — first-party static analysis.
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@REPLACE_WITH_DIGEST_FOR_v4  # actions/checkout@v4
+      - uses: actions/setup-python@REPLACE_WITH_DIGEST_FOR_v5  # actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install bandit semgrep
+      - name: bandit
+        run: bandit -r src -c pyproject.toml
+      - name: semgrep (block on high/critical)
+        run: semgrep --config p/python --config p/security-audit --error
+
+  # 6. SCA — dependency vulnerability scan (block on high/critical CVEs).
+  sca:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@REPLACE_WITH_DIGEST_FOR_v4  # actions/checkout@v4
+      - uses: actions/setup-python@REPLACE_WITH_DIGEST_FOR_v5  # actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install pip-audit
+      - name: pip-audit
+        run: pip-audit --strict --desc
+
+  # 7. Secret scan — block on any detected secret.
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@REPLACE_WITH_DIGEST_FOR_v4  # actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history for the secret scanner
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@REPLACE_WITH_DIGEST_FOR_v2  # gitleaks/gitleaks-action@v2
+
+  # 8. Container / IaC scan — worker image + Dockerfiles/manifests (WS3). Runs once those exist.
+  container-iac-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@REPLACE_WITH_DIGEST_FOR_v4  # actions/checkout@v4
+      - name: Trivy config/IaC scan (misconfig + Dockerfile)
+        uses: aquasecurity/trivy-action@REPLACE_WITH_DIGEST_FOR_v0  # aquasecurity/trivy-action@<pin>
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"     # fail closed on high/critical misconfig
+      # NOTE: the worker IMAGE scan (Trivy image, pinned by digest) + SBOM generation run in the
+      # WS3 build/release workflow once the worker image exists; this job covers IaC/config now.
+
+  # Integration/E2E (real worker) run in a separate workflow (needs the built worker image),
+  # NOT in PR CI — no image pulls / network here. Tracked for WS3/WS5.

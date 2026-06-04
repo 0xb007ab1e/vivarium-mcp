@@ -1,0 +1,166 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ghidra-mcp"
+version = "0.1.0"
+description = "Secure MCP server exposing headless, out-of-process Ghidra to LLM clients as read-only tools."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "ghidra-mcp authors" }]
+keywords = ["mcp", "ghidra", "reverse-engineering", "security", "llm-tools"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Security",
+  "Typing :: Typed",
+]
+
+# NOTE (supply chain / lockfile-intent — std-supplychain, GATED):
+#   Dependencies are declared here but DELIBERATELY NOT RESOLVED OR INSTALLED in WS0.
+#   Installing/resolving deps and pulling the Ghidra/JDK base image is a GATED supply-chain
+#   action (PLAN §6). Before any install, a maintainer must:
+#     1. Run `uv lock` (or `pip-compile --generate-hashes`) to produce a hash-pinned lockfile
+#        (`uv.lock` / `requirements*.lock`) committed to VCS.
+#     2. Pin the Ghidra + JDK base image BY DIGEST (see deploy/ — WS3) — never a floating tag.
+#     3. Vet each new dep (maintenance, provenance, license, CVEs) per std-supplychain.
+#   Version floors below are conservative minimums; the lockfile is the source of truth for
+#   exact, hashed versions. No upper pins here so the lock can move forward under review.
+dependencies = [
+  "mcp>=1.2.0",        # official Model Context Protocol SDK (FastMCP). stdio transport in v1.
+  "pydantic>=2.6",     # boundary validation: every tool input AND output schema (PLAN §3).
+]
+
+[project.optional-dependencies]
+# Dev/test/security tooling. Also unresolved in WS0 (see lockfile-intent note above).
+dev = [
+  "ruff>=0.4",         # lint + format, including the `D` (pydocstyle) docstring rule set.
+  "mypy>=1.10",        # static typing in --strict mode.
+  "pytest>=8.0",
+  "pytest-cov>=5.0",   # coverage gate (master §4).
+  "bandit>=1.7",       # Python SAST.
+  "pip-audit>=2.7",    # dependency CVE scan (SCA).
+]
+
+[project.urls]
+Homepage = "https://github.com/OWNER/ghidra-mcp"
+Repository = "https://github.com/OWNER/ghidra-mcp"
+Issues = "https://github.com/OWNER/ghidra-mcp/issues"
+
+[project.scripts]
+# stdio entrypoint (the only transport in v1). Implementation stub lives in src/ghidra_mcp/__main__.py.
+ghidra-mcp = "ghidra_mcp.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ghidra_mcp"]
+
+# ---------------------------------------------------------------------------
+# Ruff — lint + format. Docstring mandate enforced mechanically (topic-documentation).
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E", "F", "W",   # pycodestyle / pyflakes
+  "I",             # isort
+  "N",             # pep8-naming
+  "UP",            # pyupgrade
+  "B",             # flake8-bugbear
+  "S",             # flake8-bandit (security smells; complements bandit)
+  "C4",            # comprehensions
+  "SIM",           # simplify
+  "PTH",           # use pathlib (path-traversal hygiene)
+  "RUF",           # ruff-specific
+  "D",             # pydocstyle — DOCSTRING MANDATE on public symbols (master §1)
+]
+ignore = [
+  "D203",  # one-blank-line-before-class (conflicts with D211)
+  "D213",  # multi-line-summary-second-line (conflicts with D212)
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may use asserts (S101) and need not be fully docstringed (D...).
+# IMPORTANT (topic-testing false-pass trap): docstring-gate probe fixtures MUST use a
+# PUBLIC module name — a leading underscore marks a module private and `D` exempts it,
+# giving a false PASS. Do not add `examples/`-style globs that silently exempt probes.
+"tests/**" = ["S101", "D"]
+
+# ---------------------------------------------------------------------------
+# Mypy — strict typing (lang-python: strict for new code).
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_generics = true
+no_implicit_reexport = true
+show_error_codes = true
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+# The `mcp` SDK may not ship complete stubs; allow until upstream types land. Re-tighten on bump.
+module = ["mcp.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# Pytest + coverage. Coverage gate is enforced here AND in CI (workflow-cicd).
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+  "-ra",
+  "--strict-markers",
+  "--strict-config",
+  "--cov=ghidra_mcp",
+  "--cov-branch",
+  "--cov-report=term-missing",
+  "--cov-report=xml",
+  # Repo-wide BASELINE floor (master §4: >=90% line+branch). The 100%-critical-path rule is
+  # enforced separately (see [tool.coverage] groups note below + CI critical-path job).
+  "--cov-fail-under=90",
+]
+markers = [
+  "critical: critical-path test (input validation / session isolation / trust boundaries) — target 100%.",
+  "abuse: adversarial/abuse-path test (WS4) — decompile-bomb, injection, BOLA, resource exhaustion.",
+  "integration: requires a real Ghidra worker (not run in unit CI).",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["ghidra_mcp"]
+# Worker-side Ghidra/JVM glue is exercised only in the integration suite (real worker), not unit CI.
+omit = ["src/ghidra_mcp/ghidra/_jvm_bridge.py"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "\\.\\.\\.",
+]
+
+# Critical paths (target 100% — master §4). Enforced by a dedicated CI job that runs coverage
+# scoped to these modules with --fail-under=100. Listed here as the authoritative designation:
+#   - src/ghidra_mcp/core/validation.py     (trust boundary 1: client args)
+#   - src/ghidra_mcp/core/envelope.py       (trust boundary 4: untrusted-data + error envelopes)
+#   - src/ghidra_mcp/sessions/manager.py    (session isolation / eviction / BOLA prevention)
+#   - src/ghidra_mcp/security/limits.py     (DoS bounds enforced before the worker)
+
+[tool.bandit]
+# bandit SAST config; asserts in tests are excluded via the test path, not by skipping checks.
+exclude_dirs = ["tests", ".venv"]
