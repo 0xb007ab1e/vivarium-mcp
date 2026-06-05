@@ -1,0 +1,107 @@
+{
+  "__doc__": "OPTIONAL stricter seccomp profile for the Ghidra worker (ADR-004). Default-deny (errno) allow-list scoped to a headless JVM doing OFFLINE analysis. OPT-IN: validate with deploy/verify-isolation.sh + a full import->analyze->decompile smoke test before replacing RuntimeDefault. The ONLY permitted socket family is AF_UNIX (the per-session UDS); AF_INET/AF_INET6 are denied as defense-in-depth on top of --network=none. Network-reaching syscalls (connect/bind to inet, sendto, etc.) are NOT in the allow-list. See infra/seccomp/README.md.",
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "defaultErrnoRet": 1,
+  "archMap": [
+    {
+      "architecture": "SCMP_ARCH_X86_64",
+      "subArchitectures": ["SCMP_ARCH_X86", "SCMP_ARCH_X32"]
+    },
+    {
+      "architecture": "SCMP_ARCH_AARCH64",
+      "subArchitectures": ["SCMP_ARCH_ARM"]
+    }
+  ],
+  "syscalls": [
+    {
+      "__group__": "process / threads / scheduling (JVM is heavily threaded)",
+      "names": [
+        "clone", "clone3", "execve", "exit", "exit_group", "fork", "vfork",
+        "futex", "futex_waitv", "set_robust_list", "get_robust_list",
+        "set_tid_address", "gettid", "getpid", "getppid",
+        "sched_getaffinity", "sched_setaffinity", "sched_yield",
+        "sched_getparam", "sched_getscheduler", "sched_get_priority_max",
+        "sched_get_priority_min", "getrandom", "rseq",
+        "tgkill", "tkill", "wait4", "waitid",
+        "getuid", "geteuid", "getgid", "getegid", "getgroups",
+        "getresuid", "getresgid", "setsid", "prctl", "arch_prctl",
+        "capget", "getcpu", "getpriority"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "__group__": "memory management",
+      "names": [
+        "mmap", "munmap", "mprotect", "mremap", "madvise", "mlock", "munlock",
+        "brk", "msync", "mincore", "membarrier"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "__group__": "file IO (read mounted binary, write only to tmpfs scratch — enforced by ro-rootfs)",
+      "names": [
+        "open", "openat", "openat2", "close", "close_range", "read", "pread64",
+        "readv", "preadv", "preadv2", "write", "pwrite64", "writev", "pwrite",
+        "lseek", "fstat", "fstatat64", "newfstatat", "stat", "lstat", "statx",
+        "fstatfs", "statfs", "fcntl", "fadvise64", "fallocate", "ftruncate",
+        "truncate", "getdents64", "getcwd", "readlink", "readlinkat",
+        "access", "faccessat", "faccessat2", "dup", "dup2", "dup3",
+        "pipe", "pipe2", "fsync", "fdatasync", "sync", "umask", "flock",
+        "mkdir", "mkdirat", "unlink", "unlinkat", "rmdir", "rename", "renameat",
+        "renameat2", "chmod", "fchmod", "fchmodat", "chown", "fchown", "fchownat",
+        "memfd_create", "eventfd", "eventfd2", "inotify_init1", "inotify_add_watch"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "__group__": "AF_UNIX sockets ONLY — the per-session UDS (rpc-protocol.md). No inet networking.",
+      "names": ["socketpair"],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": ["socket"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        { "index": 0, "value": 1, "op": "SCMP_CMP_EQ", "__comment__": "AF_UNIX == 1" }
+      ]
+    },
+    {
+      "__group__": "UDS connection lifecycle (server-connects model or worker-listens; allow both AF_UNIX)",
+      "names": [
+        "bind", "listen", "accept", "accept4", "connect",
+        "getsockname", "getpeername", "getsockopt", "setsockopt",
+        "shutdown", "recvfrom", "recvmsg", "sendto", "sendmsg"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "__comment__": "These are scoped in practice to AF_UNIX because socket(AF_INET*) is denied above and --network=none removes any inet route. Listed for the UDS data path."
+    },
+    {
+      "__group__": "polling / event loops (NIO / epoll)",
+      "names": [
+        "epoll_create", "epoll_create1", "epoll_ctl", "epoll_wait", "epoll_pwait",
+        "epoll_pwait2", "poll", "ppoll", "select", "pselect6",
+        "nanosleep", "clock_nanosleep", "timerfd_create", "timerfd_settime",
+        "timerfd_gettime", "signalfd", "signalfd4"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "__group__": "signals",
+      "names": [
+        "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "rt_sigpending",
+        "rt_sigsuspend", "rt_sigtimedwait", "rt_sigqueueinfo", "sigaltstack",
+        "kill", "pause", "restart_syscall"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "__group__": "time / resource introspection (read-only)",
+      "names": [
+        "clock_gettime", "clock_getres", "gettimeofday", "time",
+        "getrusage", "getrlimit", "prlimit64", "sysinfo", "uname",
+        "ioctl"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ]
+}

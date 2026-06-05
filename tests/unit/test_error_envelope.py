@@ -52,9 +52,7 @@ def test_envelope_is_frozen_and_forbids_extra_fields() -> None:
 @pytest.mark.parametrize("bad_status", [399, 600])
 def test_status_bounds_enforced(bad_status: int) -> None:
     with pytest.raises(ValidationError):
-        ErrorEnvelope(
-            type=ErrorType.VALIDATION, title="t", detail="d", status=bad_status
-        )
+        ErrorEnvelope(type=ErrorType.VALIDATION, title="t", detail="d", status=bad_status)
 
 
 @pytest.mark.critical

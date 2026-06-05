@@ -1,0 +1,157 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# Containerfile.worker — hardened, network-isolated Ghidra analysis worker
+# =============================================================================
+# Realizes ADR-003 (container-only Ghidra 11.x + JDK 21, pinned by digest) and is the image
+# hardened at RUNTIME by deploy/ per ADR-004 (rootless, ro-rootfs, all caps dropped, no network,
+# seccomp RuntimeDefault, gVisor/runsc, resource limits). This image hosts the WS2 `worker/`
+# entrypoint that speaks JSON-RPC 2.0 over the per-session UDS (docs/contracts/rpc-protocol.md).
+#
+# TRUST BOUNDARY 3 (HOSTILE INPUT): this container parses attacker-controlled binaries through the
+# Ghidra JVM. It is a DISPOSABLE fault domain — one worker per session, killed on eviction/timeout
+# (ADR-002). It MUST be able to do nothing but read its mounted binary, analyze it, and answer RPC
+# on its own socket. No network, no host access, no persistence beyond a session-scoped tmpfs/volume.
+#
+# -----------------------------------------------------------------------------
+# SUPPLY CHAIN (std-supplychain / ADR-003) — DIGEST PINNING IS GATED (PLAN §6)
+# -----------------------------------------------------------------------------
+# Base images are pinned BY DIGEST (@sha256:...), NEVER by floating tag. Resolving a digest needs
+# a network pull (GATED). Until a maintainer vets + pins the real digest, we use the same
+# REPLACE_WITH_DIGEST_FOR_<image:tag> placeholder convention as .github/workflows/ci.yml.
+#
+#   GATED ITEM W1: base build image (JDK 21 + build tooling to unpack Ghidra)
+#   GATED ITEM W2: base runtime image (JDK 21 runtime ONLY — no shell/pkg-mgr where feasible)
+#   GATED ITEM W3: Ghidra 11.x release artifact (downloaded + CHECKSUM-VERIFIED, not pulled as image)
+#
+# The exact Ghidra 11.x patch version is an open SME item (ADR-003 / PLAN §9). The build ARG below
+# is the single place to set it; the release zip's published SHA-256 is verified before unzip.
+# =============================================================================
+
+# --- ARGs (set at build; pinned values are GATED — see notes above) -----------------------------
+# Ghidra release version + the publisher's SHA-256 of the release zip (verified during build).
+ARG GHIDRA_VERSION=REPLACE_WITH_GHIDRA_11x_PATCH_VERSION
+ARG GHIDRA_RELEASE_TAG=REPLACE_WITH_GHIDRA_RELEASE_TAG
+ARG GHIDRA_ZIP_SHA256=REPLACE_WITH_GHIDRA_RELEASE_ZIP_SHA256
+ARG GHIDRA_ZIP_URL=REPLACE_WITH_GHIDRA_RELEASE_ZIP_URL
+
+# =============================================================================
+# Stage 1: builder — fetch + verify + unpack Ghidra. Build tooling stays HERE, not in runtime.
+# =============================================================================
+# GATED ITEM W1: pin this base by digest (a JDK 21 image with a shell + unzip + curl).
+FROM eclipse-temurin:21-jdk@sha256:b9142586f9712700c6c9e07adcedfb18608b1a3a056e4001423a3354adfa9d80 AS builder
+
+ARG GHIDRA_VERSION
+ARG GHIDRA_RELEASE_TAG
+ARG GHIDRA_ZIP_SHA256
+ARG GHIDRA_ZIP_URL
+
+# hadolint ignore=DL3008,DL3009
+# Build-only tooling (unzip/ca-certs). Never ships to the runtime stage.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl unzip; \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/ghidra-src
+
+# GATED ITEM W3: download the Ghidra release zip and VERIFY its publisher SHA-256 BEFORE unzip.
+# A checksum mismatch FAILS THE BUILD (fail closed — supply-chain integrity, no tampered artifact).
+# The download itself is a GATED network action; a maintainer supplies the pinned URL + SHA-256.
+RUN set -eux; \
+    echo "${GHIDRA_ZIP_SHA256}  ghidra.zip" > ghidra.zip.sha256; \
+    curl -fsSL --proto '=https' --tlsv1.2 -o ghidra.zip "${GHIDRA_ZIP_URL}"; \
+    sha256sum -c ghidra.zip.sha256; \
+    unzip -q ghidra.zip; \
+    rm -f ghidra.zip ghidra.zip.sha256; \
+    # The zip extracts to ghidra_<version>_PUBLIC/. Normalize to a stable path.
+    mv ghidra_*_PUBLIC /opt/ghidra; \
+    # Strip components a headless analyzer never needs (GUI, docs, samples) to shrink attack
+    # surface + image size. Keep support/, Ghidra/, and the headless analyzer.
+    rm -rf /opt/ghidra/docs /opt/ghidra/GPL/DemanglerGnu/build 2>/dev/null || true
+
+# =============================================================================
+# Stage 2: runtime — JDK 21 runtime + Ghidra + the WS2 worker entrypoint. NO build tools.
+# =============================================================================
+# GATED ITEM W2: pin this base by digest (a JDK 21 RUNTIME image; prefer a minimal/distroless-style
+# JRE base with no package manager + no shell in the final layer where the chosen base allows it).
+FROM eclipse-temurin:21-jre@sha256:010e0a06bd4e0184dec58626afb3ba727b42c56c91b977e2f0a9e0837e0fa3fb AS runtime
+
+ARG GHIDRA_VERSION
+LABEL org.opencontainers.image.title="ghidra-mcp-worker" \
+      org.opencontainers.image.description="Hardened, network-isolated headless Ghidra analysis worker (TB3)." \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.source="https://github.com/OWNER/ghidra-mcp" \
+      org.ghidra-mcp.ghidra-version="${GHIDRA_VERSION}" \
+      org.ghidra-mcp.trust-boundary="TB3-hostile-input" \
+      org.ghidra-mcp.network="none"
+
+# --- Non-root user (CIS / topic-container-k8s) ---------------------------------------------------
+# Fixed high UID:GID so deploy/ can map ownership of the socket dir + scratch deterministically.
+# No login shell, no home writable content beyond the runtime tmpfs.
+ARG WORKER_UID=65532
+ARG WORKER_GID=65532
+RUN set -eux; \
+    groupadd --gid "${WORKER_GID}" worker; \
+    useradd --uid "${WORKER_UID}" --gid "${WORKER_GID}" --no-create-home \
+            --home-dir /home/worker --shell /usr/sbin/nologin worker
+
+# --- Ghidra (from builder; verified upstream) ----------------------------------------------------
+COPY --from=builder --chown=root:root /opt/ghidra /opt/ghidra
+ENV GHIDRA_INSTALL_DIR=/opt/ghidra
+ENV PATH="/opt/ghidra/support:${PATH}"
+
+# --- WS2 worker entrypoint (the only code this image runs) ---------------------------------------
+# The `worker/` tree (WS2) holds the entrypoint + headless analysis scripts. Owned by root, read by
+# the non-root worker user (defense in depth: the running user cannot modify its own code; combined
+# with the runtime read-only rootfs in deploy/, the entire FS is immutable at run time).
+# COORDINATION ITEM (WS2): exact files + the entrypoint command/args/env are the WS2 contract.
+# `worker/` is currently a WS2-owned path (empty at WS3 time) — this COPY activates once WS2 lands it.
+COPY --chown=root:root worker/ /opt/ghidra-mcp-worker/
+
+# --- Runtime environment (mirrors security/limits.py defaults; deploy/ also passes these) --------
+# The worker enforces its own wall-clock + memory bounds in addition to the server-side kill (F7).
+# These are conservative built-in fallbacks; deploy/ injects the resolved values from config.
+ENV GHIDRA_MCP_RPC_SOCKET_DIR=/run/ghidra-mcp \
+    GHIDRA_MCP_ANALYSIS_TIMEOUT_SECONDS=600 \
+    GHIDRA_MCP_TOOL_TIMEOUT_SECONDS=60 \
+    GHIDRA_MCP_MAX_RESPONSE_BYTES=4194304 \
+    GHIDRA_MCP_MAX_BINARY_BYTES=134217728 \
+    # JVM: cap the heap (deploy/ cgroup mem limit is the hard wall; this is the JVM-level bound).
+    # -XX:+ExitOnOutOfMemoryError so an OOM kills the JVM (→ worker-unavailable → evict) rather
+    # than thrashing. No network properties; Ghidra runs fully offline.
+    JAVA_TOOL_OPTIONS="-XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75.0 -Djava.awt.headless=true -Djava.net.preferIPv4Stack=true"
+
+# --- Scratch / writable surfaces -----------------------------------------------------------------
+# The rootfs is READ-ONLY at runtime (deploy/). The worker writes ONLY to tmpfs mounts that deploy/
+# provides: the per-session project store and a JVM/tmp scratch. Declared here so the image is
+# self-documenting and the dirs exist with correct ownership for the read-only-rootfs case.
+RUN set -eux; \
+    mkdir -p /run/ghidra-mcp /work/project /tmp/ghidra; \
+    chown -R "${WORKER_UID}:${WORKER_GID}" /run/ghidra-mcp /work /tmp/ghidra; \
+    chmod 0700 /run/ghidra-mcp /work/project
+VOLUME ["/work/project"]
+
+USER ${WORKER_UID}:${WORKER_GID}
+WORKDIR /work
+
+# --- Healthcheck ---------------------------------------------------------------------------------
+# Liveness only — confirms the JVM/entrypoint process is alive WITHOUT any network. The real
+# readiness/health signal is the RPC `ping` over the UDS (rpc-protocol.md), driven by the server.
+# COORDINATION ITEM (WS2): WS2 may ship `worker/healthcheck.py` invoking RPC `ping` on the socket;
+# until then this is a minimal process-liveness probe. Kept network-free by design.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD ["/opt/java/openjdk/bin/java", "-version"]
+
+# --- Entrypoint ----------------------------------------------------------------------------------
+# The container runs ONLY the WS2 worker entrypoint (no shell, no analyzeHeadless invoked directly
+# from here — the entrypoint orchestrates headless analysis internally and serves RPC).
+# COORDINATION ITEM (WS2): the WS2 entrypoint must:
+#   - accept the session id + socket path via env/arg (e.g. GHIDRA_MCP_RPC_SOCKET_DIR + a session id),
+#   - bind/listen on the per-session UDS at 0600 (rpc-protocol.md §2),
+#   - run wholly offline, write only to /work/project (+ /tmp/ghidra),
+#   - exit non-zero on fatal error (→ server maps to worker-unavailable → evict).
+# Placeholder command until WS2 lands the entrypoint module; documented, not executed (gated).
+ENTRYPOINT ["/opt/java/openjdk/bin/java", "-version"]
+# WS2 replaces the above with, e.g.:
+#   ENTRYPOINT ["/opt/java/openjdk/bin/java", "-jar", "/opt/ghidra-mcp-worker/worker.jar"]
+#   or a Python launcher invoking analyzeHeadless + PyGhidra inside the worker.

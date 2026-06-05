@@ -18,7 +18,9 @@ from ghidra_mcp.tools.registry import TIER1_TOOL_NAMES
 def test_session_scoped_inputs_forbid_extra_fields() -> None:
     with pytest.raises(ValidationError):
         s.DecompileFunctionIn(  # unknown field rejected
-            session_id="abc", function="main", danger="rm -rf"  # type: ignore[call-arg]
+            session_id="abc",
+            function="main",
+            danger="rm -rf",  # type: ignore[call-arg]
         )
 
 

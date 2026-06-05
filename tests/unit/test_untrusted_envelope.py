@@ -55,7 +55,12 @@ def test_notes_are_bounded() -> None:
 
 
 @pytest.mark.critical
-def test_wrap_helper_is_reserved_for_ws4() -> None:
-    # The normalization chokepoint is intentionally a stub until WS4 hardens it.
-    with pytest.raises(NotImplementedError):
-        wrap("anything")
+def test_wrap_chokepoint_marks_content_untrusted() -> None:
+    # Implemented at integration by WS4 (was a reserved stub in WS0). Full normalization behavior
+    # (control/bidi/zero-width neutralization, encoding/notes) lives in tests/unit/test_envelope_wrap.py
+    # and tests/security/**; here we assert the contract: wrap() yields a provenance-marked envelope.
+    u = wrap("mov eax, 1")
+    assert isinstance(u, Untrusted)
+    assert u.value == "mov eax, 1"
+    assert u.origin == DataOrigin.BINARY  # default provenance for binary-derived content
+    assert u.notes == []

@@ -68,6 +68,145 @@ class Untrusted(BaseModel, Generic[T]):
     notes: list[str] = Field(default_factory=list, max_length=16)
 
 
+# --- Defensive-normalization tables (WS4) -------------------------------------------------------
+#
+# These are the Unicode/control classes that subvert how a downstream renderer, terminal, or LLM
+# *interprets* text — distinct from the visible characters they decorate. They are used to spoof
+# (bidi reordering / homoglyphs — topic-i18n), to smuggle invisible instructions/state (zero-width),
+# or to corrupt parsers/terminals (C0/C1 controls). Binary-derived strings, symbol/function names,
+# comments, and decompiled C can carry these as an indirect-prompt-injection vector (std-owasp-llm
+# LLM01/02, std-cwe CWE-20). The single chokepoint :func:`wrap` NEUTRALIZES them (replaces each with
+# an inert, visible ``<U+XXXX>`` token so no information is silently lost) AND ANNOTATES via safe,
+# server-generated ``notes`` so the client/LLM is told the class was present.
+#
+# Newlines/tabs are preserved (legitimate in decompiled code / multi-line text); only the dangerous
+# control subset is neutralized.
+
+# Bidirectional formatting + override codepoints (Trojan-Source style spoofing — CVE-2021-42574).
+_BIDI_CODEPOINTS: frozenset[int] = frozenset(
+    {
+        0x202A,  # LEFT-TO-RIGHT EMBEDDING
+        0x202B,  # RIGHT-TO-LEFT EMBEDDING
+        0x202C,  # POP DIRECTIONAL FORMATTING
+        0x202D,  # LEFT-TO-RIGHT OVERRIDE
+        0x202E,  # RIGHT-TO-LEFT OVERRIDE
+        0x2066,  # LEFT-TO-RIGHT ISOLATE
+        0x2067,  # RIGHT-TO-LEFT ISOLATE
+        0x2068,  # FIRST STRONG ISOLATE
+        0x2069,  # POP DIRECTIONAL ISOLATE
+        0x200E,  # LEFT-TO-RIGHT MARK
+        0x200F,  # RIGHT-TO-LEFT MARK
+    }
+)
+
+# Zero-width / invisible joiners and the BOM/word-joiner used to smuggle hidden content.
+_ZERO_WIDTH_CODEPOINTS: frozenset[int] = frozenset(
+    {
+        0x200B,  # ZERO WIDTH SPACE
+        0x200C,  # ZERO WIDTH NON-JOINER
+        0x200D,  # ZERO WIDTH JOINER
+        0x2060,  # WORD JOINER
+        0xFEFF,  # ZERO WIDTH NO-BREAK SPACE / BOM
+    }
+)
+
+# Control characters that are SAFE to keep (legitimate whitespace in code/text).
+_ALLOWED_CONTROL_CHARS: frozenset[str] = frozenset({"\t", "\n", "\r"})
+
+# Annotation note strings (stable, server-generated — NEVER derived from the content).
+_NOTE_CONTROL = "control characters neutralized"
+_NOTE_BIDI = "bidirectional/override formatting neutralized"
+_NOTE_ZERO_WIDTH = "zero-width/invisible characters neutralized"
+
+# Stable ordering for emitted notes (deterministic output).
+_NOTE_ORDER: tuple[str, ...] = (_NOTE_CONTROL, _NOTE_BIDI, _NOTE_ZERO_WIDTH)
+
+# Cap on the per-call notes list (mirrors the frozen ``Untrusted.notes`` max_length=16).
+_MAX_NOTES = 16
+
+
+def _is_neutralizable(ch: str) -> tuple[bool, str | None]:
+    """Classify a single character for neutralization.
+
+    Args:
+        ch: A one-character string.
+
+    Returns:
+        ``(neutralize, note)`` — ``neutralize`` is ``True`` when ``ch`` must be replaced with an
+        inert token; ``note`` is the stable annotation for its class (or ``None`` when not
+        neutralized).
+    """
+    code = ord(ch)
+    if code in _BIDI_CODEPOINTS:
+        return True, _NOTE_BIDI
+    if code in _ZERO_WIDTH_CODEPOINTS:
+        return True, _NOTE_ZERO_WIDTH
+    if ch in _ALLOWED_CONTROL_CHARS:
+        return False, None
+    # C0 controls (U+0000-U+001F), DEL (U+007F), and C1 controls (U+0080-U+009F).
+    if code <= 0x1F or code == 0x7F or 0x80 <= code <= 0x9F:
+        return True, _NOTE_CONTROL
+    return False, None
+
+
+def _normalize_text(text: str) -> tuple[str, list[str]]:
+    """Neutralize and annotate dangerous control/bidi/zero-width characters in ``text``.
+
+    Each offending character is replaced with an inert, visible ``<U+XXXX>`` token (no information
+    is silently dropped) and its class is recorded once in the returned annotation notes. Pure and
+    deterministic (no I/O) — trivially testable.
+
+    Args:
+        text: The untrusted string to normalize.
+
+    Returns:
+        ``(normalized_text, notes)`` where ``notes`` lists the distinct classes neutralized in a
+        stable order (control, bidi, zero-width).
+    """
+    out: list[str] = []
+    flagged: set[str] = set()
+    for ch in text:
+        neutralize, note = _is_neutralizable(ch)
+        if neutralize:
+            out.append(f"<U+{ord(ch):04X}>")
+            if note is not None:
+                flagged.add(note)
+        else:
+            out.append(ch)
+    ordered = [n for n in _NOTE_ORDER if n in flagged]
+    return "".join(out), ordered
+
+
+def _normalize_value(value: T) -> tuple[T, list[str]]:
+    """Apply normalization to ``str`` payloads (and ``str`` items of a flat list); pass others.
+
+    Only textual content can carry the injection/spoofing classes ``wrap`` defends against;
+    server-computed scalars and structured models are passed through unchanged (ADR-005: only
+    binary-derived content is wrapped, and only text needs neutralizing).
+
+    Args:
+        value: The payload to normalize.
+
+    Returns:
+        ``(normalized_value, notes)`` — the normalized payload and the aggregated, de-duplicated
+        annotation notes (stable order).
+    """
+    if isinstance(value, str):
+        norm, notes = _normalize_text(value)
+        return norm, notes  # type: ignore[return-value]
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        flagged: set[str] = set()
+        new_items: list[str] = []
+        for item in value:
+            norm_item, item_notes = _normalize_text(item)
+            new_items.append(norm_item)
+            flagged.update(item_notes)
+        ordered = [n for n in _NOTE_ORDER if n in flagged]
+        return new_items, ordered  # type: ignore[return-value]
+    # Non-text payload (structured model, scalar, mixed list): nothing to neutralize.
+    return value, []
+
+
 def wrap(
     value: T,
     *,
@@ -78,22 +217,48 @@ def wrap(
 ) -> Untrusted[T]:
     """Wrap binary-derived content in the untrusted-data envelope.
 
-    This is the single chokepoint through which hostile content leaves the core. WS4 hardens it
-    with defensive normalization (e.g. neutralizing/annotating control characters and bidi/zero-
-    width Unicode used for prompt-injection or spoofing — std-cwe, topic-i18n homoglyph note).
+    This is the single chokepoint through which hostile content leaves the core (ADR-005). It
+    applies defensive normalization to textual payloads: control characters (C0/C1/DEL except
+    tab/newline/CR), bidirectional formatting/override codepoints (Trojan-Source spoofing —
+    CVE-2021-42574), and zero-width/invisible characters are **neutralized** to inert
+    ``<U+XXXX>`` tokens and **annotated** via safe, server-generated ``notes`` (std-cwe CWE-20,
+    topic-i18n homoglyph/bidi note). Caller-supplied ``notes`` are preserved; the function-derived
+    annotations are appended, de-duplicated, and the combined list is bounded to the frozen
+    ``Untrusted`` cap (16 — fail closed).
+
+    This is a typing + provenance + normalization control layered with the read-only tool surface
+    and the "never auto-execute" rendering contract — defense-in-depth, **not** a guarantee against
+    prompt injection (the model may still be tricked; see threat-model §5 residual risk).
 
     Args:
-        value: The untrusted payload to wrap.
+        value: The untrusted payload to wrap. ``str`` and flat ``list[str]`` payloads are
+            normalized; structured/scalar payloads pass through unchanged.
         origin: Provenance of the content. Defaults to ``DataOrigin.BINARY``.
-        truncated: Set when ``value`` was capped.
-        encoding: Representation of any embedded bytes.
-        notes: Safe server-generated annotations.
+        truncated: Set when ``value`` was capped by the producing tool BEFORE wrapping.
+        encoding: Representation of any embedded bytes (e.g. ``"hex"``, ``"base64"``,
+            ``"utf-8-replace"``); ``None`` for structured/plain-text payloads.
+        notes: Optional safe, caller-supplied annotations. Never instructions derived from the
+            content; the producing tool supplies these.
 
     Returns:
-        An :class:`Untrusted` wrapper around ``value``.
-
-    Note:
-        STUB (WS4) — the WS0 stub will construct the wrapper directly; WS4 adds the normalization
-        and annotation pass. Signature is frozen.
+        An :class:`Untrusted` wrapper around the normalized ``value``, with provenance, the
+        ``truncated`` flag, ``encoding``, and the merged annotation ``notes``.
     """
-    raise NotImplementedError("WS4: implement normalization/annotation; construct Untrusted")
+    normalized, derived_notes = _normalize_value(value)
+    # Caller notes first (provenance/cap annotations from the producing tool), then our defensive
+    # annotations; de-duplicate while preserving order; bound to the frozen cap (fail closed).
+    merged: list[str] = []
+    seen: set[str] = set()
+    for note in (*(notes or ()), *derived_notes):
+        if note not in seen:
+            seen.add(note)
+            merged.append(note)
+    if len(merged) > _MAX_NOTES:
+        merged = merged[:_MAX_NOTES]
+    return Untrusted[T](
+        value=normalized,
+        origin=origin,
+        truncated=truncated,
+        encoding=encoding,
+        notes=merged,
+    )

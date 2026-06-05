@@ -1,0 +1,39 @@
+# Trivy config — image + IaC/misconfig + secret scanning for the ghidra-mcp images and deploy specs.
+# Used by the WS3 worker-image workflow (.github/workflows/worker-image.yml) for IMAGE scans, and
+# complements the existing ci.yml `container-iac-scan` job (which does config/IaC scanning).
+#
+# Fail-closed: HIGH + CRITICAL block (exit-code 1). std-supplychain / workflow-cicd gate #8.
+
+# Severities that BLOCK (merge-blocking gate). Lower severities are reported, not blocked.
+severity:
+  - HIGH
+  - CRITICAL
+
+# Non-zero exit on any finding at the above severities (fail closed).
+exit-code: 1
+
+# Do not fail the pipeline merely because the vuln DB couldn't update; but DO fail on findings.
+# (Set to false so a transient DB hiccup doesn't mask real findings by erroring the stage — a
+#  skipped/errored security stage is itself treated as failure by CI orchestration.)
+ignore-unfixed: false
+
+scan:
+  scanners:
+    - vuln       # OS + language package CVEs (Ghidra deps, JDK, Python wheels)
+    - misconfig  # Dockerfile + IaC misconfiguration
+    - secret     # accidental secrets in layers/config
+  # Skip noisy paths that are not part of the shipped artifact.
+  skip-dirs:
+    - tests
+    - .git
+    - .claude
+
+misconfiguration:
+  # Scan our Dockerfiles + deploy specs for hardening misconfig (non-root, no-new-privileges, etc.).
+  include-non-failures: false
+
+# Vulnerability DB / Java DB are fetched at scan time (GATED network in CI; the action handles it).
+# A maintainer pins the trivy-action by digest in worker-image.yml (REPLACE_WITH_DIGEST_FOR_*).
+
+# .trivyignore (if ever needed) holds TIME-BOXED, justified CVE waivers ONLY — never a permanent
+# ignore (workflow-cve-management). Each entry: CVE id + expiry + reason + owner. None at v1.
