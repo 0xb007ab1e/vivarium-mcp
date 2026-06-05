@@ -23,15 +23,18 @@ benign, structurally-valid data only.
 from __future__ import annotations
 
 import enum
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
 
 from ghidra_mcp.core.envelope import DataOrigin, Untrusted
 from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from ghidra_mcp.tools import schemas as s
+
+if TYPE_CHECKING:
+    from ghidra_mcp.ghidra.port import GhidraPort
 
 # ---------------------------------------------------------------------------------------------
 # Failure injection
@@ -96,7 +99,7 @@ def _error(
 
 
 def _u(value: Any, *, encoding: str | None = None) -> Untrusted[Any]:
-    """Wrap a value in the untrusted-data envelope directly (the production ``wrap()`` is a WS4 stub).
+    """Wrap a value in the untrusted-data envelope directly (production ``wrap()`` is a WS4 stub).
 
     The test double constructs :class:`Untrusted` directly so it does not depend on the
     not-yet-implemented normalization chokepoint. The shape is identical to the frozen contract.
@@ -391,6 +394,13 @@ def fake_port() -> FakeGhidraPort:
     return FakeGhidraPort()
 
 
+if TYPE_CHECKING:
+    # Structural conformance gate (mypy --strict): if FakeGhidraPort ever drifts from the frozen
+    # GhidraPort Protocol (a renamed/retyped method), this assignment fails to type-check — proving
+    # the fake stays a drop-in for the real adapter rather than asserting it vacuously.
+    _port_conforms: GhidraPort = FakeGhidraPort()
+
+
 # ---------------------------------------------------------------------------------------------
 # FrozenClock — injectable deterministic time
 # ---------------------------------------------------------------------------------------------
@@ -546,10 +556,48 @@ class FakeSessionManager:
             self.evict(sid, reason="close")
 
 
+class _SessionManagerLike(Protocol):
+    """The session-manager surface the suite (and tool handlers) depend on (structural).
+
+    Mirrors the public methods of the frozen :class:`ghidra_mcp.sessions.manager.SessionManager`
+    that the server shell and abuse/e2e tests exercise. :class:`FakeSessionManager` is asserted
+    to satisfy this below so its signatures cannot silently drift from the real manager.
+    """
+
+    def create(self, *, label: str | None = ...) -> s.SessionInfo:
+        """Open a new session."""
+        ...
+
+    def authorize(self, session_id: str) -> s.SessionInfo:
+        """Authorize a live session (BOLA chokepoint)."""
+        ...
+
+    def evict(self, session_id: str, *, reason: str) -> bool:
+        """Evict a session; return the verified-wipe flag."""
+        ...
+
+    def reap_expired(self) -> int:
+        """Evict expired/idle sessions; return the count."""
+        ...
+
+    def shutdown(self) -> None:
+        """Drain and evict all live sessions."""
+        ...
+
+
 @pytest.fixture
 def session_manager(clock: FrozenClock) -> FakeSessionManager:
     """Provide a :class:`FakeSessionManager` wired to the frozen test clock."""
     return FakeSessionManager(clock=clock)
+
+
+if TYPE_CHECKING:
+    # Structural conformance gates (mypy --strict): the fakes must remain drop-in for the frozen
+    # collaborator surfaces. A retyped/renamed method on either fake (or a drift in the real
+    # SessionManager's clock injection contract) fails to type-check here rather than at runtime.
+    _sessions_conforms: _SessionManagerLike = FakeSessionManager(clock=FrozenClock())
+    _mono_clock: Callable[[], float] = FrozenClock().monotonic
+    _wall_clock: Callable[[], int] = FrozenClock().time
 
 
 # ---------------------------------------------------------------------------------------------

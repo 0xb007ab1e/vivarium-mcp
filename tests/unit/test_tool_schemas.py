@@ -28,7 +28,7 @@ def test_session_scoped_inputs_forbid_extra_fields() -> None:
 def test_inputs_are_frozen() -> None:
     a = s.ReadBytesIn(session_id="abc", address="0x1000", length=16)
     with pytest.raises(ValidationError):
-        a.length = 999  # type: ignore[misc]
+        a.length = 999  # frozen
 
 
 @pytest.mark.critical

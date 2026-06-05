@@ -8,12 +8,17 @@ worker, no JVM — ADR-001).
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any, cast
+
 import pytest
 
 from ghidra_mcp.config import Config
 from ghidra_mcp.core.envelope import DataOrigin, Untrusted
 from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
+from ghidra_mcp.ghidra.port import GhidraPort
 from ghidra_mcp.security.limits import Limits
+from ghidra_mcp.sessions.manager import SessionManager
 from ghidra_mcp.tools import registry as reg
 from ghidra_mcp.tools import schemas as s
 
@@ -69,13 +74,33 @@ class FakePort:
     def _rec(self, method: str, sid: str) -> None:
         self.calls.append((method, sid))
 
+    def start_worker(self, session_id: str) -> None:
+        self._rec("start_worker", session_id)
+
+    def kill_worker(self, session_id: str) -> None:
+        self._rec("kill_worker", session_id)
+
     def import_binary(self, sid: str, a: s.SessionImportIn) -> s.SessionInfo:
         self._rec("import_binary", sid)
-        return s.SessionInfo(session_id=sid, state="ready", created_at=0, expires_at=10)
+        # Worker contributes only ``binary_sha256``; the forged lifecycle fields here MUST be
+        # discarded by the handler in favor of the manager's authoritative values (#9 overlay).
+        return s.SessionInfo(
+            session_id="WORKER-FORGED",
+            state="worker-forged",
+            created_at=999_999,
+            expires_at=1,
+            binary_sha256="a" * 64,
+        )
 
     def analyze(self, sid: str, a: s.SessionAnalyzeIn) -> s.SessionInfo:
         self._rec("analyze", sid)
-        return s.SessionInfo(session_id=sid, state="ready", created_at=0, expires_at=10)
+        return s.SessionInfo(
+            session_id="WORKER-FORGED",
+            state="worker-forged",
+            created_at=999_999,
+            expires_at=1,
+            binary_sha256="b" * 64,
+        )
 
     def decompile_function(self, sid: str, a: s.DecompileFunctionIn) -> s.DecompiledFunction:
         self._rec("decompile_function", sid)
@@ -195,7 +220,13 @@ def ctx() -> reg.ToolContext:
         worker_runtime="runsc",
         rpc_socket_dir="/run/x",
     )
-    return reg.ToolContext(config=config, sessions=FakeSessionManager(), port=FakePort())
+    # The fakes implement the methods the handlers exercise; ``cast`` satisfies the static types
+    # (``SessionManager`` is a concrete class, ``GhidraPort`` a Protocol) without a real worker/JVM.
+    return reg.ToolContext(
+        config=config,
+        sessions=cast(SessionManager, FakeSessionManager()),
+        port=cast(GhidraPort, FakePort()),
+    )
 
 
 def test_catalog_is_exactly_22_unique_tools() -> None:
@@ -221,7 +252,7 @@ def test_register_tools_registers_every_tool_exactly_once(ctx: reg.ToolContext) 
 def test_register_tools_applies_wrap_to_each_handler(ctx: reg.ToolContext) -> None:
     wrapped: list[str] = []
 
-    def wrap(name: str, fn: object) -> object:
+    def wrap(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
         wrapped.append(name)
         return fn
 
@@ -295,6 +326,37 @@ def test_session_status_returns_info(ctx: reg.ToolContext) -> None:
     handlers = reg.build_handlers(ctx)
     info = handlers["session_status"](session_id=_VALID_SID)
     assert info.session_id == _VALID_SID
+
+
+@pytest.mark.critical
+def test_session_import_uses_manager_lifecycle_keeps_worker_sha256(ctx: reg.ToolContext) -> None:
+    """#9 overlay: the manager owns identity/timing/state; the worker contributes only sha256.
+
+    The fake port returns forged ``session_id``/``state``/``created_at``/``expires_at`` — these MUST
+    be discarded in favor of the manager's authoritative values, so a hostile worker can't forge a
+    session's lifecycle. Only ``binary_sha256`` is carried through from the worker.
+    """
+    handlers = reg.build_handlers(ctx)
+    info = handlers["session_import"](session_id=_VALID_SID, source_ref="upload-1")
+    # Authoritative lifecycle from the manager's authorize() (id/state/created_at/expires_at).
+    assert info.session_id == _VALID_SID
+    assert info.state == "ready"
+    assert info.created_at == 0
+    assert info.expires_at == 10
+    # Worker-only contribution survives the overlay.
+    assert info.binary_sha256 == "a" * 64
+
+
+@pytest.mark.critical
+def test_session_analyze_uses_manager_lifecycle_keeps_worker_sha256(ctx: reg.ToolContext) -> None:
+    """#9 overlay for ``session_analyze`` — same authority split as import."""
+    handlers = reg.build_handlers(ctx)
+    info = handlers["session_analyze"](session_id=_VALID_SID)
+    assert info.session_id == _VALID_SID
+    assert info.state == "ready"
+    assert info.created_at == 0
+    assert info.expires_at == 10
+    assert info.binary_sha256 == "b" * 64
 
 
 @pytest.mark.parametrize(

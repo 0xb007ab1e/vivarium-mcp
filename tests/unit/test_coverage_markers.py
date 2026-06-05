@@ -100,7 +100,9 @@ def test_baseline_fail_under_is_at_least_ninety() -> None:
     cfg = _load_pyproject()
     tool = cfg["tool"]
     assert isinstance(tool, dict)
-    ini = tool["pytest"]["ini_options"]  # type: ignore[index]
+    pytest_cfg = tool["pytest"]
+    assert isinstance(pytest_cfg, dict)
+    ini = pytest_cfg["ini_options"]
     assert isinstance(ini, dict)
     addopts = ini["addopts"]
     assert isinstance(addopts, list)

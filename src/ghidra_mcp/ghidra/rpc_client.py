@@ -18,15 +18,26 @@ Concrete :class:`ghidra_mcp.ghidra.port.GhidraPort` implementation. It:
 This module runs IN THE SERVER process and MUST NOT import the JVM bridge (ADR-001). It only ever
 sends/receives bytes over the socket; the framing/JSON-RPC codec lives in the JVM-free
 :mod:`ghidra_mcp.ghidra.rpc_framing`.
+
+**Untrusted-data wrap chokepoint (PM #9, ADR-005).** The worker returns *plain* JSON (rpc-protocol
+§4: "the worker returns plain structured data"). This adapter is the single server-side place that
+turns those plain values into typed ``*Out`` models, calling :func:`ghidra_mcp.core.envelope.wrap`
+on every binary-derived field as it constructs each model — ``DataOrigin.BINARY`` for content
+*extracted* from the binary (strings, bytes, names, comments) and ``DataOrigin.GHIDRA`` for content
+*synthesized* by the decompiler/analysis over hostile input (pseudo-C, signatures, recovered
+mnemonics/types). Nothing binary-derived leaves this adapter un-wrapped.
 """
 
 from __future__ import annotations
 
+import contextlib
 import socket
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Protocol
 
+from ghidra_mcp.core.envelope import DataOrigin, Untrusted, wrap
 from ghidra_mcp.core.errors import ErrorType
 from ghidra_mcp.ghidra import _errors, rpc_framing
 from ghidra_mcp.ghidra.rpc_framing import (
@@ -34,6 +45,7 @@ from ghidra_mcp.ghidra.rpc_framing import (
     RpcCallError,
     RpcProtocolError,
 )
+from ghidra_mcp.security.limits import Limits, check_binary_size
 from ghidra_mcp.tools import schemas as s
 
 
@@ -56,6 +68,29 @@ class WorkerProcess(Protocol):
 #: A launcher takes a session id and the socket path and returns a running worker process. WS3
 #: supplies the concrete container command (arg list — never ``shell=True``); tests supply a fake.
 WorkerLauncher = Callable[[str, str], WorkerProcess]
+
+#: Resolves a (server-confined) ``source_ref`` to the byte size of the candidate input, so the
+#: server can enforce the binary-size cap BEFORE a single byte reaches the worker (CWE-22 path
+#: confinement + DoS cap, both server-side and pre-Ghidra). WS3/deploy injects the concrete,
+#: allow-list-confined resolver; the built-in default stats a path under the OS (used only when the
+#: composition root wires no resolver). It returns a non-negative ``int`` size.
+SourceResolver = Callable[[str], int]
+
+
+def _default_source_size(source_ref: str) -> int:
+    """Default ``SourceResolver``: byte size of a filesystem ``source_ref`` (server-side, no JVM).
+
+    This is a conservative built-in used only when no confined resolver is injected; WS3/deploy
+    supplies the real allow-list/path-confinement resolver. It performs NO read of the bytes into
+    memory — it only stats the size so the cap can be enforced before the worker is fed.
+
+    Args:
+        source_ref: The server-resolved reference to the input.
+
+    Returns:
+        The size of the referenced input in bytes.
+    """
+    return Path(source_ref).stat().st_size
 
 
 class _Session:
@@ -97,6 +132,8 @@ class RpcGhidraAdapter:
         tool_timeout_s: float,
         analysis_timeout_s: float,
         max_response_bytes: int,
+        limits: Limits | None = None,
+        source_resolver: SourceResolver | None = None,
         connect_timeout_s: float = 30.0,
     ) -> None:
         """Initialize the adapter with injected runtime collaborators.
@@ -107,6 +144,10 @@ class RpcGhidraAdapter:
             tool_timeout_s: Default per-tool-call wall-clock deadline.
             analysis_timeout_s: Per-analysis wall-clock deadline (kills worker on expiry).
             max_response_bytes: Hard frame cap; a declared length above this kills the worker.
+            limits: Resolved resource limits; the binary-size cap is enforced from these BEFORE the
+                worker is fed (defaults to built-in safe :class:`Limits`).
+            source_resolver: Maps a (confined) ``source_ref`` to its byte size for the pre-Ghidra
+                size check (defaults to :func:`_default_source_size`).
             connect_timeout_s: How long to wait for the worker to bind/accept on its socket.
         """
         self._launcher = launcher
@@ -114,6 +155,8 @@ class RpcGhidraAdapter:
         self._tool_timeout_s = tool_timeout_s
         self._analysis_timeout_s = analysis_timeout_s
         self._max_response_bytes = max_response_bytes
+        self._limits = limits if limits is not None else Limits()
+        self._source_resolver = source_resolver or _default_source_size
         self._connect_timeout_s = connect_timeout_s
         self._sessions: dict[str, _Session] = {}
 
@@ -140,21 +183,33 @@ class RpcGhidraAdapter:
         if sess is None:
             return
         self._close_socket(sess)
-        try:
+        # Best-effort kill: a launcher/runtime hiccup must not stop eviction (fail closed → drop).
+        with contextlib.suppress(Exception):
             sess.worker.kill()
-        except Exception:
-            pass
 
     def import_binary(self, session_id: str, args: s.SessionImportIn) -> s.SessionInfo:
-        """Import the (size-checked) binary into the session's worker.
+        """Import the binary into the session's worker, enforcing the size cap FIRST.
+
+        The binary-size cap is checked server-side and pre-Ghidra (DoS first line — PLAN §3 F7,
+        ADR-001: no byte reaches the JVM until it has passed the cap). The ``source_ref`` is
+        resolved by the injected confined resolver; an over-cap input raises ``LIMIT_EXCEEDED``
+        before the worker is contacted, and an unresolvable ref fails closed as ``VALIDATION``.
 
         Args:
             session_id: The session.
-            args: Import arguments (size/digest already enforced server-side before this call).
+            args: Import arguments (digest verification happens in the worker).
 
         Returns:
-            Updated :class:`SessionInfo`.
+            Updated :class:`SessionInfo` (server-computed fields only — no binary-derived content).
         """
+        try:
+            size_bytes = self._source_resolver(args.source_ref)
+        except OSError as exc:
+            raise _errors.make_error(
+                ErrorType.VALIDATION, "input reference could not be resolved"
+            ) from exc
+        # Fail closed BEFORE the worker: an over-cap binary is rejected pre-Ghidra (TB3 DoS).
+        check_binary_size(size_bytes, self._limits)
         result = self._call(
             session_id,
             "import_binary",
@@ -183,15 +238,17 @@ class RpcGhidraAdapter:
         return s.SessionInfo.model_validate(result)
 
     # --- read-only tool operations ----------------------------------------------------------
+    # Each method takes the worker's PLAIN result dict and builds the typed ``*Out`` via a module-
+    # level builder that wraps every binary-derived field at the right provenance (PM #9, ADR-005).
     def decompile_function(self, sid: str, a: s.DecompileFunctionIn) -> s.DecompiledFunction:
-        """Decompile one function."""
-        return s.DecompiledFunction.model_validate(
+        """Decompile one function (decompiler output → GHIDRA-origin untrusted)."""
+        return _build_decompiled(
             self._tool_call(sid, "decompile_function", {"function": a.function})
         )
 
     def disassemble(self, sid: str, a: s.DisassembleIn) -> s.DisassembleOut:
         """Disassemble a bounded range or function."""
-        return s.DisassembleOut.model_validate(
+        return _build_disassemble(
             self._tool_call(
                 sid,
                 "disassemble",
@@ -201,7 +258,7 @@ class RpcGhidraAdapter:
 
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
-        return s.FunctionListOut.model_validate(
+        return _build_function_list(
             self._tool_call(
                 sid,
                 "list_functions",
@@ -211,21 +268,21 @@ class RpcGhidraAdapter:
 
     def get_function(self, sid: str, a: s.GetFunctionIn) -> s.FunctionDetail:
         """Get one function's detail."""
-        return s.FunctionDetail.model_validate(
+        return _build_function_detail(
             self._tool_call(sid, "get_function", {"function": a.function})
         )
 
     def xrefs_to(self, sid: str, a: s.XrefsIn) -> s.XrefsOut:
-        """References TO a target."""
+        """References TO a target (addresses/ref-types are server-safe — no wrap needed)."""
         return s.XrefsOut.model_validate(self._tool_call(sid, "xrefs_to", _xrefs_params(a)))
 
     def xrefs_from(self, sid: str, a: s.XrefsIn) -> s.XrefsOut:
-        """References FROM a target."""
+        """References FROM a target (addresses/ref-types are server-safe — no wrap needed)."""
         return s.XrefsOut.model_validate(self._tool_call(sid, "xrefs_from", _xrefs_params(a)))
 
     def list_strings(self, sid: str, a: s.ListStringsIn) -> s.StringListOut:
         """List defined strings (paginated/bounded)."""
-        return s.StringListOut.model_validate(
+        return _build_string_list(
             self._tool_call(
                 sid,
                 "list_strings",
@@ -235,7 +292,7 @@ class RpcGhidraAdapter:
 
     def list_symbols(self, sid: str, a: s.ListSymbolsIn) -> s.SymbolListOut:
         """List symbols (paginated/bounded)."""
-        return s.SymbolListOut.model_validate(
+        return _build_symbol_list(
             self._tool_call(
                 sid,
                 "list_symbols",
@@ -245,23 +302,21 @@ class RpcGhidraAdapter:
 
     def get_symbol(self, sid: str, a: s.GetSymbolIn) -> s.Symbol:
         """Resolve one symbol."""
-        return s.Symbol.model_validate(
-            self._tool_call(sid, "get_symbol", {"identifier": a.identifier})
-        )
+        return _build_symbol(self._tool_call(sid, "get_symbol", {"identifier": a.identifier}))
 
     def list_data(self, sid: str, a: s.ListDataIn) -> s.DataListOut:
         """List defined data (paginated/bounded)."""
-        return s.DataListOut.model_validate(
+        return _build_data_list(
             self._tool_call(sid, "list_data", {"offset": a.offset, "limit": a.limit})
         )
 
     def get_data_type(self, sid: str, a: s.GetDataTypeIn) -> s.DataType:
         """Resolve one data type."""
-        return s.DataType.model_validate(self._tool_call(sid, "get_data_type", {"name": a.name}))
+        return _build_data_type(self._tool_call(sid, "get_data_type", {"name": a.name}))
 
     def get_comments(self, sid: str, a: s.GetCommentsIn) -> s.CommentListOut:
         """Read comments (paginated/bounded)."""
-        return s.CommentListOut.model_validate(
+        return _build_comment_list(
             self._tool_call(
                 sid,
                 "get_comments",
@@ -271,17 +326,17 @@ class RpcGhidraAdapter:
 
     def memory_map(self, sid: str, a: s.MemoryMapIn) -> s.MemoryMapOut:
         """List memory blocks/segments."""
-        return s.MemoryMapOut.model_validate(self._tool_call(sid, "memory_map", {}))
+        return _build_memory_map(self._tool_call(sid, "memory_map", {}))
 
     def read_bytes(self, sid: str, a: s.ReadBytesIn) -> s.ReadBytesOut:
         """Bounded raw byte read."""
-        return s.ReadBytesOut.model_validate(
+        return _build_read_bytes(
             self._tool_call(sid, "read_bytes", {"address": a.address, "length": a.length})
         )
 
     def search_bytes(self, sid: str, a: s.SearchBytesIn) -> s.SearchBytesOut:
         """Bounded byte-pattern search."""
-        return s.SearchBytesOut.model_validate(
+        return _build_search_bytes(
             self._tool_call(
                 sid,
                 "search_bytes",
@@ -290,18 +345,19 @@ class RpcGhidraAdapter:
         )
 
     def search_strings(self, sid: str, a: s.SearchStringsIn) -> s.SearchStringsOut:
-        """Bounded defined-string search."""
-        return s.SearchStringsOut.model_validate(
+        """Bounded defined-string search (same shape as ``list_strings``)."""
+        base = _build_string_list(
             self._tool_call(
                 sid,
                 "search_strings",
                 {"query": a.query, "offset": a.offset, "limit": a.limit},
             )
         )
+        return s.SearchStringsOut(strings=base.strings, total=base.total, truncated=base.truncated)
 
     def program_metadata(self, sid: str, a: s.ProgramMetadataIn) -> s.ProgramMetadata:
         """High-level program metadata."""
-        return s.ProgramMetadata.model_validate(self._tool_call(sid, "program_metadata", {}))
+        return _build_program_metadata(self._tool_call(sid, "program_metadata", {}))
 
     # --- internal: call orchestration -------------------------------------------------------
     def _tool_call(self, sid: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -459,10 +515,8 @@ class RpcGhidraAdapter:
             sess: The per-session state.
         """
         if sess.sock is not None:
-            try:
+            with contextlib.suppress(OSError):
                 sess.sock.close()
-            except OSError:
-                pass
             sess.sock = None
 
     def _socket_path(self, session_id: str) -> str:
@@ -487,3 +541,250 @@ def _xrefs_params(a: s.XrefsIn) -> dict[str, Any]:
         The RPC params dict.
     """
     return {"target": a.target, "offset": a.offset, "limit": a.limit}
+
+
+# =====================================================================================
+# Untrusted-data wrap builders (PM #9, ADR-005)
+# =====================================================================================
+# These turn a worker's PLAIN result dict into the typed ``*Out`` model, wrapping every
+# binary-derived field via :func:`core.envelope.wrap`. They are the single, auditable map of
+# field → provenance. Provenance rule (envelope spec): BINARY = *extracted* from the binary
+# (strings, raw/searched bytes, symbol/function/section names, comments, format-reported metadata);
+# GHIDRA = *synthesized* by the decompiler/analysis over hostile input (pseudo-C, signatures,
+# recovered mnemonics/operands, calling conventions, resolved type names/definitions). Server-
+# computed scalars (addresses we normalized, counts, sizes, booleans, ref-types) stay bare.
+#
+# These builders are pure (dict in → model out, no I/O) and trivially unit-testable. They read
+# fields defensively with ``.get`` so a missing optional collapses to ``None``/empty rather than a
+# ``KeyError`` crossing the boundary; structural shape is still enforced by the frozen ``*Out``
+# models on construction (a bad type fails closed via pydantic).
+
+
+def _w(value: str, origin: DataOrigin, *, encoding: str | None = None) -> Untrusted[str]:
+    """Wrap a required string field at ``origin`` (the chokepoint normalizes/annotates it).
+
+    Args:
+        value: The plain, binary-derived string from the worker.
+        origin: Provenance (:class:`DataOrigin`).
+        encoding: Optional byte-representation tag (e.g. ``"hex"``) for byte payloads.
+
+    Returns:
+        The :class:`Untrusted` wrapper.
+    """
+    return wrap(str(value), origin=origin, encoding=encoding)
+
+
+def _w_opt(value: object, origin: DataOrigin) -> Untrusted[str] | None:
+    """Wrap an OPTIONAL string field, passing ``None`` through unwrapped.
+
+    Args:
+        value: The plain value or ``None``.
+        origin: Provenance to apply when present.
+
+    Returns:
+        The wrapper, or ``None`` if ``value`` is ``None``.
+    """
+    if value is None:
+        return None
+    return wrap(str(value), origin=origin)
+
+
+def _build_decompiled(r: dict[str, Any]) -> s.DecompiledFunction:
+    """Build :class:`DecompiledFunction`: name=BINARY; c_code/signature=GHIDRA."""
+    return s.DecompiledFunction(
+        address=str(r["address"]),
+        name=_w(r["name"], DataOrigin.BINARY),
+        c_code=_w(r["c_code"], DataOrigin.GHIDRA),
+        signature=_w(r["signature"], DataOrigin.GHIDRA),
+    )
+
+
+def _build_instruction(r: dict[str, Any]) -> s.Instruction:
+    """Build one :class:`Instruction`: mnemonic/operands=GHIDRA; bytes_hex=BINARY (hex)."""
+    return s.Instruction(
+        address=str(r["address"]),
+        mnemonic=_w(r["mnemonic"], DataOrigin.GHIDRA),
+        operands=_w(r["operands"], DataOrigin.GHIDRA),
+        bytes_hex=_w(r["bytes_hex"], DataOrigin.BINARY, encoding="hex"),
+    )
+
+
+def _build_disassemble(r: dict[str, Any]) -> s.DisassembleOut:
+    """Build :class:`DisassembleOut` from a plain result."""
+    return s.DisassembleOut(
+        instructions=[_build_instruction(i) for i in r.get("instructions", [])],
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_function_summary(r: dict[str, Any]) -> s.FunctionSummary:
+    """Build one :class:`FunctionSummary`: name=BINARY; size is safe."""
+    return s.FunctionSummary(
+        address=str(r["address"]),
+        name=_w(r["name"], DataOrigin.BINARY),
+        size=int(r["size"]),
+    )
+
+
+def _build_function_list(r: dict[str, Any]) -> s.FunctionListOut:
+    """Build :class:`FunctionListOut` from a plain result."""
+    return s.FunctionListOut(
+        functions=[_build_function_summary(f) for f in r.get("functions", [])],
+        total=int(r["total"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_function_detail(r: dict[str, Any]) -> s.FunctionDetail:
+    """Build :class:`FunctionDetail`: name=BINARY; signature/calling_convention=GHIDRA."""
+    return s.FunctionDetail(
+        address=str(r["address"]),
+        name=_w(r["name"], DataOrigin.BINARY),
+        signature=_w(r["signature"], DataOrigin.GHIDRA),
+        size=int(r["size"]),
+        is_thunk=bool(r["is_thunk"]),
+        calling_convention=_w_opt(r.get("calling_convention"), DataOrigin.GHIDRA),
+    )
+
+
+def _build_defined_string(r: dict[str, Any]) -> s.DefinedString:
+    """Build one :class:`DefinedString`: value=BINARY (extracted, utf-8-replace)."""
+    return s.DefinedString(
+        address=str(r["address"]),
+        value=_w(r["value"], DataOrigin.BINARY, encoding="utf-8-replace"),
+        length=int(r["length"]),
+    )
+
+
+def _build_string_list(r: dict[str, Any]) -> s.StringListOut:
+    """Build :class:`StringListOut` from a plain result."""
+    return s.StringListOut(
+        strings=[_build_defined_string(x) for x in r.get("strings", [])],
+        total=int(r["total"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_symbol(r: dict[str, Any]) -> s.Symbol:
+    """Build one :class:`Symbol`: name/namespace=BINARY (extracted); kind is safe."""
+    return s.Symbol(
+        address=str(r["address"]),
+        name=_w(r["name"], DataOrigin.BINARY),
+        kind=str(r["kind"]),
+        namespace=_w_opt(r.get("namespace"), DataOrigin.BINARY),
+    )
+
+
+def _build_symbol_list(r: dict[str, Any]) -> s.SymbolListOut:
+    """Build :class:`SymbolListOut` from a plain result."""
+    return s.SymbolListOut(
+        symbols=[_build_symbol(x) for x in r.get("symbols", [])],
+        total=int(r["total"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_defined_data(r: dict[str, Any]) -> s.DefinedData:
+    """Build one :class:`DefinedData`: data_type=GHIDRA (resolved); value_repr=BINARY."""
+    return s.DefinedData(
+        address=str(r["address"]),
+        data_type=_w(r["data_type"], DataOrigin.GHIDRA),
+        value_repr=_w(r["value_repr"], DataOrigin.BINARY),
+        length=int(r["length"]),
+    )
+
+
+def _build_data_list(r: dict[str, Any]) -> s.DataListOut:
+    """Build :class:`DataListOut` from a plain result."""
+    return s.DataListOut(
+        data=[_build_defined_data(x) for x in r.get("data", [])],
+        total=int(r["total"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_data_type(r: dict[str, Any]) -> s.DataType:
+    """Build :class:`DataType`: name/definition=GHIDRA (resolved over hostile input)."""
+    return s.DataType(
+        name=_w(r["name"], DataOrigin.GHIDRA),
+        kind=str(r["kind"]),
+        size=int(r["size"]),
+        definition=_w(r["definition"], DataOrigin.GHIDRA),
+    )
+
+
+def _build_comment(r: dict[str, Any]) -> s.Comment:
+    """Build one :class:`Comment`: text=BINARY (extracted; planted-comment injection vector)."""
+    return s.Comment(
+        address=str(r["address"]),
+        comment_type=str(r["comment_type"]),
+        text=_w(r["text"], DataOrigin.BINARY),
+    )
+
+
+def _build_comment_list(r: dict[str, Any]) -> s.CommentListOut:
+    """Build :class:`CommentListOut` from a plain result."""
+    return s.CommentListOut(
+        comments=[_build_comment(x) for x in r.get("comments", [])],
+        total=int(r["total"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_memory_block(r: dict[str, Any]) -> s.MemoryBlock:
+    """Build one :class:`MemoryBlock`: name=BINARY (section header); rest are safe."""
+    return s.MemoryBlock(
+        name=_w(r["name"], DataOrigin.BINARY),
+        start=str(r["start"]),
+        end=str(r["end"]),
+        size=int(r["size"]),
+        permissions=str(r["permissions"]),
+        initialized=bool(r["initialized"]),
+    )
+
+
+def _build_memory_map(r: dict[str, Any]) -> s.MemoryMapOut:
+    """Build :class:`MemoryMapOut` from a plain result."""
+    return s.MemoryMapOut(blocks=[_build_memory_block(b) for b in r.get("blocks", [])])
+
+
+def _build_read_bytes(r: dict[str, Any]) -> s.ReadBytesOut:
+    """Build :class:`ReadBytesOut`: data=BINARY (raw bytes, hex-encoded)."""
+    return s.ReadBytesOut(
+        address=str(r["address"]),
+        data=_w(r["data"], DataOrigin.BINARY, encoding="hex"),
+        length=int(r["length"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_byte_match(r: dict[str, Any]) -> s.ByteMatch:
+    """Build one :class:`ByteMatch`: context_hex=BINARY (raw bytes, hex-encoded)."""
+    return s.ByteMatch(
+        address=str(r["address"]),
+        context_hex=_w(r["context_hex"], DataOrigin.BINARY, encoding="hex"),
+    )
+
+
+def _build_search_bytes(r: dict[str, Any]) -> s.SearchBytesOut:
+    """Build :class:`SearchBytesOut` from a plain result."""
+    return s.SearchBytesOut(
+        matches=[_build_byte_match(m) for m in r.get("matches", [])],
+        total=int(r["total"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_program_metadata(r: dict[str, Any]) -> s.ProgramMetadata:
+    """Build :class:`ProgramMetadata`: compiler=BINARY (format-reported); rest are safe."""
+    return s.ProgramMetadata(
+        sha256=str(r["sha256"]),
+        size_bytes=int(r["size_bytes"]),
+        format=str(r["format"]),
+        architecture=str(r["architecture"]),
+        endianness=str(r["endianness"]),
+        compiler=_w_opt(r.get("compiler"), DataOrigin.BINARY),
+        entry_point=(str(r["entry_point"]) if r.get("entry_point") is not None else None),
+        function_count=int(r["function_count"]),
+        analysis_complete=bool(r["analysis_complete"]),
+    )

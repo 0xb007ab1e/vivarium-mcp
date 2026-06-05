@@ -47,7 +47,7 @@ def test_unknown_session_id_is_bola_safe_over_stdio(fake_port: object) -> None:
 
 
 def test_oversize_argument_rejected_at_boundary_over_stdio(fake_port: object) -> None:
-    """An over-cap tool argument is rejected with a ``VALIDATION`` envelope before reaching the port.
+    """An over-cap tool argument is rejected with a ``VALIDATION`` envelope before the port.
 
     Confirms the server validates at TB1 (the fake port should never be called for a rejected arg).
     """

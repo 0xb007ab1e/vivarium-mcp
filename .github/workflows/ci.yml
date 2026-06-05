@@ -50,14 +50,14 @@ jobs:
       - name: Critical-path coverage 100%   # master §4: 100% on designated critical paths
         run: |
           # Critical modules (see pyproject [tool.coverage] note): validation, envelope, errors,
-          # sessions.manager, security.limits. Enforce 100% scoped to these.
-          pytest -m "not integration" \
-            --cov=ghidra_mcp.core.validation \
-            --cov=ghidra_mcp.core.envelope \
-            --cov=ghidra_mcp.core.errors \
-            --cov=ghidra_mcp.sessions.manager \
-            --cov=ghidra_mcp.security.limits \
-            --cov-fail-under=100
+          # sessions.manager, security.limits. Enforce 100% SCOPED to these.
+          # NOTE: pyproject `[tool.coverage.run] source = ["ghidra_mcp"]` forces whole-package
+          # measurement, so `--cov=<module> --cov-fail-under=100` would (wrongly) gate the whole
+          # package. Instead: measure once, then `coverage report --include=<the 5 files>
+          # --fail-under=100` to gate exactly the critical paths.
+          pytest -m "not integration" --cov=ghidra_mcp --cov-report=
+          coverage report --fail-under=100 \
+            --include='*/ghidra_mcp/core/validation.py,*/ghidra_mcp/core/envelope.py,*/ghidra_mcp/core/errors.py,*/ghidra_mcp/sessions/manager.py,*/ghidra_mcp/security/limits.py'
       - name: Upload coverage artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # actions/upload-artifact@v4

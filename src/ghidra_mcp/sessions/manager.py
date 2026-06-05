@@ -18,13 +18,14 @@ periodic reaper and request threads cannot corrupt the table (topic-concurrency)
 
 from __future__ import annotations
 
-import os
+import contextlib
 import secrets
 import shutil
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol
 
 from ghidra_mcp.core.errors import ErrorType
@@ -84,7 +85,7 @@ class _Session:
     Attributes:
         session_id: Opaque CSPRNG id.
         state: Lifecycle state string.
-        created_at: Monotonic-independent wall-clock epoch seconds at creation (for ``SessionInfo``).
+        created_at: Wall-clock epoch seconds at creation (for ``SessionInfo``; not used for TTL).
         created_mono: Monotonic timestamp at creation (TTL math — immune to clock jumps).
         last_used_mono: Monotonic timestamp of the last authorize (idle math).
         ttl_s: Absolute lifetime in seconds.
@@ -335,12 +336,11 @@ class SessionManager:
         """
         if store_path is None:
             return True
-        try:
+        # Fall through to the existence check — verification, not the attempt, decides success.
+        with contextlib.suppress(OSError):
             shutil.rmtree(store_path, ignore_errors=True)
-        except OSError:
-            pass  # fall through to the existence check — verification, not the attempt, decides
         # Verified wipe: the contract is that the store path no longer exists (ADR-002).
-        return not os.path.exists(store_path)
+        return not Path(store_path).exists()
 
     def _store_path_for(self, session_id: str) -> str | None:
         """Compute the per-session store path under the store root, if one is configured.
@@ -354,7 +354,7 @@ class SessionManager:
         if self._store_root is None:
             return None
         # session_id is URL-safe base64 of CSPRNG bytes: no separators, no traversal sequences.
-        return os.path.join(self._store_root, session_id)
+        return str(Path(self._store_root) / session_id)
 
     def _is_expired(self, sess: _Session, now: float) -> bool:
         """Whether a session has hit either its absolute TTL or its idle timeout.

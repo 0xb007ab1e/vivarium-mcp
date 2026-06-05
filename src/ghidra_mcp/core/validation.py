@@ -43,9 +43,10 @@ _MAX_ADDRESS_HEX_DIGITS = 16
 # Hex digit alphabet (case-insensitive) used for fast, allow-list character checks.
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
-# Unicode line/paragraph separators that must never appear in a name (log/render corruption,
-# injection smuggling — topic-i18n, std-cwe). C0/C1 controls and DEL are handled by code-point range.
-_UNICODE_SEPARATORS = frozenset("  ")
+# Unicode line/paragraph separators (U+2028 / U+2029) that must never appear in a name (log/render
+# corruption, injection smuggling — topic-i18n, std-cwe). Spelled as escapes (not literal glyphs) so
+# the source stays unambiguous; C0/C1 controls and DEL are handled by the code-point range below.
+_UNICODE_SEPARATORS = frozenset("\u2028\u2029")
 
 
 def _validation_error(detail: str) -> GhidraMcpError:
@@ -132,7 +133,11 @@ def parse_address(value: str) -> int:
         raise _validation_error("address contains non-hexadecimal characters")
 
     address = int(digits, 16)
-    if address > _MAX_ADDRESS:  # unreachable given the digit cap, but explicit fail-closed bound.
+    # Defensive, fail-closed ceiling. With the 16-hex-digit cap above, ``int(digits, 16)`` cannot
+    # exceed ``_MAX_ADDRESS`` (0xffff_ffff_ffff_ffff), so this branch is provably unreachable via
+    # the validated path; it stays as an explicit bound and is excluded from coverage as dead-by-
+    # construction (topic-defensive-programming; the live guard is the digit cap, tested above).
+    if address > _MAX_ADDRESS:  # pragma: no cover
         raise _validation_error("address is out of range")
     return address
 

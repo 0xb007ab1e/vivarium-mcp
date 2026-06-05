@@ -57,7 +57,9 @@ def _default_session_manager_factory(config: Config, port: GhidraPort) -> Sessio
     Returns:
         A constructed :class:`ghidra_mcp.sessions.manager.SessionManager`.
     """
-    return SessionManager()  # type: ignore[call-arg]  # WS2 finalizes the constructor signature.
+    # SessionManager is constructible with safe defaults today; WS2 finalizes the wiring that
+    # injects ``port``/``config`` here at the composition root.
+    return SessionManager()
 
 
 def main(

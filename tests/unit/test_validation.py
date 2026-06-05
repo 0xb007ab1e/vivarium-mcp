@@ -83,8 +83,8 @@ def test_validate_name_accepts_valid(value: str) -> None:
         "esc\x1bseq",
         "del\x7f",
         "c1\x85control",
-        "line sep",
-        "para sep",
+        "line\u2028sep",  # U+2028 LINE SEPARATOR (escape form keeps the source unambiguous)
+        "para\u2029sep",  # U+2029 PARAGRAPH SEPARATOR
     ],
 )
 def test_validate_name_rejects_invalid(value: str) -> None:

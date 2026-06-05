@@ -15,12 +15,12 @@ All time is injected (a fake monotonic clock) so tests are deterministic and her
 
 from __future__ import annotations
 
-import os
+from pathlib import Path
 
 import pytest
 
 from ghidra_mcp.core.errors import ErrorType, GhidraMcpError
-from ghidra_mcp.sessions.manager import STATE_OPEN, SessionManager
+from ghidra_mcp.sessions.manager import STATE_EVICTED, STATE_OPEN, SessionManager
 
 
 class _FakeClock:
@@ -136,7 +136,7 @@ def test_bola_unknown_foreign_and_evicted_yield_identical_error() -> None:
     # succeed here (manager has no per-caller ownership in v1: single stdio client), so we assert
     # the *failure modes* are identical and never confirm existence of `live`.
     assert unknown == evicted_env
-    assert "exists" not in unknown["detail"].lower()
+    assert "exists" not in str(unknown["detail"]).lower()
     # The live session is still authorizable (we did not accidentally evict it proving foreignness).
     assert mgr.authorize(live.session_id).session_id == live.session_id
 
@@ -168,22 +168,22 @@ def test_authorize_expired_session_is_session_invalid_and_evicts() -> None:
 
 # --- eviction: kill + verified wipe -----------------------------------------------------------
 @pytest.mark.critical
-def test_evict_kills_worker_then_wipes_store(tmp_path) -> None:
+def test_evict_kills_worker_then_wipes_store(tmp_path: Path) -> None:
     port = _FakePort()
     store_root = str(tmp_path / "stores")
     mgr, _ = _mgr(port=port, store_root=store_root)
     info = mgr.create()
     sid = info.session_id
     # Simulate a provisioned store + a started worker.
-    store_path = os.path.join(store_root, sid)
-    os.makedirs(store_path, exist_ok=True)
+    store_path = Path(store_root) / sid
+    store_path.mkdir(parents=True, exist_ok=True)
     # Mark the worker started so eviction kills it.
     mgr._sessions[sid].worker_started = True
 
-    assert os.path.exists(store_path)
+    assert store_path.exists()
     wiped = mgr.evict(sid, reason="close")
     assert wiped is True
-    assert not os.path.exists(store_path)  # VERIFIED wipe
+    assert not store_path.exists()  # VERIFIED wipe
     assert port.killed == [sid]  # killed before wipe
 
 
@@ -206,20 +206,22 @@ def test_evict_unknown_session_is_idempotent_success() -> None:
 
 
 @pytest.mark.critical
-def test_wipe_failure_surfaces_store_wiped_false(tmp_path, monkeypatch) -> None:
+def test_wipe_failure_surfaces_store_wiped_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A store that still exists after the wipe attempt must report ``store_wiped=False``."""
     store_root = str(tmp_path / "stores")
     mgr, _ = _mgr(store_root=store_root)
     info = mgr.create()
     sid = info.session_id
-    store_path = os.path.join(store_root, sid)
-    os.makedirs(store_path, exist_ok=True)
+    store_path = Path(store_root) / sid
+    store_path.mkdir(parents=True, exist_ok=True)
 
     # Simulate a wipe that cannot remove the directory: rmtree no-ops, path persists.
     monkeypatch.setattr("ghidra_mcp.sessions.manager.shutil.rmtree", lambda *a, **k: None)
     wiped = mgr.evict(sid, reason="close")
     assert wiped is False  # confidentiality incident — alerted on
-    assert os.path.exists(store_path)
+    assert store_path.exists()
 
 
 def test_evict_no_store_is_vacuously_wiped() -> None:
@@ -234,7 +236,7 @@ def test_reap_expired_evicts_idle_session_keeps_refreshed_one() -> None:
     port = _FakePort()
     mgr, clock = _mgr(port=port, ttl_s=1000, idle_s=50, max_sessions=8)
     a = mgr.create()
-    b = mgr.create()
+    mgr.create()  # session "b": never refreshed → will idle-expire
     clock.advance(40)  # within idle window
     mgr.authorize(a.session_id)  # refresh a at t=40
     clock.advance(40)  # t=80: a idle=40 (ok), b idle=80 (expired)
@@ -259,7 +261,7 @@ def test_reap_expired_keeps_live_sessions() -> None:
 
 
 @pytest.mark.critical
-def test_shutdown_evicts_all(tmp_path) -> None:
+def test_shutdown_evicts_all(tmp_path: Path) -> None:
     port = _FakePort()
     store_root = str(tmp_path / "stores")
     mgr, _ = _mgr(port=port, store_root=store_root, max_sessions=8)
@@ -267,14 +269,62 @@ def test_shutdown_evicts_all(tmp_path) -> None:
     for _ in range(3):
         info = mgr.create()
         sids.append(info.session_id)
-        os.makedirs(os.path.join(store_root, info.session_id), exist_ok=True)
+        (Path(store_root) / info.session_id).mkdir(parents=True, exist_ok=True)
         mgr._sessions[info.session_id].worker_started = True
     mgr.shutdown()
     assert sorted(port.killed) == sorted(sids)
     for sid in sids:
-        assert not os.path.exists(os.path.join(store_root, sid))
+        assert not (Path(store_root) / sid).exists()
     # Idempotent: a second shutdown is a no-op.
     mgr.shutdown()
+
+
+@pytest.mark.critical
+def test_evict_survives_worker_kill_failure_and_still_wipes(tmp_path: Path) -> None:
+    """A worker-kill that raises must NOT abort eviction: the store is still verified-wiped.
+
+    Covers the kill-failure branch in ``_evict_locked`` (best-effort kill, logged) — a launcher /
+    runtime hiccup during teardown cannot leave the confidential store behind.
+    """
+
+    class _ExplodingPort:
+        def start_worker(self, session_id: str) -> None:  # pragma: no cover - unused here
+            raise AssertionError("not used")
+
+        def kill_worker(self, session_id: str) -> None:
+            raise RuntimeError("runtime refused to SIGKILL")
+
+    store_root = str(tmp_path / "stores")
+    mgr = SessionManager(port=_ExplodingPort(), store_root=store_root, clock=_FakeClock())
+    info = mgr.create()
+    sid = info.session_id
+    store_path = Path(store_root) / sid
+    store_path.mkdir(parents=True, exist_ok=True)
+    mgr._sessions[sid].worker_started = True
+
+    # Kill raises internally but eviction proceeds and the store is verified gone.
+    assert mgr.evict(sid, reason="poison") is True
+    assert not store_path.exists()
+
+
+@pytest.mark.critical
+def test_shutdown_skips_already_evicted_session_in_table() -> None:
+    """``shutdown`` must skip a session already marked EVICTED still present in the table.
+
+    Covers the false branch of the state guard in the shutdown loop (idempotency / no double-kill
+    of an already-torn-down session).
+    """
+    port = _FakePort()
+    mgr, _ = _mgr(port=port, max_sessions=4)
+    live = mgr.create()
+    stale = mgr.create()
+    mgr._sessions[live.session_id].worker_started = True
+    # Force a session into EVICTED state WITHOUT removing it from the table, so the shutdown loop
+    # encounters it and must skip (the guard's False branch).
+    mgr._sessions[stale.session_id].state = STATE_EVICTED
+    mgr.shutdown()
+    # Only the live session was (re-)evicted/killed; the pre-evicted one was skipped, not killed.
+    assert port.killed == [live.session_id]
 
 
 def test_store_path_no_traversal() -> None:

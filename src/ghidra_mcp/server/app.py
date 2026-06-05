@@ -90,7 +90,7 @@ def _internal_envelope(correlation_id: str) -> ErrorEnvelope:
     )
 
 
-def _with_error_boundary(tool_name: str, handler: Callable[[Any], Any]) -> Callable[[Any], Any]:
+def _with_error_boundary(tool_name: str, handler: Callable[..., Any]) -> Callable[..., Any]:
     """Wrap a tool handler so every failure becomes a safe, frozen error envelope.
 
     A :class:`GhidraMcpError` is translated to its carried envelope (attaching a correlation id if

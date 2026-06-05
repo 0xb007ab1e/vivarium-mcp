@@ -204,7 +204,8 @@ def dispatch(backend: GhidraBackend, method: str, params: dict[str, Any]) -> dic
     handler = getattr(backend, method, None)
     if handler is None:  # defensive: method in allow-list but backend lacks it
         raise WorkerError(CODE_METHOD_NOT_FOUND, "method not implemented")
-    return handler(params)
+    result: dict[str, Any] = handler(params)  # narrow the dynamic getattr result to the contract
+    return result
 
 
 def build_response(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:

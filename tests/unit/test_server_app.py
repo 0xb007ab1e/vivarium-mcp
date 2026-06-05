@@ -9,14 +9,18 @@ All collaborators are local fakes; no real worker / JVM / transport is exercised
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from ghidra_mcp import __main__ as entry
 from ghidra_mcp.config import Config
 from ghidra_mcp.core.envelope import DataOrigin, Untrusted
 from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
+from ghidra_mcp.ghidra.port import GhidraPort
 from ghidra_mcp.security.limits import Limits
 from ghidra_mcp.server import app as srv
+from ghidra_mcp.sessions.manager import SessionManager
 from ghidra_mcp.tools import schemas as s
 
 
@@ -80,7 +84,7 @@ def test_boundary_maps_unexpected_exception_to_generic_internal() -> None:
 
 def test_boundary_maps_pydantic_validation_error() -> None:
     def boom(**_kw: object) -> object:
-        s.ReadBytesIn()  # missing required fields → pydantic ValidationError
+        s.ReadBytesIn()  # type: ignore[call-arg]  # intentionally missing required fields
         return None
 
     out = srv._with_error_boundary("read_bytes", boom)()
@@ -126,17 +130,32 @@ class _FakePort:
             length=4,
         )
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> Any:
         def _unused(sid: str, a: object | None = None) -> object:
             raise AssertionError(f"unexpected port call {name}")
 
         return _unused
 
 
+def _build_with_fakes() -> Any:
+    """Build the app with cast fakes (``SessionManager`` is concrete, ``GhidraPort`` a Protocol)."""
+    return srv.build_app(
+        _config(),
+        session_manager=cast(SessionManager, _FakeSessions()),
+        port=cast(GhidraPort, _FakePort()),
+    )
+
+
+def _result_text(result: object) -> str:
+    """Extract the text payload from a FastMCP ``call_tool`` result (first content block)."""
+    block = cast(Any, result)[0]
+    return cast(str, block.text)
+
+
 def test_build_app_registers_full_catalog() -> None:
     import anyio
 
-    app = srv.build_app(_config(), session_manager=_FakeSessions(), port=_FakePort())
+    app = _build_with_fakes()
     tools = anyio.run(app.list_tools)
     from ghidra_mcp.tools.registry import TIER1_TOOL_NAMES
 
@@ -146,7 +165,7 @@ def test_build_app_registers_full_catalog() -> None:
 def test_build_app_publishes_flat_input_schema() -> None:
     import anyio
 
-    app = srv.build_app(_config(), session_manager=_FakeSessions(), port=_FakePort())
+    app = _build_with_fakes()
     tools = {t.name: t for t in anyio.run(app.list_tools)}
     props = tools["read_bytes"].inputSchema.get("properties") or {}
     assert {"session_id", "address", "length"} <= set(props)
@@ -157,18 +176,18 @@ def test_build_app_tool_call_returns_wrapped_output_and_errors() -> None:
 
     import anyio
 
-    app = srv.build_app(_config(), session_manager=_FakeSessions(), port=_FakePort())
+    app = _build_with_fakes()
     ok = anyio.run(
         app.call_tool, "read_bytes", {"session_id": "sid1", "address": "0x401000", "length": 4}
     )
-    doc = json.loads(ok[0].text)
+    doc = json.loads(_result_text(ok))
     assert doc["data"]["origin"] == "binary-derived"  # untrusted envelope preserved end-to-end
 
     # Semantic validation failure surfaces as the frozen error envelope (not a transport crash).
     bad = anyio.run(
         app.call_tool, "read_bytes", {"session_id": "sid1", "address": "NOTHEX", "length": 4}
     )
-    assert json.loads(bad[0].text)["type"] == "validation-error"
+    assert json.loads(_result_text(bad))["type"] == "validation-error"
 
 
 # --- run_stdio -----------------------------------------------------------------------
@@ -232,8 +251,8 @@ def test_main_happy_path_wires_and_serves(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(entry, "run_stdio", fake_run)
 
     code = entry.main(
-        port_factory=lambda cfg: object(),
-        session_manager_factory=lambda cfg, port: _FakeSessions(),
+        port_factory=lambda cfg: cast(GhidraPort, object()),
+        session_manager_factory=lambda cfg, port: cast(SessionManager, _FakeSessions()),
     )
     assert code == 0
     assert built["ok"] is True
@@ -265,7 +284,7 @@ def test_main_returns_nonzero_on_collaborator_construction_failure(
     monkeypatch.setattr(entry, "load_config", _config)
     monkeypatch.setattr(entry, "configure_logging", lambda **_k: None)
 
-    def bad_port(cfg: Config) -> object:
+    def bad_port(cfg: Config) -> GhidraPort:
         raise GhidraMcpError(
             ErrorEnvelope(type=ErrorType.INTERNAL, title="x", detail="no worker", status=500)
         )

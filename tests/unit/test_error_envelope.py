@@ -15,14 +15,16 @@ from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 @pytest.mark.critical
 def test_error_type_slugs_are_stable() -> None:
     # Clients may branch on these slugs; assert the frozen values explicitly.
-    assert ErrorType.VALIDATION == "validation-error"
-    assert ErrorType.NOT_FOUND == "not-found"
-    assert ErrorType.SESSION_INVALID == "session-invalid"
-    assert ErrorType.LIMIT_EXCEEDED == "limit-exceeded"
-    assert ErrorType.TIMEOUT == "timeout"
-    assert ErrorType.WORKER_UNAVAILABLE == "worker-unavailable"
-    assert ErrorType.ANALYSIS_FAILED == "analysis-failed"
-    assert ErrorType.INTERNAL == "internal-error"
+    # (.value: ErrorType is a str-enum; compare the serialized slug so mypy --strict doesn't
+    # flag the enum-member-vs-str-literal comparison as non-overlapping.)
+    assert ErrorType.VALIDATION.value == "validation-error"
+    assert ErrorType.NOT_FOUND.value == "not-found"
+    assert ErrorType.SESSION_INVALID.value == "session-invalid"
+    assert ErrorType.LIMIT_EXCEEDED.value == "limit-exceeded"
+    assert ErrorType.TIMEOUT.value == "timeout"
+    assert ErrorType.WORKER_UNAVAILABLE.value == "worker-unavailable"
+    assert ErrorType.ANALYSIS_FAILED.value == "analysis-failed"
+    assert ErrorType.INTERNAL.value == "internal-error"
 
 
 @pytest.mark.critical
@@ -38,7 +40,7 @@ def test_minimal_envelope_defaults_fail_closed() -> None:
 def test_envelope_is_frozen_and_forbids_extra_fields() -> None:
     env = ErrorEnvelope(type=ErrorType.TIMEOUT, title="Timeout", detail="Deadline elapsed.")
     with pytest.raises(ValidationError):
-        env.detail = "mutated"  # type: ignore[misc]  # frozen
+        env.detail = "mutated"  # frozen
     with pytest.raises(ValidationError):
         ErrorEnvelope(  # extra field rejected
             type=ErrorType.TIMEOUT,

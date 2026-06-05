@@ -16,7 +16,7 @@ from ghidra_mcp.core import envelope
 from ghidra_mcp.core.envelope import (
     DataOrigin,
     Untrusted,
-    _is_neutralizable,
+    _neutralization_note,
     _normalize_text,
     _normalize_value,
     wrap,
@@ -31,7 +31,7 @@ NOTE_ZERO_WIDTH = "zero-width/invisible characters neutralized"
 
 
 # ----------------------------------------------------------------------------------------------
-# Classifier: _is_neutralizable
+# Classifier: _neutralization_note
 # ----------------------------------------------------------------------------------------------
 @pytest.mark.parametrize(
     ("char", "expected_note"),
@@ -57,23 +57,20 @@ NOTE_ZERO_WIDTH = "zero-width/invisible characters neutralized"
 )
 def test_neutralizable_characters_are_flagged(char: str, expected_note: str) -> None:
     """Every dangerous control/bidi/zero-width codepoint is classified for neutralization."""
-    neutralize, note = _is_neutralizable(char)
-    assert neutralize is True
+    note = _neutralization_note(char)
+    assert note is not None  # non-None == must be neutralized
     assert note == expected_note
 
 
 @pytest.mark.parametrize("char", ["\t", "\n", "\r", "a", "Z", "0", " ", "é", "🦀"])
 def test_safe_characters_are_preserved(char: str) -> None:
     """Whitespace (tab/newline/CR), printable ASCII, and ordinary Unicode are NOT neutralized."""
-    neutralize, note = _is_neutralizable(char)
-    assert neutralize is False
-    assert note is None
+    assert _neutralization_note(char) is None
 
 
 def test_c0_just_below_c1_gap_not_neutralized() -> None:
     """U+00A0 (just above the C1 range) is a non-control character and is preserved."""
-    neutralize, _ = _is_neutralizable(" ")
-    assert neutralize is False
+    assert _neutralization_note(" ") is None  # noqa: RUF001  # intentional: U+00A0 NBSP is the boundary char under test
 
 
 # ----------------------------------------------------------------------------------------------
@@ -125,7 +122,8 @@ def test_normalize_value_list_of_str() -> None:
 
 def test_normalize_value_empty_list() -> None:
     """An empty list (which passes the all-str predicate vacuously) is preserved."""
-    value, notes = _normalize_value([])
+    empty: list[str] = []
+    value, notes = _normalize_value(empty)
     assert value == []
     assert notes == []
 
@@ -220,11 +218,11 @@ def test_wrap_result_is_frozen() -> None:
     """The returned envelope honors the frozen model contract (immutability)."""
     u = wrap("x")
     with pytest.raises(Exception):  # noqa: B017 - pydantic raises ValidationError on frozen set
-        u.value = "mutated"  # type: ignore[misc]
+        u.value = "mutated"
 
 
 def test_module_tables_are_disjoint_and_frozen() -> None:
-    """The bidi and zero-width tables don't overlap and the allowed-control set is the safe three."""
+    """The bidi and zero-width tables are disjoint and the allowed-control set is the safe three."""
     assert envelope._BIDI_CODEPOINTS.isdisjoint(envelope._ZERO_WIDTH_CODEPOINTS)
     assert frozenset({"\t", "\n", "\r"}) == envelope._ALLOWED_CONTROL_CHARS
     assert envelope._MAX_NOTES == 16

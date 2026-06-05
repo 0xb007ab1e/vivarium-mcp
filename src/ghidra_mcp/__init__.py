@@ -14,7 +14,7 @@ This package is organized with **ports & adapters** (functional core / imperativ
 - ``ghidra``   — the **adapter** to the out-of-process Ghidra worker via internal RPC. The MCP
                  server process NEVER loads the JVM or parses a binary (ADR-001).
 
-WS0 freezes the contracts (``docs/contracts/``) and ships interface stubs only; WS1–WS5 implement
+WS0 freezes the contracts (``docs/contracts/``) and ships interface stubs only; WS1-WS5 implement
 the logic against those frozen contracts.
 """
 

@@ -13,6 +13,8 @@ it activates automatically once WS1 lands (Wave-2), no env flag required.
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 
@@ -22,14 +24,21 @@ def _server_shell_ready() -> bool:
     Calls the factory with placeholder args inside a guard: a ``NotImplementedError`` means the
     stub is still reserved (Wave-1) → e2e is skipped. Any other outcome (success or a different,
     argument-related error) means the shell exists and e2e can attempt to drive it.
+
+    The factory is invoked through an ``Any`` view so this hermetic stub-probe does not have to
+    satisfy the (now-tightened) typed ``build_app`` signature — the call deliberately passes
+    placeholder ``None`` args only to distinguish "reserved stub" from "implemented".
     """
     from ghidra_mcp.server import app
 
+    build_app = cast(Any, app.build_app)
     try:
-        app.build_app(None, session_manager=None)
+        build_app(None, session_manager=None)
     except NotImplementedError:
         return False
     except Exception:
+        # Any other failure (e.g. a TypeError from the placeholder args) means the shell is
+        # implemented, not a reserved stub.
         return True
     return True
 

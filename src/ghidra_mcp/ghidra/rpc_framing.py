@@ -118,7 +118,7 @@ def decode_length_prefix(prefix: bytes, *, max_frame_bytes: int) -> int:
     (n,) = _LENGTH_STRUCT.unpack(prefix)
     if n > max_frame_bytes:
         raise FramingError("declared frame length exceeds maximum")
-    return n
+    return int(n)  # struct.unpack returns Any; narrow to the declared int return
 
 
 def decode_body(body: bytes) -> dict[str, Any]:

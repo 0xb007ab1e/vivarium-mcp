@@ -15,6 +15,7 @@ import contextlib
 import os
 import socket
 import stat
+from pathlib import Path
 
 from worker.dispatch import GhidraBackend, serve_connection
 
@@ -32,9 +33,10 @@ def bind_socket(socket_path: str, *, accept_timeout_s: float | None = None) -> s
     Returns:
         A listening :class:`socket.socket` (backlog 1 — single sole client).
     """
+    sock_file = Path(socket_path)
     # Remove a stale socket from a prior crashed worker, if any (idempotent bind).
     with contextlib.suppress(FileNotFoundError):
-        os.unlink(socket_path)
+        sock_file.unlink()
     # Restrictive umask so the socket is created without group/other bits even before chmod.
     old_umask = os.umask(0o077)
     try:
@@ -42,7 +44,7 @@ def bind_socket(socket_path: str, *, accept_timeout_s: float | None = None) -> s
         srv.bind(socket_path)
     finally:
         os.umask(old_umask)
-    os.chmod(socket_path, _SOCKET_MODE)
+    sock_file.chmod(_SOCKET_MODE)
     srv.listen(1)
     if accept_timeout_s is not None:
         srv.settimeout(accept_timeout_s)
@@ -72,5 +74,5 @@ def run_server(socket_path: str, backend: GhidraBackend, *, max_frame_bytes: int
         with contextlib.suppress(OSError):
             srv.close()
         with contextlib.suppress(FileNotFoundError, OSError):
-            os.unlink(socket_path)
+            Path(socket_path).unlink()
     return 0

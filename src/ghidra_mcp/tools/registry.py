@@ -133,29 +133,61 @@ def _handle_session_import(ctx: ToolContext, args: s.SessionImportIn) -> s.Sessi
     resolution + path confinement of ``source_ref`` is the adapter's responsibility (CWE-22),
     behind the port; the server only asserts the session is live first.
 
+    The session lifecycle is owned **server-side** by the :class:`SessionManager`: its
+    ``created_at``/``expires_at``/``state``/``session_id`` are authoritative and are overlaid onto
+    the worker's reply, which contributes only ``binary_sha256`` (the worker is untrusted and never
+    dictates session timing/identity/state — ADR-001/005, master §2).
+
     Args:
         ctx: Injected collaborators.
         args: Validated ``session_import`` arguments.
 
     Returns:
-        Updated :class:`SessionInfo` after import.
+        Updated :class:`SessionInfo` after import, with authoritative lifecycle fields.
     """
-    ctx.sessions.authorize(args.session_id)
-    return ctx.port.import_binary(args.session_id, args)
+    authoritative = ctx.sessions.authorize(args.session_id)
+    imported = ctx.port.import_binary(args.session_id, args)
+    return _merge_session_info(authoritative, imported)
 
 
 def _handle_session_analyze(ctx: ToolContext, args: s.SessionAnalyzeIn) -> s.SessionInfo:
     """Run Ghidra auto-analysis, bounded by the analysis timeout (kills worker on expiry).
+
+    As with import, the :class:`SessionManager` owns the session lifecycle: its authoritative
+    ``created_at``/``expires_at``/``state``/``session_id`` are overlaid onto the worker's reply,
+    which contributes only ``binary_sha256``. A hostile/buggy worker cannot forge session timing,
+    identity, or lifecycle state.
 
     Args:
         ctx: Injected collaborators.
         args: Validated ``session_analyze`` arguments.
 
     Returns:
-        Updated :class:`SessionInfo` after analysis.
+        Updated :class:`SessionInfo` after analysis, with authoritative lifecycle fields.
     """
-    ctx.sessions.authorize(args.session_id)
-    return ctx.port.analyze(args.session_id, args)
+    authoritative = ctx.sessions.authorize(args.session_id)
+    analyzed = ctx.port.analyze(args.session_id, args)
+    return _merge_session_info(authoritative, analyzed)
+
+
+def _merge_session_info(authoritative: s.SessionInfo, worker: s.SessionInfo) -> s.SessionInfo:
+    """Overlay the manager's authoritative lifecycle fields onto a worker-returned ``SessionInfo``.
+
+    The server-side :class:`SessionManager` is the single source of truth for a session's identity
+    and lifecycle (``session_id``, ``created_at``, ``expires_at``, ``state``); the out-of-process
+    worker is untrusted (ADR-001/005) and contributes only the server-relevant ``binary_sha256`` it
+    computed over the imported input. Overlaying the manager's fields prevents a hostile/buggy
+    worker from forging session timing, identity, or lifecycle state (defense in depth — master §2).
+
+    Args:
+        authoritative: The :class:`SessionInfo` the session manager returned from ``authorize``.
+        worker: The :class:`SessionInfo` the Ghidra adapter returned (worker-supplied).
+
+    Returns:
+        A frozen :class:`SessionInfo` carrying the manager's lifecycle fields and the worker's
+        ``binary_sha256``.
+    """
+    return authoritative.model_copy(update={"binary_sha256": worker.binary_sha256})
 
 
 def _handle_session_status(ctx: ToolContext, args: s._SessionScopedIn) -> s.SessionInfo:
@@ -391,19 +423,20 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
 }
 
 
-def build_handlers(ctx: ToolContext) -> dict[str, Callable[[Any], Any]]:
+def build_handlers(ctx: ToolContext) -> dict[str, Callable[..., Any]]:
     """Build the name → bound-handler map for the full Tier-1 catalog.
 
-    Each returned handler closes over ``ctx`` and takes a single, already-validated ``*In`` model
-    (matching how FastMCP invokes a structured tool). Its ``__signature__``/``__annotations__`` are
-    set to the tool's concrete input schema so the MCP SDK can derive the tool's JSON schema. The
-    map is exhaustive over :data:`TIER1_TOOL_NAMES` (asserted below and in tests).
+    Each returned handler closes over ``ctx`` and exposes the tool's input-model **fields** as
+    flat keyword parameters (matching how FastMCP invokes a structured tool); it reconstructs and
+    re-validates the ``*In`` model internally. Its ``__signature__``/``__annotations__`` are set to
+    those fields so the MCP SDK can derive the tool's JSON schema. The map is exhaustive over
+    :data:`TIER1_TOOL_NAMES` (asserted below and in tests).
 
     Args:
         ctx: The injected collaborators (config, session manager, Ghidra port).
 
     Returns:
-        A mapping of tool name to a single-argument handler callable.
+        A mapping of tool name to a flat-keyword-arguments handler callable.
 
     Raises:
         RuntimeError: If the handler table drifts from :data:`TIER1_TOOL_NAMES` (programmer error —
@@ -413,7 +446,7 @@ def build_handlers(ctx: ToolContext) -> dict[str, Callable[[Any], Any]]:
         # Fail closed: the allow-list and the handler table MUST be identical.
         raise RuntimeError("tool handler table does not match the frozen Tier-1 allow-list")
 
-    bound: dict[str, Callable[[Any], Any]] = {}
+    bound: dict[str, Callable[..., Any]] = {}
     for name, (handler, in_schema) in _HANDLERS.items():
         bound[name] = _bind(handler, ctx, in_schema)
     return bound
@@ -501,7 +534,7 @@ def register_tools(
     registrar: _ToolRegistrar,
     ctx: ToolContext,
     *,
-    wrap: Callable[[str, Callable[[Any], Any]], Callable[[Any], Any]] | None = None,
+    wrap: Callable[[str, Callable[..., Any]], Callable[..., Any]] | None = None,
 ) -> None:
     """Register the full Tier-1 tool catalog with the MCP server.
 

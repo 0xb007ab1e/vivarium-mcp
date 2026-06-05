@@ -115,6 +115,12 @@ files = ["src", "tests"]
 module = ["mcp.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# PyGhidra/JPype exist ONLY inside the worker container (ADR-001/003) and are not installed in the
+# server/test env. The JVM bridge is the sole importer; allow missing imports at that boundary.
+module = ["pyghidra.*", "jpype.*"]
+ignore_missing_imports = true
+
 # ---------------------------------------------------------------------------
 # Pytest + coverage. Coverage gate is enforced here AND in CI (workflow-cicd).
 # ---------------------------------------------------------------------------

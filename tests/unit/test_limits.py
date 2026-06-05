@@ -151,18 +151,18 @@ def test_error_detail_is_safe_and_names_only_the_key() -> None:
 # check_binary_size
 # ----------------------------------------------------------------------------------------------
 def test_size_under_cap_passes() -> None:
-    """A size below the cap is accepted (returns None)."""
-    assert check_binary_size(1024, Limits()) is None
+    """A size below the cap is accepted (does not raise)."""
+    check_binary_size(1024, Limits())  # no exception == accepted
 
 
 def test_size_zero_passes() -> None:
     """A zero-byte input is not a size violation (other validation handles emptiness)."""
-    assert check_binary_size(0, Limits()) is None
+    check_binary_size(0, Limits())  # no exception == accepted
 
 
 def test_size_exactly_at_cap_passes() -> None:
     """A size exactly equal to the cap is accepted (boundary — ``>`` not ``>=``)."""
-    assert check_binary_size(DEFAULT_MAX_BINARY_BYTES, Limits()) is None
+    check_binary_size(DEFAULT_MAX_BINARY_BYTES, Limits())  # no exception == accepted
 
 
 def test_size_one_over_cap_rejected() -> None:

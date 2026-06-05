@@ -17,7 +17,7 @@ contract for clients.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -38,7 +38,7 @@ class DataOrigin(StrEnum):
     input — still untrusted, as inputs influence it."""
 
 
-class Untrusted(BaseModel, Generic[T]):
+class Untrusted(BaseModel, Generic[T]):  # noqa: UP046  # frozen ADR-005 contract; classic typing.Generic retained
     """A typed wrapper marking ``value`` as untrusted, hostile-origin content — FROZEN CONTRACT.
 
     Type parameters:
@@ -125,28 +125,32 @@ _NOTE_ORDER: tuple[str, ...] = (_NOTE_CONTROL, _NOTE_BIDI, _NOTE_ZERO_WIDTH)
 _MAX_NOTES = 16
 
 
-def _is_neutralizable(ch: str) -> tuple[bool, str | None]:
+def _neutralization_note(ch: str) -> str | None:
     """Classify a single character for neutralization.
+
+    A single source of truth: a non-``None`` result both means "this character must be replaced
+    with an inert token" AND is the stable annotation note for its class. Returning one value
+    (rather than a ``(bool, note)`` pair) removes the otherwise-unreachable "neutralize but no
+    note" state.
 
     Args:
         ch: A one-character string.
 
     Returns:
-        ``(neutralize, note)`` — ``neutralize`` is ``True`` when ``ch`` must be replaced with an
-        inert token; ``note`` is the stable annotation for its class (or ``None`` when not
-        neutralized).
+        The stable annotation note for ``ch``'s dangerous class, or ``None`` when ``ch`` is safe
+        (preserved as-is).
     """
     code = ord(ch)
     if code in _BIDI_CODEPOINTS:
-        return True, _NOTE_BIDI
+        return _NOTE_BIDI
     if code in _ZERO_WIDTH_CODEPOINTS:
-        return True, _NOTE_ZERO_WIDTH
+        return _NOTE_ZERO_WIDTH
     if ch in _ALLOWED_CONTROL_CHARS:
-        return False, None
+        return None
     # C0 controls (U+0000-U+001F), DEL (U+007F), and C1 controls (U+0080-U+009F).
     if code <= 0x1F or code == 0x7F or 0x80 <= code <= 0x9F:
-        return True, _NOTE_CONTROL
-    return False, None
+        return _NOTE_CONTROL
+    return None
 
 
 def _normalize_text(text: str) -> tuple[str, list[str]]:
@@ -166,18 +170,17 @@ def _normalize_text(text: str) -> tuple[str, list[str]]:
     out: list[str] = []
     flagged: set[str] = set()
     for ch in text:
-        neutralize, note = _is_neutralizable(ch)
-        if neutralize:
+        note = _neutralization_note(ch)
+        if note is not None:
             out.append(f"<U+{ord(ch):04X}>")
-            if note is not None:
-                flagged.add(note)
+            flagged.add(note)
         else:
             out.append(ch)
     ordered = [n for n in _NOTE_ORDER if n in flagged]
     return "".join(out), ordered
 
 
-def _normalize_value(value: T) -> tuple[T, list[str]]:
+def _normalize_value(value: T) -> tuple[T, list[str]]:  # noqa: UP047  # classic TypeVar retained to match frozen Untrusted[T] (ADR-005)
     """Apply normalization to ``str`` payloads (and ``str`` items of a flat list); pass others.
 
     Only textual content can carry the injection/spoofing classes ``wrap`` defends against;
@@ -193,7 +196,9 @@ def _normalize_value(value: T) -> tuple[T, list[str]]:
     """
     if isinstance(value, str):
         norm, notes = _normalize_text(value)
-        return norm, notes  # type: ignore[return-value]
+        # ``value`` is ``str`` here, so ``T`` is ``str``; mypy cannot narrow a TypeVar from an
+        # isinstance guard, hence the explicit (sound) cast rather than a blanket ignore.
+        return cast("T", norm), notes
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
         flagged: set[str] = set()
         new_items: list[str] = []
@@ -202,12 +207,12 @@ def _normalize_value(value: T) -> tuple[T, list[str]]:
             new_items.append(norm_item)
             flagged.update(item_notes)
         ordered = [n for n in _NOTE_ORDER if n in flagged]
-        return new_items, ordered  # type: ignore[return-value]
+        return cast("T", new_items), ordered
     # Non-text payload (structured model, scalar, mixed list): nothing to neutralize.
     return value, []
 
 
-def wrap(
+def wrap(  # noqa: UP047  # classic TypeVar retained to match frozen Untrusted[T] (ADR-005)
     value: T,
     *,
     origin: DataOrigin = DataOrigin.BINARY,

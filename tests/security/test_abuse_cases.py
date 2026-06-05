@@ -74,12 +74,14 @@ def test_injection_in_decompiled_code_and_symbol_names_is_wrapped() -> None:
 @pytest.mark.critical
 def test_homoglyph_and_bidi_spoofing_normalization_edge_cases() -> None:
     """Mixed control/bidi/zero-width spoofing is fully neutralized and de-duplicated in notes."""
-    # Interleave every class plus a benign homoglyph (Cyrillic 'а' U+0430) which we deliberately
-    # do NOT transform (homoglyph *display* defense is the client's; we annotate structure only).
-    spoof = " а‮\x00​‍login\x9f"
+    # Interleave every class plus a benign homoglyph: U+0430 (Cyrillic small a), which we
+    # deliberately do NOT transform (homoglyph *display* defense is the client's; we annotate
+    # structure only). The literal look-alike is carried inert as data:
+    # 'а' = U+0430  # noqa: RUF003  # intentional: the homoglyph char under test
+    spoof = " а‮\x00​‍login\x9f"  # noqa: RUF001  # intentional: Cyrillic homoglyph kept inert (display defense is client-side)
     wrapped = wrap(spoof)
     # Cyrillic look-alike is preserved as inert data (not a control/format char).
-    assert "а" in wrapped.value
+    assert "а" in wrapped.value  # noqa: RUF001  # intentional: Cyrillic homoglyph kept inert (display defense is client-side)
     # All three dangerous classes neutralized.
     for token in ("<U+202E>", "<U+0000>", "<U+200B>", "<U+200D>", "<U+009F>"):
         assert token in wrapped.value

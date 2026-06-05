@@ -48,7 +48,7 @@ def _did_not_revert_to_stub(fn: object, *args: object, **kwargs: object) -> None
         raise AssertionError(
             f"{getattr(fn, '__name__', fn)!r} reverted to a NotImplementedError stub"
         ) from exc
-    except Exception:
+    except Exception:  # noqa: S110 - any non-NotImplementedError means "implemented"; intentionally ignored
         pass
 
 
