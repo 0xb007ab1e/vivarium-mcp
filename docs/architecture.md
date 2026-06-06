@@ -17,7 +17,7 @@ hijack the LLM via prompt injection.
 |---|----------|-----|
 | 1 | Ghidra runs **out-of-process** in a hardened worker; the server never loads the JVM or parses a binary. | [ADR-001](adr/ADR-001-out-of-process-ghidra.md) |
 | 2 | **One worker per session**, killed on eviction; per-session store verified-wiped. | [ADR-002](adr/ADR-002-one-worker-per-session.md) |
-| 3 | **Container-only**; Ghidra 11.x + JDK 21 pinned **by digest**; host unsupported. | [ADR-003](adr/ADR-003-container-only-ghidra-jdk.md) |
+| 3 | **Container-only**; Ghidra 12.1.2 + JDK 21 pinned **by digest**; host unsupported. | [ADR-003](adr/ADR-003-container-only-ghidra-jdk.md) |
 | 4 | Isolation tier: rootless OCI baseline + **gVisor** for the worker. | [ADR-004](adr/ADR-004-isolation-tier.md) |
 | 5 | **Untrusted-data envelope** wraps all binary-derived output. | [ADR-005](adr/ADR-005-untrusted-data-envelope.md) |
 | 6 | **stdio-first**; HTTP transport is a gated v1.1 increment. | [ADR-006](adr/ADR-006-stdio-first-transport.md) |
@@ -35,7 +35,7 @@ Person(user, "Analyst / Operator", "Drives an MCP client")
 System_Boundary(b, "ghidra-mcp") {
   System(client, "MCP Client (LLM host)", "Sends tool calls over stdio")
   System(server, "ghidra-mcp server", "Python 3.12+, FastMCP, stdio. No JVM. Validates, sessions, envelopes.")
-  System(worker, "Ghidra worker", "Hardened, network-isolated container. Ghidra 11.x / JDK 21. The ONLY place a binary is parsed.")
+  System(worker, "Ghidra worker", "Hardened, network-isolated container. Ghidra 12.1.2 / JDK 21. The ONLY place a binary is parsed.")
 }
 System_Ext(binary, "Analyzed binary", "HOSTILE INPUT")
 Rel(user, client, "prompts / tool requests")
@@ -65,7 +65,7 @@ flowchart LR
   end
   subgraph WORKER["Ghidra worker container (hardened, no network — ADR-004)"]
     RPC["RPC server loop"]
-    JVM["_jvm_bridge (Ghidra 11.x / JDK 21) — WORKER ONLY"]
+    JVM["_jvm_bridge (Ghidra 12.1.2 / JDK 21) — WORKER ONLY"]
     RPC --> JVM
   end
   BIN[("Analyzed binary\nHOSTILE")]:::hostile

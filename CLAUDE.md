@@ -42,7 +42,7 @@
   lockfile **and** hashes (`std-supplychain`).
 - **MCP:** official `mcp` SDK (FastMCP) — **stdio transport only** in v1.
 - **Validation:** pydantic v2 at every tool boundary (input *and* output schemas).
-- **Ghidra worker (separate process/container only):** Ghidra **11.x** + **JDK 21**, pinned by
+- **Ghidra worker (separate process/container only):** Ghidra **12.1.2** + **JDK 21**, pinned by
   **digest**; headless / PyGhidra integration lives **inside the worker only**.
 - **Server ↔ worker RPC:** internal, local-only (see `docs/contracts/rpc-protocol.md`); the server
   is the worker's sole client.

@@ -29,10 +29,10 @@
 
 # --- ARGs (set at build; pinned values are GATED — see notes above) -----------------------------
 # Ghidra release version + the publisher's SHA-256 of the release zip (verified during build).
-ARG GHIDRA_VERSION=REPLACE_WITH_GHIDRA_11x_PATCH_VERSION
-ARG GHIDRA_RELEASE_TAG=REPLACE_WITH_GHIDRA_RELEASE_TAG
-ARG GHIDRA_ZIP_SHA256=REPLACE_WITH_GHIDRA_RELEASE_ZIP_SHA256
-ARG GHIDRA_ZIP_URL=REPLACE_WITH_GHIDRA_RELEASE_ZIP_URL
+ARG GHIDRA_VERSION=12.1.2
+ARG GHIDRA_RELEASE_TAG=Ghidra_12.1.2_build
+ARG GHIDRA_ZIP_SHA256=b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d
+ARG GHIDRA_ZIP_URL=https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip
 
 # =============================================================================
 # Stage 1: builder — fetch + verify + unpack Ghidra. Build tooling stays HERE, not in runtime.

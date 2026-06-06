@@ -12,9 +12,9 @@
 WORKER_IMAGE  ?= ghcr.io/OWNER/ghidra-mcp-worker
 SERVER_IMAGE  ?= ghcr.io/OWNER/ghidra-mcp-server
 TAG           ?= dev
-GHIDRA_VERSION    ?= REPLACE_WITH_GHIDRA_11x_PATCH_VERSION
-GHIDRA_ZIP_URL    ?= REPLACE_WITH_GHIDRA_RELEASE_ZIP_URL
-GHIDRA_ZIP_SHA256 ?= REPLACE_WITH_GHIDRA_RELEASE_ZIP_SHA256
+GHIDRA_VERSION    ?= 12.1.2
+GHIDRA_ZIP_URL    ?= https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip
+GHIDRA_ZIP_SHA256 ?= b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d
 
 ENGINE ?= podman
 

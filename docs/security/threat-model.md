@@ -149,6 +149,6 @@ attack (the control holds) and be a deterministic, hermetic test.
    performs a **verified wipe** (assert the store is gone). (store-I / ADR-002)
 
 ## 7. Open items feeding the model (PLAN §9)
-- Exact Ghidra 11.x patch version + headless integration (SME) — affects TB3 CVE surface.
+- Exact Ghidra 12.1.2 patch version + headless integration (SME) — affects TB3 CVE surface.
 - Final RPC mechanism + serialization (recommended in `docs/contracts/rpc-protocol.md`) — affects TB2.
 - Project-store location (volume vs tmpfs) + verified-wipe mechanism — affects store-I/D (ADR-002).
