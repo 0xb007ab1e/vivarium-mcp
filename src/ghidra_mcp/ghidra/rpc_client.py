@@ -228,7 +228,14 @@ class RpcGhidraAdapter:
         Returns:
             Updated :class:`SessionInfo`.
         """
-        deadline = float(args.timeout_seconds) if args.timeout_seconds else self._analysis_timeout_s
+        # Clamp the client override DOWN to the configured analysis ceiling (defense-in-depth DoS:
+        # the schema bounds timeout_seconds to <=3600, but the deployment's configured max may be
+        # lower — never let a per-call arg exceed it). No override → use the configured ceiling.
+        deadline = (
+            min(float(args.timeout_seconds), self._analysis_timeout_s)
+            if args.timeout_seconds
+            else self._analysis_timeout_s
+        )
         result = self._call(
             session_id,
             "analyze",
