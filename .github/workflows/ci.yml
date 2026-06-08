@@ -96,6 +96,9 @@ jobs:
   # 7. Secret scan — block on any detected secret.
   secret-scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read   # gitleaks-action lists PR commits via the API (else 403 on PRs)
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # actions/checkout@v4
         with:
