@@ -19,9 +19,14 @@ ignore-unfixed: false
 
 scan:
   scanners:
-    - vuln       # OS + language package CVEs (Ghidra deps, JDK, Python wheels)
-    - misconfig  # Dockerfile + IaC misconfiguration
-    - secret     # accidental secrets in layers/config
+    - vuln       # OS + language package CVEs (Ghidra deps, JDK, Python wheels) — the point of image scan
+    - secret     # accidental secrets baked into image layers
+    # `misconfig` is deliberately NOT run on the built IMAGE. Trivy's Dockerfile/IaC misconfig scanner
+    # parses third-party files BUNDLED in the image — e.g. Ghidra ships
+    # `opt/ghidra/docker/Dockerfile.dockerignore`, which Trivy 0.70 cannot parse and errors the whole
+    # scan (exit 1). Our OWN Dockerfiles + deploy/IaC are misconfig-scanned at the SOURCE by ci.yml's
+    # `container-iac-scan` (+ hadolint in worker-image.yml), so image-level misconfig is redundant.
+    # workflow-cicd gate #8 (IaC/misconfig) coverage is preserved by that source scan.
   # Skip noisy paths that are not part of the shipped artifact.
   skip-dirs:
     - tests
