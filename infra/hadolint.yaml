@@ -1,8 +1,9 @@
 # hadolint config — Dockerfile linting for Containerfile.worker / Containerfile.server.
 # Run (GATED — needs the hadolint binary): hadolint --config infra/hadolint.yaml Containerfile.*
 #
-# We deliberately keep almost everything as ERROR (fail-closed Dockerfile hygiene). Two narrow,
-# justified relaxations only, scoped via inline `# hadolint ignore=` in the builder stage.
+# We deliberately keep almost everything as ERROR (fail-closed Dockerfile hygiene). A few narrow,
+# justified relaxations only (see the `ignored` list); the builder-stage apt rules are also scoped
+# via inline `# hadolint ignore=` in the Containerfile.
 
 failure-threshold: warning
 
@@ -22,6 +23,14 @@ ignored:
   # DL3009: delete apt lists. We DO clean lists; this is belt-and-suspenders for the builder stage
   #         where layers are discarded anyway. Scoped via inline ignore.
   - DL3009
+  # DL3013: pin pip versions with `==`. This project pins its Python supply chain the STRONGER way —
+  #         the runtime install uses `--require-hashes -r requirements.lock` (hash-pinned), the
+  #         ghidra_mcp wheel + bundled PyGhidra install offline via `--no-index --find-links`
+  #         (resolved from an already-SHA-256-verified Ghidra dist / a locally-built wheel), and the
+  #         pybuilder's `build`/`hatchling` are throwaway build-only tooling. A bare `==` pin adds
+  #         nothing over hashes + offline resolution, so DL3013 is a false positive for our install
+  #         pattern. (The lockfile, not `==`, is the reproducibility control — std-supplychain.)
+  - DL3013
 
 # Everything else (no-root-user checks, COPY/ADD hygiene, etc.) stays at default severity.
 # Note: hadolint cannot see runtime hardening (USER is set; ro-rootfs/caps/seccomp/no-net are
