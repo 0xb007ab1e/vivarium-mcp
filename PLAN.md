@@ -102,7 +102,10 @@ Contract changes route through the PM (batch-atomicity mandate).
 - ⏳ **Image scan↔sign binding (PR #3 review, Low-1).** `worker-image.yml` scans a *second*,
   cache-identical `provenance:false` docker tarball rather than the exact pushed (manifest-list)
   artifact — layers are byte-identical (intra-run buildx cache) but the manifest digests differ, so
-  the binding rests on cache determinism. Harden by scanning the pushed artifact directly: single
-  build with multi-output `type=image,push=true` + `type=oci,dest=` (the OCI exporter carries
-  manifest lists/attestations) → Trivy `--input` the OCI tarball. Needs a real `docker buildx` env to
-  validate the Trivy-on-OCI-with-attestations interaction (the dev box only has buildah).
+  the binding rests on cache determinism. **ATTEMPTED single-build multi-output `type=oci,dest=*.tar`
+  (CI run 27172201879): does NOT compose with Trivy `--input` — Trivy reads only a docker-save tar
+  (`manifest.json`) or an OCI *directory* (`index.json`), not an OCI-archive tar; the docker exporter
+  Trivy does read can't carry the provenance manifest-list. Reverted; the mitigated two-build
+  (cache-identical layers, documented) stays accepted.** Future options if hardening is revisited:
+  `type=oci,dest=<dir>,tar=false` (OCI layout dir) → `trivy --input <dir>`, or `skopeo copy` the
+  pushed image to a docker-archive then scan that. LOW; not urgent.

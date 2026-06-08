@@ -82,26 +82,45 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ONE build, TWO outputs (PR #3 review, Low-1 — scan the EXACT pushed artifact):
-      #   * type=image,push=true → push to ghcr with SLSA provenance + SBOM attestations;
-      #   * type=oci,dest=...     → export an OCI archive of the SAME build for Trivy to scan below.
-      # The OCI exporter (unlike the docker exporter) carries manifest lists/attestations, so a single
-      # provenance:true build can do both. Trivy then scans the byte-identical artifact that was
-      # pushed — no registry re-pull (which died on HTTP/2 for the ~1.3 GB worker) and no second-build
-      # cache-determinism assumption. The worker build needs the Ghidra release ARGs (version/url/
-      # sha256), supplied as GATED, vetted repo/org variables — NOT secrets (non-secret but pinned).
-      - name: Build + push + export OCI tarball for scanning (${{ matrix.name }})
+      # Build + push by DIGEST (provenance + SBOM attestation produced by Buildx where supported).
+      # NOTE: the worker build needs the Ghidra release ARGs (version/url/sha256) — supplied as
+      # GATED, vetted repo/org variables, NOT secrets in source (they are non-secret but pinned).
+      - name: Build + push (${{ matrix.name }})
         id: build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # docker/build-push-action@v7.2.0
         with:
           context: .
           file: ${{ matrix.containerfile }}
+          push: true
           tags: ${{ matrix.image }}:${{ github.sha }}
-          outputs: |
-            type=image,push=true
-            type=oci,dest=/tmp/image-${{ matrix.name }}.tar
-          provenance: true          # SLSA provenance attestation (pushed image + OCI archive).
-          sbom: true                # build-time SBOM attestation.
+          provenance: true          # SLSA provenance attestation (pushed to the registry).
+          sbom: true                # build-time SBOM attestation (pushed to the registry).
+          build-args: |
+            GHIDRA_VERSION=${{ vars.GHIDRA_VERSION }}
+            GHIDRA_RELEASE_TAG=${{ vars.GHIDRA_RELEASE_TAG }}
+            GHIDRA_ZIP_URL=${{ vars.GHIDRA_ZIP_URL }}
+            GHIDRA_ZIP_SHA256=${{ vars.GHIDRA_ZIP_SHA256 }}
+
+      # Export the SAME image as a PLAIN single-manifest docker tarball for Trivy to scan locally —
+      # no registry re-pull (which died on HTTP/2 for the ~1.3 GB worker) and no manifest list (so the
+      # docker exporter is happy; `provenance: false` keeps it a single manifest). Cache hit from the
+      # push build above, so this only adds the local tar export. We scan/​SBOM this tarball below.
+      #
+      # ASSURANCE NOTE (PR #3 review, Low-1): this is a SECOND build, so its manifest digest differs
+      # from the pushed/signed image's. The binding "scanned == shipped" therefore rests on intra-run
+      # buildx CACHE DETERMINISM — every layer here is a cache hit from the push build above, so the
+      # filesystem/package set Trivy inspects is byte-identical to what was pushed (only the
+      # attestation-manifest wrapping, which the docker exporter can't carry, differs). The hardening
+      # to scan the exact pushed artifact (single build, multi-output type=oci) is tracked in
+      # PLAN.md §9 — it needs a real `docker buildx` env to validate Trivy-on-OCI-with-attestations.
+      - name: Export image tarball for scanning (${{ matrix.name }})
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # docker/build-push-action@v7.2.0
+        with:
+          context: .
+          file: ${{ matrix.containerfile }}
+          tags: ${{ matrix.image }}:${{ github.sha }}
+          outputs: type=docker,dest=/tmp/image-${{ matrix.name }}.tar
+          provenance: false         # plain manifest — the docker exporter cannot export manifest lists.
           build-args: |
             GHIDRA_VERSION=${{ vars.GHIDRA_VERSION }}
             GHIDRA_RELEASE_TAG=${{ vars.GHIDRA_RELEASE_TAG }}
@@ -113,7 +132,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          input: /tmp/image-${{ matrix.name }}.tar   # OCI archive of the pushed build (scanned == shipped).
+          input: /tmp/image-${{ matrix.name }}.tar   # scan the locally-built tarball (no registry pull).
           trivy-config: infra/trivy.yaml
           trivyignores: .trivyignore.yaml   # time-boxed, justified, auto-expiring CVE waivers.
           format: sarif
