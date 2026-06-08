@@ -94,3 +94,15 @@ Contract changes route through the PM (batch-atomicity mandate).
 - ⏳ **WS3:** confirm exact Ghidra 12.1.2 patch version + digest (SME) at worker-image build; confirm
   project-store location (session-scoped volume vs tmpfs) + verified-wipe mechanism (ADR-002 fixes
   kill-then-verified-wipe).
+- ⏳ **Image hardening — distroless/perl-free base (durable fix behind the CVE waivers).** The 6
+  no-upstream-fix Debian-base CVEs in `.trivyignore.yaml` (perl-base + ncurses) are waived
+  not-reachable, **auto-expiring 2026-09-06**. The durable remediation is migrating the worker/server
+  off `python:3.12-slim` to a distroless/perl-free base so those packages aren't present. Re-evaluate
+  on/before the waiver expiry. (PR #3 review, Low-3.)
+- ⏳ **Image scan↔sign binding (PR #3 review, Low-1).** `worker-image.yml` scans a *second*,
+  cache-identical `provenance:false` docker tarball rather than the exact pushed (manifest-list)
+  artifact — layers are byte-identical (intra-run buildx cache) but the manifest digests differ, so
+  the binding rests on cache determinism. Harden by scanning the pushed artifact directly: single
+  build with multi-output `type=image,push=true` + `type=oci,dest=` (the OCI exporter carries
+  manifest lists/attestations) → Trivy `--input` the OCI tarball. Needs a real `docker buildx` env to
+  validate the Trivy-on-OCI-with-attestations interaction (the dev box only has buildah).

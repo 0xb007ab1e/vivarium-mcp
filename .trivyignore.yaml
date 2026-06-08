@@ -7,7 +7,8 @@
 # our execution path. Compensating controls on the runtime (ADR-004): no network, read-only rootfs,
 # all Linux capabilities dropped, non-root (uid 65532), seccomp RuntimeDefault, gVisor (runsc).
 # A base-image digest bump does NOT clear these (Debian has shipped no fix); the durable fix is a
-# move to a distroless/perl-free base, tracked as future hardening.
+# move to a distroless/perl-free base, TRACKED in PLAN.md §9 (Open items) — re-evaluate on/before
+# the expiry below.
 #
 # Owner: 0xb007ab1e.  Filed: 2026-06-08.  Re-evaluate on/before each expiry.
 vulnerabilities:
