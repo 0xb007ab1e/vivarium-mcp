@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # actions/checkout@v4
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # actions/checkout@v6.0.3
       - name: hadolint (worker + server Containerfiles)
         uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5  # hadolint/hadolint-action@v3.3.0
         with:
@@ -70,13 +70,13 @@ jobs:
             image: ghcr.io/${{ github.repository_owner }}/ghidra-mcp-server
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # actions/checkout@v4
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # actions/checkout@v6.0.3
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # docker/setup-buildx-action@v4.1.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # docker/login-action@v3
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # docker/login-action@v4.2.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -87,7 +87,7 @@ jobs:
       # GATED, vetted repo/org variables, NOT secrets in source (they are non-secret but pinned).
       - name: Build + push (${{ matrix.name }})
         id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # docker/build-push-action@v6
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # docker/build-push-action@v7.2.0
         with:
           context: .
           file: ${{ matrix.containerfile }}
@@ -105,8 +105,16 @@ jobs:
       # no registry re-pull (which died on HTTP/2 for the ~1.3 GB worker) and no manifest list (so the
       # docker exporter is happy; `provenance: false` keeps it a single manifest). Cache hit from the
       # push build above, so this only adds the local tar export. We scan/​SBOM this tarball below.
+      #
+      # ASSURANCE NOTE (PR #3 review, Low-1): this is a SECOND build, so its manifest digest differs
+      # from the pushed/signed image's. The binding "scanned == shipped" therefore rests on intra-run
+      # buildx CACHE DETERMINISM — every layer here is a cache hit from the push build above, so the
+      # filesystem/package set Trivy inspects is byte-identical to what was pushed (only the
+      # attestation-manifest wrapping, which the docker exporter can't carry, differs). The hardening
+      # to scan the exact pushed artifact (single build, multi-output type=oci) is tracked in
+      # PLAN.md §9 — it needs a real `docker buildx` env to validate Trivy-on-OCI-with-attestations.
       - name: Export image tarball for scanning (${{ matrix.name }})
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # docker/build-push-action@v6
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # docker/build-push-action@v7.2.0
         with:
           context: .
           file: ${{ matrix.containerfile }}
@@ -134,7 +142,7 @@ jobs:
 
       - name: Upload Trivy SARIF (${{ matrix.name }})
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # actions/upload-artifact@v7.0.1
         with:
           name: trivy-${{ matrix.name }}
           path: trivy-${{ matrix.name }}.sarif
@@ -150,14 +158,14 @@ jobs:
 
       - name: Upload SBOM (${{ matrix.name }})
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # actions/upload-artifact@v7.0.1
         with:
           name: sbom-${{ matrix.name }}
           path: sbom-${{ matrix.name }}.cdx.json
 
       # Sign the image + attest the SBOM (cosign keyless via OIDC — no static keys; std-supplychain).
       - name: Install cosign
-        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac  # sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # sigstore/cosign-installer@v4.1.2
       - name: Sign image (keyless) + attest SBOM (${{ matrix.name }})
         env:
           COSIGN_EXPERIMENTAL: "1"
@@ -178,7 +186,7 @@ jobs:
     needs: build-scan-sign
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # actions/checkout@v6.0.3
       - name: ADR-004 isolation verification is a gVisor-capable-host step
         run: |
           echo "ADR-004 isolation checks (seccomp/caps/no-net/ro-rootfs/gVisor) run via"
