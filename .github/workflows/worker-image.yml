@@ -85,23 +85,34 @@ jobs:
       # Build + push by DIGEST (provenance + SBOM attestation produced by Buildx where supported).
       # NOTE: the worker build needs the Ghidra release ARGs (version/url/sha256) — supplied as
       # GATED, vetted repo/org variables, NOT secrets in source (they are non-secret but pinned).
-      - name: Build + push (${{ matrix.name }}) + export local tarball for scanning
+      - name: Build + push (${{ matrix.name }})
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.containerfile }}
+          push: true
           tags: ${{ matrix.image }}:${{ github.sha }}
-          # TWO outputs from ONE build: push the image (with SLSA provenance + SBOM attestations) to
-          # ghcr, AND write a local docker tarball. Trivy then scans the TARBALL (below) instead of
-          # re-pulling the multi-hundred-MB worker image from ghcr — which reliably died mid-layer
-          # with an HTTP/2 "stream PROTOCOL_ERROR" on the hosted runner. No registry pull == no flake,
-          # and we scan exactly the bytes we pushed.
-          outputs: |
-            type=image,push=true
-            type=docker,dest=/tmp/image-${{ matrix.name }}.tar
-          provenance: true          # SLSA provenance attestation (attached to the pushed image).
-          sbom: true                # build-time SBOM attestation (attached to the pushed image).
+          provenance: true          # SLSA provenance attestation (pushed to the registry).
+          sbom: true                # build-time SBOM attestation (pushed to the registry).
+          build-args: |
+            GHIDRA_VERSION=${{ vars.GHIDRA_VERSION }}
+            GHIDRA_RELEASE_TAG=${{ vars.GHIDRA_RELEASE_TAG }}
+            GHIDRA_ZIP_URL=${{ vars.GHIDRA_ZIP_URL }}
+            GHIDRA_ZIP_SHA256=${{ vars.GHIDRA_ZIP_SHA256 }}
+
+      # Export the SAME image as a PLAIN single-manifest docker tarball for Trivy to scan locally —
+      # no registry re-pull (which died on HTTP/2 for the ~1.3 GB worker) and no manifest list (so the
+      # docker exporter is happy; `provenance: false` keeps it a single manifest). Cache hit from the
+      # push build above, so this only adds the local tar export. We scan/​SBOM this tarball below.
+      - name: Export image tarball for scanning (${{ matrix.name }})
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.containerfile }}
+          tags: ${{ matrix.image }}:${{ github.sha }}
+          outputs: type=docker,dest=/tmp/image-${{ matrix.name }}.tar
+          provenance: false         # plain manifest — the docker exporter cannot export manifest lists.
           build-args: |
             GHIDRA_VERSION=${{ vars.GHIDRA_VERSION }}
             GHIDRA_RELEASE_TAG=${{ vars.GHIDRA_RELEASE_TAG }}
