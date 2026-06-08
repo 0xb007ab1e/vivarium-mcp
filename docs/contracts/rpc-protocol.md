@@ -61,8 +61,14 @@ Error response (worker → server):
 `import_binary`, `analyze`, `decompile_function`, `disassemble`, `list_functions`, `get_function`,
 `xrefs_to`, `xrefs_from`, `list_strings`, `list_symbols`, `get_symbol`, `list_data`,
 `get_data_type`, `get_comments`, `memory_map`, `read_bytes`, `search_bytes`, `search_strings`,
-`program_metadata`, plus a `ping`/`shutdown` control pair.
-(Session create/status/close are **server-side** lifecycle, not worker RPC methods.)
+`program_metadata`, and the v1.1 semantic-naming extraction primitives `call_graph` and
+`referenced_strings` (ADR-007; worker-only graph/string extraction per ADR-001 — the leaf-first
+*ordering* and the `function_context` *aggregation* are computed server-side, no worker method),
+plus a `ping`/`shutdown` control pair.
+(Session create/status/close are **server-side** lifecycle, not worker RPC methods. The public
+`callees`/`callers`/`analysis_order`/`function_context` tools are derived/aggregated server-side
+from `call_graph` + `referenced_strings` + the existing read-only methods — no dedicated worker
+method of their own.)
 
 ## 5. Error model (worker → server)
 

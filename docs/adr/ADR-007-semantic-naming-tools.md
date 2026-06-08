@@ -1,6 +1,6 @@
 # ADR-007: Semantic-naming support tools (call-graph + leaf-first ordering + function context)
 
-- **Status:** Proposed (v1.1 feature; contract expansion awaiting PM ratification — batch-atomicity)
+- **Status:** Accepted (v1.1; contract expansion PM-ratified — built on `feat/semantic-naming`)
 - **Date:** 2026-06-08
 - **Deciders:** Human (locked decisions) + PM; recorded by Software Architect (v1.1 bootstrap)
 - **Relates to:** ADR-001 (out-of-process Ghidra), ADR-005 (untrusted-data envelope),
@@ -53,8 +53,9 @@ decisions shape them:
 
 - **ADR-001 (out-of-process; no JVM server-side) — UPHELD, and the split is the crux.** Graph
   *extraction* (which function calls which, who is external/thunk, which call sites are unresolved)
-  is a Ghidra/JVM operation and lives **only in the worker** (`_gh_call_graph` in `_jvm_bridge`, a
-  new `call_graph` worker RPC method). The leaf-first **ordering** over the extracted adjacency is
+  is a Ghidra/JVM operation and lives **only in the worker** (`_gh_call_graph` + `_gh_referenced_
+  strings` in `_jvm_bridge`, behind two new worker RPC methods `call_graph` + `referenced_strings`).
+  The leaf-first **ordering** over the extracted adjacency is
   **pure graph theory with no JVM, no I/O, no binary parsing** — so it lives in the **pure
   server-side core** (`src/ghidra_mcp/core/callgraph.py`, the functional core). The server never
   loads the JVM; the architecture-invariant test that bans `pyghidra`/`jpype`/`_jvm_bridge` imports
@@ -86,8 +87,10 @@ or downstream claim MUST reflect "best-effort, measured — not guaranteed."
 
 - **Positive:** unlocks the highest-value RE workflow without a server-side LLM or any DB mutation;
   the algorithmic heart (leaf-first SCC ordering) is a pure, 100%-tested core that needs no Ghidra;
-  the worker/JVM surface grows by exactly one extraction method; the read-only + containment
-  invariants are untouched; honesty about equivalence avoids over-promising.
+  the worker/JVM surface grows by exactly two extraction methods (`call_graph` +
+  `referenced_strings`), and the public tools `callees`/`callers`/`analysis_order`/
+  `function_context` are derived/aggregated server-side from them (no extra worker surface); the
+  read-only + containment invariants are untouched; honesty about equivalence avoids over-promising.
 - **Negative:** a hostile binary can present a huge/deep/cyclic call graph (DoS) — mitigated by
   node/edge/depth caps enforced at the tool boundary before the worker (threat-model addendum,
   TB4); unresolved indirect/virtual edges mean the graph (and any inferred purpose) is incomplete —

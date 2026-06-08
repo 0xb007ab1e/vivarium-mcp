@@ -1,8 +1,10 @@
 # Design: Semantic-naming support (call graph, leaf-first ordering, function context)
 
-> Status: design + frozen contracts (v1.1). Implements ADR-007. The pure ordering core
-> (`src/ghidra_mcp/core/callgraph.py`) and the contract schemas are built; worker graph
-> *extraction* and `function_context` *assembly* are reserved stubs for the WS2 build fan-out.
+> Status: built (v1.1, `feat/semantic-naming`). Implements ADR-007. The pure ordering core, the
+> contract schemas, the server-side adapter (extraction wiring + one-hop projections + aggregation),
+> and the worker RPC contract are all implemented and unit-tested. The two worker/JVM extraction
+> bindings (`_gh_call_graph`, `_gh_referenced_strings`) are coverage-omitted edges whose end-to-end
+> behavior is validated only by the real-worker integration suite (a gated Ghidra-image build).
 
 ## 1. Goal & scope
 
@@ -75,10 +77,13 @@ client needs to name one function and draft its C:
 - `referenced_strings` — string literals the function references (bounded) — a strong naming signal.
 - `has_unresolved_calls` — honesty flag that the call context is incomplete.
 
-Assembled from the existing read-only RPCs (decompile, get_function, callees/callers, strings +
-xrefs); every binary-derived field is wrapped at the single `core.envelope.wrap` chokepoint
-(ADR-005). The client may pass previously-assigned callee names back as *inert input* on later
-calls; the server never trusts, executes, or persists them.
+Assembled server-side from `get_function` (name/signature/entry), a depth-1 `call_graph` (the
+function's own node + direct callees), a reverse one-hop over the whole-program `call_graph`
+(callers), `decompile_function` (the pseudo-C), and the dedicated `referenced_strings` worker
+primitive — every binary-derived field wrapped at the single `core.envelope.wrap` chokepoint
+(ADR-005). `is_external`/`has_unresolved_calls` are taken from the function's graph node. The
+client may pass previously-assigned callee names back as *inert input* on later calls; the server
+never trusts, executes, or persists them.
 
 ## 5. Client orchestration loop (the client builds this; documented for the contract)
 
@@ -130,10 +135,10 @@ the v1.1 build):
 | Tool schemas (frozen In/Out) | `src/ghidra_mcp/tools/schemas.py` | no |
 | Tool handlers (authorize → validate → delegate) | `src/ghidra_mcp/tools/registry.py` | no |
 | **Leaf-first ordering (pure core)** | `src/ghidra_mcp/core/callgraph.py` | **no** |
-| Adapter: wrap + ordering seam | `src/ghidra_mcp/ghidra/rpc_client.py` (`_build_call_graph`, `_build_analysis_order`) | no |
+| Adapter: extraction wiring + one-hop/aggregation + wrap | `src/ghidra_mcp/ghidra/rpc_client.py` (`call_graph`/`callees`/`callers`/`analysis_order`/`function_context`, `_one_hop`, `_build_*`) | no |
 | Port interface | `src/ghidra_mcp/ghidra/port.py` | no |
-| Worker RPC method (allow-list + dispatch) | `worker/dispatch.py` (`call_graph`) | no |
-| **Graph extraction (worker/JVM)** | `src/ghidra_mcp/ghidra/_jvm_bridge.py` (`_gh_call_graph`) | **yes — worker only (ADR-001)** |
+| Worker RPC methods (allow-list + dispatch) | `worker/dispatch.py` (`call_graph`, `referenced_strings`) | no |
+| **Graph + string extraction (worker/JVM)** | `src/ghidra_mcp/ghidra/_jvm_bridge.py` (`_gh_call_graph`, `_gh_referenced_strings`) | **yes — worker only (ADR-001)** |
 
 ## References
 - ADR-007 (decision), ADR-001 (out-of-process), ADR-005 (untrusted envelope), ADR-006 (catalog seam).

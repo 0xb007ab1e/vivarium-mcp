@@ -367,52 +367,115 @@ class RpcGhidraAdapter:
         return _build_program_metadata(self._tool_call(sid, "program_metadata", {}))
 
     # --- call-graph / semantic-naming operations (v1.1 — ADR-007) ---------------------------
-    # RESERVED STUBS (WS2 build fan-out): the worker ``call_graph`` extraction binding is built
-    # against the pinned Ghidra image. ``analysis_order`` then computes the leaf-first ordering via
-    # the PURE server-side core (:mod:`ghidra_mcp.core.callgraph`) — no JVM (ADR-001/ADR-007). The
-    # pure ``_build_analysis_order`` adjacency→order builder below is implemented and unit-tested
-    # now so only the worker RPC hop is reserved.
+    # The worker exposes exactly two extraction primitives for this feature (ADR-001):
+    # ``call_graph`` (resolved adjacency) and ``referenced_strings``. Everything else is computed
+    # HERE, JVM-free: ``analysis_order`` runs the PURE ordering core (core.callgraph) over the
+    # adjacency; ``callees``/``callers`` are one-hop projections of ``call_graph``;
+    # ``function_context`` aggregates existing read-only RPCs. All output-only (no DB mutation).
     def call_graph(self, sid: str, a: s.CallGraphIn) -> s.CallGraphOut:
-        """Extract the bounded call adjacency (RESERVED — v1.1 worker extraction)."""
-        raise NotImplementedError(
-            "RESERVED (v1.1 ADR-007 / WS2): call_graph worker extraction "
-            "— pending pinned-image build"
+        """Extract the bounded call adjacency (resolved edges + unresolved callers)."""
+        return _build_call_graph(
+            self._tool_call(
+                sid,
+                "call_graph",
+                {
+                    "root": a.root,
+                    "max_depth": a.max_depth,
+                    "max_nodes": a.max_nodes,
+                    "max_edges": a.max_edges,
+                },
+            )
         )
 
     def callees(self, sid: str, a: s.CalleesIn) -> s.CallNeighborsOut:
-        """List direct callees (RESERVED — v1.1 worker extraction)."""
-        raise NotImplementedError(
-            "RESERVED (v1.1 ADR-007 / WS2): callees worker extraction — pending pinned-image build"
-        )
+        """List the functions ``a.function`` directly calls (one hop over a depth-1 call graph)."""
+        entry = self._resolve_entry(sid, a.function)
+        graph = self.call_graph(sid, s.CallGraphIn(session_id=sid, root=a.function, max_depth=1))
+        return _one_hop(graph, entry, direction="out", offset=a.offset, limit=a.limit)
 
     def callers(self, sid: str, a: s.CallersIn) -> s.CallNeighborsOut:
-        """List direct callers (RESERVED — v1.1 worker extraction)."""
-        raise NotImplementedError(
-            "RESERVED (v1.1 ADR-007 / WS2): callers worker extraction — pending pinned-image build"
-        )
+        """List the functions that directly call ``a.function`` (reverse one hop).
+
+        There is no reverse-rooted extraction primitive (ADR-001 keeps graph walking in the worker),
+        so this projects the bounded **whole-program** call graph and reverses it; ``truncated``
+        honestly reflects a node/edge cap clipping the view (ADR-005).
+        """
+        entry = self._resolve_entry(sid, a.function)
+        graph = self.call_graph(sid, s.CallGraphIn(session_id=sid))
+        return _one_hop(graph, entry, direction="in", offset=a.offset, limit=a.limit)
 
     def analysis_order(self, sid: str, a: s.AnalysisOrderIn) -> s.AnalysisOrderOut:
-        """Leaf-first analysis order (RESERVED — extraction; ordering is the pure core).
+        """Leaf-first reverse-topological order over the call graph (pure core — ADR-001/ADR-007).
 
-        When built (WS2): extract the adjacency via the worker ``call_graph`` RPC, then feed it to
-        the PURE :func:`ghidra_mcp.core.callgraph.compute_analysis_order` and shape the result with
-        :func:`_build_analysis_order` (implemented + tested now). No JVM on this path (ADR-001).
+        Extracts the adjacency via the worker ``call_graph`` RPC, then computes the ordering with
+        the PURE :func:`ghidra_mcp.core.callgraph.compute_analysis_order` and shapes it via
+        :func:`_build_analysis_order`. No JVM on this path — only the extraction hop touched Ghidra.
         """
-        raise NotImplementedError(
-            "RESERVED (v1.1 ADR-007 / WS2): analysis_order extraction hop "
-            "— pending pinned-image build"
-        )
+        return _build_analysis_order(self.call_graph(sid, a))
 
     def function_context(self, sid: str, a: s.FunctionContextIn) -> s.FunctionContext:
-        """Assemble the per-function naming/synthesis context bundle (RESERVED — v1.1).
+        """Assemble the per-function naming/synthesis context bundle (server-side aggregation).
 
-        When built (WS2): aggregate decompilation + signature + one-hop callees/callers +
-        referenced strings from the existing read-only RPCs, wrapping every binary-derived field
-        (ADR-005). Server-side assembly only — no naming or C synthesis (no server-side LLM).
+        Aggregates existing read-only facts — signature (``get_function``), the function's own
+        call-graph node + direct callees (a depth-1 ``call_graph``), direct callers (reverse hop),
+        decompiled pseudo-C (``decompile_function``), and referenced strings
+        (``referenced_strings``) — wrapping every binary-derived field at the ADR-005 chokepoint.
+        NO naming or C synthesis
+        (no server-side LLM — locked decision #1); the client does that.
         """
-        raise NotImplementedError(
-            "RESERVED (v1.1 ADR-007 / WS2): function_context assembly — pending pinned-image build"
+        detail = self.get_function(sid, s.GetFunctionIn(session_id=sid, function=a.function))
+        entry = detail.address
+        graph = self.call_graph(sid, s.CallGraphIn(session_id=sid, root=a.function, max_depth=1))
+        own = next((n for n in graph.nodes if n.address == entry), None)
+
+        callees_page = _one_hop(graph, entry, direction="out", offset=0, limit=a.max_callees)
+        callers_nodes: list[s.CallGraphNode] = []
+        callers_trunc = False
+        if a.max_callers:
+            callers_page = self.callers(
+                sid, s.CallersIn(session_id=sid, function=a.function, limit=a.max_callers)
+            )
+            callers_nodes = callers_page.neighbors
+            callers_trunc = callers_page.truncated
+
+        decompilation = None
+        if a.include_decompilation:
+            decompilation = self.decompile_function(
+                sid, s.DecompileFunctionIn(session_id=sid, function=a.function)
+            ).c_code
+
+        referenced_strings: list[Untrusted[str]] = []
+        strings_trunc = False
+        if a.max_strings:
+            rs = self._tool_call(
+                sid,
+                "referenced_strings",
+                {"function": a.function, "max_strings": a.max_strings},
+            )
+            referenced_strings = [_w(str(v), DataOrigin.BINARY) for v in rs.get("strings", [])]
+            strings_trunc = bool(rs.get("truncated", False))
+
+        # The function's own attributes come from its graph node when present (``is_external`` /
+        # ``has_unresolved_calls`` are graph-only facts); fall back to ``get_function`` otherwise.
+        name = own.name if own is not None else detail.name
+        is_external = own.is_external if own is not None else detail.is_thunk
+        has_unresolved = own.has_unresolved_calls if own is not None else False
+        return s.FunctionContext(
+            address=entry,
+            name=name,
+            signature=detail.signature,
+            is_external=is_external,
+            decompilation=decompilation,
+            callees=callees_page.neighbors,
+            callers=callers_nodes,
+            referenced_strings=referenced_strings,
+            has_unresolved_calls=has_unresolved,
+            truncated=graph.truncated or callees_page.truncated or callers_trunc or strings_trunc,
         )
+
+    def _resolve_entry(self, sid: str, function: str) -> str:
+        """Resolve a function (name or hex) to its server-normalized entry address (via worker)."""
+        return self.get_function(sid, s.GetFunctionIn(session_id=sid, function=function)).address
 
     # --- internal: call orchestration -------------------------------------------------------
     def _tool_call(self, sid: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -911,6 +974,51 @@ def _build_analysis_order(graph: s.CallGraphOut) -> s.AnalysisOrderOut:
         unresolved_callers=list(order.unresolved_callers),
         self_recursive=list(order.self_recursive),
         truncated=graph.truncated,
+    )
+
+
+def _one_hop(
+    graph: s.CallGraphOut, entry: str, *, direction: str, offset: int, limit: int
+) -> s.CallNeighborsOut:
+    """Project a call graph into one function's one-hop neighbors (PURE, no JVM, no I/O).
+
+    Builds the direct callees (``direction="out"`` — edges *from* ``entry``) or callers
+    (``direction="in"`` — edges *to* ``entry``) from the graph's edges, de-duplicated by address
+    (a function may call/​be-called-by another at several sites) and paginated. The ``unresolved``
+    honesty flag is set for the callee direction when ``entry`` itself has unresolved outgoing calls
+    (it is not meaningful for callers — schema). ``truncated`` reflects the underlying graph cap or
+    a page cap.
+
+    Args:
+        graph: The extracted call graph (whole-program for callers; depth-1-rooted for callees).
+        entry: The target function's server-normalized entry address.
+        direction: ``"out"`` for callees or ``"in"`` for callers.
+        offset: Zero-based pagination offset.
+        limit: Maximum neighbors to return in the page.
+
+    Returns:
+        The bounded, de-duplicated :class:`CallNeighborsOut`.
+    """
+    by_addr = {node.address: node for node in graph.nodes}
+    if direction == "out":
+        neighbor_addrs = [e.to_address for e in graph.edges if e.from_address == entry]
+        unresolved = any(n.address == entry and n.has_unresolved_calls for n in graph.nodes)
+    else:
+        neighbor_addrs = [e.from_address for e in graph.edges if e.to_address == entry]
+        unresolved = False
+    ordered: list[s.CallGraphNode] = []
+    seen: set[str] = set()
+    for addr in neighbor_addrs:
+        node = by_addr.get(addr)
+        if node is None or addr in seen:
+            continue
+        seen.add(addr)
+        ordered.append(node)
+    total = len(ordered)
+    page = ordered[offset : offset + limit]
+    truncated = graph.truncated or (offset + limit < total)
+    return s.CallNeighborsOut(
+        neighbors=page, total=total, unresolved=unresolved, truncated=truncated
     )
 
 
