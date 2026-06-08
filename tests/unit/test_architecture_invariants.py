@@ -13,14 +13,18 @@ import pytest
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "ghidra_mcp"
 
-# Server-side packages that MUST NOT touch the JVM/PyGhidra (ADR-001). The worker-only bridge is
-# the sole exception and is excluded.
-_SERVER_DIRS = ["core", "sessions", "security", "server", "tools"]
+# Server-side packages that MUST NOT touch the JVM/PyGhidra (ADR-001). This INCLUDES the ``ghidra``
+# adapter package — ``rpc_client``/``port`` run IN the server process and are the most tempting
+# place for an accidental JVM import. The worker-only ``_jvm_bridge`` is the sole exception (the
+# only JVM consumer, runs inside the worker), so it is excluded from the scan.
+_SERVER_DIRS = ["core", "sessions", "security", "server", "tools", "ghidra"]
 _FORBIDDEN_IMPORT_SUBSTRINGS = ("pyghidra", "jpype", "ghidra_mcp.ghidra._jvm_bridge")
+#: The worker-only JVM bridge legitimately imports PyGhidra/JPype; it is the documented exception.
+_WORKER_ONLY_FILES = {"_jvm_bridge.py"}
 
 
 def _python_files(rel_dir: str) -> list[Path]:
-    return sorted((_SRC / rel_dir).rglob("*.py"))
+    return sorted(p for p in (_SRC / rel_dir).rglob("*.py") if p.name not in _WORKER_ONLY_FILES)
 
 
 @pytest.mark.critical

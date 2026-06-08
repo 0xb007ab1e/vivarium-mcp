@@ -28,6 +28,12 @@ from typing import Any
 # Bounds the bridge enforces itself (defense-in-depth; the server also caps before calling).
 _MAX_RESULT_COUNT = 10_000
 _MAX_READ_BYTES = 1_048_576  # 1 MiB
+# Call-graph extraction caps (v1.1 — ADR-007): mirror the schema/threat-model §8 ceilings, NOT the
+# generic 10k result cap — otherwise the worker would silently clamp even its own 40k edge default
+# down to 10k, contradicting the documented contract (the server schema remains authoritative).
+_MAX_GRAPH_NODES = 50_000
+_MAX_GRAPH_EDGES = 200_000
+_MAX_GRAPH_DEPTH = 256
 _DEFAULT_MAX_FRAME_BYTES = 4 * 1024 * 1024  # 4 MiB (mirrors security.limits default)
 
 
@@ -189,9 +195,9 @@ class PyGhidraBackend:
         Returns:
             ``{"nodes": [...], "edges": [...], "unresolved_callers": [...], "truncated": bool}``.
         """
-        max_nodes = _clamp_count(int(params.get("max_nodes", 10_000)))
-        max_edges = _clamp_count(int(params.get("max_edges", 40_000)))
-        max_depth = max(1, int(params.get("max_depth", 8)))
+        max_nodes = max(1, min(int(params.get("max_nodes", 10_000)), _MAX_GRAPH_NODES))
+        max_edges = max(1, min(int(params.get("max_edges", 40_000)), _MAX_GRAPH_EDGES))
+        max_depth = max(1, min(int(params.get("max_depth", 8)), _MAX_GRAPH_DEPTH))
         return self._gh_call_graph(params.get("root"), max_depth, max_nodes, max_edges)
 
     def referenced_strings(self, params: dict[str, Any]) -> dict[str, Any]:
