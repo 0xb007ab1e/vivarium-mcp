@@ -106,7 +106,7 @@ jobs:
       - name: gitleaks
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # gitleaks/gitleaks-action@v3.0.0
         env:
-          # gitleaks-action v2 requires GITHUB_TOKEN to scan PRs (uses the auto-provided token).
+          # gitleaks-action v3 requires GITHUB_TOKEN to scan PRs (uses the auto-provided token).
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # 8. Container / IaC scan — worker image + Dockerfiles/manifests (WS3). Runs once those exist.
