@@ -85,16 +85,23 @@ jobs:
       # Build + push by DIGEST (provenance + SBOM attestation produced by Buildx where supported).
       # NOTE: the worker build needs the Ghidra release ARGs (version/url/sha256) — supplied as
       # GATED, vetted repo/org variables, NOT secrets in source (they are non-secret but pinned).
-      - name: Build + push (${{ matrix.name }})
+      - name: Build + push (${{ matrix.name }}) + export local tarball for scanning
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.containerfile }}
-          push: true
           tags: ${{ matrix.image }}:${{ github.sha }}
-          provenance: true          # SLSA provenance attestation.
-          sbom: true                # build-time SBOM attestation.
+          # TWO outputs from ONE build: push the image (with SLSA provenance + SBOM attestations) to
+          # ghcr, AND write a local docker tarball. Trivy then scans the TARBALL (below) instead of
+          # re-pulling the multi-hundred-MB worker image from ghcr — which reliably died mid-layer
+          # with an HTTP/2 "stream PROTOCOL_ERROR" on the hosted runner. No registry pull == no flake,
+          # and we scan exactly the bytes we pushed.
+          outputs: |
+            type=image,push=true
+            type=docker,dest=/tmp/image-${{ matrix.name }}.tar
+          provenance: true          # SLSA provenance attestation (attached to the pushed image).
+          sbom: true                # build-time SBOM attestation (attached to the pushed image).
           build-args: |
             GHIDRA_VERSION=${{ vars.GHIDRA_VERSION }}
             GHIDRA_RELEASE_TAG=${{ vars.GHIDRA_RELEASE_TAG }}
@@ -103,15 +110,10 @@ jobs:
 
       # IMAGE vulnerability + misconfig + secret scan (gate #8 for the image). Fail on HIGH/CRITICAL.
       - name: Trivy image scan (${{ matrix.name }})
-        env:
-          # Force HTTP/1.1 for the registry pull: the multi-hundred-MB worker image reliably trips an
-          # HTTP/2 "stream ... PROTOCOL_ERROR" mid-layer-extraction on the hosted runner. HTTP/1.1
-          # avoids it (known go-containerregistry/Trivy large-image workaround); scoped to Trivy only.
-          GODEBUG: http2client=0
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          image-ref: ${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          input: /tmp/image-${{ matrix.name }}.tar   # scan the locally-built tarball (no registry pull).
           trivy-config: infra/trivy.yaml
           trivyignores: .trivyignore.yaml   # time-boxed, justified, auto-expiring CVE waivers.
           format: sarif
@@ -128,12 +130,10 @@ jobs:
 
       # CycloneDX SBOM per image (std-supplychain: SBOM per release artifact, stored with it).
       - name: Generate CycloneDX SBOM (${{ matrix.name }})
-        env:
-          GODEBUG: http2client=0   # same HTTP/1.1 workaround as the scan (large-image registry pull).
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          image-ref: ${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          input: /tmp/image-${{ matrix.name }}.tar   # SBOM from the same locally-built tarball.
           format: cyclonedx
           output: sbom-${{ matrix.name }}.cdx.json
 
