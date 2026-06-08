@@ -1,0 +1,23 @@
+# Build-context exclusions (podman reads .containerignore; docker reads .dockerignore).
+# Keep the context tiny: the Containerfiles COPY only src/, worker/, pyproject.toml,
+# requirements.lock, README.md, LICENSE, NOTICE. Everything below is irrelevant to the image
+# and must NOT be shipped into build layers (esp. .claude/worktrees — full repo copies, 78M).
+.git/
+.claude/
+.venv/
+**/__pycache__/
+**/*.pyc
+samples/
+coverage.xml
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# Docs / CI / infra not needed inside the image:
+docs/
+tests/
+.github/
+deploy/
+infra/
+# Other Containerfiles (avoid recursive context confusion):
+Containerfile.server
