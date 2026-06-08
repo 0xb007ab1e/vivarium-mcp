@@ -198,7 +198,11 @@ ENV GHIDRA_MCP_RPC_SOCKET_DIR=/run/ghidra-mcp \
     # JVM: cap the heap (deploy/ cgroup mem limit is the hard wall; this is the JVM-level bound).
     # -XX:+ExitOnOutOfMemoryError so an OOM kills the JVM (→ worker-unavailable → evict) rather
     # than thrashing. No network properties; Ghidra runs fully offline.
-    JAVA_TOOL_OPTIONS="-XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75.0 -Djava.awt.headless=true -Djava.net.preferIPv4Stack=true"
+    # -Duser.home: Ghidra (AppConfig/LaunchSupport -save) reads Java's `user.home` system property
+    # — NOT $HOME — and it resolves from the passwd entry (/home/worker, absent under
+    # --no-create-home + read-only rootfs). Override it to the writable /tmp/ghidra tmpfs so Ghidra
+    # can save its JDK config + user settings. (Verified via the in-image PyGhidra boot smoke.)
+    JAVA_TOOL_OPTIONS="-XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75.0 -Djava.awt.headless=true -Djava.net.preferIPv4Stack=true -Djava.io.tmpdir=/tmp/ghidra -Duser.home=/tmp/ghidra"
 
 # --- Scratch / writable surfaces -----------------------------------------------------------------
 # The rootfs is READ-ONLY at runtime (deploy/). The worker writes ONLY to tmpfs mounts that deploy/
@@ -208,6 +212,13 @@ RUN set -eux; \
     mkdir -p /run/ghidra-mcp /work/project /tmp/ghidra; \
     chown -R "65532:65532" /run/ghidra-mcp /work /tmp/ghidra; \
     chmod 0700 /run/ghidra-mcp /work/project
+
+# Ghidra needs a WRITABLE home for its user settings + the JDK-config save (LaunchSupport -save)
+# and a writable java.io.tmpdir. The runtime rootfs is read-only and the worker user was created
+# with --no-create-home, so point HOME at the /tmp/ghidra tmpfs (deploy/ mounts it; java.io.tmpdir
+# above points there too). Without this, PyGhidra's launcher fails with
+# "User home directory does not exist: /home/worker". Found via the in-image PyGhidra boot smoke.
+ENV HOME=/tmp/ghidra
 VOLUME ["/work/project"]
 
 USER 65532:65532
