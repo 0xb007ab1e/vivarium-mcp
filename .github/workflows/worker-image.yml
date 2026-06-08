@@ -103,6 +103,11 @@ jobs:
 
       # IMAGE vulnerability + misconfig + secret scan (gate #8 for the image). Fail on HIGH/CRITICAL.
       - name: Trivy image scan (${{ matrix.name }})
+        env:
+          # Force HTTP/1.1 for the registry pull: the multi-hundred-MB worker image reliably trips an
+          # HTTP/2 "stream ... PROTOCOL_ERROR" mid-layer-extraction on the hosted runner. HTTP/1.1
+          # avoids it (known go-containerregistry/Trivy large-image workaround); scoped to Trivy only.
+          GODEBUG: http2client=0
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
@@ -123,6 +128,8 @@ jobs:
 
       # CycloneDX SBOM per image (std-supplychain: SBOM per release artifact, stored with it).
       - name: Generate CycloneDX SBOM (${{ matrix.name }})
+        env:
+          GODEBUG: http2client=0   # same HTTP/1.1 workaround as the scan (large-image registry pull).
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
