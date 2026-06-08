@@ -3,8 +3,11 @@
 Formalizes the manual in-worker smoke (12/12 ``_gh_*`` paths against ``/bin/true`` on Ghidra
 12.1.2) into a repeatable, self-skipping pytest. It drives :class:`PyGhidraBackend` **directly
 inside the worker container** — import → analyze → metadata → list/get/decompile a function →
-memory map → strings — and asserts the **contract shapes** the WS2 ``rpc_client`` builders depend
-on (``docs/contracts/`` frozen shapes), NOT exact values (the in-image binary may change).
+memory map → strings → **call graph + referenced strings (v1.1, ADR-007)** — and asserts the
+**contract shapes** the WS2 ``rpc_client`` builders depend on (``docs/contracts/`` frozen shapes),
+NOT exact values (the in-image binary may change). The two v1.1 bindings (``_gh_call_graph`` /
+``_gh_referenced_strings``) are the worker-only extraction primitives behind the semantic-naming
+tools; this suite is the only place their real JVM behavior is validated (ADR-001).
 
 Why drive the backend in-container (not the server-side RPC adapter): this test exercises trust
 boundary TB3 — the JVM/PyGhidra edge that is excluded from server unit coverage (ADR-001) and is
@@ -25,6 +28,9 @@ Honored environment:
       defaults to ``localhost/ghidra-mcp-worker:dev`` for local validation if unset).
     * ``GHIDRA_MCP_CONTAINER_ENGINE`` — container CLI to invoke (default ``podman``).
     * ``GHIDRA_MCP_INTEGRATION_TARGET`` — in-image ELF to analyze (default ``/bin/true``).
+    * ``GHIDRA_MCP_WORKER_SRC_MOUNT`` — OPTIONAL dev hook: a host repo root to bind read-only over
+      the image's installed package (validate working-tree code against the pinned image without a
+      rebuild). CI leaves it UNSET so the baked, digest-pinned image is what gets validated.
 """
 
 from __future__ import annotations
@@ -45,6 +51,9 @@ _ENGINE_ENV = "GHIDRA_MCP_CONTAINER_ENGINE"
 _DEFAULT_ENGINE = "podman"
 _TARGET_ENV = "GHIDRA_MCP_INTEGRATION_TARGET"
 _DEFAULT_TARGET = "/bin/true"
+#: Optional dev hook: bind a host repo root read-only over the image's installed package, so a
+#: working-tree change can be validated against the pinned image without a rebuild (CI unsets it).
+_SRC_MOUNT_ENV = "GHIDRA_MCP_WORKER_SRC_MOUNT"
 
 #: Generous overall ceiling for JVM boot + Ghidra auto-analysis + the read-only queries.
 _RUN_TIMEOUT_SECONDS = 300
@@ -97,6 +106,18 @@ def main():
     out["list_strings"] = backend.list_strings(
         {"offset": 0, "limit": 5, "min_length": 4}
     )
+
+    # v1.1 semantic-naming JVM bindings (ADR-007): the two worker-only extraction primitives.
+    out["call_graph"] = backend.call_graph(
+        {"root": None, "max_depth": 8, "max_nodes": 5000, "max_edges": 20000}
+    )
+    if rows:
+        out["call_graph_rooted"] = backend.call_graph(
+            {"root": rows[0]["address"], "max_depth": 2, "max_nodes": 5000, "max_edges": 20000}
+        )
+        out["referenced_strings"] = backend.referenced_strings(
+            {"function": rows[0]["address"], "max_strings": 16}
+        )
     return out
 
 
@@ -141,7 +162,7 @@ def _build_command(engine: str, image: str, target: str) -> list[str]:
     Returns:
         The full argv list to pass to :func:`subprocess.run`.
     """
-    return [
+    cmd = [
         engine,
         "run",
         "--rm",
@@ -165,6 +186,21 @@ def _build_command(engine: str, image: str, target: str) -> list[str]:
         f"{_TARGET_ENV}={target}",
         "--env",
         f"GHIDRA_MCP_DRIVER_ANALYZE_TIMEOUT={_ANALYZE_TIMEOUT_SECONDS}",
+    ]
+    # OPTIONAL dev hook (off by default): validate WORKING-TREE code against the pinned image
+    # without a rebuild. Set GHIDRA_MCP_WORKER_SRC_MOUNT=<repo-root> to bind it read-only and put
+    # its src/ + worker/ ahead of the image's installed package on PYTHONPATH. CI leaves this UNSET,
+    # so the suite validates the baked, digest-pinned image (the shipped artifact). The mount is
+    # read-only — the worker still cannot modify host code (defense in depth holds).
+    src_mount = os.environ.get(_SRC_MOUNT_ENV, "").strip()
+    if src_mount:
+        cmd += [
+            "--volume",
+            f"{src_mount}:/host-repo:ro",
+            "--env",
+            "PYTHONPATH=/host-repo/src:/host-repo",
+        ]
+    cmd += [
         # Override the worker launcher entrypoint: drive the backend directly, not the RPC loop.
         "--entrypoint",
         "python",
@@ -172,6 +208,7 @@ def _build_command(engine: str, image: str, target: str) -> list[str]:
         "-c",
         _DRIVER,
     ]
+    return cmd
 
 
 def _parse_marker_json(stdout: str) -> dict[str, Any]:
@@ -259,6 +296,13 @@ def test_worker_analyzes_real_elf_end_to_end(worker_image: str) -> None:
 
     _assert_memory_map_shape(data["memory_map"])
     _assert_string_list_shape(data["list_strings"])
+
+    # v1.1 semantic-naming JVM bindings (ADR-007) — the two worker-only extraction primitives.
+    _assert_call_graph_shape(data["call_graph"])
+    if "call_graph_rooted" in data:
+        _assert_call_graph_shape(data["call_graph_rooted"])
+    if "referenced_strings" in data:
+        _assert_referenced_strings_shape(data["referenced_strings"])
 
 
 # --- contract assertions (mirror the dict shapes the WS2 rpc_client _build_* builders consume) ---
@@ -353,6 +397,57 @@ def _assert_memory_map_shape(memory_map: dict[str, Any]) -> None:
         assert key in block, f"memory block missing key {key!r}"
     assert isinstance(block["size"], int) and block["size"] >= 0, "block size invalid"
     assert isinstance(block["permissions"], str), "block permissions must be a string"
+
+
+def _assert_call_graph_shape(graph: dict[str, Any]) -> None:
+    """Assert ``call_graph`` returns the frozen adjacency shape with internally-consistent edges.
+
+    Proves the ``_gh_call_graph`` JVM binding (ADR-007) emits well-formed nodes (address + name +
+    ``is_external``/``has_unresolved_calls`` flags), edges whose endpoints are nodes in the same
+    (scope-bounded) graph, an ``unresolved_callers`` honesty list, and a ``truncated`` bool — the
+    exact dict the ``rpc_client._build_call_graph`` builder + the pure ordering core consume.
+
+    Args:
+        graph: A ``call_graph`` result dict (whole-program or root-scoped).
+    """
+    nodes = graph.get("nodes")
+    assert isinstance(nodes, list) and nodes, "call_graph nodes empty"
+    node_addrs: set[str] = set()
+    for node in nodes:
+        assert isinstance(node.get("address"), str) and node["address"], "node address missing"
+        assert isinstance(node.get("name"), str) and node["name"], "node name missing"
+        assert isinstance(node.get("is_external"), bool), "node is_external must be a bool"
+        assert isinstance(node.get("has_unresolved_calls"), bool), "has_unresolved_calls not bool"
+        node_addrs.add(node["address"])
+    edges = graph.get("edges")
+    assert isinstance(edges, list), "call_graph edges must be a list"
+    for edge in edges:
+        src, dst = edge.get("from_address"), edge.get("to_address")
+        assert isinstance(src, str) and src, "edge from_address missing"
+        assert isinstance(dst, str) and dst, "edge to_address missing"
+        # The binding only emits edges whose endpoints are in scope (ADR-007 §2 / threat-model TB4).
+        assert src in node_addrs, f"edge from_address {src!r} is not a node"
+        assert dst in node_addrs, f"edge to_address {dst!r} is not a node"
+    unresolved = graph.get("unresolved_callers")
+    assert isinstance(unresolved, list), "unresolved_callers must be a list"
+    assert all(isinstance(c, str) and c for c in unresolved), "unresolved_caller must be non-empty"
+    assert isinstance(graph.get("truncated"), bool), "call_graph truncated must be a bool"
+
+
+def _assert_referenced_strings_shape(referenced: dict[str, Any]) -> None:
+    """Assert ``referenced_strings`` returns the ``{strings: list[str], truncated: bool}`` shape.
+
+    Proves the ``_gh_referenced_strings`` JVM binding (ADR-007) returns plain string VALUES (the
+    server wraps each in the untrusted envelope) and a ``truncated`` cap flag. The list may be empty
+    (a function need not reference any string) — only the shape is asserted, not the payload.
+
+    Args:
+        referenced: A ``referenced_strings`` result dict.
+    """
+    values = referenced.get("strings")
+    assert isinstance(values, list), "referenced_strings.strings must be a list"
+    assert all(isinstance(v, str) for v in values), "each referenced string must be a str"
+    assert isinstance(referenced.get("truncated"), bool), "referenced_strings truncated not a bool"
 
 
 def _assert_string_list_shape(strings: dict[str, Any]) -> None:
