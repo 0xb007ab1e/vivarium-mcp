@@ -17,7 +17,7 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-SERVER_IMAGE="${GHIDRA_MCP_SERVER_IMAGE:-ghcr.io/OWNER/ghidra-mcp-server@sha256:REPLACE_WITH_PINNED_DIGEST}"
+SERVER_IMAGE="${GHIDRA_MCP_SERVER_IMAGE:-ghcr.io/0xb007ab1e/ghidra-mcp-server@sha256:e7912616058dbcc2e3be0eea82c9b89ae492f26afc978754b05c14fe2d1cb691}"
 
 # Shared UDS dir (host) — server OWNS it (0700); workers get only their own per-session subdir
 # bind-mounted in (see deploy/worker-run.sh + deploy/socket-dir.md).
@@ -55,7 +55,7 @@ exec podman run \
   --env "GHIDRA_MCP_RPC_SOCKET_DIR=/run/ghidra-mcp" \
   --env "GHIDRA_MCP_LOG_FORMAT=${GHIDRA_MCP_LOG_FORMAT:-json}" \
   --env "GHIDRA_MCP_LOG_LEVEL=${GHIDRA_MCP_LOG_LEVEL:-INFO}" \
-  --env "GHIDRA_MCP_WORKER_IMAGE=${GHIDRA_MCP_WORKER_IMAGE:-ghcr.io/OWNER/ghidra-mcp-worker@sha256:REPLACE_WITH_PINNED_DIGEST}" \
+  --env "GHIDRA_MCP_WORKER_IMAGE=${GHIDRA_MCP_WORKER_IMAGE:-ghcr.io/0xb007ab1e/ghidra-mcp-worker@sha256:921cd0ec9b2fbf2456b405acdd0ab8c4458c1cd4424d55f7d3d4539300f2c3c7}" \
   --env "GHIDRA_MCP_WORKER_RUNTIME=${GHIDRA_MCP_WORKER_RUNTIME:-runsc}" \
   --env "GHIDRA_MCP_MAX_SESSIONS=${GHIDRA_MCP_MAX_SESSIONS:-4}" \
   --env "GHIDRA_MCP_SESSION_TTL_SECONDS=${GHIDRA_MCP_SESSION_TTL_SECONDS:-3600}" \

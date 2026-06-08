@@ -82,9 +82,9 @@ ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=igno
 WORKDIR /build
 COPY pyproject.toml README.md LICENSE NOTICE /build/
 COPY src/ /build/src/
-# hadolint ignore=DL3013
 # `build` + the hatchling backend are build-only and never ship to runtime. integration-validate:
 # if README.md/LICENSE/NOTICE move, update the COPY above (hatchling reads license-files at build).
+# (DL3013 — bare `==` pin — is ignored project-wide; see infra/hadolint.yaml justification.)
 RUN set -eux; \
     python -m pip install --no-cache-dir build hatchling; \
     python -m build --wheel --outdir /build/dist /build

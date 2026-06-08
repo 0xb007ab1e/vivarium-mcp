@@ -45,13 +45,13 @@ COPY src ./src
 
 RUN set -eux; \
     python -m venv /venv; \
-    /venv/bin/pip install --upgrade pip; \
+    /venv/bin/pip install --no-cache-dir --upgrade pip; \
     # SUPPLY-CHAIN SAFE INSTALL (enable once the lockfile exists — GATED):
-    #   /venv/bin/pip install --require-hashes -r requirements.lock
+    #   /venv/bin/pip install --no-cache-dir --require-hashes -r requirements.lock
     # Then install the project itself (no deps; they came from the pinned lock):
-    #   /venv/bin/pip install --no-deps .
+    #   /venv/bin/pip install --no-cache-dir --no-deps .
     # Placeholder until the lock lands — documented, not a floating prod install path:
-    /venv/bin/pip install --no-deps .
+    /venv/bin/pip install --no-cache-dir --no-deps .
 
 # =============================================================================
 # Stage 2: runtime — minimal Python + the venv. No build tools, no compilers.

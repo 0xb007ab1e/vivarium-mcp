@@ -93,8 +93,26 @@ jobs:
           file: ${{ matrix.containerfile }}
           push: true
           tags: ${{ matrix.image }}:${{ github.sha }}
-          provenance: true          # SLSA provenance attestation.
-          sbom: true                # build-time SBOM attestation.
+          provenance: true          # SLSA provenance attestation (pushed to the registry).
+          sbom: true                # build-time SBOM attestation (pushed to the registry).
+          build-args: |
+            GHIDRA_VERSION=${{ vars.GHIDRA_VERSION }}
+            GHIDRA_RELEASE_TAG=${{ vars.GHIDRA_RELEASE_TAG }}
+            GHIDRA_ZIP_URL=${{ vars.GHIDRA_ZIP_URL }}
+            GHIDRA_ZIP_SHA256=${{ vars.GHIDRA_ZIP_SHA256 }}
+
+      # Export the SAME image as a PLAIN single-manifest docker tarball for Trivy to scan locally —
+      # no registry re-pull (which died on HTTP/2 for the ~1.3 GB worker) and no manifest list (so the
+      # docker exporter is happy; `provenance: false` keeps it a single manifest). Cache hit from the
+      # push build above, so this only adds the local tar export. We scan/​SBOM this tarball below.
+      - name: Export image tarball for scanning (${{ matrix.name }})
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.containerfile }}
+          tags: ${{ matrix.image }}:${{ github.sha }}
+          outputs: type=docker,dest=/tmp/image-${{ matrix.name }}.tar
+          provenance: false         # plain manifest — the docker exporter cannot export manifest lists.
           build-args: |
             GHIDRA_VERSION=${{ vars.GHIDRA_VERSION }}
             GHIDRA_RELEASE_TAG=${{ vars.GHIDRA_RELEASE_TAG }}
@@ -106,8 +124,9 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          image-ref: ${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          input: /tmp/image-${{ matrix.name }}.tar   # scan the locally-built tarball (no registry pull).
           trivy-config: infra/trivy.yaml
+          trivyignores: .trivyignore.yaml   # time-boxed, justified, auto-expiring CVE waivers.
           format: sarif
           output: trivy-${{ matrix.name }}.sarif
           exit-code: "1"           # fail closed on HIGH/CRITICAL.
@@ -125,7 +144,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          image-ref: ${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          input: /tmp/image-${{ matrix.name }}.tar   # SBOM from the same locally-built tarball.
           format: cyclonedx
           output: sbom-${{ matrix.name }}.cdx.json
 

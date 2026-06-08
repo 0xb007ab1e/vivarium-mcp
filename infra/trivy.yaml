@@ -19,9 +19,14 @@ ignore-unfixed: false
 
 scan:
   scanners:
-    - vuln       # OS + language package CVEs (Ghidra deps, JDK, Python wheels)
-    - misconfig  # Dockerfile + IaC misconfiguration
-    - secret     # accidental secrets in layers/config
+    - vuln       # OS + language package CVEs (Ghidra deps, JDK, Python wheels) — the point of image scan
+    - secret     # accidental secrets baked into image layers
+    # `misconfig` is deliberately NOT run on the built IMAGE. Trivy's Dockerfile/IaC misconfig scanner
+    # parses third-party files BUNDLED in the image — e.g. Ghidra ships
+    # `opt/ghidra/docker/Dockerfile.dockerignore`, which Trivy 0.70 cannot parse and errors the whole
+    # scan (exit 1). Our OWN Dockerfiles + deploy/IaC are misconfig-scanned at the SOURCE by ci.yml's
+    # `container-iac-scan` (+ hadolint in worker-image.yml), so image-level misconfig is redundant.
+    # workflow-cicd gate #8 (IaC/misconfig) coverage is preserved by that source scan.
   # Skip noisy paths that are not part of the shipped artifact.
   skip-dirs:
     - tests
@@ -35,5 +40,8 @@ misconfiguration:
 # Vulnerability DB / Java DB are fetched at scan time (GATED network in CI; the action handles it).
 # A maintainer pins the trivy-action by digest in worker-image.yml (REPLACE_WITH_DIGEST_FOR_*).
 
-# .trivyignore (if ever needed) holds TIME-BOXED, justified CVE waivers ONLY — never a permanent
-# ignore (workflow-cve-management). Each entry: CVE id + expiry + reason + owner. None at v1.
+# Waivers live in `.trivyignore.yaml` (repo root) — TIME-BOXED, justified, owned, AUTO-EXPIRING CVE
+# waivers ONLY, never a permanent ignore (workflow-cve-management). Each entry: CVE id + statement
+# (VEX reachability + compensating controls) + `expired_at`. Wired via the `trivyignores:` input on
+# the image-scan step in .github/workflows/worker-image.yml. Current waivers: 6 no-upstream-fix
+# Debian-base CVEs (perl-base + ncurses) not reachable in our execution path — re-evaluate on expiry.
