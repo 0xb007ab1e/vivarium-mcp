@@ -92,5 +92,13 @@ exec podman run \
   `# --- no host env leakage; an explicit, minimal allow-list only (the --env lines above) ---` \
   --env-host=false \
   "${WORKER_IMAGE}"
-# COORDINATION ITEM (WS2): if the WS2 entrypoint takes the session id / socket path as ARGS rather
-# than env, append them after the image, e.g.:  "${WORKER_IMAGE}" --session "${SESSION_ID}"
+# ENTRYPOINT CONTRACT (WS3, RECONCILED): the worker image ENTRYPOINT is `python -m worker`
+# (worker/__main__.py). It is ENV-ONLY — it takes NO positional args. It reads:
+#   * GHIDRA_MCP_SESSION_ID      (required; passed above) — names the per-session UDS <sid>.sock,
+#   * GHIDRA_MCP_RPC_SOCKET_DIR  (=/run/ghidra-mcp above) — the bind-mounted private socket dir,
+# derives GHIDRA_MCP_RPC_SOCKET=<dir>/<sid>.sock, then runs worker_main() (rpc-protocol.md §2).
+# Inside the container the socket therefore lands at /run/ghidra-mcp/<SESSION_ID>.sock; the host
+# side of that path is "${RPC_SOCKET_DIR}/${SESSION_ID}/<SESSION_ID>.sock" via the volume above —
+# the server's RPC client connects to the host path, the worker binds the in-container path.
+# A missing GHIDRA_MCP_SESSION_ID makes the launcher exit non-zero BEFORE the JVM starts → the
+# server observes worker-unavailable and evicts (fail closed). Do NOT append args after the image.

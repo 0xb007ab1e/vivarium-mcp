@@ -47,6 +47,15 @@ dev = [
   "pip-audit>=2.7",    # dependency CVE scan (SCA).
 ]
 
+# WORKER-RUNTIME dependency (documented, NOT a pip/PyPI dependency of this package):
+#   The out-of-process worker additionally requires **PyGhidra** (+ JPype1), which is installed in
+#   `Containerfile.worker` from the wheel BUNDLED INSIDE the pinned, SHA-256-verified Ghidra 12.1.2
+#   distribution (`/opt/ghidra/.../PyGhidra/.../dist`) — NOT resolved from PyPI. Its integrity is
+#   inherited from the Ghidra zip checksum (ADR-003); it is version-matched to Ghidra by construction
+#   and captured in the worker image SBOM (CycloneDX, worker-image.yml). Listed here only so the
+#   worker's full dependency surface is discoverable; do not add it as a resolvable dependency (that
+#   would pull an unpinned PyPI build and break the version-match + offline-install guarantees).
+
 [project.urls]
 Homepage = "https://github.com/OWNER/ghidra-mcp"
 Repository = "https://github.com/OWNER/ghidra-mcp"
