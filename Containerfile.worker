@@ -159,6 +159,14 @@ COPY --chown=root:root requirements.lock /opt/ghidra-mcp/requirements.lock
 COPY --from=pybuilder --chown=root:root /build/dist /opt/ghidra-mcp/dist
 COPY --chown=root:root worker/ /opt/ghidra-mcp-worker/worker/
 
+# `worker/` is plain modules (NOT in the hatch wheel) — put its parent on the import path BEFORE the
+# install/validate RUN so the `import worker` validation below AND the runtime `python -m worker`
+# entrypoint both resolve. (ENV persists to the final image.) PYTHONDONTWRITEBYTECODE keeps the
+# read-only rootfs from needing a writable __pycache__ at import time.
+ENV PYTHONPATH=/opt/ghidra-mcp-worker \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 # Pinned, hashed runtime deps; then the prebuilt wheel + bundled PyGhidra, both OFFLINE (--no-index).
 # integration-validate: the bundled PyGhidra wheel path inside the 12.1.2 dist. Ghidra ships it at
 #   /opt/ghidra/Ghidra/Features/PyGhidra/pypkg/dist/*.whl   (preferred — a built wheel + JPype1)
@@ -178,14 +186,6 @@ RUN set -eux; \
     python -c "import ghidra_mcp.ghidra._jvm_bridge"; \
     python -c "import worker, worker.dispatch, worker.server"; \
     python -c "import pyghidra"
-
-# `worker/` is plain modules (not in the wheel) — put its parent on the import path so
-# `python -m worker` and the launcher's `import worker.*` resolve. PYTHONDONTWRITEBYTECODE keeps the
-# read-only rootfs from needing a writable __pycache__ at import time (the import-validate RUNs
-# above already wrote/discarded any bytecode in this build layer).
-ENV PYTHONPATH=/opt/ghidra-mcp-worker \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
 
 # --- Runtime environment (mirrors security/limits.py defaults; deploy/ also passes these) --------
 # The worker enforces its own wall-clock + memory bounds in addition to the server-side kill (F7).
