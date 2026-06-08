@@ -366,6 +366,54 @@ class RpcGhidraAdapter:
         """High-level program metadata."""
         return _build_program_metadata(self._tool_call(sid, "program_metadata", {}))
 
+    # --- call-graph / semantic-naming operations (v1.1 — ADR-007) ---------------------------
+    # RESERVED STUBS (WS2 build fan-out): the worker ``call_graph`` extraction binding is built
+    # against the pinned Ghidra image. ``analysis_order`` then computes the leaf-first ordering via
+    # the PURE server-side core (:mod:`ghidra_mcp.core.callgraph`) — no JVM (ADR-001/ADR-007). The
+    # pure ``_build_analysis_order`` adjacency→order builder below is implemented and unit-tested
+    # now so only the worker RPC hop is reserved.
+    def call_graph(self, sid: str, a: s.CallGraphIn) -> s.CallGraphOut:
+        """Extract the bounded call adjacency (RESERVED — v1.1 worker extraction)."""
+        raise NotImplementedError(
+            "RESERVED (v1.1 ADR-007 / WS2): call_graph worker extraction "
+            "— pending pinned-image build"
+        )
+
+    def callees(self, sid: str, a: s.CalleesIn) -> s.CallNeighborsOut:
+        """List direct callees (RESERVED — v1.1 worker extraction)."""
+        raise NotImplementedError(
+            "RESERVED (v1.1 ADR-007 / WS2): callees worker extraction — pending pinned-image build"
+        )
+
+    def callers(self, sid: str, a: s.CallersIn) -> s.CallNeighborsOut:
+        """List direct callers (RESERVED — v1.1 worker extraction)."""
+        raise NotImplementedError(
+            "RESERVED (v1.1 ADR-007 / WS2): callers worker extraction — pending pinned-image build"
+        )
+
+    def analysis_order(self, sid: str, a: s.AnalysisOrderIn) -> s.AnalysisOrderOut:
+        """Leaf-first analysis order (RESERVED — extraction; ordering is the pure core).
+
+        When built (WS2): extract the adjacency via the worker ``call_graph`` RPC, then feed it to
+        the PURE :func:`ghidra_mcp.core.callgraph.compute_analysis_order` and shape the result with
+        :func:`_build_analysis_order` (implemented + tested now). No JVM on this path (ADR-001).
+        """
+        raise NotImplementedError(
+            "RESERVED (v1.1 ADR-007 / WS2): analysis_order extraction hop "
+            "— pending pinned-image build"
+        )
+
+    def function_context(self, sid: str, a: s.FunctionContextIn) -> s.FunctionContext:
+        """Assemble the per-function naming/synthesis context bundle (RESERVED — v1.1).
+
+        When built (WS2): aggregate decompilation + signature + one-hop callees/callers +
+        referenced strings from the existing read-only RPCs, wrapping every binary-derived field
+        (ADR-005). Server-side assembly only — no naming or C synthesis (no server-side LLM).
+        """
+        raise NotImplementedError(
+            "RESERVED (v1.1 ADR-007 / WS2): function_context assembly — pending pinned-image build"
+        )
+
     # --- internal: call orchestration -------------------------------------------------------
     def _tool_call(self, sid: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Issue a read-only tool RPC bounded by the per-tool timeout.
@@ -779,6 +827,90 @@ def _build_search_bytes(r: dict[str, Any]) -> s.SearchBytesOut:
         matches=[_build_byte_match(m) for m in r.get("matches", [])],
         total=int(r["total"]),
         truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_call_graph(r: dict[str, Any]) -> s.CallGraphOut:
+    """Build :class:`CallGraphOut`: node ``name`` is BINARY-untrusted; addresses/flags are safe.
+
+    Args:
+        r: The worker's plain ``call_graph`` result dict.
+
+    Returns:
+        The typed, wrapped :class:`CallGraphOut`.
+    """
+    return s.CallGraphOut(
+        nodes=[_build_call_graph_node(n) for n in r.get("nodes", [])],
+        edges=[
+            s.CallEdge(from_address=str(e["from_address"]), to_address=str(e["to_address"]))
+            for e in r.get("edges", [])
+        ],
+        unresolved_callers=[str(c) for c in r.get("unresolved_callers", [])],
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_call_graph_node(r: dict[str, Any]) -> s.CallGraphNode:
+    """Build one :class:`CallGraphNode`: name=BINARY (extracted symbol); address/flags safe.
+
+    Args:
+        r: One plain node dict.
+
+    Returns:
+        The typed node with its name untrusted-wrapped.
+    """
+    return s.CallGraphNode(
+        address=str(r["address"]),
+        name=_w(r["name"], DataOrigin.BINARY),
+        is_external=bool(r.get("is_external", False)),
+        has_unresolved_calls=bool(r.get("has_unresolved_calls", False)),
+    )
+
+
+def _adjacency_from_graph(graph: s.CallGraphOut) -> tuple[dict[str, list[str]], list[str]]:
+    """Project a :class:`CallGraphOut` into a plain adjacency map + unresolved-caller list.
+
+    Pure shaping helper (no I/O) feeding the pure ordering core: every node becomes a key (so
+    disconnected/leaf nodes are represented), and each resolved edge appends its callee.
+
+    Args:
+        graph: The extracted call graph.
+
+    Returns:
+        ``(adjacency, unresolved)`` for :func:`ghidra_mcp.core.callgraph.compute_analysis_order`.
+    """
+    adjacency: dict[str, list[str]] = {node.address: [] for node in graph.nodes}
+    for edge in graph.edges:
+        adjacency.setdefault(edge.from_address, []).append(edge.to_address)
+    return adjacency, list(graph.unresolved_callers)
+
+
+def _build_analysis_order(graph: s.CallGraphOut) -> s.AnalysisOrderOut:
+    """Compute + shape the leaf-first analysis order from an extracted call graph (PURE, no JVM).
+
+    Delegates the ordering to the pure server-side core
+    (:func:`ghidra_mcp.core.callgraph.compute_analysis_order`) — the algorithmic heart of ADR-007 —
+    and maps its result to the frozen :class:`AnalysisOrderOut`. No binary-derived *content* is in
+    this result (only server-normalized addresses + structural flags), so nothing needs wrapping.
+
+    Args:
+        graph: The extracted :class:`CallGraphOut`.
+
+    Returns:
+        The leaf-first :class:`AnalysisOrderOut` (sinks first, entry roots last).
+    """
+    from ghidra_mcp.core.callgraph import compute_analysis_order
+
+    adjacency, unresolved = _adjacency_from_graph(graph)
+    order = compute_analysis_order(adjacency, unresolved=unresolved)
+    return s.AnalysisOrderOut(
+        components=[
+            s.OrderedComponent(members=list(c.members), is_recursive=c.is_recursive)
+            for c in order.components
+        ],
+        unresolved_callers=list(order.unresolved_callers),
+        self_recursive=list(order.self_recursive),
+        truncated=graph.truncated,
     )
 
 

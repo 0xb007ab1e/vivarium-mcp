@@ -1,7 +1,7 @@
 """Tier-1 tool registry — the explicit allow-list of exposed tools (WS1).
 
 There is no dynamic tool discovery: the catalog is a fixed, reviewed allow-list (PLAN §2). This
-module binds each of the 22 catalog tools to a handler and registers them with the FastMCP server.
+module binds each of the 27 catalog tools to a handler and registers them with the FastMCP server.
 
 Each handler is a thin **imperative shell** step (topic-architecture-patterns) that:
 
@@ -71,6 +71,12 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "search_strings",
     # metadata
     "program_metadata",
+    # call graph / semantic-naming support (v1.1 — ADR-007; READ-ONLY)
+    "call_graph",
+    "callees",
+    "callers",
+    "analysis_order",
+    "function_context",
 )
 
 
@@ -370,6 +376,55 @@ def _handle_program_metadata(ctx: ToolContext, args: s.ProgramMetadataIn) -> s.P
 
 
 # =====================================================================================
+# Call-graph / semantic-naming handlers (v1.1 — ADR-007; READ-ONLY, output-only)
+# =====================================================================================
+# These follow the same imperative-shell pattern as the Tier-1 handlers: authorize the session
+# (BOLA), apply semantic validation the schema can't express, then delegate to the injected port.
+# The graph *extraction* the port performs is worker-only (ADR-001); the leaf-first *ordering* the
+# ``analysis_order`` path returns is computed by the PURE server-side core (core.callgraph) inside
+# the adapter — no JVM on the server. None of these mutate the Ghidra DB (output-only).
+def _handle_call_graph(ctx: ToolContext, args: s.CallGraphIn) -> s.CallGraphOut:
+    """Extract the bounded function call adjacency (resolved edges + unresolved callers)."""
+    ctx.sessions.authorize(args.session_id)
+    if args.root is not None:
+        v.validate_name(args.root)
+    return ctx.port.call_graph(args.session_id, args)
+
+
+def _handle_callees(ctx: ToolContext, args: s.CalleesIn) -> s.CallNeighborsOut:
+    """List the functions a given function directly calls (one hop, paginated/bounded)."""
+    ctx.sessions.authorize(args.session_id)
+    v.validate_name(args.function)
+    return ctx.port.callees(args.session_id, args)
+
+
+def _handle_callers(ctx: ToolContext, args: s.CallersIn) -> s.CallNeighborsOut:
+    """List the functions that directly call a given function (one hop, paginated/bounded)."""
+    ctx.sessions.authorize(args.session_id)
+    v.validate_name(args.function)
+    return ctx.port.callers(args.session_id, args)
+
+
+def _handle_analysis_order(ctx: ToolContext, args: s.AnalysisOrderIn) -> s.AnalysisOrderOut:
+    """Leaf-first reverse-topological analysis order over the call graph (ADR-007).
+
+    The adjacency is extracted by the worker; the ordering is computed by the pure server-side core
+    (:mod:`ghidra_mcp.core.callgraph`) within the adapter — no JVM on the server (ADR-001).
+    """
+    ctx.sessions.authorize(args.session_id)
+    if args.root is not None:
+        v.validate_name(args.root)
+    return ctx.port.analysis_order(args.session_id, args)
+
+
+def _handle_function_context(ctx: ToolContext, args: s.FunctionContextIn) -> s.FunctionContext:
+    """Assemble the per-function naming/synthesis context bundle (server-side aggregation)."""
+    ctx.sessions.authorize(args.session_id)
+    v.validate_name(args.function)
+    return ctx.port.function_context(args.session_id, args)
+
+
+# =====================================================================================
 # Local helpers
 # =====================================================================================
 def _require(detail: str) -> GhidraMcpError:
@@ -420,6 +475,11 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "search_bytes": (_handle_search_bytes, s.SearchBytesIn),
     "search_strings": (_handle_search_strings, s.SearchStringsIn),
     "program_metadata": (_handle_program_metadata, s.ProgramMetadataIn),
+    "call_graph": (_handle_call_graph, s.CallGraphIn),
+    "callees": (_handle_callees, s.CalleesIn),
+    "callers": (_handle_callers, s.CallersIn),
+    "analysis_order": (_handle_analysis_order, s.AnalysisOrderIn),
+    "function_context": (_handle_function_context, s.FunctionContextIn),
 }
 
 

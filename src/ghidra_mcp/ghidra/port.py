@@ -112,3 +112,28 @@ class GhidraPort(Protocol):
     def program_metadata(self, sid: str, a: s.ProgramMetadataIn) -> s.ProgramMetadata:
         """High-level program metadata."""
         ...
+
+    # --- call-graph / semantic-naming operations (v1.1 — ADR-007) ---
+    def call_graph(self, sid: str, a: s.CallGraphIn) -> s.CallGraphOut:
+        """Extract the bounded function call adjacency (resolved edges + unresolved callers)."""
+        ...
+
+    def callees(self, sid: str, a: s.CalleesIn) -> s.CallNeighborsOut:
+        """List the functions a given function directly calls (one hop, paginated/bounded)."""
+        ...
+
+    def callers(self, sid: str, a: s.CallersIn) -> s.CallNeighborsOut:
+        """List the functions that directly call a given function (one hop, paginated/bounded)."""
+        ...
+
+    def analysis_order(self, sid: str, a: s.AnalysisOrderIn) -> s.AnalysisOrderOut:
+        """Leaf-first reverse-topological order over the call graph (server computes the ordering).
+
+        The adjacency is extracted by the worker; the ordering is the PURE server-side core
+        (:mod:`ghidra_mcp.core.callgraph`) — no JVM on this path (ADR-001/ADR-007).
+        """
+        ...
+
+    def function_context(self, sid: str, a: s.FunctionContextIn) -> s.FunctionContext:
+        """Assemble the per-function naming/synthesis context bundle (server-side aggregation)."""
+        ...

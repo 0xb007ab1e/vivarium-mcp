@@ -180,6 +180,20 @@ class PyGhidraBackend:
         """High-level program metadata."""
         return self._gh_program_metadata()
 
+    def call_graph(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Extract the bounded function call adjacency (v1.1 — ADR-007).
+
+        Args:
+            params: ``{"root": str | None, "max_depth": int, "max_nodes": int, "max_edges": int}``.
+
+        Returns:
+            ``{"nodes": [...], "edges": [...], "unresolved_callers": [...], "truncated": bool}``.
+        """
+        max_nodes = _clamp_count(int(params.get("max_nodes", 10_000)))
+        max_edges = _clamp_count(int(params.get("max_edges", 40_000)))
+        max_depth = max(1, int(params.get("max_depth", 8)))
+        return self._gh_call_graph(params.get("root"), max_depth, max_nodes, max_edges)
+
     # --- JVM edge (PyGhidra calls live ONLY here; imported lazily) ---------------------------
     # NOTE: these helpers are the worker-only JVM boundary. They are excluded from server unit
     # coverage and exercised only by the integration suite against a real pinned worker image. The
@@ -817,6 +831,40 @@ class PyGhidraBackend:
             "function_count": int(program.getFunctionManager().getFunctionCount()),
             "analysis_complete": bool(self._analyzed),
         }
+
+    def _gh_call_graph(
+        self, root: str | None, max_depth: int, max_nodes: int, max_edges: int
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """RESERVED STUB (v1.1 — ADR-007 / WS2 build fan-out): extract the call adjacency.
+
+        Walks the FunctionManager + ReferenceManager to build a bounded resolved-call adjacency
+        (caller entry -> callee entries via ``REF_TYPE`` CALL/COMPUTED_CALL references), flags
+        functions with UNRESOLVED outgoing calls (indirect/virtual/computed where the target does
+        not resolve to a concrete function), and marks external/imported/thunk functions
+        (``is_external``) so the client does NOT re-infer their KNOWN names. Stops at ``max_nodes``/
+        ``max_edges``/``max_depth`` and sets ``truncated`` (DoS — threat-model TB4). Returns plain
+        JSON-serializable values only (no Java objects cross the boundary); the server wraps the
+        untrusted ``name`` fields (ADR-005).
+
+        Args:
+            root: Optional function (entry address hex or name) to scope reachability from; ``None``
+                walks the whole program.
+            max_depth: Maximum traversal depth from ``root`` (ignored when ``root`` is ``None``).
+            max_nodes: Hard cap on emitted nodes.
+            max_edges: Hard cap on emitted edges.
+
+        Returns:
+            ``{"nodes": [...], "edges": [...], "unresolved_callers": [...], "truncated": bool}``.
+
+        Raises:
+            NotImplementedError: Always — JVM/Ghidra graph extraction is built by WS2 against the
+                pinned Ghidra 12.1.2 image (a GATED supply-chain action) and validated only in the
+                real-worker integration suite. ADR-001: this runs ONLY inside the worker.
+        """
+        raise NotImplementedError(
+            "RESERVED (v1.1 ADR-007 / WS2): worker call-graph extraction "
+            "— pending pinned-image build"
+        )
 
     # --- private JVM helpers (lazy imports only; never at module scope) -----------------------
     def _require_program(self) -> Any:  # pragma: no cover - JVM edge
