@@ -71,10 +71,14 @@ exec podman run \
   --security-opt "seccomp=${SECCOMP_PROFILE}" \
   `# --- read-only root filesystem: the entire image FS is immutable at runtime ---` \
   --read-only \
-  `# --- writable scratch ONLY via tmpfs (noexec,nosuid,nodev): JVM /tmp + Ghidra temp ---` \
-  --tmpfs /tmp/ghidra:rw,noexec,nosuid,nodev,size="${TMPFS_SCRATCH_SIZE}" \
+  `# --- writable scratch ONLY via tmpfs (noexec,nosuid,nodev). mode=1777: a fresh tmpfs is ---` \
+  `# --- root-owned, but the worker runs as uid 65532 under the read-only rootfs; 1777 (the /tmp ---` \
+  `# --- model) lets the non-root worker write its user.home + java.io.tmpdir + project store. ---` \
+  `# --- Without it Ghidra LaunchSupport -save fails ("user home directory does not exist") and ---` \
+  `# --- the JVM never boots — caught by the real-worker integration test (tests/integration). ---` \
+  --tmpfs /tmp/ghidra:rw,noexec,nosuid,nodev,mode=1777,size="${TMPFS_SCRATCH_SIZE}" \
   `# --- per-session project store on tmpfs: NEVER persisted to disk; vanishes on kill (ADR-002) ---` \
-  --tmpfs /work/project:rw,noexec,nosuid,nodev,size="${PROJECT_STORE_SIZE}" \
+  --tmpfs /work/project:rw,noexec,nosuid,nodev,mode=1777,size="${PROJECT_STORE_SIZE}" \
   `# --- resource limits (DoS bounds F7); OOM kills the worker → server evicts ---` \
   --memory "${MEM_LIMIT}" \
   --memory-swap "${MEM_LIMIT}" \

@@ -18,6 +18,12 @@ import pytest
 
 _ENV_FLAG = "GHIDRA_MCP_INTEGRATION"
 
+#: Default worker-image reference for LOCAL validation when ``GHIDRA_MCP_WORKER_IMAGE`` is unset.
+#: CI pins the image BY DIGEST via the env var (WS3, std-supplychain); this convenience default is
+#: the locally-built dev tag used by the manual in-worker smoke. It only takes effect once the
+#: integration flag is already set, so the unit/coverage job (flag unset) never reaches it.
+_DEFAULT_WORKER_IMAGE = "localhost/ghidra-mcp-worker:dev"
+
 
 def _integration_enabled() -> bool:
     """Return whether integration tests are explicitly enabled via the environment flag."""
@@ -32,15 +38,15 @@ def integration_enabled() -> bool:
 
 @pytest.fixture
 def worker_image() -> str:
-    """Resolve the pinned-by-digest worker image reference, or skip if unset.
+    """Resolve the pinned-by-digest worker image reference (falling back to the dev tag).
 
     The image reference is provided by the integration environment (WS3 pins it by digest). When
-    absent, the dependent test is skipped rather than failing — there is no worker to talk to.
+    the env var is unset, fall back to the locally-built dev tag (``_DEFAULT_WORKER_IMAGE``) so a
+    maintainer can validate against a freshly-built image without exporting the var; CI always
+    exports the pinned-by-digest reference. This fixture is only reached when the integration flag
+    is enabled, so the unit/coverage job never depends on an image existing.
     """
-    ref = os.environ.get("GHIDRA_MCP_WORKER_IMAGE", "").strip()
-    if not ref:
-        pytest.skip("no GHIDRA_MCP_WORKER_IMAGE pinned-by-digest reference set")
-    return ref
+    return os.environ.get("GHIDRA_MCP_WORKER_IMAGE", "").strip() or _DEFAULT_WORKER_IMAGE
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
