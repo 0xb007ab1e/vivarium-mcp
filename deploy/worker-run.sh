@@ -26,7 +26,7 @@ BINARY_PATH="${2:-}"                                                  # host pat
 
 # Pinned BY DIGEST (ADR-003). GATED ITEM W-IMG: a maintainer pins the real digest; placeholder
 # mirrors .env.example's GHIDRA_MCP_WORKER_IMAGE convention.
-WORKER_IMAGE="${GHIDRA_MCP_WORKER_IMAGE:-ghcr.io/OWNER/ghidra-mcp-worker@sha256:REPLACE_WITH_PINNED_DIGEST}"
+WORKER_IMAGE="${GHIDRA_MCP_WORKER_IMAGE:-ghcr.io/0xb007ab1e/ghidra-mcp-worker@sha256:921cd0ec9b2fbf2456b405acdd0ab8c4458c1cd4424d55f7d3d4539300f2c3c7}"
 
 # gVisor by default (ADR-004); falls back to the rootless OCI baseline only where runsc is absent.
 WORKER_RUNTIME="${GHIDRA_MCP_WORKER_RUNTIME:-runsc}"
