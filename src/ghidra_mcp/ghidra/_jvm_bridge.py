@@ -222,8 +222,17 @@ class PyGhidraBackend:
         self._analyzed = False
 
         # Hold the opened-program context on self so analyze() and the read-only ops reuse it.
-        # integration-validate: open_program yields a context manager; WS3 launcher closes it.
-        ctx = pyghidra.open_program(source_ref, analyze=False)
+        # project_location MUST be a WRITABLE dir: PyGhidra otherwise defaults the project next to
+        # the binary (e.g. /bin/true_ghidra) → read-only rootfs → PermissionError. Point it at the
+        # per-session worker store (writable tmpfs mounted by deploy/; created in the image).
+        # Found via the in-worker analyze smoke against a real ELF.
+        project_dir = os.environ.get("GHIDRA_MCP_WORKER_PROJECT_DIR", "/work/project")
+        ctx = pyghidra.open_program(
+            source_ref,
+            project_location=project_dir,
+            project_name="session",
+            analyze=False,
+        )
         program = ctx.__enter__()
         self._project = ctx  # retain the context manager for the worker launcher to close on evict
         self._program = getattr(program, "getCurrentProgram", lambda: program)()
