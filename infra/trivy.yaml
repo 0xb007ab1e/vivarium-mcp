@@ -35,5 +35,8 @@ misconfiguration:
 # Vulnerability DB / Java DB are fetched at scan time (GATED network in CI; the action handles it).
 # A maintainer pins the trivy-action by digest in worker-image.yml (REPLACE_WITH_DIGEST_FOR_*).
 
-# .trivyignore (if ever needed) holds TIME-BOXED, justified CVE waivers ONLY — never a permanent
-# ignore (workflow-cve-management). Each entry: CVE id + expiry + reason + owner. None at v1.
+# Waivers live in `.trivyignore.yaml` (repo root) — TIME-BOXED, justified, owned, AUTO-EXPIRING CVE
+# waivers ONLY, never a permanent ignore (workflow-cve-management). Each entry: CVE id + statement
+# (VEX reachability + compensating controls) + `expired_at`. Wired via the `trivyignores:` input on
+# the image-scan step in .github/workflows/worker-image.yml. Current waivers: 6 no-upstream-fix
+# Debian-base CVEs (perl-base + ncurses) not reachable in our execution path — re-evaluate on expiry.

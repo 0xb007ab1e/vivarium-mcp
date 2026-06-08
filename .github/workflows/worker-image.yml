@@ -108,6 +108,7 @@ jobs:
           scan-type: image
           image-ref: ${{ matrix.image }}@${{ steps.build.outputs.digest }}
           trivy-config: infra/trivy.yaml
+          trivyignores: .trivyignore.yaml   # time-boxed, justified, auto-expiring CVE waivers.
           format: sarif
           output: trivy-${{ matrix.name }}.sarif
           exit-code: "1"           # fail closed on HIGH/CRITICAL.

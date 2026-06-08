@@ -1,0 +1,50 @@
+# Trivy vulnerability waivers — TIME-BOXED, justified, owned (workflow-cve-management /
+# workflow-vuln-mgmt). Each entry AUTO-EXPIRES on `expired_at`; after that date Trivy re-includes
+# the CVE and the image-scan gate re-blocks — there are NO permanent ignores.
+#
+# Every entry below is a no-upstream-fix base-OS CVE in the `python:3.12-slim` (Debian 13) layer
+# shared by BOTH the worker and server images. VEX determination: NOT AFFECTED / not reachable in
+# our execution path. Compensating controls on the runtime (ADR-004): no network, read-only rootfs,
+# all Linux capabilities dropped, non-root (uid 65532), seccomp RuntimeDefault, gVisor (runsc).
+# A base-image digest bump does NOT clear these (Debian has shipped no fix); the durable fix is a
+# move to a distroless/perl-free base, tracked as future hardening.
+#
+# Owner: 0xb007ab1e.  Filed: 2026-06-08.  Re-evaluate on/before each expiry.
+vulnerabilities:
+  # ncurses (libncursesw6 / libtinfo6 / ncurses-base / ncurses-bin) — terminal/terminfo library.
+  # Not reachable: neither image runs an interactive TTY or feeds untrusted terminfo/terminal input
+  # to ncurses. HIGH; no Debian fix as of 2026-06-08.
+  - id: CVE-2025-69720
+    statement: >-
+      ncurses in the Debian base layer; no upstream fix. Not reachable — no interactive TTY and no
+      untrusted terminfo/terminal input in the worker or server. Compensating controls per ADR-004
+      (no-net, read-only rootfs, caps dropped, non-root, seccomp, gVisor).
+    expired_at: 2026-09-06
+  # perl-base — never invoked by either image (Python server / Python+JDK+Ghidra worker run no perl);
+  # present only as a transitive base dependency. No perl executes on any input, untrusted or not.
+  # No Debian fix as of 2026-06-08.
+  - id: CVE-2026-42496
+    statement: >-
+      perl-base in the Debian base; CRITICAL but no perl execution path exists in our runtime (no
+      perl is invoked on any input). No upstream fix. Compensating controls per ADR-004.
+    expired_at: 2026-09-06
+  - id: CVE-2026-8376
+    statement: >-
+      perl-base; CRITICAL; no perl execution path in our runtime; no upstream fix. Compensating
+      controls per ADR-004.
+    expired_at: 2026-09-06
+  - id: CVE-2026-42497
+    statement: >-
+      perl-base; no perl execution path in our runtime; no upstream fix. Compensating controls per
+      ADR-004.
+    expired_at: 2026-09-06
+  - id: CVE-2026-48962
+    statement: >-
+      perl-base; no perl execution path in our runtime; no upstream fix. Compensating controls per
+      ADR-004.
+    expired_at: 2026-09-06
+  - id: CVE-2026-9538
+    statement: >-
+      perl-base; no perl execution path in our runtime; no upstream fix. Compensating controls per
+      ADR-004.
+    expired_at: 2026-09-06
