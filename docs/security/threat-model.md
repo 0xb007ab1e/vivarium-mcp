@@ -152,3 +152,44 @@ attack (the control holds) and be a deterministic, hermetic test.
 - Exact Ghidra 12.1.2 patch version + headless integration (SME) — affects TB3 CVE surface.
 - Final RPC mechanism + serialization (recommended in `docs/contracts/rpc-protocol.md`) — affects TB2.
 - Project-store location (volume vs tmpfs) + verified-wipe mechanism — affects store-I/D (ADR-002).
+
+## 8. Addendum — v1.1 semantic-naming tools (ADR-007)
+
+The five new tools (`call_graph`, `callees`, `callers`, `analysis_order`, `function_context`) add
+surface but introduce **no new trust boundary**: still a single **stdio** process, still
+**read-only**, still **output-only** (the tools NEVER mutate the Ghidra DB). They sit on the
+existing TB1 (client args), TB3 (hostile binary → analyzer, for graph extraction), and TB4 (untrusted
+output → LLM) boundaries. The naming/synthesis intelligence runs on the **client** (no server-side
+LLM), so server-side agency risk (LLM08) is unchanged.
+
+New/relevant threats and controls:
+
+| STRIDE | Threat | Control |
+|--------|--------|---------|
+| **D** | **Graph-bomb** — a hostile binary presents an enormous fan-out call graph (millions of edges) to exhaust memory/time | Node/edge caps enforced at the tool boundary **before** the worker (`max_nodes ≤ 50k`, `max_edges ≤ 200k`); worker stops at the cap and sets `truncated`. (TB3-D / TB4-D, std-owasp-llm LLM04) |
+| **D/I** | **String-flood / injection via `referenced_strings`** — a function referencing huge or attacker-crafted string literals to exhaust output or smuggle a prompt-injection payload | `max_strings ≤ 1024` cap enforced at the tool boundary and again in the worker (de-duplicated by target address, `truncated` on clip); every value stays `Untrusted[...]` (`BINARY` origin) and is normalized at the `core.envelope.wrap` chokepoint — client renders inert. (TB3-D / TB4-I, ADR-005) |
+| **D** | **Deep recursion / long-chain** — a deeply nested or very long call chain | `max_depth ≤ 256` traversal cap; the **pure ordering core is iterative** (no Python recursion) so it cannot stack-overflow at any size. (TB3-D) |
+| **D** | **Cycle abuse** — densely cyclic/mutually-recursive graph to blow up an ordering algorithm | SCC condensation is `O(V+E)` Tarjan (iterative); cycles collapse to one component; deterministic, bounded by node/edge caps. (TB3-D) |
+| **I/S** | **Untrusted graph + decompiled C** — node names, comments, and pseudo-C in `function_context` carry indirect-prompt-injection payloads | All binary-derived names + decompiled C stay `Untrusted[...]`, normalized/annotated at the `core.envelope.wrap` chokepoint; client renders inert (TB4 — same control as abuse-case 5, ADR-005). |
+| **I** | **Misleading-incomplete graph** — unresolved indirect/virtual calls silently dropped would hide real control flow and mislead naming | Unresolved edges are **surfaced** in `unresolved_callers` / `has_unresolved_calls`, never dropped (honesty; the client knows the inference is incomplete). |
+| **T** | **DB tampering via naming** | Out of scope by design — tools are read-only/output-only; no rename/retype/comment-write/`runScript` exists (ADR-007). |
+
+**Residual risk (added to §5).** Synthesized C is **best-effort**: compile-rate and behavioral
+equivalence are **measured, not guaranteed** (ADR-007) — a client must not treat recompiled C as a
+faithful reproduction. Indirect prompt injection via graph node names / decompiled C in
+`function_context` carries the same residual risk as abuse-case 5 (the envelope is defense-in-depth,
+not a guarantee).
+
+### Abuse cases for the v1.1 build fan-out (append to §6; benign/synthetic fixtures only)
+
+9. **Graph-bomb** — a synthetic binary/graph with edge count above `max_edges` returns a
+   `truncated` graph capped at the limit, not an OOM; the server stays responsive. (TB3-D/TB4-D)
+10. **Deep-recursion chain** — a synthetic deep call chain is ordered without recursion/stack
+    overflow and respects `max_depth`. (TB3-D)
+11. **Cycle / mutual-recursion** — a synthetic cyclic graph condenses to a single recursive
+    component; the order is total and deterministic; `is_recursive`/`self_recursive` are set. (TB3-D)
+12. **Unresolved-edge surfacing** — a synthetic indirect/virtual call site appears in
+    `unresolved_callers` / `has_unresolved_calls`, is never silently dropped. (TB4-I)
+13. **Injection via graph node name / decompiled C in `function_context`** — a planted payload in a
+    node name or pseudo-C is returned `Untrusted`-wrapped + normalized, never as bare instructions.
+    (TB4-S/E — extends abuse-case 5)

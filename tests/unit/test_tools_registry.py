@@ -1,9 +1,9 @@
 """Unit tests for the Tier-1 tool registry and handlers (WS1).
 
-Verifies the allow-list is exactly the 22 frozen tools, that handlers authorize the session first
-(BOLA defense), apply semantic validation before touching the port, and delegate to the injected
-:class:`GhidraPort`. Collaborators are local fakes implementing the frozen interfaces (no real
-worker, no JVM — ADR-001).
+Verifies the allow-list is exactly the 27 frozen tools (22 Tier-1 + 5 v1.1 semantic-naming —
+ADR-007), that handlers authorize the session first (BOLA defense), apply semantic validation
+before touching the port, and delegate to the injected :class:`GhidraPort`. Collaborators are
+local fakes implementing the frozen interfaces (no real worker, no JVM — ADR-001).
 """
 
 from __future__ import annotations
@@ -187,6 +187,31 @@ class FakePort:
             analysis_complete=True,
         )
 
+    def call_graph(self, sid: str, a: s.CallGraphIn) -> s.CallGraphOut:
+        self._rec("call_graph", sid)
+        return s.CallGraphOut(nodes=[], edges=[], unresolved_callers=[])
+
+    def callees(self, sid: str, a: s.CalleesIn) -> s.CallNeighborsOut:
+        self._rec("callees", sid)
+        return s.CallNeighborsOut(neighbors=[], total=0)
+
+    def callers(self, sid: str, a: s.CallersIn) -> s.CallNeighborsOut:
+        self._rec("callers", sid)
+        return s.CallNeighborsOut(neighbors=[], total=0)
+
+    def analysis_order(self, sid: str, a: s.AnalysisOrderIn) -> s.AnalysisOrderOut:
+        self._rec("analysis_order", sid)
+        return s.AnalysisOrderOut(components=[], unresolved_callers=[], self_recursive=[])
+
+    def function_context(self, sid: str, a: s.FunctionContextIn) -> s.FunctionContext:
+        self._rec("function_context", sid)
+        return s.FunctionContext(
+            address="0x401000",
+            name=_u("main"),
+            signature=_u("int main()", DataOrigin.GHIDRA),
+            is_external=False,
+        )
+
 
 class RecordingRegistrar:
     """Captures ``add_tool`` calls so tests can assert exhaustive registration."""
@@ -229,9 +254,10 @@ def ctx() -> reg.ToolContext:
     )
 
 
-def test_catalog_is_exactly_22_unique_tools() -> None:
-    assert len(reg.TIER1_TOOL_NAMES) == 22
-    assert len(set(reg.TIER1_TOOL_NAMES)) == 22
+def test_catalog_is_exactly_27_unique_tools() -> None:
+    # 22 Tier-1 read-only tools + 5 v1.1 semantic-naming tools (ADR-007), all READ-ONLY.
+    assert len(reg.TIER1_TOOL_NAMES) == 27
+    assert len(set(reg.TIER1_TOOL_NAMES)) == 27
 
 
 def test_handler_table_matches_frozen_allow_list() -> None:
@@ -383,6 +409,18 @@ def test_session_analyze_uses_manager_lifecycle_keeps_worker_sha256(ctx: reg.Too
         ("search_bytes", {"session_id": _VALID_SID, "pattern_hex": "de??ff"}, "search_bytes"),
         ("search_strings", {"session_id": _VALID_SID, "query": "http"}, "search_strings"),
         ("program_metadata", {"session_id": _VALID_SID}, "program_metadata"),
+        # v1.1 semantic-naming tools (ADR-007) — same authorize-then-delegate contract.
+        ("call_graph", {"session_id": _VALID_SID}, "call_graph"),
+        ("call_graph", {"session_id": _VALID_SID, "root": "main"}, "call_graph"),
+        ("callees", {"session_id": _VALID_SID, "function": "main"}, "callees"),
+        ("callers", {"session_id": _VALID_SID, "function": "main"}, "callers"),
+        ("analysis_order", {"session_id": _VALID_SID}, "analysis_order"),
+        ("analysis_order", {"session_id": _VALID_SID, "root": "main"}, "analysis_order"),
+        (
+            "function_context",
+            {"session_id": _VALID_SID, "function": "main"},
+            "function_context",
+        ),
     ],
 )
 def test_each_worker_tool_authorizes_and_delegates(

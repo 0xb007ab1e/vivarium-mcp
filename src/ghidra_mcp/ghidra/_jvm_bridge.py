@@ -28,6 +28,12 @@ from typing import Any
 # Bounds the bridge enforces itself (defense-in-depth; the server also caps before calling).
 _MAX_RESULT_COUNT = 10_000
 _MAX_READ_BYTES = 1_048_576  # 1 MiB
+# Call-graph extraction caps (v1.1 — ADR-007): mirror the schema/threat-model §8 ceilings, NOT the
+# generic 10k result cap — otherwise the worker would silently clamp even its own 40k edge default
+# down to 10k, contradicting the documented contract (the server schema remains authoritative).
+_MAX_GRAPH_NODES = 50_000
+_MAX_GRAPH_EDGES = 200_000
+_MAX_GRAPH_DEPTH = 256
 _DEFAULT_MAX_FRAME_BYTES = 4 * 1024 * 1024  # 4 MiB (mirrors security.limits default)
 
 
@@ -179,6 +185,35 @@ class PyGhidraBackend:
     def program_metadata(self, params: dict[str, Any]) -> dict[str, Any]:
         """High-level program metadata."""
         return self._gh_program_metadata()
+
+    def call_graph(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Extract the bounded function call adjacency (v1.1 — ADR-007).
+
+        Args:
+            params: ``{"root": str | None, "max_depth": int, "max_nodes": int, "max_edges": int}``.
+
+        Returns:
+            ``{"nodes": [...], "edges": [...], "unresolved_callers": [...], "truncated": bool}``.
+        """
+        max_nodes = max(1, min(int(params.get("max_nodes", 10_000)), _MAX_GRAPH_NODES))
+        max_edges = max(1, min(int(params.get("max_edges", 40_000)), _MAX_GRAPH_EDGES))
+        max_depth = max(1, min(int(params.get("max_depth", 8)), _MAX_GRAPH_DEPTH))
+        return self._gh_call_graph(params.get("root"), max_depth, max_nodes, max_edges)
+
+    def referenced_strings(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List the (bounded) defined-string values a function references (v1.1 — ADR-007).
+
+        A function's referenced string literals are a strong semantic-naming signal. The server
+        wraps each returned value in the BINARY-origin untrusted envelope (ADR-005).
+
+        Args:
+            params: ``{"function": str, "max_strings": int}``.
+
+        Returns:
+            ``{"strings": [str, ...], "truncated": bool}`` — plain string values, capped.
+        """
+        max_strings = _clamp_count(int(params.get("max_strings", 64)))
+        return self._gh_referenced_strings(str(_require(params, "function")), max_strings)
 
     # --- JVM edge (PyGhidra calls live ONLY here; imported lazily) ---------------------------
     # NOTE: these helpers are the worker-only JVM boundary. They are excluded from server unit
@@ -817,6 +852,196 @@ class PyGhidraBackend:
             "function_count": int(program.getFunctionManager().getFunctionCount()),
             "analysis_complete": bool(self._analyzed),
         }
+
+    def _gh_call_graph(
+        self, root: str | None, max_depth: int, max_nodes: int, max_edges: int
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Extract a bounded resolved-call adjacency (v1.1 — ADR-007; worker-only per ADR-001).
+
+        Walks the FunctionManager + Listing/ReferenceManager to build a bounded adjacency: nodes are
+        functions in scope, edges are resolved caller-entry -> callee-entry calls. Functions with an
+        UNRESOLVED outgoing call site (indirect/virtual/computed whose target does not resolve to a
+        concrete function) are flagged (``has_unresolved_calls``) and listed in
+        ``unresolved_callers`` — surfaced, never silently dropped (ADR-005 honesty; threat-model
+        TB4). External/imported/thunk functions are marked ``is_external`` so the client does NOT
+        re-infer their KNOWN names. Stops at ``max_nodes``/``max_edges`` (and ``max_depth`` for a
+        scoped ``root``) and sets ``truncated`` (DoS cap). Returns plain JSON-serializable values
+        only (no Java object crosses the boundary); the server wraps the untrusted ``name`` fields.
+
+        Args:
+            root: Optional function (entry address hex or name) to scope reachability from; ``None``
+                walks the whole program.
+            max_depth: Maximum forward call depth from ``root`` (ignored when ``root`` is ``None``).
+            max_nodes: Hard cap on emitted nodes.
+            max_edges: Hard cap on distinct emitted edges.
+
+        Returns:
+            ``{"nodes": [...], "edges": [...], "unresolved_callers": [...], "truncated": bool}``.
+        """
+        # integration-validate (Ghidra 12.1.2 javadoc — confirm at the gated image build):
+        #   FunctionManager.getFunctions(bool) / getFunctionAt / getFunctionContaining;
+        #   Function.getEntryPoint/getName/getBody/isExternal/isThunk; Listing.getInstructions(
+        #   AddressSetView, bool); Instruction.getFlowType().isCall() / getReferencesFrom();
+        #   Reference.getReferenceType().isCall() / getToAddress().
+        program = self._require_program()
+        manager = program.getFunctionManager()
+        listing = program.getListing()
+        ref_mgr = program.getReferenceManager()
+
+        # --- phase 1: the in-scope node set (capped at max_nodes → truncated) ---
+        nodes: dict[str, Any] = {}  # entry-hex -> Function (insertion order = deterministic)
+        truncated = False
+
+        def _add(func: Any) -> bool:
+            """Add a function to the node set; return False (and signal truncation) if capped."""
+            entry = str(func.getEntryPoint())
+            if entry in nodes:
+                return True
+            if len(nodes) >= max_nodes:
+                return False
+            nodes[entry] = func
+            return True
+
+        if root is None:
+            for func in manager.getFunctions(True):
+                if not _add(func):
+                    truncated = True
+                    break
+        else:
+            seed = self._resolve_function(str(root))
+            _add(seed)
+            frontier = [seed]
+            depth = 0
+            while frontier and depth < max_depth:
+                nxt: list[Any] = []
+                for caller in frontier:
+                    for callee in self._iter_call_sites(caller, listing, ref_mgr, manager):
+                        if callee is None:
+                            continue
+                        was_known = str(callee.getEntryPoint()) in nodes
+                        if not _add(callee):
+                            truncated = True
+                        elif not was_known:
+                            nxt.append(callee)
+                frontier = nxt
+                depth += 1
+
+        # --- phase 2: resolved edges over the final node set + per-node unresolved flag ---
+        edges: list[dict[str, str]] = []
+        seen_edges: set[tuple[str, str]] = set()
+        unresolved_callers: list[str] = []
+        node_rows: list[dict[str, Any]] = []
+        for entry, func in nodes.items():
+            has_unresolved = False
+            for callee in self._iter_call_sites(func, listing, ref_mgr, manager):
+                if callee is None:
+                    has_unresolved = True
+                    continue
+                callee_entry = str(callee.getEntryPoint())
+                if callee_entry not in nodes:
+                    continue  # resolved but beyond the scope/depth boundary — not "unresolved"
+                key = (entry, callee_entry)
+                if key in seen_edges:
+                    continue
+                if len(edges) >= max_edges:
+                    truncated = True
+                    continue
+                seen_edges.add(key)
+                edges.append({"from_address": entry, "to_address": callee_entry})
+            if has_unresolved:
+                unresolved_callers.append(entry)
+            node_rows.append(
+                {
+                    "address": entry,
+                    "name": _to_text(func.getName()),
+                    "is_external": bool(func.isExternal()) or bool(func.isThunk()),
+                    "has_unresolved_calls": has_unresolved,
+                }
+            )
+        return {
+            "nodes": node_rows,
+            "edges": edges,
+            "unresolved_callers": unresolved_callers,
+            "truncated": truncated,
+        }
+
+    def _iter_call_sites(
+        self, func: Any, listing: Any, ref_mgr: Any, manager: Any
+    ) -> Any:  # pragma: no cover - JVM edge
+        """Yield one target per call site in ``func``: a callee ``Function`` or ``None``.
+
+        Iterates the function's call instructions; for each, the resolved call target is yielded
+        as a Ghidra ``Function``. A call site whose target cannot be resolved to a concrete
+        function (indirect/virtual/computed — e.g. ``call rax``) yields ``None`` so the caller can
+        flag an unresolved edge (ADR-005 honesty; never silently dropped).
+
+        Args:
+            func: The caller Ghidra ``Function``.
+            listing: The program ``Listing``.
+            ref_mgr: The program ``ReferenceManager`` (reserved for call-ref fallbacks).
+            manager: The program ``FunctionManager`` (resolves a target address to a function).
+
+        Yields:
+            A callee ``Function`` for each resolved call site, or ``None`` for an unresolved one.
+        """
+        del ref_mgr  # call targets come from the instruction's own references; kept for symmetry
+        for instr in listing.getInstructions(func.getBody(), True):
+            if not bool(instr.getFlowType().isCall()):
+                continue
+            target = None
+            for ref in instr.getReferencesFrom():
+                if not bool(ref.getReferenceType().isCall()):
+                    continue
+                fn = manager.getFunctionAt(ref.getToAddress())
+                if fn is None:
+                    fn = manager.getFunctionContaining(ref.getToAddress())
+                if fn is not None:
+                    target = fn
+                    break
+            yield target
+
+    def _gh_referenced_strings(
+        self, function: str, max_strings: int
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """List the (bounded) defined-string values ``function`` references (v1.1 — ADR-007).
+
+        Scans the function body's outgoing references; any reference whose target is defined data
+        with a string value contributes that value (de-duplicated by target address, capped at
+        ``max_strings`` → ``truncated``). Plain string values only; the server wraps each in the
+        BINARY-origin untrusted envelope (ADR-005).
+
+        Args:
+            function: Function entry address (hex) or name.
+            max_strings: Hard cap on returned string values (already clamped).
+
+        Returns:
+            ``{"strings": [str, ...], "truncated": bool}``.
+        """
+        # integration-validate: ReferenceManager.getReferenceSourceIterator(AddressSetView, bool) /
+        # getReferencesFrom(Address); Listing.getDataContaining(Address); Data.hasStringValue().
+        program = self._require_program()
+        func = self._resolve_function(function)
+        listing = program.getListing()
+        ref_mgr = program.getReferenceManager()
+        seen: set[str] = set()
+        values: list[str] = []
+        truncated = False
+        for src in ref_mgr.getReferenceSourceIterator(func.getBody(), True):
+            for ref in ref_mgr.getReferencesFrom(src):
+                to_addr = ref.getToAddress()
+                key = str(to_addr)
+                if key in seen:
+                    continue
+                data = listing.getDataContaining(to_addr)
+                value = _string_value(data) if data is not None else None
+                if value is None:
+                    continue
+                seen.add(key)
+                if len(values) >= max_strings:
+                    truncated = True
+                    continue
+                values.append(value)
+        return {"strings": values, "truncated": truncated}
 
     # --- private JVM helpers (lazy imports only; never at module scope) -----------------------
     def _require_program(self) -> Any:  # pragma: no cover - JVM edge

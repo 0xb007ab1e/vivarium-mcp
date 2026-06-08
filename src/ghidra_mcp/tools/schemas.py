@@ -632,6 +632,223 @@ class SearchStringsOut(StringListOut):
 
 
 # =====================================================================================
+# Call graph / semantic-naming support (v1.1 — ADR-007)
+# =====================================================================================
+# Bounds for graph-shaped tools (DoS — a hostile binary can present a huge/deep/cyclic call graph;
+# threat-model TB4 / std-owasp-llm LLM04). These cap node/edge fan-out and traversal depth BEFORE
+# the worker is asked, mirrored in core.validation / security.limits.
+_MAX_GRAPH_NODES = 50_000
+_MAX_GRAPH_EDGES = 200_000
+_MAX_GRAPH_DEPTH = 256
+_DEFAULT_GRAPH_DEPTH = 8
+
+
+class CallGraphIn(_SessionScopedIn):
+    """Arguments for ``call_graph`` — extract the (bounded) function call adjacency.
+
+    The worker returns RESOLVED call edges (caller -> callees) plus the ids of functions with
+    UNRESOLVED outgoing edges (indirect/virtual/computed calls). Output is bounded by node/edge
+    caps; ``truncated`` flags a clipped view (ADR-005 honesty).
+
+    Attributes:
+        root: Optional function (entry address hex or name) to scope the graph to its reachable
+            sub-graph; omit for the whole program (still node/edge-capped).
+        max_depth: Maximum call depth to traverse from ``root`` (ignored when ``root`` is omitted),
+            bounded to guard a pathologically deep graph (DoS).
+        max_nodes: Hard cap on returned nodes (the worker stops and sets ``truncated``).
+        max_edges: Hard cap on returned edges.
+    """
+
+    root: str | None = Field(default=None, max_length=_MAX_NAME)
+    max_depth: int = Field(default=_DEFAULT_GRAPH_DEPTH, ge=1, le=_MAX_GRAPH_DEPTH)
+    max_nodes: int = Field(default=10_000, ge=1, le=_MAX_GRAPH_NODES)
+    max_edges: int = Field(default=40_000, ge=1, le=_MAX_GRAPH_EDGES)
+
+
+class CallEdge(_Out):
+    """One resolved call edge (caller -> callee). Addresses are server-safe (normalized).
+
+    Attributes:
+        from_address: Caller function entry address (hex) — safe.
+        to_address: Callee function entry address (hex) — safe.
+    """
+
+    from_address: str
+    to_address: str
+
+
+class CallGraphNode(_Out):
+    """One function node in the call graph.
+
+    Attributes:
+        address: Function entry address (hex) — safe.
+        name: Function name as Ghidra knows it — untrusted (attacker-influenced symbol).
+        is_external: Whether the function is an imported/external/thunk function whose name is
+            KNOWN (not to be re-inferred) — safe boolean.
+        has_unresolved_calls: Whether this node has at least one unresolved (indirect/virtual)
+            outgoing call edge not represented in ``edges`` — safe boolean (honesty flag).
+    """
+
+    address: str
+    name: Untrusted[str]
+    is_external: bool
+    has_unresolved_calls: bool
+
+
+class CallGraphOut(_Out):
+    """Result of ``call_graph`` — a bounded adjacency view of the program's calls.
+
+    Attributes:
+        nodes: Bounded list of function nodes.
+        edges: Bounded list of resolved call edges.
+        unresolved_callers: Entry addresses (hex) of nodes with unresolved outgoing calls — safe;
+            surfaced, never silently dropped (ADR-005, threat-model TB4).
+        truncated: Whether a node/edge cap clipped the graph.
+    """
+
+    nodes: list[CallGraphNode]
+    edges: list[CallEdge]
+    unresolved_callers: list[str]
+    truncated: bool = False
+
+
+class CalleesIn(_Page):
+    """Arguments for ``callees`` — the functions a given function directly calls (one hop).
+
+    Attributes:
+        function: The function (entry address hex or name) to list direct callees of.
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class CallersIn(_Page):
+    """Arguments for ``callers`` — the functions that directly call a given function (one hop).
+
+    Attributes:
+        function: The function (entry address hex or name) to list direct callers of.
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class CallNeighborsOut(_Out):
+    """Result of ``callees`` / ``callers`` — a bounded list of one-hop neighbor functions.
+
+    Attributes:
+        neighbors: Bounded list of neighbor function nodes.
+        total: Total neighbors (for pagination) — safe count.
+        unresolved: Whether the target has unresolved (indirect/virtual) edges in this direction
+            not represented in ``neighbors`` — safe honesty flag (only meaningful for ``callees``).
+        truncated: Whether the page was capped.
+    """
+
+    neighbors: list[CallGraphNode]
+    total: int
+    unresolved: bool = False
+    truncated: bool = False
+
+
+class AnalysisOrderIn(CallGraphIn):
+    """Arguments for ``analysis_order`` — leaf-first ordering over the (bounded) call graph.
+
+    Same bounds/scoping as ``call_graph``; the server extracts the adjacency (worker) and computes
+    the pure leaf-first reverse-topological order over SCCs (server-side core — ADR-007/ADR-001).
+    """
+
+
+class OrderedComponent(_Out):
+    """One strongly-connected component in leaf-first analysis order.
+
+    Attributes:
+        members: Function entry addresses (hex) in this component — safe. More than one member is a
+            mutual-recursion cycle; a single member may still be self-recursive.
+        is_recursive: Whether the component represents recursion (a cycle or a self-loop) — safe.
+    """
+
+    members: list[str]
+    is_recursive: bool
+
+
+class AnalysisOrderOut(_Out):
+    """Result of ``analysis_order`` — the leaf-first plan a client walks to name callees first.
+
+    Attributes:
+        components: Strongly-connected components in leaf-first reverse-topological order (sinks
+            first, entry roots last) — names assigned to earlier components carry forward.
+        unresolved_callers: Entry addresses (hex) with unresolved outgoing calls — safe honesty
+            flag (their inferred purpose rests on incomplete call info).
+        self_recursive: Entry addresses (hex) with a direct self-loop — safe.
+        truncated: Whether the underlying graph was node/edge-capped before ordering.
+    """
+
+    components: list[OrderedComponent]
+    unresolved_callers: list[str]
+    self_recursive: list[str]
+    truncated: bool = False
+
+
+class FunctionContextIn(_SessionScopedIn):
+    """Arguments for ``function_context`` — the bundle a client needs to name/synthesize one func.
+
+    Aggregates (server-side) the per-function facts the client LLM uses to infer a semantic name
+    and draft recompilable C: decompiled pseudo-C, signature, direct callees/callers, referenced
+    strings, and the names already assigned to its callees (passed back by the client as it walks
+    leaf-first). Every binary-derived field is untrusted-wrapped; assigned names the client sends
+    in are echoed back only as context and are NOT trusted as instructions.
+
+    Attributes:
+        function: The function (entry address hex or name) to build context for.
+        include_decompilation: Whether to include the decompiled pseudo-C (default True).
+        max_callees: Cap on direct callees included.
+        max_callers: Cap on direct callers included.
+        max_strings: Cap on referenced strings included.
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    include_decompilation: bool = Field(default=True)
+    max_callees: int = Field(default=64, ge=0, le=1024)
+    max_callers: int = Field(default=64, ge=0, le=1024)
+    max_strings: int = Field(default=64, ge=0, le=1024)
+
+
+class FunctionContext(_Out):
+    """The per-function context bundle for client-side naming + C synthesis (ADR-007).
+
+    Server-assembled from several read-only tools; the server performs NO naming or C synthesis
+    (no server-side LLM — locked decision #1). All binary-derived fields are untrusted-wrapped
+    (ADR-005); the client treats them as inert data.
+
+    Attributes:
+        address: Function entry address (hex) — safe.
+        name: Current Ghidra name — untrusted.
+        signature: Recovered signature — untrusted.
+        is_external: Whether this is an imported/external/thunk function with a KNOWN name (the
+            client should NOT re-infer a name for it) — safe.
+        decompilation: The decompiled pseudo-C, or ``None`` when not requested — untrusted
+            (GHIDRA origin; prime injection vector — ADR-005).
+        callees: Direct callee function nodes (bounded) — for naming bottom-up context.
+        callers: Direct caller function nodes (bounded) — for usage context.
+        referenced_strings: String literals referenced by this function (bounded) — untrusted
+            (BINARY origin), strong semantic signal for naming.
+        has_unresolved_calls: Whether the function makes unresolved (indirect/virtual) calls — safe
+            honesty flag (the context is incomplete).
+        truncated: Whether any bundled list was capped.
+    """
+
+    address: str
+    name: Untrusted[str]
+    signature: Untrusted[str]
+    is_external: bool
+    decompilation: Untrusted[str] | None = None
+    callees: list[CallGraphNode] = Field(default_factory=list)
+    callers: list[CallGraphNode] = Field(default_factory=list)
+    referenced_strings: list[Untrusted[str]] = Field(default_factory=list)
+    has_unresolved_calls: bool = False
+    truncated: bool = False
+
+
+# =====================================================================================
 # Program metadata
 # =====================================================================================
 class ProgramMetadataIn(_SessionScopedIn):

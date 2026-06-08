@@ -73,9 +73,10 @@ def test_expected_sha256_pattern_enforced() -> None:
 
 @pytest.mark.critical
 def test_catalog_count_matches_registry() -> None:
-    # 22 Tier-1 tools per the frozen catalog; registry list is the single source for registration.
+    # 27 tools per the frozen catalog: 22 Tier-1 read-only + 5 v1.1 semantic-naming (ADR-007).
+    # The registry list is the single source for registration.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 22
+    assert len(TIER1_TOOL_NAMES) == 27
 
 
 @pytest.mark.critical

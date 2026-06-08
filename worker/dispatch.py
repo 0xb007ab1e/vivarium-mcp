@@ -68,6 +68,9 @@ RPC_METHODS = frozenset(
         "search_bytes",
         "search_strings",
         "program_metadata",
+        # call-graph + naming-context extraction (v1.1 — ADR-007; worker-only, ADR-001)
+        "call_graph",
+        "referenced_strings",
         "ping",
         "shutdown",
     }
@@ -177,6 +180,14 @@ class GhidraBackend(Protocol):
 
     def program_metadata(self, params: dict[str, Any]) -> dict[str, Any]:
         """High-level program metadata."""
+        ...
+
+    def call_graph(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Extract the bounded call adjacency (resolved edges + unresolved callers) — v1.1."""
+        ...
+
+    def referenced_strings(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List the (bounded) defined-string values one function references — v1.1."""
         ...
 
 

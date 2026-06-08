@@ -387,6 +387,104 @@ class FakeGhidraPort:
             analysis_complete=True,
         )
 
+    # --- call-graph / semantic-naming operations (v1.1 — ADR-007; deterministic fakes) ---
+    def call_graph(self, sid: str, a: s.CallGraphIn) -> s.CallGraphOut:
+        """Return a deterministic 2-node call graph (one resolved edge, no unresolved)."""
+        self._maybe_fail()
+        return s.CallGraphOut(
+            nodes=[
+                s.CallGraphNode(
+                    address="0x00401000",
+                    name=_u("main"),
+                    is_external=False,
+                    has_unresolved_calls=False,
+                ),
+                s.CallGraphNode(
+                    address="0x00401100",
+                    name=_u("puts"),
+                    is_external=True,
+                    has_unresolved_calls=False,
+                ),
+            ],
+            edges=[s.CallEdge(from_address="0x00401000", to_address="0x00401100")],
+            unresolved_callers=[],
+            truncated=False,
+        )
+
+    def callees(self, sid: str, a: s.CalleesIn) -> s.CallNeighborsOut:
+        """Return a deterministic one-hop callee list."""
+        self._maybe_fail()
+        return s.CallNeighborsOut(
+            neighbors=[
+                s.CallGraphNode(
+                    address="0x00401100",
+                    name=_u("puts"),
+                    is_external=True,
+                    has_unresolved_calls=False,
+                )
+            ],
+            total=1,
+            unresolved=False,
+            truncated=False,
+        )
+
+    def callers(self, sid: str, a: s.CallersIn) -> s.CallNeighborsOut:
+        """Return a deterministic one-hop caller list."""
+        self._maybe_fail()
+        return s.CallNeighborsOut(
+            neighbors=[
+                s.CallGraphNode(
+                    address="0x00401000",
+                    name=_u("main"),
+                    is_external=False,
+                    has_unresolved_calls=False,
+                )
+            ],
+            total=1,
+            unresolved=False,
+            truncated=False,
+        )
+
+    def analysis_order(self, sid: str, a: s.AnalysisOrderIn) -> s.AnalysisOrderOut:
+        """Return a deterministic leaf-first order (callee before caller)."""
+        self._maybe_fail()
+        return s.AnalysisOrderOut(
+            components=[
+                s.OrderedComponent(members=["0x00401100"], is_recursive=False),
+                s.OrderedComponent(members=["0x00401000"], is_recursive=False),
+            ],
+            unresolved_callers=[],
+            self_recursive=[],
+            truncated=False,
+        )
+
+    def function_context(self, sid: str, a: s.FunctionContextIn) -> s.FunctionContext:
+        """Return a deterministic per-function naming/synthesis context bundle."""
+        self._maybe_fail()
+        return s.FunctionContext(
+            address="0x00401000",
+            name=_u("main"),
+            signature=_ug("int main(int argc, char **argv)"),
+            is_external=False,
+            decompilation=(
+                _ug('int main(int argc, char **argv){ puts("hi"); return 0; }')
+                if a.include_decompilation
+                else None
+            ),
+            callees=[
+                s.CallGraphNode(
+                    address="0x00401100",
+                    name=_u("puts"),
+                    is_external=True,
+                    has_unresolved_calls=False,
+                )
+            ],
+            callers=[],
+            referenced_strings=[_u("hi")],
+            has_unresolved_calls=False,
+            truncated=False,
+        )
+
 
 @pytest.fixture
 def fake_port() -> FakeGhidraPort:
