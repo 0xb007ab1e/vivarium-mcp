@@ -1,0 +1,243 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# Containerfile.worker — hardened, network-isolated Ghidra analysis worker
+# =============================================================================
+# Realizes ADR-003 (container-only Ghidra 11.x + JDK 21, pinned by digest) and is the image
+# hardened at RUNTIME by deploy/ per ADR-004 (rootless, ro-rootfs, all caps dropped, no network,
+# seccomp RuntimeDefault, gVisor/runsc, resource limits). This image hosts the WS2 `worker/`
+# entrypoint that speaks JSON-RPC 2.0 over the per-session UDS (docs/contracts/rpc-protocol.md).
+#
+# TRUST BOUNDARY 3 (HOSTILE INPUT): this container parses attacker-controlled binaries through the
+# Ghidra JVM. It is a DISPOSABLE fault domain — one worker per session, killed on eviction/timeout
+# (ADR-002). It MUST be able to do nothing but read its mounted binary, analyze it, and answer RPC
+# on its own socket. No network, no host access, no persistence beyond a session-scoped tmpfs/volume.
+#
+# -----------------------------------------------------------------------------
+# SUPPLY CHAIN (std-supplychain / ADR-003) — DIGEST PINNING IS GATED (PLAN §6)
+# -----------------------------------------------------------------------------
+# Base images are pinned BY DIGEST (@sha256:...), NEVER by floating tag. Resolving a digest needs
+# a network pull (GATED). Until a maintainer vets + pins the real digest, we use the same
+# REPLACE_WITH_DIGEST_FOR_<image:tag> placeholder convention as .github/workflows/ci.yml.
+#
+#   GATED ITEM W1: base build image (JDK 21 + build tooling to unpack Ghidra)
+#   GATED ITEM W2: base runtime image (JDK 21 runtime ONLY — no shell/pkg-mgr where feasible)
+#   GATED ITEM W3: Ghidra 11.x release artifact (downloaded + CHECKSUM-VERIFIED, not pulled as image)
+#
+# The exact Ghidra 11.x patch version is an open SME item (ADR-003 / PLAN §9). The build ARG below
+# is the single place to set it; the release zip's published SHA-256 is verified before unzip.
+# =============================================================================
+
+# --- ARGs (set at build; pinned values are GATED — see notes above) -----------------------------
+# Ghidra release version + the publisher's SHA-256 of the release zip (verified during build).
+ARG GHIDRA_VERSION=12.1.2
+ARG GHIDRA_RELEASE_TAG=Ghidra_12.1.2_build
+ARG GHIDRA_ZIP_SHA256=b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d
+ARG GHIDRA_ZIP_URL=https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip
+
+# =============================================================================
+# Stage 1: builder — fetch + verify + unpack Ghidra. Build tooling stays HERE, not in runtime.
+# =============================================================================
+# GATED ITEM W1: pin this base by digest (a JDK 21 image with a shell + unzip + curl).
+FROM eclipse-temurin:21-jdk@sha256:b9142586f9712700c6c9e07adcedfb18608b1a3a056e4001423a3354adfa9d80 AS builder
+
+ARG GHIDRA_VERSION
+ARG GHIDRA_RELEASE_TAG
+ARG GHIDRA_ZIP_SHA256
+ARG GHIDRA_ZIP_URL
+
+# hadolint ignore=DL3008,DL3009
+# Build-only tooling (unzip/ca-certs). Never ships to the runtime stage.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl unzip; \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/ghidra-src
+
+# GATED ITEM W3: download the Ghidra release zip and VERIFY its publisher SHA-256 BEFORE unzip.
+# A checksum mismatch FAILS THE BUILD (fail closed — supply-chain integrity, no tampered artifact).
+# The download itself is a GATED network action; a maintainer supplies the pinned URL + SHA-256.
+RUN set -eux; \
+    echo "${GHIDRA_ZIP_SHA256}  ghidra.zip" > ghidra.zip.sha256; \
+    curl -fsSL --proto '=https' --tlsv1.2 -o ghidra.zip "${GHIDRA_ZIP_URL}"; \
+    sha256sum -c ghidra.zip.sha256; \
+    unzip -q ghidra.zip; \
+    rm -f ghidra.zip ghidra.zip.sha256; \
+    # The zip extracts to ghidra_<version>_PUBLIC/. Normalize to a stable path.
+    mv ghidra_*_PUBLIC /opt/ghidra; \
+    # Strip components a headless analyzer never needs (GUI, docs, samples) to shrink attack
+    # surface + image size. Keep support/, Ghidra/, and the headless analyzer.
+    rm -rf /opt/ghidra/docs /opt/ghidra/GPL/DemanglerGnu/build 2>/dev/null || true
+
+# =============================================================================
+# Stage 1b: pybuilder — build the ghidra_mcp wheel (PEP 517) so the runtime install is OFFLINE.
+# =============================================================================
+# Building from a source tree needs a PEP 517 backend (hatchling), which is NOT in requirements.lock
+# (the lock pins RUNTIME deps only). Resolving the backend is a network action — confined HERE in a
+# builder stage (network during the gated build is already accepted: Ghidra download + apt). The
+# runtime stage then installs ONLY the resulting wheel `--no-index`, so the final image build does
+# no network resolution. Same pinned base as runtime → reproducible toolchain.
+FROM python:3.12-slim@sha256:090ba77e2958f6af52a5341f788b50b032dd4ca28377d2893dcf1ecbdfdfe203 AS pybuilder
+ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=ignore
+WORKDIR /build
+COPY pyproject.toml README.md LICENSE NOTICE /build/
+COPY src/ /build/src/
+# hadolint ignore=DL3013
+# `build` + the hatchling backend are build-only and never ship to runtime. integration-validate:
+# if README.md/LICENSE/NOTICE move, update the COPY above (hatchling reads license-files at build).
+RUN set -eux; \
+    python -m pip install --no-cache-dir build hatchling; \
+    python -m build --wheel --outdir /build/dist /build
+
+# =============================================================================
+# Stage 2: runtime — Python 3.12 + JDK 21 + Ghidra + PyGhidra + the worker code. NO build tools.
+# =============================================================================
+# RUNTIME BASE (human-decided): python:3.12-slim, pinned BY DIGEST (ADR-003 / std-supplychain).
+# The worker entrypoint is the Python launcher `python -m worker`, which boots the PyGhidra/JPype
+# JVM bridge — so the runtime needs CPython AND a JDK. We get CPython from this slim base and copy
+# the EXACT, digest-pinned JDK 21 out of the builder stage (reproducible: no apt openjdk pull, no
+# second base image, the JVM is byte-identical to the one Ghidra was unpacked against).
+FROM python:3.12-slim@sha256:090ba77e2958f6af52a5341f788b50b032dd4ca28377d2893dcf1ecbdfdfe203 AS runtime
+
+ARG GHIDRA_VERSION
+LABEL org.opencontainers.image.title="ghidra-mcp-worker" \
+      org.opencontainers.image.description="Hardened, network-isolated headless Ghidra analysis worker (TB3)." \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.source="https://github.com/OWNER/ghidra-mcp" \
+      org.ghidra-mcp.ghidra-version="${GHIDRA_VERSION}" \
+      org.ghidra-mcp.trust-boundary="TB3-hostile-input" \
+      org.ghidra-mcp.network="none"
+
+# --- Non-root user (CIS / topic-container-k8s) ---------------------------------------------------
+# Fixed high UID:GID so deploy/ can map ownership of the socket dir + scratch deterministically.
+# No login shell, no home writable content beyond the runtime tmpfs. The slim base uses Debian's
+# adduser/addgroup (no shadow-utils groupadd/useradd guaranteed); --system avoids reserving a login.
+RUN set -eux; \
+    addgroup --system --gid "65532" worker; \
+    adduser --system --uid "65532" --gid "65532" --no-create-home \
+            --home /home/worker --shell /usr/sbin/nologin worker
+
+# --- JDK 21 (copied from the digest-pinned builder; NO apt openjdk → reproducible) ---------------
+# eclipse-temurin installs the JDK at /opt/java/openjdk; lift it verbatim. JAVA_TOOL_OPTIONS below
+# and JPype (via PyGhidra) discover the JVM through JAVA_HOME → ${JAVA_HOME}/lib/server/libjvm.so.
+# integration-validate: confirm the temurin 21-jdk layout is /opt/java/openjdk on this digest
+# (it is for current eclipse-temurin images); the prior /opt/java/openjdk HEALTHCHECK assumed it too.
+COPY --from=builder --chown=root:root /opt/java/openjdk /opt/java/openjdk
+ENV JAVA_HOME=/opt/java/openjdk
+ENV PATH="/opt/java/openjdk/bin:${PATH}"
+
+# --- Ghidra (from builder; upstream zip already SHA-256-verified) --------------------------------
+COPY --from=builder --chown=root:root /opt/ghidra /opt/ghidra
+ENV GHIDRA_INSTALL_DIR=/opt/ghidra
+ENV PATH="/opt/ghidra/support:${PATH}"
+
+# --- Python: ghidra_mcp package + PyGhidra + the worker code -------------------------------------
+# Install order is supply-chain-deliberate (std-supplychain) — and FULLY OFFLINE in this stage
+# (no index resolution touches the network during the final image build):
+#   1. Runtime deps from the HASH-PINNED lockfile (`--require-hashes`): any tampered/substituted
+#      wheel fails the build (fail closed). mcp + pydantic + their transitive closure live here.
+#   2. The ghidra_mcp wheel PREBUILT in the pybuilder stage, installed `--no-deps` + `--no-index`
+#      (deps already satisfied by step 1; this just lands the importable `ghidra_mcp.*` tree incl.
+#      `ghidra_mcp.ghidra._jvm_bridge`). Building the wheel upstream keeps this stage off the index.
+#   3. PyGhidra from the wheel BUNDLED INSIDE the SHA-256-verified Ghidra dist via `--no-index`
+#      (offline) — its integrity is inherited from the already-verified zip, which is strictly
+#      better than an unpinned PyPI pull. JPype1 (PyGhidra's native dep) also ships in that dist
+#      dir, so `--find-links <dir> --no-index` resolves the whole closure offline.
+# Everything installs into the system site-packages (the image runs a single app; a venv adds no
+# isolation here and the rootfs is read-only at runtime anyway). pip's cache is disabled to keep
+# layers lean and deterministic.
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_ROOT_USER_ACTION=ignore
+
+# Inputs: the hash-pinned runtime lock, the prebuilt ghidra_mcp wheel (from pybuilder), and the
+# `worker/` modules. `worker/` is copied to a stable, root-owned location on the import path (see
+# PYTHONPATH below); it is NOT part of the hatch wheel (pyproject packages only `src/ghidra_mcp`),
+# so it ships as plain modules the launcher imports. Root-owned + read-only-rootfs ⇒ the worker
+# user cannot modify its own code at runtime (defense in depth).
+COPY --chown=root:root requirements.lock /opt/ghidra-mcp/requirements.lock
+COPY --from=pybuilder --chown=root:root /build/dist /opt/ghidra-mcp/dist
+COPY --chown=root:root worker/ /opt/ghidra-mcp-worker/worker/
+
+# `worker/` is plain modules (NOT in the hatch wheel) — put its parent on the import path BEFORE the
+# install/validate RUN so the `import worker` validation below AND the runtime `python -m worker`
+# entrypoint both resolve. (ENV persists to the final image.) PYTHONDONTWRITEBYTECODE keeps the
+# read-only rootfs from needing a writable __pycache__ at import time.
+ENV PYTHONPATH=/opt/ghidra-mcp-worker \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Pinned, hashed runtime deps; then the prebuilt wheel + bundled PyGhidra, both OFFLINE (--no-index).
+# integration-validate: the bundled PyGhidra wheel path inside the 12.1.2 dist. Ghidra ships it at
+#   /opt/ghidra/Ghidra/Features/PyGhidra/pypkg/dist/*.whl   (preferred — a built wheel + JPype1)
+# with the support helper at /opt/ghidra/support/pyghidra. CONFIRM the exact glob against the real
+# 12.1.2 layout at build; if the dist ships an sdist/dir instead of a wheel, point --find-links at
+# that dir (the `pip install --no-index --find-links` below resolves whatever wheels/sdists exist).
+RUN set -eux; \
+    PYGHIDRA_DIST="/opt/ghidra/Ghidra/Features/PyGhidra/pypkg/dist"; \
+    python -m pip install --no-cache-dir --require-hashes \
+        --requirement /opt/ghidra-mcp/requirements.lock; \
+    python -m pip install --no-cache-dir --no-deps --no-index \
+        --find-links /opt/ghidra-mcp/dist ghidra-mcp; \
+    test -d "${PYGHIDRA_DIST}" || { echo "PyGhidra dist not found at ${PYGHIDRA_DIST}" >&2; exit 1; }; \
+    python -m pip install --no-cache-dir --no-index \
+        --find-links "${PYGHIDRA_DIST}" pyghidra; \
+    rm -rf /opt/ghidra-mcp/dist; \
+    python -c "import ghidra_mcp.ghidra._jvm_bridge"; \
+    python -c "import worker, worker.dispatch, worker.server"; \
+    python -c "import pyghidra"
+
+# --- Runtime environment (mirrors security/limits.py defaults; deploy/ also passes these) --------
+# The worker enforces its own wall-clock + memory bounds in addition to the server-side kill (F7).
+# These are conservative built-in fallbacks; deploy/ injects the resolved values from config.
+ENV GHIDRA_MCP_RPC_SOCKET_DIR=/run/ghidra-mcp \
+    GHIDRA_MCP_ANALYSIS_TIMEOUT_SECONDS=600 \
+    GHIDRA_MCP_TOOL_TIMEOUT_SECONDS=60 \
+    GHIDRA_MCP_MAX_RESPONSE_BYTES=4194304 \
+    GHIDRA_MCP_MAX_BINARY_BYTES=134217728 \
+    # JVM: cap the heap (deploy/ cgroup mem limit is the hard wall; this is the JVM-level bound).
+    # -XX:+ExitOnOutOfMemoryError so an OOM kills the JVM (→ worker-unavailable → evict) rather
+    # than thrashing. No network properties; Ghidra runs fully offline.
+    # -Duser.home: Ghidra (AppConfig/LaunchSupport -save) reads Java's `user.home` system property
+    # — NOT $HOME — and it resolves from the passwd entry (/home/worker, absent under
+    # --no-create-home + read-only rootfs). Override it to the writable /tmp/ghidra tmpfs so Ghidra
+    # can save its JDK config + user settings. (Verified via the in-image PyGhidra boot smoke.)
+    JAVA_TOOL_OPTIONS="-XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75.0 -Djava.awt.headless=true -Djava.net.preferIPv4Stack=true -Djava.io.tmpdir=/tmp/ghidra -Duser.home=/tmp/ghidra"
+
+# --- Scratch / writable surfaces -----------------------------------------------------------------
+# The rootfs is READ-ONLY at runtime (deploy/). The worker writes ONLY to tmpfs mounts that deploy/
+# provides: the per-session project store and a JVM/tmp scratch. Declared here so the image is
+# self-documenting and the dirs exist with correct ownership for the read-only-rootfs case.
+RUN set -eux; \
+    mkdir -p /run/ghidra-mcp /work/project /tmp/ghidra; \
+    chown -R "65532:65532" /run/ghidra-mcp /work /tmp/ghidra; \
+    chmod 0700 /run/ghidra-mcp /work/project
+
+# Ghidra needs a WRITABLE home for its user settings + the JDK-config save (LaunchSupport -save)
+# and a writable java.io.tmpdir. The runtime rootfs is read-only and the worker user was created
+# with --no-create-home, so point HOME at the /tmp/ghidra tmpfs (deploy/ mounts it; java.io.tmpdir
+# above points there too). Without this, PyGhidra's launcher fails with
+# "User home directory does not exist: /home/worker". Found via the in-image PyGhidra boot smoke.
+ENV HOME=/tmp/ghidra
+VOLUME ["/work/project"]
+
+USER 65532:65532
+WORKDIR /work
+
+# --- Healthcheck ---------------------------------------------------------------------------------
+# Liveness only — confirms the Python entrypoint process can import its own code WITHOUT any
+# network. The real readiness/health signal is the RPC `ping` over the UDS (rpc-protocol.md §4),
+# driven by the server. Kept network-free by design; runs under the read-only rootfs (import-only,
+# no writes — PYTHONDONTWRITEBYTECODE is set).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD ["python", "-c", "import worker, ghidra_mcp.ghidra._jvm_bridge"]
+
+# --- Entrypoint ----------------------------------------------------------------------------------
+# The container runs ONLY the Python worker launcher (`worker/__main__.py`). It reconciles the
+# per-session UDS path from GHIDRA_MCP_SESSION_ID + GHIDRA_MCP_RPC_SOCKET_DIR (deploy/worker-run.sh
+# injects both), exports GHIDRA_MCP_RPC_SOCKET, then runs worker_main() which binds the 0600 UDS
+# (rpc-protocol.md §2), boots PyGhidra offline, and serves RPC writing only to /work/project +
+# /tmp/ghidra. It exits non-zero on a missing session id or fatal error → the server maps the
+# closed/absent socket to worker-unavailable and evicts (rpc-protocol.md §6). No shell; a single
+# Python process is a clean SIGKILL fault domain (ADR-002).
+ENTRYPOINT ["python", "-m", "worker"]

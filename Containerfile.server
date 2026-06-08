@@ -1,0 +1,103 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# Containerfile.server — the ghidra-mcp MCP control-plane server
+# =============================================================================
+# The TRUSTED control plane (validation, sessions, transport, worker lifecycle). Per ADR-001 it
+# NEVER loads the JVM or parses a binary — so this image carries NO Ghidra and NO JDK. It speaks
+# MCP over **stdio only** in v1 (PLAN §2): NO ports are exposed.
+#
+# The server is the sole client of each worker over a per-session UDS (rpc-protocol.md). To spawn
+# workers it must reach a container runtime — that wiring lives in deploy/ (the runtime socket is a
+# deliberate, reviewed mount; NOT baked into this image). This image is minimal, non-root, and run
+# read-only by deploy/.
+#
+# -----------------------------------------------------------------------------
+# SUPPLY CHAIN (std-supplychain) — DIGEST PINNING IS GATED (PLAN §6)
+# -----------------------------------------------------------------------------
+#   GATED ITEM S1: base build image (Python 3.12 with build tooling for the wheel)
+#   GATED ITEM S2: base runtime image (minimal Python 3.12 runtime; prefer distroless/slim)
+# Pinned by digest via REPLACE_WITH_DIGEST_FOR_<image:tag> until a maintainer vets + pins (gated).
+#
+# Dependencies install from the HASH-PINNED lockfile only (--require-hashes). Generating that lock
+# is itself gated (see pyproject.toml lockfile-intent note); until it exists, the build COPY +
+# install of the lock is the single place a maintainer points at the committed lockfile.
+# =============================================================================
+
+# =============================================================================
+# Stage 1: builder — build the wheel + install deps from the hash-pinned lock into a venv.
+# =============================================================================
+# GATED ITEM S1: pin this base by digest.
+FROM python:3.12-slim@sha256:090ba77e2958f6af52a5341f788b50b032dd4ca28377d2893dcf1ecbdfdfe203 AS builder
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /build
+
+# Copy only what the build needs (better layer caching; smaller context).
+COPY pyproject.toml README.md LICENSE NOTICE ./
+COPY src ./src
+# COORDINATION: the hash-pinned lockfile (uv.lock / requirements.lock) is GATED to generate.
+# Once committed, uncomment the COPY + the --require-hashes install below (fail-closed: no floating
+# resolve in the image build). Until then this stage documents the intended supply-chain-safe path.
+# COPY requirements.lock ./
+
+RUN set -eux; \
+    python -m venv /venv; \
+    /venv/bin/pip install --upgrade pip; \
+    # SUPPLY-CHAIN SAFE INSTALL (enable once the lockfile exists — GATED):
+    #   /venv/bin/pip install --require-hashes -r requirements.lock
+    # Then install the project itself (no deps; they came from the pinned lock):
+    #   /venv/bin/pip install --no-deps .
+    # Placeholder until the lock lands — documented, not a floating prod install path:
+    /venv/bin/pip install --no-deps .
+
+# =============================================================================
+# Stage 2: runtime — minimal Python + the venv. No build tools, no compilers.
+# =============================================================================
+# GATED ITEM S2: pin this base by digest (prefer a distroless python base for no shell/pkg-mgr).
+FROM python:3.12-slim@sha256:090ba77e2958f6af52a5341f788b50b032dd4ca28377d2893dcf1ecbdfdfe203 AS runtime
+
+LABEL org.opencontainers.image.title="ghidra-mcp-server" \
+      org.opencontainers.image.description="Secure MCP control-plane server for headless Ghidra (stdio, v1)." \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.source="https://github.com/OWNER/ghidra-mcp" \
+      org.ghidra-mcp.role="control-plane" \
+      org.ghidra-mcp.transport="stdio" \
+      org.ghidra-mcp.ports="none"
+
+# Non-root user (CIS / topic-container-k8s). No JVM here (ADR-001) — server only.
+ARG SERVER_UID=65532
+ARG SERVER_GID=65532
+RUN set -eux; \
+    groupadd --gid "${SERVER_GID}" app; \
+    useradd --uid "${SERVER_UID}" --gid "${SERVER_GID}" --no-create-home \
+            --home-dir /home/app --shell /usr/sbin/nologin app
+
+ENV PATH="/venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    # Structured JSON logs to stdout/stderr (12-Factor / topic-logging-observability).
+    GHIDRA_MCP_LOG_FORMAT=json \
+    GHIDRA_MCP_LOG_LEVEL=INFO \
+    # Per-session RPC sockets live here; deploy/ mounts this as a private 0700 dir shared with
+    # workers (server is owner). No network surface (rpc-protocol.md §2).
+    GHIDRA_MCP_RPC_SOCKET_DIR=/run/ghidra-mcp
+
+COPY --from=builder --chown=root:root /venv /venv
+
+# Socket dir owned by the server user; private. deploy/ may override-mount with a tmpfs.
+RUN set -eux; \
+    mkdir -p /run/ghidra-mcp; \
+    chown "${SERVER_UID}:${SERVER_GID}" /run/ghidra-mcp; \
+    chmod 0700 /run/ghidra-mcp
+
+USER ${SERVER_UID}:${SERVER_GID}
+WORKDIR /home/app
+
+# No HEALTHCHECK: a stdio MCP server has no port/endpoint to probe. Liveness is the process itself
+# (the MCP client over stdio is the health signal). Adding a network probe would be misleading.
+
+# stdio MCP entrypoint (the only transport in v1). NO EXPOSE — no ports in v1.
+ENTRYPOINT ["ghidra-mcp"]

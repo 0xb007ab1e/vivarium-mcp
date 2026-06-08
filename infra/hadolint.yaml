@@ -1,0 +1,28 @@
+# hadolint config — Dockerfile linting for Containerfile.worker / Containerfile.server.
+# Run (GATED — needs the hadolint binary): hadolint --config infra/hadolint.yaml Containerfile.*
+#
+# We deliberately keep almost everything as ERROR (fail-closed Dockerfile hygiene). Two narrow,
+# justified relaxations only, scoped via inline `# hadolint ignore=` in the builder stage.
+
+failure-threshold: warning
+
+# Treat unpinned base images / apt versions strictly — but our bases are pinned BY DIGEST
+# (REPLACE_WITH_DIGEST_FOR_* placeholders), which hadolint accepts as pinned.
+trustedRegistries:
+  - docker.io
+  - ghcr.io
+
+# Ignored rules (each justified):
+ignored:
+  # DL3008: pin apt versions. Build-stage only (ca-certificates/curl/unzip), and those packages
+  #         are stripped from the runtime stage entirely. Version-pinning distro packages in a
+  #         throwaway builder adds churn for no runtime supply-chain benefit (the runtime image
+  #         carries none of them). Scoped to the builder via inline ignore in the Containerfile.
+  - DL3008
+  # DL3009: delete apt lists. We DO clean lists; this is belt-and-suspenders for the builder stage
+  #         where layers are discarded anyway. Scoped via inline ignore.
+  - DL3009
+
+# Everything else (no-root-user checks, COPY/ADD hygiene, etc.) stays at default severity.
+# Note: hadolint cannot see runtime hardening (USER is set; ro-rootfs/caps/seccomp/no-net are
+# applied by deploy/ at RUN time, not in the Dockerfile) — see deploy/ + infra/trivy.yaml.

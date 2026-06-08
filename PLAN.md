@@ -30,7 +30,7 @@ is the central security control.
 - **MCP server:** Python 3.12+, official `mcp` SDK (FastMCP); pydantic validates **every** tool
   arg at the boundary. Ports & adapters: pure tool/validation/report **core** + Ghidra **adapter**
   (functional core / imperative shell).
-- **Ghidra worker:** **container-only**, host unsupported (F5). Pin **Ghidra 11.x + JDK 21 by
+- **Ghidra worker:** **container-only**, host unsupported (F5). Pin **Ghidra 12.1.2 + JDK 21 by
   digest**; SBOM + CVE-track. Integration via headless scripts / PyGhidra **inside the worker
   only**.
 - **Isolation (F8):** rootless podman/OCI baseline — non-root, read-only rootfs, all caps dropped,
@@ -84,13 +84,13 @@ Contract changes route through the PM (batch-atomicity mandate).
 
 ## 8. ADR log (decisions to record in `docs/adr/`)
 - ADR-001 Out-of-process Ghidra worker mandatory (F1). ADR-002 One worker per session, killed on
-  eviction (F2). ADR-003 Container-only; Ghidra 11.x + JDK 21 pinned by digest (F5).
+  eviction (F2). ADR-003 Container-only; Ghidra 12.1.2 + JDK 21 pinned by digest (F5).
   ADR-004 Isolation tier (rootless podman baseline; gVisor for worker) (F8). ADR-005 Untrusted-data
   envelope for binary-derived output (F3). ADR-006 stdio-first; HTTP gated v1.1 (F9).
 
 ## 9. Open items
 - ✅ **RESOLVED (WS0):** worker RPC = **JSON-RPC 2.0 over per-session UDS** (ratified 2026-06-03;
   see `docs/contracts/rpc-protocol.md`).
-- ⏳ **WS3:** confirm exact Ghidra 11.x patch version + digest (SME) at worker-image build; confirm
+- ⏳ **WS3:** confirm exact Ghidra 12.1.2 patch version + digest (SME) at worker-image build; confirm
   project-store location (session-scoped volume vs tmpfs) + verified-wipe mechanism (ADR-002 fixes
   kill-then-verified-wipe).

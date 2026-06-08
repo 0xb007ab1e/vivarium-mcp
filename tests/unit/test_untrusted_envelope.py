@@ -14,8 +14,8 @@ from ghidra_mcp.core.envelope import DataOrigin, Untrusted, wrap
 
 @pytest.mark.critical
 def test_origin_slugs_are_stable() -> None:
-    assert DataOrigin.BINARY == "binary-derived"
-    assert DataOrigin.GHIDRA == "ghidra-generated"
+    assert DataOrigin.BINARY.value == "binary-derived"
+    assert DataOrigin.GHIDRA.value == "ghidra-generated"
 
 
 @pytest.mark.critical
@@ -43,7 +43,7 @@ def test_wraps_structured_payloads_generically() -> None:
 def test_envelope_is_frozen_and_forbids_extra() -> None:
     u: Untrusted[str] = Untrusted(value="x", origin=DataOrigin.BINARY)
     with pytest.raises(ValidationError):
-        u.value = "y"  # type: ignore[misc]  # frozen
+        u.value = "y"  # frozen
     with pytest.raises(ValidationError):
         Untrusted(value="x", origin=DataOrigin.BINARY, trusted=True)  # type: ignore[call-arg]
 
@@ -55,7 +55,12 @@ def test_notes_are_bounded() -> None:
 
 
 @pytest.mark.critical
-def test_wrap_helper_is_reserved_for_ws4() -> None:
-    # The normalization chokepoint is intentionally a stub until WS4 hardens it.
-    with pytest.raises(NotImplementedError):
-        wrap("anything")
+def test_wrap_chokepoint_marks_content_untrusted() -> None:
+    # Implemented at integration by WS4 (was a reserved stub in WS0). Full normalization behavior
+    # (control/bidi/zero-width neutralization, encoding/notes) lives in test_envelope_wrap.py and
+    # tests/security/**; here we assert only the contract: wrap() returns a marked envelope.
+    u = wrap("mov eax, 1")
+    assert isinstance(u, Untrusted)
+    assert u.value == "mov eax, 1"
+    assert u.origin == DataOrigin.BINARY  # default provenance for binary-derived content
+    assert u.notes == []

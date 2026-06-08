@@ -1,0 +1,168 @@
+# =============================================================================
+# worker-image.yml — build + scan + SBOM + sign the ghidra-mcp container images (WS3)
+# =============================================================================
+# Separate from ci.yml (PR gates) — this is the IMAGE supply-chain pipeline (std-supplychain):
+# build the worker + server images, Trivy IMAGE scan (vuln+misconfig+secret), generate a CycloneDX
+# SBOM per image, and sign image + SBOM with cosign/Sigstore provenance. ci.yml's
+# `container-iac-scan` already covers IaC/config scanning on PRs; this covers the built IMAGES.
+#
+# Runs on demand + on release tags (NOT every PR — image builds pull bases + the Ghidra release,
+# which is a GATED supply-chain action; this workflow only runs once digests are pinned/approved).
+#
+# SUPPLY CHAIN (std-supplychain): every action is pinned BY COMMIT DIGEST (@<sha>) using the SAME
+# REPLACE_WITH_DIGEST_FOR_<tag> placeholder convention as ci.yml — a maintainer resolves each to its
+# SHA as a GATED step before this workflow runs. Image bases are pinned by digest in the Containerfiles.
+name: worker-image
+
+on:
+  workflow_dispatch:          # manual, gated trigger (after digests/lock approved).
+  push:
+    tags: ["v*"]              # build + sign on release tags.
+
+permissions:
+  contents: read              # least privilege; raised per-job only where needed.
+
+concurrency:
+  group: worker-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Lint the Dockerfiles before building (cheap, fail-fast).
+  # ---------------------------------------------------------------------------
+  hadolint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # actions/checkout@v4
+      - name: hadolint (worker + server Containerfiles)
+        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5  # hadolint/hadolint-action@v3.3.0
+        with:
+          dockerfile: Containerfile.worker
+          config: infra/hadolint.yaml
+          failure-threshold: warning
+      - name: hadolint (server)
+        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5  # hadolint/hadolint-action@v3.3.0
+        with:
+          dockerfile: Containerfile.server
+          config: infra/hadolint.yaml
+          failure-threshold: warning
+
+  # ---------------------------------------------------------------------------
+  # Build, scan, SBOM, sign — per image (worker, then server reuse via matrix).
+  # ---------------------------------------------------------------------------
+  build-scan-sign:
+    needs: hadolint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write          # push to GHCR.
+      id-token: write          # cosign keyless (OIDC) signing — no long-lived keys.
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: worker
+            containerfile: Containerfile.worker
+            image: ghcr.io/${{ github.repository_owner }}/ghidra-mcp-worker
+          - name: server
+            containerfile: Containerfile.server
+            image: ghcr.io/${{ github.repository_owner }}/ghidra-mcp-server
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build + push by DIGEST (provenance + SBOM attestation produced by Buildx where supported).
+      # NOTE: the worker build needs the Ghidra release ARGs (version/url/sha256) — supplied as
+      # GATED, vetted repo/org variables, NOT secrets in source (they are non-secret but pinned).
+      - name: Build + push (${{ matrix.name }})
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.containerfile }}
+          push: true
+          tags: ${{ matrix.image }}:${{ github.sha }}
+          provenance: true          # SLSA provenance attestation.
+          sbom: true                # build-time SBOM attestation.
+          build-args: |
+            GHIDRA_VERSION=${{ vars.GHIDRA_VERSION }}
+            GHIDRA_RELEASE_TAG=${{ vars.GHIDRA_RELEASE_TAG }}
+            GHIDRA_ZIP_URL=${{ vars.GHIDRA_ZIP_URL }}
+            GHIDRA_ZIP_SHA256=${{ vars.GHIDRA_ZIP_SHA256 }}
+
+      # IMAGE vulnerability + misconfig + secret scan (gate #8 for the image). Fail on HIGH/CRITICAL.
+      - name: Trivy image scan (${{ matrix.name }})
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          trivy-config: infra/trivy.yaml
+          format: sarif
+          output: trivy-${{ matrix.name }}.sarif
+          exit-code: "1"           # fail closed on HIGH/CRITICAL.
+          severity: HIGH,CRITICAL
+
+      - name: Upload Trivy SARIF (${{ matrix.name }})
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # actions/upload-artifact@v4
+        with:
+          name: trivy-${{ matrix.name }}
+          path: trivy-${{ matrix.name }}.sarif
+
+      # CycloneDX SBOM per image (std-supplychain: SBOM per release artifact, stored with it).
+      - name: Generate CycloneDX SBOM (${{ matrix.name }})
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          format: cyclonedx
+          output: sbom-${{ matrix.name }}.cdx.json
+
+      - name: Upload SBOM (${{ matrix.name }})
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.name }}
+          path: sbom-${{ matrix.name }}.cdx.json
+
+      # Sign the image + attest the SBOM (cosign keyless via OIDC — no static keys; std-supplychain).
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac  # sigstore/cosign-installer@v3
+      - name: Sign image (keyless) + attest SBOM (${{ matrix.name }})
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign sign --yes "${{ matrix.image }}@${{ steps.build.outputs.digest }}"
+          cosign attest --yes \
+            --predicate sbom-${{ matrix.name }}.cdx.json \
+            --type cyclonedx \
+            "${{ matrix.image }}@${{ steps.build.outputs.digest }}"
+
+  # ---------------------------------------------------------------------------
+  # Isolation verification is a RUNTIME check (needs to run a container with --runtime runsc, no-net,
+  # caps dropped). GitHub-hosted runners cannot run gVisor; this asserts the harness exists and
+  # documents that ADR-004 acceptance runs on a gVisor-capable self-hosted runner / maintainer host.
+  # Tracked as a follow-up; deploy/verify-isolation.sh is the harness.
+  # ---------------------------------------------------------------------------
+  isolation-verify-note:
+    needs: build-scan-sign
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # actions/checkout@v4
+      - name: ADR-004 isolation verification is a gVisor-capable-host step
+        run: |
+          echo "ADR-004 isolation checks (seccomp/caps/no-net/ro-rootfs/gVisor) run via"
+          echo "deploy/verify-isolation.sh on a gVisor-capable host/self-hosted runner — NOT on"
+          echo "the default GitHub runner (no runsc). See deploy/README.md step 3."
+          test -x deploy/verify-isolation.sh || { echo "harness missing"; exit 1; }
