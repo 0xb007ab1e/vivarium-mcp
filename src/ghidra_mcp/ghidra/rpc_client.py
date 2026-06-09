@@ -477,6 +477,53 @@ class RpcGhidraAdapter:
         """Resolve a function (name or hex) to its server-normalized entry address (via worker)."""
         return self.get_function(sid, s.GetFunctionIn(session_id=sid, function=function)).address
 
+    # --- Tier-2 reporting / metrics (v1.1 — ADR-008) ----------------------------------------
+    # RESERVED STUBS (build fan-out): each is wired here to the PURE cores (core.metrics /
+    # core.iocscan) over existing read-only RPCs (list_strings / search_bytes / call_graph) and the
+    # new worker extraction RPCs (function_cfg / imports / exports / coverage). No JVM on the server
+    # (ADR-001); binary-derived fields wrapped at the ADR-005 chokepoint, in the build fan-out.
+    def cyclomatic_complexity(
+        self, sid: str, a: s.CyclomaticComplexityIn
+    ) -> s.CyclomaticComplexity:
+        """McCabe complexity of one function (RESERVED — v1.1 worker `function_cfg`)."""
+        raise NotImplementedError(
+            "RESERVED (v1.1 ADR-008): cyclomatic_complexity — pending build fan-out"
+        )
+
+    def list_imports(self, sid: str, a: s.ListImportsIn) -> s.ImportListOut:
+        """List imported symbols (RESERVED — v1.1 worker `imports` extraction)."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-008): list_imports — pending build fan-out")
+
+    def list_exports(self, sid: str, a: s.ListExportsIn) -> s.ExportListOut:
+        """List exported symbols (RESERVED — v1.1 worker `exports` extraction)."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-008): list_exports — pending build fan-out")
+
+    def coverage(self, sid: str, a: s.CoverageIn) -> s.CoverageOut:
+        """Code/data coverage (RESERVED — v1.1 worker `coverage` extraction + pure ratios)."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-008): coverage — pending build fan-out")
+
+    def ioc_scan(self, sid: str, a: s.IocScanIn) -> s.IocScanOut:
+        """Heuristic IOC scan (RESERVED — v1.1 pure core over the list_strings RPC)."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-008): ioc_scan — pending build fan-out")
+
+    def crypto_constant_scan(self, sid: str, a: s.CryptoConstantScanIn) -> s.CryptoConstantScanOut:
+        """Heuristic crypto-constant scan (RESERVED — v1.1 signature table over search_bytes)."""
+        raise NotImplementedError(
+            "RESERVED (v1.1 ADR-008): crypto_constant_scan — pending build fan-out"
+        )
+
+    def call_graph_metrics(self, sid: str, a: s.CallGraphMetricsIn) -> s.CallGraphMetricsOut:
+        """Structural call-graph metrics (RESERVED — v1.1 pure core over call_graph)."""
+        raise NotImplementedError(
+            "RESERVED (v1.1 ADR-008): call_graph_metrics — pending build fan-out"
+        )
+
+    def program_summary(self, sid: str, a: s.ProgramSummaryIn) -> s.ProgramSummary:
+        """One-shot aggregate report (RESERVED — v1.1 aggregation of Tier-1 + Tier-2)."""
+        raise NotImplementedError(
+            "RESERVED (v1.1 ADR-008): program_summary — pending build fan-out"
+        )
+
     # --- internal: call orchestration -------------------------------------------------------
     def _tool_call(self, sid: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Issue a read-only tool RPC bounded by the per-tool timeout.

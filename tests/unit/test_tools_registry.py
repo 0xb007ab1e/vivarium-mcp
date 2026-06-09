@@ -254,10 +254,10 @@ def ctx() -> reg.ToolContext:
     )
 
 
-def test_catalog_is_exactly_27_unique_tools() -> None:
-    # 22 Tier-1 read-only tools + 5 v1.1 semantic-naming tools (ADR-007), all READ-ONLY.
-    assert len(reg.TIER1_TOOL_NAMES) == 27
-    assert len(set(reg.TIER1_TOOL_NAMES)) == 27
+def test_catalog_is_exactly_35_unique_tools() -> None:
+    # 22 Tier-1 + 5 v1.1 semantic-naming (ADR-007) + 8 v1.1 Tier-2 metrics (ADR-008), all READ-ONLY.
+    assert len(reg.TIER1_TOOL_NAMES) == 35
+    assert len(set(reg.TIER1_TOOL_NAMES)) == 35
 
 
 def test_handler_table_matches_frozen_allow_list() -> None:

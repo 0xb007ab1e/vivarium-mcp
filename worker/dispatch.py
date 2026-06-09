@@ -71,6 +71,11 @@ RPC_METHODS = frozenset(
         # call-graph + naming-context extraction (v1.1 — ADR-007; worker-only, ADR-001)
         "call_graph",
         "referenced_strings",
+        # Tier-2 metric extraction (v1.1 — ADR-008; worker-only, ADR-001)
+        "function_cfg",
+        "imports",
+        "exports",
+        "coverage",
         "ping",
         "shutdown",
     }
@@ -188,6 +193,22 @@ class GhidraBackend(Protocol):
 
     def referenced_strings(self, params: dict[str, Any]) -> dict[str, Any]:
         """List the (bounded) defined-string values one function references — v1.1."""
+        ...
+
+    def function_cfg(self, params: dict[str, Any]) -> dict[str, Any]:
+        """CFG block/edge counts for one function (for cyclomatic complexity) — v1.1."""
+        ...
+
+    def imports(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List imported symbols/functions (paginated/bounded) — v1.1."""
+        ...
+
+    def exports(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List exported symbols/entry points (paginated/bounded) — v1.1."""
+        ...
+
+    def coverage(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Defined-code/data byte counts for program coverage — v1.1."""
         ...
 
 

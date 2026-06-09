@@ -215,6 +215,31 @@ class PyGhidraBackend:
         max_strings = _clamp_count(int(params.get("max_strings", 64)))
         return self._gh_referenced_strings(str(_require(params, "function")), max_strings)
 
+    def function_cfg(self, params: dict[str, Any]) -> dict[str, Any]:
+        """CFG block/edge counts for one function (v1.1 — ADR-008; for cyclomatic complexity).
+
+        Args:
+            params: ``{"function": str}``.
+
+        Returns:
+            ``{"address", "name", "block_count", "edge_count", "incomplete"}``.
+        """
+        return self._gh_function_cfg(str(_require(params, "function")))
+
+    def imports(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List imported symbols/functions (paginated/bounded) — v1.1 (ADR-008)."""
+        offset, limit = _page(params)
+        return self._gh_imports(offset, limit)
+
+    def exports(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List exported symbols/entry points (paginated/bounded) — v1.1 (ADR-008)."""
+        offset, limit = _page(params)
+        return self._gh_exports(offset, limit)
+
+    def coverage(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Defined-code/data byte counts for program coverage — v1.1 (ADR-008)."""
+        return self._gh_coverage()
+
     # --- JVM edge (PyGhidra calls live ONLY here; imported lazily) ---------------------------
     # NOTE: these helpers are the worker-only JVM boundary. They are excluded from server unit
     # coverage and exercised only by the integration suite against a real pinned worker image. The
@@ -1042,6 +1067,65 @@ class PyGhidraBackend:
                     continue
                 values.append(value)
         return {"strings": values, "truncated": truncated}
+
+    # --- Tier-2 metric extraction (RESERVED — v1.1 ADR-008; built by the WS2-style fan-out against
+    # the pinned Ghidra image, validated only in the real-worker integration suite; ADR-001). -----
+    def _gh_function_cfg(self, function: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """RESERVED STUB (v1.1 — ADR-008): per-function CFG block/edge counts.
+
+        Walks ``BasicBlockModel`` over the resolved function to count basic blocks (CFG nodes) and
+        control-flow edges; ``incomplete`` flags unresolved flow. The server computes McCabe
+        ``E - N + 2`` from these counts in the pure core (:mod:`ghidra_mcp.core.metrics`).
+
+        Args:
+            function: Function entry address (hex) or name.
+
+        Returns:
+            ``{"address", "name", "block_count", "edge_count", "incomplete"}``.
+
+        Raises:
+            NotImplementedError: Always — built by the fan-out against the pinned Ghidra image.
+        """
+        raise NotImplementedError(
+            "RESERVED (v1.1 ADR-008): function_cfg extraction — pending pinned-image build"
+        )
+
+    def _gh_imports(self, offset: int, limit: int) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """RESERVED STUB (v1.1 — ADR-008): imported symbols via ExternalManager/SymbolTable.
+
+        Returns ``{"imports": [{"name","library"?,"address"?}], "total", "truncated"}`` (paginated).
+
+        Raises:
+            NotImplementedError: Always — built by the fan-out against the pinned Ghidra image.
+        """
+        raise NotImplementedError(
+            "RESERVED (v1.1 ADR-008): imports extraction — pending pinned-image build"
+        )
+
+    def _gh_exports(self, offset: int, limit: int) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """RESERVED STUB (v1.1 — ADR-008): exported symbols/entry points via SymbolTable.
+
+        Returns ``{"exports": [{"name","address"}], "total", "truncated"}`` (paginated).
+
+        Raises:
+            NotImplementedError: Always — built by the fan-out against the pinned Ghidra image.
+        """
+        raise NotImplementedError(
+            "RESERVED (v1.1 ADR-008): exports extraction — pending pinned-image build"
+        )
+
+    def _gh_coverage(self) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """RESERVED STUB (v1.1 — ADR-008): defined-code/data byte counts via the Listing.
+
+        Returns ``{"total_bytes", "defined_code_bytes", "defined_data_bytes", "function_count"}``;
+        the server computes ratios + ``undefined_bytes`` in the pure core.
+
+        Raises:
+            NotImplementedError: Always — built by the fan-out against the pinned Ghidra image.
+        """
+        raise NotImplementedError(
+            "RESERVED (v1.1 ADR-008): coverage extraction — pending pinned-image build"
+        )
 
     # --- private JVM helpers (lazy imports only; never at module scope) -----------------------
     def _require_program(self) -> Any:  # pragma: no cover - JVM edge
