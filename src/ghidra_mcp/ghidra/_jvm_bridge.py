@@ -6,7 +6,7 @@ intentionally excluded from server-side coverage (``[tool.coverage.run] omit``) 
 imported by ``server``, ``sessions``, ``core``, or ``tools``. An import-linter / test guard (WS5)
 enforces this boundary.
 
-Inside the worker it: bootstraps headless Ghidra (11.x / JDK 21), imports + analyzes the binary
+Inside the worker it: bootstraps headless Ghidra (12.1.2 / JDK 21), imports + analyzes the binary
 under the bridge's own bounds, and serves the internal RPC by mapping requests to Ghidra API calls
 and returning structured, size-capped results to the server, which wraps them as untrusted.
 
