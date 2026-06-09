@@ -122,13 +122,15 @@ Contract changes route through the PM (batch-atomicity mandate).
   (cache-identical layers, documented) stays accepted.** Future options if hardening is revisited:
   `type=oci,dest=<dir>,tar=false` (OCI layout dir) → `trivy --input <dir>`, or `skopeo copy` the
   pushed image to a docker-archive then scan that. LOW; not urgent.
-- ⏳ **Adapter builder hardening — map malformed-worker `KeyError` to `WORKER_UNAVAILABLE` (PR #6
+- ✅ **RESOLVED — adapter builder hardening: malformed-worker result → `WORKER_UNAVAILABLE` (PR #6
   review, Low-2; INFO).** The `_build_*` builders in `ghidra/rpc_client.py` read required keys
-  directly (`r["edge_count"]`, etc.); a worker result missing a required key raises a raw `KeyError`
-  that `_call` does not catch (it catches only RPC/framing/timeout/connection errors), so it
-  propagates unmapped rather than as a fail-closed error envelope. **Pre-existing pattern shared by
-  ALL Tier-1 builders — not introduced by the Tier-2 change.** Blast radius is one tool call (the
-  worker is first-party, protocol-conformant, single-client stdio), not fail-open. Future hardening
-  pass (consistent with `@rules/topic-error-handling.md` fail-closed): catch
-  `(KeyError, ValueError, TypeError)` on the builder path in `_call` and map to `WORKER_UNAVAILABLE`,
-  applied across all builders at once. LOW/INFO; not urgent, not blocking.
+  directly; a worker result with a missing key / wrong type previously raised a raw
+  `KeyError`/`ValueError`/`TypeError`/pydantic `ValidationError` out of the adapter, which the
+  server shell caught as a *generic* `internal-error` (already fail-closed + non-leaking — NOT
+  fail-open — but misclassified a worker fault as a server bug). **Fixed:** a single `_fail_closed`
+  decorator now wraps every worker-dict builder (+ a `_validate` helper for the `model_validate`
+  paths), mapping exactly those shaping failures to the adapter's own `WORKER_UNAVAILABLE` (the
+  adapter owns the worker fault domain). `GhidraMcpError` and genuine server bugs are deliberately
+  NOT caught (the latter still surfaces as `internal-error`). Proven with negative tests
+  (`tests/unit/test_tier2_metrics.py`) that the guard fires on a known-bad result; 100% coverage on
+  `rpc_client.py`. Applied uniformly across ALL builders (Tier-1 + semantic + Tier-2).

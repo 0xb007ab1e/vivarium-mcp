@@ -31,12 +31,15 @@ mnemonics/types). Nothing binary-derived leaves this adapter un-wrapped.
 from __future__ import annotations
 
 import contextlib
+import functools
 import socket
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
+
+from pydantic import BaseModel, ValidationError
 
 from ghidra_mcp.core.envelope import DataOrigin, Untrusted, wrap
 from ghidra_mcp.core.errors import ErrorType
@@ -239,7 +242,7 @@ class RpcGhidraAdapter:
             {"source_ref": args.source_ref, "expected_sha256": args.expected_sha256},
             timeout_s=self._tool_timeout_s,
         )
-        return s.SessionInfo.model_validate(result)
+        return _validate(s.SessionInfo, result)
 
     def analyze(self, session_id: str, args: s.SessionAnalyzeIn) -> s.SessionInfo:
         """Run Ghidra auto-analysis, bounded by the analysis timeout (kills worker on expiry).
@@ -265,7 +268,7 @@ class RpcGhidraAdapter:
             {"timeout_seconds": args.timeout_seconds},
             timeout_s=deadline,
         )
-        return s.SessionInfo.model_validate(result)
+        return _validate(s.SessionInfo, result)
 
     # --- read-only tool operations ----------------------------------------------------------
     # Each method takes the worker's PLAIN result dict and builds the typed ``*Out`` via a module-
@@ -304,11 +307,11 @@ class RpcGhidraAdapter:
 
     def xrefs_to(self, sid: str, a: s.XrefsIn) -> s.XrefsOut:
         """References TO a target (addresses/ref-types are server-safe — no wrap needed)."""
-        return s.XrefsOut.model_validate(self._tool_call(sid, "xrefs_to", _xrefs_params(a)))
+        return _validate(s.XrefsOut, self._tool_call(sid, "xrefs_to", _xrefs_params(a)))
 
     def xrefs_from(self, sid: str, a: s.XrefsIn) -> s.XrefsOut:
         """References FROM a target (addresses/ref-types are server-safe — no wrap needed)."""
-        return s.XrefsOut.model_validate(self._tool_call(sid, "xrefs_from", _xrefs_params(a)))
+        return _validate(s.XrefsOut, self._tool_call(sid, "xrefs_from", _xrefs_params(a)))
 
     def list_strings(self, sid: str, a: s.ListStringsIn) -> s.StringListOut:
         """List defined strings (paginated/bounded)."""
@@ -512,18 +515,8 @@ class RpcGhidraAdapter:
         self, sid: str, a: s.CyclomaticComplexityIn
     ) -> s.CyclomaticComplexity:
         """McCabe complexity of one function (worker CFG counts → pure ``E - N + 2``)."""
-        from ghidra_mcp.core.metrics import cyclomatic_complexity as _mccabe
-
-        r = self._tool_call(sid, "function_cfg", {"function": a.function})
-        block_count = int(r["block_count"])
-        edge_count = int(r["edge_count"])
-        return s.CyclomaticComplexity(
-            address=str(r["address"]),
-            name=_w(r["name"], DataOrigin.BINARY),
-            complexity=_mccabe(block_count, edge_count),
-            block_count=block_count,
-            edge_count=edge_count,
-            incomplete=bool(r.get("incomplete", False)),
+        return _build_cyclomatic_complexity(
+            self._tool_call(sid, "function_cfg", {"function": a.function})
         )
 
     def list_imports(self, sid: str, a: s.ListImportsIn) -> s.ImportListOut:
@@ -581,23 +574,27 @@ class RpcGhidraAdapter:
     def crypto_constant_scan(self, sid: str, a: s.CryptoConstantScanIn) -> s.CryptoConstantScanOut:
         """Heuristic crypto-constant search (PURE signature table over the ``search_bytes`` RPC).
 
-        Issues one bounded ``search_bytes`` per known signature, then shapes the addresses with the
-        pure :func:`core.iocscan.scan_crypto_constants` and paginates. All output fields are safe
-        (closed-vocabulary labels + server addresses). HEURISTIC — a match is a lead, not proof.
+        Issues one bounded ``search_bytes`` per known signature (reusing the fail-closed
+        :meth:`search_bytes` adapter method, so a malformed worker result is already mapped), then
+        shapes the addresses with the pure :func:`core.iocscan.scan_crypto_constants` and paginates.
+        All output fields are safe (closed-vocabulary labels + server addresses). HEURISTIC — a
+        match is a lead, not proof.
         """
         from ghidra_mcp.core import iocscan
 
         per_signature: list[tuple[iocscan.CryptoSignature, list[str]]] = []
         search_truncated = False
         for signature in iocscan.CRYPTO_SIGNATURES:
-            result = self._tool_call(
+            found = self.search_bytes(
                 sid,
-                "search_bytes",
-                {"pattern_hex": signature.pattern_hex, "offset": 0, "limit": _CRYPTO_MATCH_BUDGET},
+                s.SearchBytesIn(
+                    session_id=a.session_id,
+                    pattern_hex=signature.pattern_hex,
+                    limit=_CRYPTO_MATCH_BUDGET,
+                ),
             )
-            search_truncated = search_truncated or bool(result.get("truncated", False))
-            addresses = [str(m["address"]) for m in result.get("matches", [])]
-            per_signature.append((signature, addresses))
+            search_truncated = search_truncated or found.truncated
+            per_signature.append((signature, [m.address for m in found.matches]))
         hits = iocscan.scan_crypto_constants(per_signature)
         total = len(hits)
         page = hits[a.offset : a.offset + a.limit]
@@ -976,6 +973,60 @@ def _w_opt(value: object, origin: DataOrigin) -> Untrusted[str] | None:
     return wrap(str(value), origin=origin)
 
 
+def _fail_closed[**P, R](builder: Callable[P, R]) -> Callable[P, R]:
+    """Map a malformed-worker-result exception in a builder to a safe ``WORKER_UNAVAILABLE``.
+
+    The builders turn the worker's *plain* result dict into a typed ``*Out`` model. A worker that
+    returns a structurally-malformed result (a missing required key, a wrong-typed value) would
+    otherwise raise a raw ``KeyError``/``ValueError``/``TypeError`` or a pydantic
+    ``ValidationError`` out of the adapter — the server shell would then catch it as a *generic*
+    ``internal-error``,
+    misclassifying a worker fault as a server bug. This decorator catches exactly those shaping
+    failures and re-raises the adapter's own ``WORKER_UNAVAILABLE`` (the adapter owns the worker
+    fault domain — rpc-protocol.md §6; topic-error-handling fail-closed). It deliberately does NOT
+    catch :class:`GhidraMcpError` (an inner builder's already-mapped fault propagates unchanged) or
+    any other exception class (a genuine server bug still surfaces as ``internal-error``). The
+    untrusted worker detail is never forwarded — only a safe, generic message.
+
+    Args:
+        builder: A pure ``dict -> *Out`` (or ``dict -> model``) shaping function.
+
+    Returns:
+        The builder wrapped so a malformed-result exception becomes a safe mapped error.
+    """
+
+    @functools.wraps(builder)
+    def _wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return builder(*args, **kwargs)
+        except (KeyError, ValueError, TypeError, ValidationError) as exc:
+            raise _errors.make_error(
+                ErrorType.WORKER_UNAVAILABLE, "worker returned a malformed result"
+            ) from exc
+
+    return _wrapped
+
+
+@_fail_closed
+def _validate[ModelT: BaseModel](model: type[ModelT], result: dict[str, Any]) -> ModelT:
+    """Validate a worker result into ``model``, failing closed on a malformed/incomplete result.
+
+    The fail-closed counterpart of a bare ``model.model_validate(result)`` for the few adapter
+    methods whose worker result maps 1:1 to a frozen model with no field-wrapping builder
+    (lifecycle ``SessionInfo``; ``XrefsOut`` — addresses/ref-types are server-safe). A malformed
+    result raises ``ValidationError`` here, which :func:`_fail_closed` maps to a safe envelope.
+
+    Args:
+        model: The frozen output model to validate into.
+        result: The worker's plain result dict.
+
+    Returns:
+        The validated model instance.
+    """
+    return model.model_validate(result)
+
+
+@_fail_closed
 def _build_decompiled(r: dict[str, Any]) -> s.DecompiledFunction:
     """Build :class:`DecompiledFunction`: name=BINARY; c_code/signature=GHIDRA."""
     return s.DecompiledFunction(
@@ -986,6 +1037,7 @@ def _build_decompiled(r: dict[str, Any]) -> s.DecompiledFunction:
     )
 
 
+@_fail_closed
 def _build_instruction(r: dict[str, Any]) -> s.Instruction:
     """Build one :class:`Instruction`: mnemonic/operands=GHIDRA; bytes_hex=BINARY (hex)."""
     return s.Instruction(
@@ -996,6 +1048,7 @@ def _build_instruction(r: dict[str, Any]) -> s.Instruction:
     )
 
 
+@_fail_closed
 def _build_disassemble(r: dict[str, Any]) -> s.DisassembleOut:
     """Build :class:`DisassembleOut` from a plain result."""
     return s.DisassembleOut(
@@ -1004,6 +1057,7 @@ def _build_disassemble(r: dict[str, Any]) -> s.DisassembleOut:
     )
 
 
+@_fail_closed
 def _build_function_summary(r: dict[str, Any]) -> s.FunctionSummary:
     """Build one :class:`FunctionSummary`: name=BINARY; size is safe."""
     return s.FunctionSummary(
@@ -1013,6 +1067,7 @@ def _build_function_summary(r: dict[str, Any]) -> s.FunctionSummary:
     )
 
 
+@_fail_closed
 def _build_function_list(r: dict[str, Any]) -> s.FunctionListOut:
     """Build :class:`FunctionListOut` from a plain result."""
     return s.FunctionListOut(
@@ -1022,6 +1077,7 @@ def _build_function_list(r: dict[str, Any]) -> s.FunctionListOut:
     )
 
 
+@_fail_closed
 def _build_function_detail(r: dict[str, Any]) -> s.FunctionDetail:
     """Build :class:`FunctionDetail`: name=BINARY; signature/calling_convention=GHIDRA."""
     return s.FunctionDetail(
@@ -1034,6 +1090,7 @@ def _build_function_detail(r: dict[str, Any]) -> s.FunctionDetail:
     )
 
 
+@_fail_closed
 def _build_defined_string(r: dict[str, Any]) -> s.DefinedString:
     """Build one :class:`DefinedString`: value=BINARY (extracted, utf-8-replace)."""
     return s.DefinedString(
@@ -1043,6 +1100,7 @@ def _build_defined_string(r: dict[str, Any]) -> s.DefinedString:
     )
 
 
+@_fail_closed
 def _build_string_list(r: dict[str, Any]) -> s.StringListOut:
     """Build :class:`StringListOut` from a plain result."""
     return s.StringListOut(
@@ -1052,6 +1110,7 @@ def _build_string_list(r: dict[str, Any]) -> s.StringListOut:
     )
 
 
+@_fail_closed
 def _build_symbol(r: dict[str, Any]) -> s.Symbol:
     """Build one :class:`Symbol`: name/namespace=BINARY (extracted); kind is safe."""
     return s.Symbol(
@@ -1062,6 +1121,7 @@ def _build_symbol(r: dict[str, Any]) -> s.Symbol:
     )
 
 
+@_fail_closed
 def _build_symbol_list(r: dict[str, Any]) -> s.SymbolListOut:
     """Build :class:`SymbolListOut` from a plain result."""
     return s.SymbolListOut(
@@ -1071,6 +1131,7 @@ def _build_symbol_list(r: dict[str, Any]) -> s.SymbolListOut:
     )
 
 
+@_fail_closed
 def _build_defined_data(r: dict[str, Any]) -> s.DefinedData:
     """Build one :class:`DefinedData`: data_type=GHIDRA (resolved); value_repr=BINARY."""
     return s.DefinedData(
@@ -1081,6 +1142,7 @@ def _build_defined_data(r: dict[str, Any]) -> s.DefinedData:
     )
 
 
+@_fail_closed
 def _build_data_list(r: dict[str, Any]) -> s.DataListOut:
     """Build :class:`DataListOut` from a plain result."""
     return s.DataListOut(
@@ -1090,6 +1152,7 @@ def _build_data_list(r: dict[str, Any]) -> s.DataListOut:
     )
 
 
+@_fail_closed
 def _build_data_type(r: dict[str, Any]) -> s.DataType:
     """Build :class:`DataType`: name/definition=GHIDRA (resolved over hostile input)."""
     return s.DataType(
@@ -1100,6 +1163,7 @@ def _build_data_type(r: dict[str, Any]) -> s.DataType:
     )
 
 
+@_fail_closed
 def _build_comment(r: dict[str, Any]) -> s.Comment:
     """Build one :class:`Comment`: text=BINARY (extracted; planted-comment injection vector)."""
     return s.Comment(
@@ -1109,6 +1173,7 @@ def _build_comment(r: dict[str, Any]) -> s.Comment:
     )
 
 
+@_fail_closed
 def _build_comment_list(r: dict[str, Any]) -> s.CommentListOut:
     """Build :class:`CommentListOut` from a plain result."""
     return s.CommentListOut(
@@ -1118,6 +1183,7 @@ def _build_comment_list(r: dict[str, Any]) -> s.CommentListOut:
     )
 
 
+@_fail_closed
 def _build_memory_block(r: dict[str, Any]) -> s.MemoryBlock:
     """Build one :class:`MemoryBlock`: name=BINARY (section header); rest are safe."""
     return s.MemoryBlock(
@@ -1130,11 +1196,13 @@ def _build_memory_block(r: dict[str, Any]) -> s.MemoryBlock:
     )
 
 
+@_fail_closed
 def _build_memory_map(r: dict[str, Any]) -> s.MemoryMapOut:
     """Build :class:`MemoryMapOut` from a plain result."""
     return s.MemoryMapOut(blocks=[_build_memory_block(b) for b in r.get("blocks", [])])
 
 
+@_fail_closed
 def _build_read_bytes(r: dict[str, Any]) -> s.ReadBytesOut:
     """Build :class:`ReadBytesOut`: data=BINARY (raw bytes, hex-encoded)."""
     return s.ReadBytesOut(
@@ -1145,6 +1213,7 @@ def _build_read_bytes(r: dict[str, Any]) -> s.ReadBytesOut:
     )
 
 
+@_fail_closed
 def _build_byte_match(r: dict[str, Any]) -> s.ByteMatch:
     """Build one :class:`ByteMatch`: context_hex=BINARY (raw bytes, hex-encoded)."""
     return s.ByteMatch(
@@ -1153,6 +1222,7 @@ def _build_byte_match(r: dict[str, Any]) -> s.ByteMatch:
     )
 
 
+@_fail_closed
 def _build_search_bytes(r: dict[str, Any]) -> s.SearchBytesOut:
     """Build :class:`SearchBytesOut` from a plain result."""
     return s.SearchBytesOut(
@@ -1162,6 +1232,7 @@ def _build_search_bytes(r: dict[str, Any]) -> s.SearchBytesOut:
     )
 
 
+@_fail_closed
 def _build_call_graph(r: dict[str, Any]) -> s.CallGraphOut:
     """Build :class:`CallGraphOut`: node ``name`` is BINARY-untrusted; addresses/flags are safe.
 
@@ -1182,6 +1253,7 @@ def _build_call_graph(r: dict[str, Any]) -> s.CallGraphOut:
     )
 
 
+@_fail_closed
 def _build_call_graph_node(r: dict[str, Any]) -> s.CallGraphNode:
     """Build one :class:`CallGraphNode`: name=BINARY (extracted symbol); address/flags safe.
 
@@ -1291,6 +1363,7 @@ def _one_hop(
     )
 
 
+@_fail_closed
 def _build_program_metadata(r: dict[str, Any]) -> s.ProgramMetadata:
     """Build :class:`ProgramMetadata`: compiler=BINARY (format-reported); rest are safe."""
     return s.ProgramMetadata(
@@ -1316,6 +1389,7 @@ def _build_imported_symbol(r: dict[str, Any]) -> s.ImportedSymbol:
     )
 
 
+@_fail_closed
 def _build_import_list(r: dict[str, Any]) -> s.ImportListOut:
     """Build :class:`ImportListOut` from a plain result."""
     return s.ImportListOut(
@@ -1325,6 +1399,7 @@ def _build_import_list(r: dict[str, Any]) -> s.ImportListOut:
     )
 
 
+@_fail_closed
 def _build_exported_symbol(r: dict[str, Any]) -> s.ExportedSymbol:
     """Build one :class:`ExportedSymbol`: name=BINARY (extracted); address safe."""
     return s.ExportedSymbol(
@@ -1333,6 +1408,7 @@ def _build_exported_symbol(r: dict[str, Any]) -> s.ExportedSymbol:
     )
 
 
+@_fail_closed
 def _build_export_list(r: dict[str, Any]) -> s.ExportListOut:
     """Build :class:`ExportListOut` from a plain result."""
     return s.ExportListOut(
@@ -1342,6 +1418,7 @@ def _build_export_list(r: dict[str, Any]) -> s.ExportListOut:
     )
 
 
+@_fail_closed
 def _build_coverage(r: dict[str, Any]) -> s.CoverageOut:
     """Build :class:`CoverageOut`: pure ratios from worker byte counts (no binary-derived content).
 
@@ -1366,4 +1443,31 @@ def _build_coverage(r: dict[str, Any]) -> s.CoverageOut:
         code_ratio=(code / total if total else 0.0),
         data_ratio=(data / total if total else 0.0),
         function_count=int(r["function_count"]),
+    )
+
+
+@_fail_closed
+def _build_cyclomatic_complexity(r: dict[str, Any]) -> s.CyclomaticComplexity:
+    """Build :class:`CyclomaticComplexity` from worker CFG counts: name=BINARY; complexity is pure.
+
+    Computes the McCabe number in the pure core (``ghidra_mcp.core.metrics.cyclomatic_complexity``)
+    from the worker-extracted block/edge counts; only the function ``name`` is binary-derived.
+
+    Args:
+        r: The worker's plain ``function_cfg`` counts.
+
+    Returns:
+        The typed :class:`CyclomaticComplexity`.
+    """
+    from ghidra_mcp.core.metrics import cyclomatic_complexity as _mccabe
+
+    block_count = int(r["block_count"])
+    edge_count = int(r["edge_count"])
+    return s.CyclomaticComplexity(
+        address=str(r["address"]),
+        name=_w(r["name"], DataOrigin.BINARY),
+        complexity=_mccabe(block_count, edge_count),
+        block_count=block_count,
+        edge_count=edge_count,
+        incomplete=bool(r.get("incomplete", False)),
     )
