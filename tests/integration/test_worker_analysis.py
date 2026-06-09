@@ -118,6 +118,13 @@ def main():
         out["referenced_strings"] = backend.referenced_strings(
             {"function": rows[0]["address"], "max_strings": 16}
         )
+
+    # v1.1 Tier-2 reporting/metrics JVM bindings (ADR-008): the four new extraction primitives.
+    out["imports"] = backend.imports({"offset": 0, "limit": 5})
+    out["exports"] = backend.exports({"offset": 0, "limit": 5})
+    out["coverage"] = backend.coverage({})
+    if rows:
+        out["function_cfg"] = backend.function_cfg({"function": rows[0]["address"]})
     return out
 
 
@@ -304,6 +311,13 @@ def test_worker_analyzes_real_elf_end_to_end(worker_image: str) -> None:
     if "referenced_strings" in data:
         _assert_referenced_strings_shape(data["referenced_strings"])
 
+    # v1.1 Tier-2 reporting/metrics JVM bindings (ADR-008) — the four new extraction primitives.
+    _assert_paged_list_shape(data["imports"], "imports", ("name",))
+    _assert_paged_list_shape(data["exports"], "exports", ("name", "address"))
+    _assert_coverage_shape(data["coverage"])
+    if "function_cfg" in data:
+        _assert_function_cfg_shape(data["function_cfg"])
+
 
 # --- contract assertions (mirror the dict shapes the WS2 rpc_client _build_* builders consume) ---
 def _assert_import_shape(result: dict[str, Any]) -> None:
@@ -463,3 +477,60 @@ def _assert_string_list_shape(strings: dict[str, Any]) -> None:
         assert isinstance(row.get("address"), str) and row["address"], "string address missing"
         assert isinstance(row.get("value"), str), "string value must be a string"
         assert isinstance(row.get("length"), int) and row["length"] >= 0, "string length invalid"
+
+
+def _assert_paged_list_shape(result: dict[str, Any], key: str, required: tuple[str, ...]) -> None:
+    """Assert a ``{<key>: [...], total, truncated}`` paginated worker result shape (ADR-008).
+
+    Proves the ``_gh_imports`` / ``_gh_exports`` JVM bindings emit the frozen paginated shape with
+    each row carrying the required string fields. The list may be empty (a stripped/static binary
+    need not import or export anything) — only the shape is asserted, not the payload.
+
+    Args:
+        result: The ``imports`` / ``exports`` result dict.
+        key: The row-list key (``"imports"`` or ``"exports"``).
+        required: Row keys that must be present and string-valued.
+    """
+    rows = result.get(key)
+    assert isinstance(rows, list), f"{key} must be a list"
+    assert isinstance(result.get("total"), int) and result["total"] >= 0, f"{key} total invalid"
+    assert isinstance(result.get("truncated"), bool), f"{key} truncated must be a bool"
+    for row in rows:
+        for field in required:
+            assert isinstance(row.get(field), str) and row[field], f"{key} row {field} missing"
+
+
+def _assert_coverage_shape(coverage: dict[str, Any]) -> None:
+    """Assert ``coverage`` returns non-negative byte counts (server derives the ratios; ADR-008).
+
+    Proves the ``_gh_coverage`` JVM binding emits the plain count fields the pure ratio core
+    consumes, and that defined code+data never exceed the addressable total (internal consistency).
+
+    Args:
+        coverage: The ``coverage`` result dict.
+    """
+    for field in ("total_bytes", "defined_code_bytes", "defined_data_bytes", "function_count"):
+        value = coverage.get(field)
+        assert isinstance(value, int) and value >= 0, f"coverage {field} invalid"
+    assert (
+        coverage["defined_code_bytes"] + coverage["defined_data_bytes"] <= coverage["total_bytes"]
+    ), "defined code+data bytes exceed the addressable total"
+
+
+def _assert_function_cfg_shape(cfg: dict[str, Any]) -> None:
+    """Assert ``function_cfg`` returns the CFG counts the pure McCabe core consumes (ADR-008).
+
+    Proves the ``_gh_function_cfg`` JVM binding emits a non-empty block count, a non-negative edge
+    count, an extracted ``name``, and the ``incomplete`` honesty flag — the exact dict the pure
+    :func:`ghidra_mcp.core.metrics.cyclomatic_complexity` derivation needs.
+
+    Args:
+        cfg: The ``function_cfg`` result dict.
+    """
+    assert isinstance(cfg.get("address"), str) and cfg["address"], "cfg address missing"
+    assert isinstance(cfg.get("name"), str), "cfg name must be a string"
+    assert isinstance(cfg.get("block_count"), int) and cfg["block_count"] >= 1, (
+        "block_count invalid"
+    )
+    assert isinstance(cfg.get("edge_count"), int) and cfg["edge_count"] >= 0, "edge_count bad"
+    assert isinstance(cfg.get("incomplete"), bool), "cfg incomplete must be a bool"

@@ -1,6 +1,7 @@
 # ADR-008: Tier-2 reporting & metrics tools (read-only analysis layer)
 
-- **Status:** Proposed (v1.1 increment; contract expansion awaiting PM ratification — batch-atomicity)
+- **Status:** Accepted (v1.1 increment; implemented on `feat/tier2-metrics` — schemas + pure cores
+  + worker extraction + adapter + aggregation, gates green)
 - **Date:** 2026-06-08
 - **Deciders:** Human (v1.1 increment selection) + PM; recorded by Software Architect
 - **Relates to:** ADR-001 (out-of-process Ghidra), ADR-005 (untrusted-data envelope),

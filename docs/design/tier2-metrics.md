@@ -1,6 +1,6 @@
 # Design: Tier-2 reporting & metrics tools (v1.1)
 
-> Status: design + frozen contracts (v1.1). Implements ADR-008. Read-only, output-only, no new trust
+> Status: implemented (v1.1). Implements ADR-008. Read-only, output-only, no new trust
 > boundary. Derivation is JVM-free (pure core); only raw extraction touches the worker (ADR-001).
 > Every binary-derived field is `Untrusted[...]`-wrapped at the `core.envelope.wrap` chokepoint
 > (ADR-005). All outputs are bounded (DoS — std-cwe CWE-400).
