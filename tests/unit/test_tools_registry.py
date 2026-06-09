@@ -1,9 +1,10 @@
 """Unit tests for the Tier-1 tool registry and handlers (WS1).
 
-Verifies the allow-list is exactly the 27 frozen tools (22 Tier-1 + 5 v1.1 semantic-naming —
-ADR-007), that handlers authorize the session first (BOLA defense), apply semantic validation
-before touching the port, and delegate to the injected :class:`GhidraPort`. Collaborators are
-local fakes implementing the frozen interfaces (no real worker, no JVM — ADR-001).
+Verifies the allow-list is exactly the 35 frozen tools (22 Tier-1 + 5 v1.1 semantic-naming
+(ADR-007) + 8 v1.1 Tier-2 reporting/metrics (ADR-008)), that handlers authorize the session first
+(BOLA defense), apply semantic validation before touching the port, and delegate to the injected
+:class:`GhidraPort`. Collaborators are local fakes implementing the frozen interfaces (no real
+worker, no JVM — ADR-001).
 """
 
 from __future__ import annotations
@@ -210,6 +211,77 @@ class FakePort:
             name=_u("main"),
             signature=_u("int main()", DataOrigin.GHIDRA),
             is_external=False,
+        )
+
+    # --- Tier-2 reporting / metrics (v1.1 — ADR-008) ---
+    def cyclomatic_complexity(
+        self, sid: str, a: s.CyclomaticComplexityIn
+    ) -> s.CyclomaticComplexity:
+        self._rec("cyclomatic_complexity", sid)
+        return s.CyclomaticComplexity(
+            address="0x401000", name=_u("main"), complexity=1, block_count=1, edge_count=0
+        )
+
+    def list_imports(self, sid: str, a: s.ListImportsIn) -> s.ImportListOut:
+        self._rec("list_imports", sid)
+        return s.ImportListOut(imports=[], total=0)
+
+    def list_exports(self, sid: str, a: s.ListExportsIn) -> s.ExportListOut:
+        self._rec("list_exports", sid)
+        return s.ExportListOut(exports=[], total=0)
+
+    def coverage(self, sid: str, a: s.CoverageIn) -> s.CoverageOut:
+        self._rec("coverage", sid)
+        return s.CoverageOut(
+            total_bytes=0,
+            defined_code_bytes=0,
+            defined_data_bytes=0,
+            undefined_bytes=0,
+            code_ratio=0.0,
+            data_ratio=0.0,
+            function_count=0,
+        )
+
+    def ioc_scan(self, sid: str, a: s.IocScanIn) -> s.IocScanOut:
+        self._rec("ioc_scan", sid)
+        return s.IocScanOut(matches=[], total=0)
+
+    def crypto_constant_scan(self, sid: str, a: s.CryptoConstantScanIn) -> s.CryptoConstantScanOut:
+        self._rec("crypto_constant_scan", sid)
+        return s.CryptoConstantScanOut(findings=[], total=0)
+
+    def call_graph_metrics(self, sid: str, a: s.CallGraphMetricsIn) -> s.CallGraphMetricsOut:
+        self._rec("call_graph_metrics", sid)
+        return s.CallGraphMetricsOut(
+            function_count=0,
+            edge_count=0,
+            leaf_count=0,
+            root_count=0,
+            recursive_component_count=0,
+            self_recursive_count=0,
+            unresolved_caller_count=0,
+            top_fan_in=[],
+            top_fan_out=[],
+        )
+
+    def program_summary(self, sid: str, a: s.ProgramSummaryIn) -> s.ProgramSummary:
+        self._rec("program_summary", sid)
+        return s.ProgramSummary(
+            metadata=s.ProgramMetadata(
+                sha256="a" * 64,
+                size_bytes=0,
+                format="ELF",
+                architecture="x86:LE:64:default",
+                endianness="little",
+                compiler=None,
+                entry_point=None,
+                function_count=0,
+                analysis_complete=True,
+            ),
+            function_count=0,
+            import_count=0,
+            export_count=0,
+            string_count=0,
         )
 
 
@@ -421,6 +493,20 @@ def test_session_analyze_uses_manager_lifecycle_keeps_worker_sha256(ctx: reg.Too
             {"session_id": _VALID_SID, "function": "main"},
             "function_context",
         ),
+        # v1.1 Tier-2 reporting/metrics tools (ADR-008) — same authorize-then-delegate contract.
+        (
+            "cyclomatic_complexity",
+            {"session_id": _VALID_SID, "function": "main"},
+            "cyclomatic_complexity",
+        ),
+        ("list_imports", {"session_id": _VALID_SID}, "list_imports"),
+        ("list_exports", {"session_id": _VALID_SID}, "list_exports"),
+        ("coverage", {"session_id": _VALID_SID}, "coverage"),
+        ("ioc_scan", {"session_id": _VALID_SID}, "ioc_scan"),
+        ("crypto_constant_scan", {"session_id": _VALID_SID}, "crypto_constant_scan"),
+        ("call_graph_metrics", {"session_id": _VALID_SID}, "call_graph_metrics"),
+        ("call_graph_metrics", {"session_id": _VALID_SID, "root": "main"}, "call_graph_metrics"),
+        ("program_summary", {"session_id": _VALID_SID}, "program_summary"),
     ],
 )
 def test_each_worker_tool_authorizes_and_delegates(

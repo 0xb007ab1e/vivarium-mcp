@@ -11,6 +11,7 @@ from ghidra_mcp.core.iocscan import (
     CryptoHit,
     CryptoSignature,
     IocHit,
+    scan_crypto_constants,
     scan_iocs,
 )
 
@@ -91,3 +92,26 @@ def test_crypto_hit_dataclass() -> None:
     """CryptoHit carries closed-vocabulary labels + a bare address."""
     hit = CryptoHit(algorithm="AES", kind="sbox", address="0x4010")
     assert (hit.algorithm, hit.kind, hit.address) == ("AES", "sbox", "0x4010")
+
+
+def test_scan_crypto_constants_shapes_dedups_and_orders() -> None:
+    """scan_crypto_constants maps per-signature addresses to ordered, deduped hits."""
+    aes = CryptoSignature("AES", "sbox", "637c")
+    sha = CryptoSignature("SHA-256", "iv", "6a09")
+    hits = scan_crypto_constants(
+        [
+            (sha, ["0x9000", "0x9000"]),  # duplicate address collapses
+            (aes, ["0x8000"]),
+        ]
+    )
+    # ordered by (algorithm, kind, address): AES before SHA-256; one SHA hit after dedup
+    assert [(h.algorithm, h.address) for h in hits] == [
+        ("AES", "0x8000"),
+        ("SHA-256", "0x9000"),
+    ]
+
+
+def test_scan_crypto_constants_empty() -> None:
+    """No matches → no hits."""
+    sig = CryptoSignature("AES", "sbox", "637c")
+    assert scan_crypto_constants([(sig, [])]) == []

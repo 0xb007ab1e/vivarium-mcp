@@ -16,7 +16,7 @@ std-cwe CWE-1333), and inputs are length-capped by the caller before matching.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 #: Hard cap on the characters of any single string scanned for IOCs (defense against pathological
@@ -144,3 +144,34 @@ class CryptoHit:
     algorithm: str
     kind: str
     address: str
+
+
+def scan_crypto_constants(
+    results: Iterable[tuple[CryptoSignature, Sequence[str]]],
+) -> list[CryptoHit]:
+    """Shape per-signature byte-search match addresses into ordered, deduped hits (PURE).
+
+    The byte search itself is delegated to the worker ``search_bytes`` RPC (the JVM edge); this core
+    owns the signature table and the result shaping, so the mapping is deterministic and testable
+    with no JVM. All output fields are closed-vocabulary labels or server-normalized addresses
+    (safe) — no binary-derived *content* is in a :class:`CryptoHit`.
+
+    Args:
+        results: Iterable of ``(signature, [match_address, ...])`` rows, one per signature.
+
+    Returns:
+        De-duplicated :class:`CryptoHit` list ordered by (algorithm, kind, address).
+    """
+    seen: set[tuple[str, str, str]] = set()
+    hits: list[CryptoHit] = []
+    for signature, addresses in results:
+        for address in addresses:
+            key = (signature.algorithm, signature.kind, address)
+            if key in seen:
+                continue
+            seen.add(key)
+            hits.append(
+                CryptoHit(algorithm=signature.algorithm, kind=signature.kind, address=address)
+            )
+    hits.sort(key=lambda h: (h.algorithm, h.kind, h.address))
+    return hits

@@ -34,6 +34,7 @@ import contextlib
 import socket
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -75,6 +76,28 @@ WorkerLauncher = Callable[[str, str], WorkerProcess]
 #: allow-list-confined resolver; the built-in default stats a path under the OS (used only when the
 #: composition root wires no resolver). It returns a non-negative ``int`` size.
 SourceResolver = Callable[[str], int]
+
+
+# --- Tier-2 internal scan budgets (ADR-008; bounded BEFORE the worker — std-cwe CWE-400) -----
+#: How many defined strings ``ioc_scan`` pulls in one bounded page before scanning (the worker also
+#: clamps; ``truncated`` is honest when more exist). Sized to a generous-but-bounded triage window.
+_IOC_STRING_BUDGET = 10_000
+#: Max ``search_bytes`` matches requested per crypto signature (each search is already bounded; this
+#: caps the per-signature contribution to the aggregate and feeds ``truncated``).
+_CRYPTO_MATCH_BUDGET = 1_000
+
+
+@dataclass(frozen=True, slots=True)
+class _TopComplex:
+    """Bounded top-by-complexity result for ``program_summary`` (helper return type).
+
+    Attributes:
+        functions: The examined functions, sorted by descending cyclomatic complexity.
+        truncated: Whether more functions existed than were examined (honesty for the summary).
+    """
+
+    functions: list[s.CyclomaticComplexity]
+    truncated: bool
 
 
 def _default_source_size(source_ref: str) -> int:
@@ -477,52 +500,251 @@ class RpcGhidraAdapter:
         """Resolve a function (name or hex) to its server-normalized entry address (via worker)."""
         return self.get_function(sid, s.GetFunctionIn(session_id=sid, function=function)).address
 
-    # --- Tier-2 reporting / metrics (v1.1 — ADR-008) ----------------------------------------
-    # RESERVED STUBS (build fan-out): each is wired here to the PURE cores (core.metrics /
-    # core.iocscan) over existing read-only RPCs (list_strings / search_bytes / call_graph) and the
-    # new worker extraction RPCs (function_cfg / imports / exports / coverage). No JVM on the server
-    # (ADR-001); binary-derived fields wrapped at the ADR-005 chokepoint, in the build fan-out.
+    # --- Tier-2 reporting / metrics (v1.1 — ADR-008; READ-ONLY) ------------------------------
+    # The worker exposes four new extraction primitives (ADR-001): ``function_cfg``, ``imports``,
+    # ``exports``, ``coverage``. The metric DERIVATION is JVM-free here: ``cyclomatic_complexity``
+    # and ``call_graph_metrics`` run the PURE ``core.metrics`` over extracted counts/adjacency;
+    # ``ioc_scan`` / ``crypto_constant_scan`` run the PURE ``core.iocscan`` over the existing
+    # ``list_strings`` / ``search_bytes`` RPCs; ``program_summary`` aggregates the others. Every
+    # binary-derived field is wrapped at the ADR-005 chokepoint; addresses/counts/ratios/labels are
+    # safe scalars. NO naming or synthesis (no server-side LLM — locked decision #1).
     def cyclomatic_complexity(
         self, sid: str, a: s.CyclomaticComplexityIn
     ) -> s.CyclomaticComplexity:
-        """McCabe complexity of one function (RESERVED — v1.1 worker `function_cfg`)."""
-        raise NotImplementedError(
-            "RESERVED (v1.1 ADR-008): cyclomatic_complexity — pending build fan-out"
+        """McCabe complexity of one function (worker CFG counts → pure ``E - N + 2``)."""
+        from ghidra_mcp.core.metrics import cyclomatic_complexity as _mccabe
+
+        r = self._tool_call(sid, "function_cfg", {"function": a.function})
+        block_count = int(r["block_count"])
+        edge_count = int(r["edge_count"])
+        return s.CyclomaticComplexity(
+            address=str(r["address"]),
+            name=_w(r["name"], DataOrigin.BINARY),
+            complexity=_mccabe(block_count, edge_count),
+            block_count=block_count,
+            edge_count=edge_count,
+            incomplete=bool(r.get("incomplete", False)),
         )
 
     def list_imports(self, sid: str, a: s.ListImportsIn) -> s.ImportListOut:
-        """List imported symbols (RESERVED — v1.1 worker `imports` extraction)."""
-        raise NotImplementedError("RESERVED (v1.1 ADR-008): list_imports — pending build fan-out")
+        """List imported symbols/functions (paginated/bounded)."""
+        return _build_import_list(
+            self._tool_call(sid, "imports", {"offset": a.offset, "limit": a.limit})
+        )
 
     def list_exports(self, sid: str, a: s.ListExportsIn) -> s.ExportListOut:
-        """List exported symbols (RESERVED — v1.1 worker `exports` extraction)."""
-        raise NotImplementedError("RESERVED (v1.1 ADR-008): list_exports — pending build fan-out")
+        """List exported symbols/entry points (paginated/bounded)."""
+        return _build_export_list(
+            self._tool_call(sid, "exports", {"offset": a.offset, "limit": a.limit})
+        )
 
     def coverage(self, sid: str, a: s.CoverageIn) -> s.CoverageOut:
-        """Code/data coverage (RESERVED — v1.1 worker `coverage` extraction + pure ratios)."""
-        raise NotImplementedError("RESERVED (v1.1 ADR-008): coverage — pending build fan-out")
+        """Defined-code/data byte coverage (worker byte counts → pure ratios; no wrap needed)."""
+        return _build_coverage(self._tool_call(sid, "coverage", {}))
 
     def ioc_scan(self, sid: str, a: s.IocScanIn) -> s.IocScanOut:
-        """Heuristic IOC scan (RESERVED — v1.1 pure core over the list_strings RPC)."""
-        raise NotImplementedError("RESERVED (v1.1 ADR-008): ioc_scan — pending build fan-out")
+        """Heuristic IOC scan over defined strings (PURE core over the ``list_strings`` RPC).
+
+        Fetches a bounded page of defined strings, runs the pure :func:`core.iocscan.scan_iocs`,
+        then paginates the matches by ``offset``/``limit``. Each matched ``value`` is
+        attacker-controlled and wrapped BINARY-origin (ADR-005) — a prime injection vector.
+        ``truncated`` reflects either the scanned-string cap or a matches-page cap (honesty).
+        """
+        from ghidra_mcp.core import iocscan
+
+        strings = _build_string_list(
+            self._tool_call(
+                sid,
+                "list_strings",
+                {"offset": 0, "limit": _IOC_STRING_BUDGET, "min_length": a.min_length},
+            )
+        )
+        rows = [(ds.address, ds.value.value) for ds in strings.strings]
+        categories = tuple(a.categories) if a.categories else None
+        hits = iocscan.scan_iocs(rows, categories=categories, min_length=a.min_length)
+        total = len(hits)
+        page = hits[a.offset : a.offset + a.limit]
+        truncated = strings.truncated or (a.offset + a.limit < total)
+        return s.IocScanOut(
+            matches=[
+                s.IocMatch(
+                    category=h.category,
+                    value=_w(h.value, DataOrigin.BINARY),
+                    source_address=h.source_address,
+                )
+                for h in page
+            ],
+            total=total,
+            truncated=truncated,
+        )
 
     def crypto_constant_scan(self, sid: str, a: s.CryptoConstantScanIn) -> s.CryptoConstantScanOut:
-        """Heuristic crypto-constant scan (RESERVED — v1.1 signature table over search_bytes)."""
-        raise NotImplementedError(
-            "RESERVED (v1.1 ADR-008): crypto_constant_scan — pending build fan-out"
+        """Heuristic crypto-constant search (PURE signature table over the ``search_bytes`` RPC).
+
+        Issues one bounded ``search_bytes`` per known signature, then shapes the addresses with the
+        pure :func:`core.iocscan.scan_crypto_constants` and paginates. All output fields are safe
+        (closed-vocabulary labels + server addresses). HEURISTIC — a match is a lead, not proof.
+        """
+        from ghidra_mcp.core import iocscan
+
+        per_signature: list[tuple[iocscan.CryptoSignature, list[str]]] = []
+        search_truncated = False
+        for signature in iocscan.CRYPTO_SIGNATURES:
+            result = self._tool_call(
+                sid,
+                "search_bytes",
+                {"pattern_hex": signature.pattern_hex, "offset": 0, "limit": _CRYPTO_MATCH_BUDGET},
+            )
+            search_truncated = search_truncated or bool(result.get("truncated", False))
+            addresses = [str(m["address"]) for m in result.get("matches", [])]
+            per_signature.append((signature, addresses))
+        hits = iocscan.scan_crypto_constants(per_signature)
+        total = len(hits)
+        page = hits[a.offset : a.offset + a.limit]
+        truncated = search_truncated or (a.offset + a.limit < total)
+        return s.CryptoConstantScanOut(
+            findings=[
+                s.CryptoConstantFinding(algorithm=h.algorithm, kind=h.kind, address=h.address)
+                for h in page
+            ],
+            total=total,
+            truncated=truncated,
         )
 
     def call_graph_metrics(self, sid: str, a: s.CallGraphMetricsIn) -> s.CallGraphMetricsOut:
-        """Structural call-graph metrics (RESERVED — v1.1 pure core over call_graph)."""
-        raise NotImplementedError(
-            "RESERVED (v1.1 ADR-008): call_graph_metrics — pending build fan-out"
+        """Structural call-graph metrics (PURE ``core.metrics`` over the ``call_graph`` RPC).
+
+        Extracts the bounded adjacency via the worker ``call_graph`` RPC (the only Ghidra hop), then
+        computes fan-in/out, leaf/root, and recursion stats with the pure
+        :func:`core.metrics.compute_call_graph_metrics` (which reuses the ADR-007 ordering core).
+        Hotspot ``name`` fields are taken from the (already-wrapped) graph nodes; addresses/counts
+        are safe. ``truncated`` reflects the underlying graph node/edge cap.
+        """
+        from ghidra_mcp.core.metrics import compute_call_graph_metrics
+
+        graph = self.call_graph(
+            sid,
+            s.CallGraphIn(
+                session_id=a.session_id,
+                root=a.root,
+                max_depth=a.max_depth,
+                max_nodes=a.max_nodes,
+                max_edges=a.max_edges,
+            ),
+        )
+        adjacency, unresolved = _adjacency_from_graph(graph)
+        result = compute_call_graph_metrics(adjacency, unresolved=tuple(unresolved), top_n=a.top_n)
+        names = {node.address: node.name for node in graph.nodes}
+
+        def _rank(entries: tuple[Any, ...]) -> list[s.FanRanking]:
+            """Map pure ``FanEntry`` ranks to :class:`FanRanking`, reusing wrapped node names."""
+            ranked: list[s.FanRanking] = []
+            for entry in entries:
+                name = names.get(entry.address)
+                if name is None:  # an edge target outside the emitted node set (boundary clip)
+                    name = _w(entry.address, DataOrigin.BINARY)
+                ranked.append(s.FanRanking(address=entry.address, name=name, count=entry.count))
+            return ranked
+
+        return s.CallGraphMetricsOut(
+            function_count=result.function_count,
+            edge_count=result.edge_count,
+            leaf_count=result.leaf_count,
+            root_count=result.root_count,
+            recursive_component_count=result.recursive_component_count,
+            self_recursive_count=result.self_recursive_count,
+            unresolved_caller_count=result.unresolved_caller_count,
+            top_fan_in=_rank(result.top_fan_in),
+            top_fan_out=_rank(result.top_fan_out),
+            truncated=graph.truncated,
         )
 
     def program_summary(self, sid: str, a: s.ProgramSummaryIn) -> s.ProgramSummary:
-        """One-shot aggregate report (RESERVED — v1.1 aggregation of Tier-1 + Tier-2)."""
-        raise NotImplementedError(
-            "RESERVED (v1.1 ADR-008): program_summary — pending build fan-out"
+        """One-shot aggregate triage report (server-side aggregation of Tier-1 + Tier-2).
+
+        Composes bounded sub-results — program metadata, import/export/string totals, coverage, the
+        optional call-graph metrics, the top functions by complexity (over a bounded examined set),
+        an IOC category histogram, and the detected crypto-algorithm set — wrapping every
+        binary-derived field at the ADR-005 chokepoint. NO naming or C synthesis (ADR-008). The
+        heavy per-item lists stay in their dedicated tools; ``truncated`` is the OR of any capped
+        sub-result so the client never mistakes a bounded view for the whole program.
+        """
+        sess = a.session_id
+        metadata = self.program_metadata(sid, s.ProgramMetadataIn(session_id=sess))
+        import_count = self.list_imports(sid, s.ListImportsIn(session_id=sess, limit=1)).total
+        export_count = self.list_exports(sid, s.ListExportsIn(session_id=sess, limit=1)).total
+        string_count = self.list_strings(sid, s.ListStringsIn(session_id=sess, limit=1)).total
+        coverage = self.coverage(sid, s.CoverageIn(session_id=sess))
+        truncated = False
+
+        call_graph_metrics: s.CallGraphMetricsOut | None = None
+        if a.include_call_graph:
+            call_graph_metrics = self.call_graph_metrics(sid, s.CallGraphMetricsIn(session_id=sess))
+            truncated = truncated or call_graph_metrics.truncated
+
+        top_complex = self._top_complex_functions(sid, sess, a.max_complex_functions)
+        truncated = truncated or top_complex.truncated
+
+        ioc_counts: list[s.IocCategoryCount] = []
+        if a.max_iocs:
+            scan = self.ioc_scan(sid, s.IocScanIn(session_id=sess, limit=a.max_iocs))
+            truncated = truncated or scan.truncated
+            counts: dict[str, int] = {}
+            for match in scan.matches:
+                counts[match.category] = counts.get(match.category, 0) + 1
+            ioc_counts = [
+                s.IocCategoryCount(category=cat, count=n) for cat, n in sorted(counts.items())
+            ]
+
+        crypto = self.crypto_constant_scan(
+            sid, s.CryptoConstantScanIn(session_id=sess, limit=_CRYPTO_MATCH_BUDGET)
         )
+        truncated = truncated or crypto.truncated
+        crypto_algorithms = sorted({f.algorithm for f in crypto.findings})
+
+        return s.ProgramSummary(
+            metadata=metadata,
+            function_count=metadata.function_count,
+            import_count=import_count,
+            export_count=export_count,
+            string_count=string_count,
+            coverage=coverage,
+            call_graph_metrics=call_graph_metrics,
+            top_complex_functions=top_complex.functions,
+            ioc_counts=ioc_counts,
+            crypto_algorithms=crypto_algorithms,
+            truncated=truncated,
+        )
+
+    def _top_complex_functions(self, sid: str, session_id: str, max_functions: int) -> _TopComplex:
+        """Return the highest-complexity functions over a bounded examined set (helper for summary).
+
+        Examines the first ``max_functions`` functions (one bounded ``list_functions`` page),
+        computes each one's cyclomatic complexity, and returns them sorted descending. ``truncated``
+        is set when more functions exist than were examined — so the summary never implies it ranked
+        the whole program. With ``max_functions == 0`` it does no work.
+
+        Args:
+            sid: The session id.
+            session_id: The same session id for sub-call argument models.
+            max_functions: Cap on functions examined and returned.
+
+        Returns:
+            A :class:`_TopComplex` (sorted functions + truncation flag).
+        """
+        if max_functions <= 0:
+            return _TopComplex(functions=[], truncated=False)
+        listing = self.list_functions(
+            sid, s.ListFunctionsIn(session_id=session_id, limit=max_functions)
+        )
+        measured = [
+            self.cyclomatic_complexity(
+                sid, s.CyclomaticComplexityIn(session_id=session_id, function=fn.address)
+            )
+            for fn in listing.functions
+        ]
+        measured.sort(key=lambda c: c.complexity, reverse=True)
+        return _TopComplex(functions=measured[:max_functions], truncated=listing.truncated)
 
     # --- internal: call orchestration -------------------------------------------------------
     def _tool_call(self, sid: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -1081,4 +1303,67 @@ def _build_program_metadata(r: dict[str, Any]) -> s.ProgramMetadata:
         entry_point=(str(r["entry_point"]) if r.get("entry_point") is not None else None),
         function_count=int(r["function_count"]),
         analysis_complete=bool(r["analysis_complete"]),
+    )
+
+
+# --- Tier-2 builders (v1.1 — ADR-008) --------------------------------------------------------
+def _build_imported_symbol(r: dict[str, Any]) -> s.ImportedSymbol:
+    """Build one :class:`ImportedSymbol`: name/library=BINARY (extracted); address safe-optional."""
+    return s.ImportedSymbol(
+        name=_w(r["name"], DataOrigin.BINARY),
+        library=_w_opt(r.get("library"), DataOrigin.BINARY),
+        address=(str(r["address"]) if r.get("address") is not None else None),
+    )
+
+
+def _build_import_list(r: dict[str, Any]) -> s.ImportListOut:
+    """Build :class:`ImportListOut` from a plain result."""
+    return s.ImportListOut(
+        imports=[_build_imported_symbol(x) for x in r.get("imports", [])],
+        total=int(r["total"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_exported_symbol(r: dict[str, Any]) -> s.ExportedSymbol:
+    """Build one :class:`ExportedSymbol`: name=BINARY (extracted); address safe."""
+    return s.ExportedSymbol(
+        name=_w(r["name"], DataOrigin.BINARY),
+        address=str(r["address"]),
+    )
+
+
+def _build_export_list(r: dict[str, Any]) -> s.ExportListOut:
+    """Build :class:`ExportListOut` from a plain result."""
+    return s.ExportListOut(
+        exports=[_build_exported_symbol(x) for x in r.get("exports", [])],
+        total=int(r["total"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_coverage(r: dict[str, Any]) -> s.CoverageOut:
+    """Build :class:`CoverageOut`: pure ratios from worker byte counts (no binary-derived content).
+
+    Computes ``undefined_bytes`` and the code/data ratios server-side (guarding divide-by-zero with
+    a 0.0 ratio when the program has no addressable bytes). All fields are safe scalars.
+
+    Args:
+        r: The worker's plain ``coverage`` counts.
+
+    Returns:
+        The typed :class:`CoverageOut`.
+    """
+    total = int(r["total_bytes"])
+    code = int(r["defined_code_bytes"])
+    data = int(r["defined_data_bytes"])
+    undefined = max(0, total - code - data)
+    return s.CoverageOut(
+        total_bytes=total,
+        defined_code_bytes=code,
+        defined_data_bytes=data,
+        undefined_bytes=undefined,
+        code_ratio=(code / total if total else 0.0),
+        data_ratio=(data / total if total else 0.0),
+        function_count=int(r["function_count"]),
     )
