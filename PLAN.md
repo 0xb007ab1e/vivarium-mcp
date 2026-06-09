@@ -122,3 +122,13 @@ Contract changes route through the PM (batch-atomicity mandate).
   (cache-identical layers, documented) stays accepted.** Future options if hardening is revisited:
   `type=oci,dest=<dir>,tar=false` (OCI layout dir) → `trivy --input <dir>`, or `skopeo copy` the
   pushed image to a docker-archive then scan that. LOW; not urgent.
+- ⏳ **Adapter builder hardening — map malformed-worker `KeyError` to `WORKER_UNAVAILABLE` (PR #6
+  review, Low-2; INFO).** The `_build_*` builders in `ghidra/rpc_client.py` read required keys
+  directly (`r["edge_count"]`, etc.); a worker result missing a required key raises a raw `KeyError`
+  that `_call` does not catch (it catches only RPC/framing/timeout/connection errors), so it
+  propagates unmapped rather than as a fail-closed error envelope. **Pre-existing pattern shared by
+  ALL Tier-1 builders — not introduced by the Tier-2 change.** Blast radius is one tool call (the
+  worker is first-party, protocol-conformant, single-client stdio), not fail-open. Future hardening
+  pass (consistent with `@rules/topic-error-handling.md` fail-closed): catch
+  `(KeyError, ValueError, TypeError)` on the builder path in `_call` and map to `WORKER_UNAVAILABLE`,
+  applied across all builders at once. LOW/INFO; not urgent, not blocking.

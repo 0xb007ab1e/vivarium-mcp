@@ -77,6 +77,15 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "callers",
     "analysis_order",
     "function_context",
+    # Tier-2 reporting / metrics (v1.1 — ADR-008; READ-ONLY)
+    "cyclomatic_complexity",
+    "list_imports",
+    "list_exports",
+    "coverage",
+    "ioc_scan",
+    "crypto_constant_scan",
+    "call_graph_metrics",
+    "program_summary",
 )
 
 
@@ -425,6 +434,67 @@ def _handle_function_context(ctx: ToolContext, args: s.FunctionContextIn) -> s.F
 
 
 # =====================================================================================
+# Tier-2 reporting / metrics handlers (v1.1 — ADR-008). READ-ONLY: authorize → validate → delegate.
+# Derivation is pure-core in the adapter; only raw extraction touches the worker (ADR-001).
+# =====================================================================================
+def _handle_cyclomatic_complexity(
+    ctx: ToolContext, args: s.CyclomaticComplexityIn
+) -> s.CyclomaticComplexity:
+    """McCabe cyclomatic complexity of one function."""
+    ctx.sessions.authorize(args.session_id)
+    v.validate_name(args.function)
+    return ctx.port.cyclomatic_complexity(args.session_id, args)
+
+
+def _handle_list_imports(ctx: ToolContext, args: s.ListImportsIn) -> s.ImportListOut:
+    """List imported symbols/functions (paginated/bounded)."""
+    ctx.sessions.authorize(args.session_id)
+    return ctx.port.list_imports(args.session_id, args)
+
+
+def _handle_list_exports(ctx: ToolContext, args: s.ListExportsIn) -> s.ExportListOut:
+    """List exported symbols/entry points (paginated/bounded)."""
+    ctx.sessions.authorize(args.session_id)
+    return ctx.port.list_exports(args.session_id, args)
+
+
+def _handle_coverage(ctx: ToolContext, args: s.CoverageIn) -> s.CoverageOut:
+    """Defined-code/data byte coverage of the program."""
+    ctx.sessions.authorize(args.session_id)
+    return ctx.port.coverage(args.session_id, args)
+
+
+def _handle_ioc_scan(ctx: ToolContext, args: s.IocScanIn) -> s.IocScanOut:
+    """Heuristic IOC scan over defined strings (pure core over list_strings)."""
+    ctx.sessions.authorize(args.session_id)
+    return ctx.port.ioc_scan(args.session_id, args)
+
+
+def _handle_crypto_constant_scan(
+    ctx: ToolContext, args: s.CryptoConstantScanIn
+) -> s.CryptoConstantScanOut:
+    """Heuristic crypto-constant search (signature table over search_bytes)."""
+    ctx.sessions.authorize(args.session_id)
+    return ctx.port.crypto_constant_scan(args.session_id, args)
+
+
+def _handle_call_graph_metrics(
+    ctx: ToolContext, args: s.CallGraphMetricsIn
+) -> s.CallGraphMetricsOut:
+    """Structural call-graph metrics (pure core over call_graph)."""
+    ctx.sessions.authorize(args.session_id)
+    if args.root is not None:
+        v.validate_name(args.root)
+    return ctx.port.call_graph_metrics(args.session_id, args)
+
+
+def _handle_program_summary(ctx: ToolContext, args: s.ProgramSummaryIn) -> s.ProgramSummary:
+    """One-shot aggregate triage report (server-side aggregation)."""
+    ctx.sessions.authorize(args.session_id)
+    return ctx.port.program_summary(args.session_id, args)
+
+
+# =====================================================================================
 # Local helpers
 # =====================================================================================
 def _require(detail: str) -> GhidraMcpError:
@@ -480,6 +550,14 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "callers": (_handle_callers, s.CallersIn),
     "analysis_order": (_handle_analysis_order, s.AnalysisOrderIn),
     "function_context": (_handle_function_context, s.FunctionContextIn),
+    "cyclomatic_complexity": (_handle_cyclomatic_complexity, s.CyclomaticComplexityIn),
+    "list_imports": (_handle_list_imports, s.ListImportsIn),
+    "list_exports": (_handle_list_exports, s.ListExportsIn),
+    "coverage": (_handle_coverage, s.CoverageIn),
+    "ioc_scan": (_handle_ioc_scan, s.IocScanIn),
+    "crypto_constant_scan": (_handle_crypto_constant_scan, s.CryptoConstantScanIn),
+    "call_graph_metrics": (_handle_call_graph_metrics, s.CallGraphMetricsIn),
+    "program_summary": (_handle_program_summary, s.ProgramSummaryIn),
 }
 
 

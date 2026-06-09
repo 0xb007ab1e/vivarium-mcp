@@ -485,6 +485,41 @@ class FakeGhidraPort:
             truncated=False,
         )
 
+    # --- Tier-2 reporting / metrics (v1.1 — ADR-008; reserved doubles matching the adapter) ---
+    def cyclomatic_complexity(
+        self, sid: str, a: s.CyclomaticComplexityIn
+    ) -> s.CyclomaticComplexity:
+        """Reserved Tier-2 stub (mirrors the reserved adapter — built in the fan-out)."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-008): cyclomatic_complexity")
+
+    def list_imports(self, sid: str, a: s.ListImportsIn) -> s.ImportListOut:
+        """Reserved Tier-2 stub."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-008): list_imports")
+
+    def list_exports(self, sid: str, a: s.ListExportsIn) -> s.ExportListOut:
+        """Reserved Tier-2 stub."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-008): list_exports")
+
+    def coverage(self, sid: str, a: s.CoverageIn) -> s.CoverageOut:
+        """Reserved Tier-2 stub."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-008): coverage")
+
+    def ioc_scan(self, sid: str, a: s.IocScanIn) -> s.IocScanOut:
+        """Reserved Tier-2 stub."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-008): ioc_scan")
+
+    def crypto_constant_scan(self, sid: str, a: s.CryptoConstantScanIn) -> s.CryptoConstantScanOut:
+        """Reserved Tier-2 stub."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-008): crypto_constant_scan")
+
+    def call_graph_metrics(self, sid: str, a: s.CallGraphMetricsIn) -> s.CallGraphMetricsOut:
+        """Reserved Tier-2 stub."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-008): call_graph_metrics")
+
+    def program_summary(self, sid: str, a: s.ProgramSummaryIn) -> s.ProgramSummary:
+        """Reserved Tier-2 stub."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-008): program_summary")
+
 
 @pytest.fixture
 def fake_port() -> FakeGhidraPort:

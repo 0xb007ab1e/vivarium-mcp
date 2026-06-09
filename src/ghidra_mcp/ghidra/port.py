@@ -137,3 +137,38 @@ class GhidraPort(Protocol):
     def function_context(self, sid: str, a: s.FunctionContextIn) -> s.FunctionContext:
         """Assemble the per-function naming/synthesis context bundle (server-side aggregation)."""
         ...
+
+    # --- Tier-2 reporting / metrics (v1.1 — ADR-008; READ-ONLY) ---
+    def cyclomatic_complexity(
+        self, sid: str, a: s.CyclomaticComplexityIn
+    ) -> s.CyclomaticComplexity:
+        """McCabe complexity of one function (worker CFG counts → pure core)."""
+        ...
+
+    def list_imports(self, sid: str, a: s.ListImportsIn) -> s.ImportListOut:
+        """List imported symbols/functions (paginated/bounded)."""
+        ...
+
+    def list_exports(self, sid: str, a: s.ListExportsIn) -> s.ExportListOut:
+        """List exported symbols/entry points (paginated/bounded)."""
+        ...
+
+    def coverage(self, sid: str, a: s.CoverageIn) -> s.CoverageOut:
+        """Defined-code/data byte coverage of the program (worker counts → pure ratios)."""
+        ...
+
+    def ioc_scan(self, sid: str, a: s.IocScanIn) -> s.IocScanOut:
+        """Heuristic IOC scan over defined strings (pure core over the list_strings RPC)."""
+        ...
+
+    def crypto_constant_scan(self, sid: str, a: s.CryptoConstantScanIn) -> s.CryptoConstantScanOut:
+        """Heuristic crypto-constant search (pure signature table over the search_bytes RPC)."""
+        ...
+
+    def call_graph_metrics(self, sid: str, a: s.CallGraphMetricsIn) -> s.CallGraphMetricsOut:
+        """Structural call-graph metrics (pure core over the call_graph RPC)."""
+        ...
+
+    def program_summary(self, sid: str, a: s.ProgramSummaryIn) -> s.ProgramSummary:
+        """One-shot aggregate triage report (server-side aggregation of Tier-1 + Tier-2)."""
+        ...

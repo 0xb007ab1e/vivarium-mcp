@@ -881,3 +881,309 @@ class ProgramMetadata(_Out):
     entry_point: str | None
     function_count: int
     analysis_complete: bool
+
+
+# =====================================================================================
+# Tier-2 reporting / metrics (v1.1 — ADR-008). READ-ONLY, output-only, bounded; binary-derived
+# fields are Untrusted-wrapped. Derivation is pure-core; only raw extraction touches the worker.
+# =====================================================================================
+class CyclomaticComplexityIn(_SessionScopedIn):
+    """Arguments for ``cyclomatic_complexity`` — McCabe complexity of one function.
+
+    Attributes:
+        function: The function (entry address hex or name) to measure.
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class CyclomaticComplexity(_Out):
+    """McCabe cyclomatic complexity for one function (computed in the pure core).
+
+    Attributes:
+        address: Function entry address (hex) — safe.
+        name: Function name — untrusted.
+        complexity: McCabe ``E - N + 2`` (``>= 1``) — safe (server-computed).
+        block_count: Basic-block count (CFG nodes) — safe.
+        edge_count: Control-flow edge count — safe.
+        incomplete: Whether the CFG had unresolved flow (complexity is then a lower bound) — safe.
+    """
+
+    address: str
+    name: Untrusted[str]
+    complexity: int
+    block_count: int
+    edge_count: int
+    incomplete: bool = False
+
+
+class ListImportsIn(_Page):
+    """Arguments for ``list_imports`` — paginated imported symbols/functions."""
+
+
+class ImportedSymbol(_Out):
+    """One imported symbol/function.
+
+    Attributes:
+        name: Imported symbol name — untrusted.
+        library: Source library/module — untrusted (``None`` if unknown).
+        address: Address of the import thunk/pointer (hex) — safe (``None`` if none).
+    """
+
+    name: Untrusted[str]
+    library: Untrusted[str] | None = None
+    address: str | None = None
+
+
+class ImportListOut(_Out):
+    """Result of ``list_imports``.
+
+    Attributes:
+        imports: Bounded page of imported symbols.
+        total: Total imports (for pagination) — safe.
+        truncated: Whether the page was capped.
+    """
+
+    imports: list[ImportedSymbol]
+    total: int
+    truncated: bool = False
+
+
+class ListExportsIn(_Page):
+    """Arguments for ``list_exports`` — paginated exported symbols/entry points."""
+
+
+class ExportedSymbol(_Out):
+    """One exported symbol/entry point.
+
+    Attributes:
+        name: Exported symbol name — untrusted.
+        address: Export address (hex) — safe.
+    """
+
+    name: Untrusted[str]
+    address: str
+
+
+class ExportListOut(_Out):
+    """Result of ``list_exports``.
+
+    Attributes:
+        exports: Bounded page of exported symbols.
+        total: Total exports (for pagination) — safe.
+        truncated: Whether the page was capped.
+    """
+
+    exports: list[ExportedSymbol]
+    total: int
+    truncated: bool = False
+
+
+class CoverageIn(_SessionScopedIn):
+    """Arguments for ``coverage`` — defined-code/data byte coverage of the program."""
+
+
+class CoverageOut(_Out):
+    """Code/data coverage of the analyzed program (worker byte counts → pure ratios).
+
+    Measures what Ghidra **defined**, not ground truth (ADR-008 caveat). All fields server-computed.
+
+    Attributes:
+        total_bytes: Total addressable bytes in the program's memory.
+        defined_code_bytes: Bytes covered by defined instructions.
+        defined_data_bytes: Bytes covered by defined data.
+        undefined_bytes: Bytes neither defined code nor data.
+        code_ratio: ``defined_code_bytes / total_bytes`` (0.0 if total is 0).
+        data_ratio: ``defined_data_bytes / total_bytes`` (0.0 if total is 0).
+        function_count: Number of functions discovered.
+    """
+
+    total_bytes: int
+    defined_code_bytes: int
+    defined_data_bytes: int
+    undefined_bytes: int
+    code_ratio: float
+    data_ratio: float
+    function_count: int
+
+
+class IocScanIn(_Page):
+    """Arguments for ``ioc_scan`` — heuristic IOC scan over defined strings (paginated).
+
+    Attributes:
+        categories: Restrict to these IOC categories (e.g. ``["ipv4", "url"]``); omit to scan all.
+        min_length: Skip strings shorter than this (noise filter).
+    """
+
+    categories: list[str] | None = Field(default=None, max_length=32)
+    min_length: int = Field(default=4, ge=1, le=4096)
+
+
+class IocMatch(_Out):
+    """One IOC match — HEURISTIC (a lead, not a verdict; ADR-008).
+
+    Attributes:
+        category: IOC category (closed vocabulary, e.g. ``"ipv4"``, ``"url"``) — safe.
+        value: The matched substring — UNTRUSTED (attacker-controlled; prime injection vector).
+        source_address: Address of the source string (hex) — safe (``None`` if unknown).
+    """
+
+    category: str
+    value: Untrusted[str]
+    source_address: str | None = None
+
+
+class IocScanOut(_Out):
+    """Result of ``ioc_scan``.
+
+    Attributes:
+        matches: Bounded page of IOC matches.
+        total: Total matches found in the scanned set — safe.
+        truncated: Whether the scanned string set or the page was capped.
+    """
+
+    matches: list[IocMatch]
+    total: int
+    truncated: bool = False
+
+
+class CryptoConstantScanIn(_Page):
+    """Arguments for ``crypto_constant_scan`` — heuristic search for known crypto constants."""
+
+
+class CryptoConstantFinding(_Out):
+    """One crypto-constant match — HEURISTIC (a lead, not proof; ADR-008).
+
+    Attributes:
+        algorithm: Algorithm label (closed vocabulary, e.g. ``"AES"``, ``"SHA-256"``) — safe.
+        kind: Constant kind (``"sbox"`` / ``"iv"`` / ``"magic"``) — safe.
+        address: Address where the constant was found (hex) — safe.
+    """
+
+    algorithm: str
+    kind: str
+    address: str
+
+
+class CryptoConstantScanOut(_Out):
+    """Result of ``crypto_constant_scan``.
+
+    Attributes:
+        findings: Bounded list of crypto-constant matches.
+        total: Total matches — safe.
+        truncated: Whether the signature set or matches were capped.
+    """
+
+    findings: list[CryptoConstantFinding]
+    total: int
+    truncated: bool = False
+
+
+class CallGraphMetricsIn(CallGraphIn):
+    """Arguments for ``call_graph_metrics`` — structural metrics over the (bounded) call graph.
+
+    Same scoping/bounds as ``call_graph`` (``root``/``max_depth``/``max_nodes``/``max_edges``).
+
+    Attributes:
+        top_n: How many hotspots to return in ``top_fan_in`` / ``top_fan_out``.
+    """
+
+    top_n: int = Field(default=10, ge=0, le=1024)
+
+
+class FanRanking(_Out):
+    """One function ranked by fan-in or fan-out degree.
+
+    Attributes:
+        address: Function entry address (hex) — safe.
+        name: Function name — untrusted.
+        count: Degree (distinct callers for fan-in, distinct callees for fan-out) — safe.
+    """
+
+    address: str
+    name: Untrusted[str]
+    count: int
+
+
+class CallGraphMetricsOut(_Out):
+    """Result of ``call_graph_metrics`` — structural metrics over the call graph (pure core).
+
+    Attributes:
+        function_count: Distinct function nodes — safe.
+        edge_count: Distinct resolved call edges — safe.
+        leaf_count: Functions that call nothing further (fan-out 0) — safe.
+        root_count: Functions nothing calls (fan-in 0) — safe.
+        recursive_component_count: Recursion cycles (multi-member or self-loop) — safe.
+        self_recursive_count: Directly self-recursive functions — safe.
+        unresolved_caller_count: Functions with unresolved outgoing calls — safe.
+        top_fan_in: Most-called functions, ranked (names untrusted).
+        top_fan_out: Functions calling the most others, ranked (names untrusted).
+        truncated: Whether the underlying graph was node/edge-capped.
+    """
+
+    function_count: int
+    edge_count: int
+    leaf_count: int
+    root_count: int
+    recursive_component_count: int
+    self_recursive_count: int
+    unresolved_caller_count: int
+    top_fan_in: list[FanRanking]
+    top_fan_out: list[FanRanking]
+    truncated: bool = False
+
+
+class ProgramSummaryIn(_SessionScopedIn):
+    """Arguments for ``program_summary`` — one-shot aggregate triage report.
+
+    Attributes:
+        max_complex_functions: Cap on the top-by-complexity functions included.
+        max_iocs: Cap on IOC matches scanned/summarized.
+        include_call_graph: Include call-graph metrics (costlier — whole-program graph).
+    """
+
+    max_complex_functions: int = Field(default=10, ge=0, le=1024)
+    max_iocs: int = Field(default=256, ge=0, le=_MAX_LIMIT)
+    include_call_graph: bool = Field(default=True)
+
+
+class IocCategoryCount(_Out):
+    """IOC match count for one category (safe — count + closed-vocabulary label).
+
+    Attributes:
+        category: IOC category — safe.
+        count: Number of matches in that category — safe.
+    """
+
+    category: str
+    count: int
+
+
+class ProgramSummary(_Out):
+    """One-shot aggregate triage report — server-side aggregation, no naming/synthesis (ADR-008).
+
+    Attributes:
+        metadata: High-level program metadata.
+        function_count: Total functions — safe.
+        import_count: Total imports — safe.
+        export_count: Total exports — safe.
+        string_count: Total defined strings — safe.
+        coverage: Code/data coverage (``None`` if unavailable).
+        call_graph_metrics: Structural call-graph metrics (``None`` if not requested).
+        top_complex_functions: Highest-complexity functions (bounded).
+        ioc_counts: IOC match counts per category over the bounded scan — safe.
+        crypto_algorithms: Distinct crypto algorithms detected (closed-vocabulary labels) — safe.
+        truncated: Whether any bounded sub-result was capped.
+    """
+
+    metadata: ProgramMetadata
+    function_count: int
+    import_count: int
+    export_count: int
+    string_count: int
+    coverage: CoverageOut | None = None
+    call_graph_metrics: CallGraphMetricsOut | None = None
+    top_complex_functions: list[CyclomaticComplexity] = Field(default_factory=list)
+    ioc_counts: list[IocCategoryCount] = Field(default_factory=list)
+    crypto_algorithms: list[str] = Field(default_factory=list)
+    truncated: bool = False

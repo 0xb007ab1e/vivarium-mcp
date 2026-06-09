@@ -193,3 +193,27 @@ not a guarantee).
 13. **Injection via graph node name / decompiled C in `function_context`** — a planted payload in a
     node name or pseudo-C is returned `Untrusted`-wrapped + normalized, never as bare instructions.
     (TB4-S/E — extends abuse-case 5)
+
+## 9. Addendum — v1.1 Tier-2 reporting/metrics tools (ADR-008)
+
+The Tier-2 tools (`cyclomatic_complexity`, `list_imports`, `list_exports`, `coverage`, `ioc_scan`,
+`crypto_constant_scan`, `call_graph_metrics`, `program_summary`) add surface but **no new trust
+boundary**: still single **stdio**, **read-only**, **output-only** (no Ghidra DB mutation). They sit
+on TB1 (client args), TB3 (hostile binary → analyzer, for the 4 new extraction RPCs), and TB4
+(untrusted output → LLM). Derivation is JVM-free (pure core — ADR-001); the metrics/scan
+intelligence is server-side, not agentic.
+
+New/relevant threats and controls:
+
+| STRIDE | Threat | Control |
+|--------|--------|---------|
+| **I/S** | **Injection via `ioc_scan` matches** — a planted string (e.g. a "URL"/"domain"/"path" that is actually a prompt-injection payload) is matched and returned | The matched `value` is `Untrusted[...]` (BINARY origin), normalized at the `core.envelope.wrap` chokepoint; surfaced as inert data the client must NOT follow/fetch/execute (TB4 — extends abuse-case 5, ADR-005). |
+| **I/S** | **Injection via import/export/crypto-finding names/detail** | All binary-derived names/detail wrapped `Untrusted`; addresses/categories/algorithm labels are server-computed/closed-vocabulary, bare. (TB4) |
+| **D** | **Scan-bomb** — a binary with millions of strings / huge data to exhaust the IOC/crypto scan | `ioc_scan` scans a bounded page (`limit`) with per-string length caps before regex (ReDoS-safe, linear patterns); `crypto_constant_scan` runs a bounded set of already-bounded `search_bytes`; both set `truncated`. (TB3-D / CWE-400) |
+| **D** | **Metric-bomb** — pathological CFG/call-graph to blow up complexity/metrics | `cyclomatic_complexity` is `O(1)` arithmetic over worker-capped block/edge counts; `call_graph_metrics` inherits the ADR-007 node/edge/depth caps and the iterative (no-recursion) core. (TB3-D) |
+| **I** | **Misleading heuristics** — IOC/crypto scans yield false positives/negatives presented as authoritative | Tools are documented + framed as **heuristic triage aids, not authoritative detections** (ADR-008 caveat); findings are leads, not verdicts. `cyclomatic_complexity` returns `incomplete` + raw block/edge counts; `coverage` measures *defined*, not ground truth. |
+| **T** | **DB tampering via reporting** | Out of scope by design — Tier-2 is read-only/output-only; no mutation tool exists (ADR-008; mutation tier is a separate gated increment). |
+
+**Residual risk (added to §5).** IOC/crypto scans are heuristic — a client must not treat a hit as
+proof or a miss as clean. The same indirect-prompt-injection residual as abuse-case 5 applies to all
+binary-derived Tier-2 strings (the envelope is defense-in-depth, not a guarantee).

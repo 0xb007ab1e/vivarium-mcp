@@ -6,8 +6,9 @@
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **27** tools (asserted in tests) —
-  22 Tier-1 read-only (v1) + 5 v1.1 semantic-naming support tools (ADR-007, also read-only).
+- **Allow-list only:** the catalog is fixed; there are exactly **35** tools (asserted in tests) —
+  22 Tier-1 read-only (v1) + 5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
+  reporting/metrics tools (ADR-008) — all read-only.
 - **Session-scoped:** every tool except `session_create` takes an opaque `session_id`, authorized
   server-side (BOLA defense). Inputs are `frozen` and reject unknown fields (`extra="forbid"`).
 - **Bounded by default:** list/search/read tools take `offset` + `limit` (or `length`) with hard
@@ -92,12 +93,28 @@ node `name`s and decompiled C stay `Untrusted` (ADR-005). Bounded (`max_nodes �
 > imported/thunk functions are flagged `is_external` (KNOWN names — do not re-infer). See
 > `docs/design/semantic-naming.md`.
 
+### Tier-2 reporting / metrics (v1.1 — ADR-008; READ-ONLY)
+
+| Tool | Input | Output |
+|------|-------|--------|
+| `cyclomatic_complexity` | `CyclomaticComplexityIn{function}` | `CyclomaticComplexity{address, name*, complexity, block_count, edge_count, incomplete}` |
+| `list_imports` | `ListImportsIn{offset, limit}` | `ImportListOut{imports[{name*, library*?, address?}], total, truncated}` |
+| `list_exports` | `ListExportsIn{offset, limit}` | `ExportListOut{exports[{name*, address}], total, truncated}` |
+| `coverage` | `CoverageIn{}` | `CoverageOut{total_bytes, defined_code_bytes, defined_data_bytes, undefined_bytes, code_ratio, data_ratio, function_count}` |
+| `ioc_scan` | `IocScanIn{offset, limit, categories?, min_length}` | `IocScanOut{matches[{category, value*, source_address?}], total, truncated}` |
+| `crypto_constant_scan` | `CryptoConstantScanIn{offset, limit}` | `CryptoConstantScanOut{findings[{algorithm, kind, address}], total, truncated}` |
+| `call_graph_metrics` | `CallGraphMetricsIn{root?, max_depth, max_nodes, max_edges, top_n}` | `CallGraphMetricsOut{function_count, edge_count, leaf_count, root_count, recursive_component_count, self_recursive_count, unresolved_caller_count, top_fan_in[{address, name*, count}], top_fan_out[…], truncated}` |
+| `program_summary` | `ProgramSummaryIn{max_complex_functions, max_iocs, include_call_graph}` | `ProgramSummary{metadata, function_count, import_count, export_count, string_count, coverage?, call_graph_metrics?, top_complex_functions[], ioc_counts[{category, count}], crypto_algorithms[], truncated}` |
+
+> `ioc_scan` and `crypto_constant_scan` are **heuristic triage aids, not authoritative detections**
+> (false positives/negatives expected); `cyclomatic_complexity`/`coverage` reflect Ghidra's recovered
+> CFG / *defined* bytes, not ground truth (ADR-008). Derivation is pure-core (ADR-001); only raw
+> extraction (`function_cfg`/`imports`/`exports`/`coverage`) touches the worker. See
+> `docs/design/tier2-metrics.md`.
+
 > `*` marks an `Untrusted[...]`-wrapped (binary-derived) field.
 
 ## Deferred (NOT yet built — gated, reviewed catalog additions)
-Tier-2 reporting/metrics (complexity, coverage, imports/exports, IOC/crypto scans, call-graph
-*metrics*, program-summary), **mutation tools (gated)**, and `runScript` remain deferred. (The
-semantic-naming *support* tools above — call graph adjacency, leaf-first order, function context —
-are delivered in v1.1 per ADR-007; they are read-only and distinct from Tier-2 call-graph
-*metrics*.) Adding any deferred tool is a reviewed,
-gated change to this allow-list (ADR-006 extensibility seam).
+**Mutation tools (gated)** (rename/retype/comment-write) and `runScript` remain deferred — each a
+separate, separately-threat-modeled v1.1+ increment. Adding any deferred tool is a reviewed, gated
+change to this allow-list (ADR-006 extensibility seam).

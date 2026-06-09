@@ -6,7 +6,7 @@ intentionally excluded from server-side coverage (``[tool.coverage.run] omit``) 
 imported by ``server``, ``sessions``, ``core``, or ``tools``. An import-linter / test guard (WS5)
 enforces this boundary.
 
-Inside the worker it: bootstraps headless Ghidra (11.x / JDK 21), imports + analyzes the binary
+Inside the worker it: bootstraps headless Ghidra (12.1.2 / JDK 21), imports + analyzes the binary
 under the bridge's own bounds, and serves the internal RPC by mapping requests to Ghidra API calls
 and returning structured, size-capped results to the server, which wraps them as untrusted.
 
@@ -214,6 +214,31 @@ class PyGhidraBackend:
         """
         max_strings = _clamp_count(int(params.get("max_strings", 64)))
         return self._gh_referenced_strings(str(_require(params, "function")), max_strings)
+
+    def function_cfg(self, params: dict[str, Any]) -> dict[str, Any]:
+        """CFG block/edge counts for one function (v1.1 — ADR-008; for cyclomatic complexity).
+
+        Args:
+            params: ``{"function": str}``.
+
+        Returns:
+            ``{"address", "name", "block_count", "edge_count", "incomplete"}``.
+        """
+        return self._gh_function_cfg(str(_require(params, "function")))
+
+    def imports(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List imported symbols/functions (paginated/bounded) — v1.1 (ADR-008)."""
+        offset, limit = _page(params)
+        return self._gh_imports(offset, limit)
+
+    def exports(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List exported symbols/entry points (paginated/bounded) — v1.1 (ADR-008)."""
+        offset, limit = _page(params)
+        return self._gh_exports(offset, limit)
+
+    def coverage(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Defined-code/data byte counts for program coverage — v1.1 (ADR-008)."""
+        return self._gh_coverage()
 
     # --- JVM edge (PyGhidra calls live ONLY here; imported lazily) ---------------------------
     # NOTE: these helpers are the worker-only JVM boundary. They are excluded from server unit
@@ -1042,6 +1067,157 @@ class PyGhidraBackend:
                     continue
                 values.append(value)
         return {"strings": values, "truncated": truncated}
+
+    # --- Tier-2 metric extraction (v1.1 — ADR-008; worker-only JVM edge per ADR-001) -------------
+    # Built against the pinned image; like every other ``_gh_*`` helper these are coverage-omitted
+    # and exercised only by the real-worker integration suite (the symbol bindings are confirmed at
+    # the gated image build — ADR-003). Each returns plain JSON-serializable values; the server
+    # computes the metrics in the pure cores and wraps binary-derived names (ADR-005).
+    def _gh_function_cfg(self, function: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Per-function CFG block/edge counts (v1.1 — ADR-008; for cyclomatic complexity).
+
+        Walks ``BasicBlockModel`` over the resolved function to count basic blocks (CFG nodes) and
+        control-flow edges; ``incomplete`` flags a block whose flow could not be fully resolved (the
+        server then treats McCabe ``E - N + 2`` as a lower bound). The pure core
+        (:mod:`ghidra_mcp.core.metrics`) computes the complexity from these counts.
+
+        Args:
+            function: Function entry address (hex) or name.
+
+        Returns:
+            ``{"address", "name", "block_count", "edge_count", "incomplete"}``.
+        """
+        # integration-validate (Ghidra 12.1.2 javadoc — confirm at the gated image build):
+        #   ghidra.program.model.block.BasicBlockModel(program);
+        #   model.getCodeBlocksContaining(func.getBody(), monitor) -> CodeBlock iterator;
+        #   CodeBlock.getNumDestinations(monitor) counts outgoing CFG edges;
+        #   ghidra.util.task.TaskMonitor.DUMMY as the no-progress monitor.
+        from ghidra.program.model.block import BasicBlockModel  # type: ignore[import-not-found]
+
+        # ghidra.util.task is already missing-ignored at its first import (in _gh_decompile); a
+        # second per-line ignore on the same module would be "unused" (mypy unused-ignore).
+        from ghidra.util.task import TaskMonitor
+
+        program = self._require_program()
+        func = self._resolve_function(function)
+        model = BasicBlockModel(program)
+        monitor = TaskMonitor.DUMMY
+        block_count = 0
+        edge_count = 0
+        incomplete = False
+        blocks = model.getCodeBlocksContaining(func.getBody(), monitor)
+        while blocks.hasNext():
+            block = blocks.next()
+            block_count += 1
+            destinations = block.getDestinations(monitor)
+            while destinations.hasNext():
+                ref = destinations.next()
+                # Count only edges whose destination is inside this function's body; a flow that
+                # leaves the function (call/return/tail) is not an intraprocedural CFG edge. A
+                # destination block we cannot resolve flags the CFG as incomplete (honesty — the
+                # complexity is then a lower bound).
+                dest = ref.getDestinationBlock()
+                if dest is None:
+                    incomplete = True
+                    continue
+                if func.getBody().contains(dest.getFirstStartAddress()):
+                    edge_count += 1
+        return {
+            "address": str(func.getEntryPoint()),
+            "name": _to_text(func.getName()),
+            "block_count": block_count,
+            "edge_count": edge_count,
+            "incomplete": incomplete,
+        }
+
+    def _gh_imports(self, offset: int, limit: int) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Imported symbols via the SymbolTable external-symbol iterator (paginated/bounded).
+
+        Args:
+            offset: Zero-based start index into the import set.
+            limit: Maximum imports to return (already clamped).
+
+        Returns:
+            ``{"imports": [{"name","library"?,"address"?}], "total", "truncated"}``.
+        """
+        # integration-validate: SymbolTable.getExternalSymbols() -> Symbol iterator;
+        #   Symbol.getName(); Symbol.getParentNamespace().getName() is the source library/module for
+        #   an external symbol; Symbol.getAddress() (may be an EXTERNAL-space address).
+        program = self._require_program()
+        rows: list[dict[str, Any]] = []
+        total = 0
+        truncated = False
+        for symbol in program.getSymbolTable().getExternalSymbols():
+            index = total
+            total += 1
+            if index < offset:
+                continue
+            if len(rows) >= limit:
+                truncated = True
+                continue
+            namespace = symbol.getParentNamespace()
+            row: dict[str, Any] = {"name": _to_text(symbol.getName())}
+            if namespace is not None and not bool(namespace.isGlobal()):
+                row["library"] = _to_text(namespace.getName())
+            address = symbol.getAddress()
+            if address is not None:
+                row["address"] = str(address)
+            rows.append(row)
+        return {"imports": rows, "total": total, "truncated": truncated}
+
+    def _gh_exports(self, offset: int, limit: int) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Exported symbols / entry points via the SymbolTable (paginated/bounded).
+
+        Args:
+            offset: Zero-based start index into the export set.
+            limit: Maximum exports to return (already clamped).
+
+        Returns:
+            ``{"exports": [{"name","address"}], "total", "truncated"}``.
+        """
+        # integration-validate: SymbolTable.getExternalEntryPointIterator() -> Address iterator of
+        #   exported entry points; SymbolTable.getPrimarySymbol(addr).getName() for the label.
+        program = self._require_program()
+        table = program.getSymbolTable()
+        rows: list[dict[str, Any]] = []
+        total = 0
+        truncated = False
+        for address in table.getExternalEntryPointIterator():
+            index = total
+            total += 1
+            if index < offset:
+                continue
+            if len(rows) >= limit:
+                truncated = True
+                continue
+            symbol = table.getPrimarySymbol(address)
+            name = _to_text(symbol.getName()) if symbol is not None else ""
+            rows.append({"name": name, "address": str(address)})
+        return {"exports": rows, "total": total, "truncated": truncated}
+
+    def _gh_coverage(self) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Defined-code/data byte counts via the Listing (server computes ratios in the pure core).
+
+        Returns:
+            ``{"total_bytes","defined_code_bytes","defined_data_bytes","function_count"}``.
+        """
+        # integration-validate: Listing.getInstructions(true) -> Instruction iterator (each
+        #   .getLength() bytes); Listing.getDefinedData(true) -> Data iterator (.getLength());
+        #   Memory.getNumAddresses() for the addressable total; FunctionManager.getFunctionCount().
+        program = self._require_program()
+        listing = program.getListing()
+        defined_code_bytes = 0
+        for instr in listing.getInstructions(True):
+            defined_code_bytes += int(instr.getLength())
+        defined_data_bytes = 0
+        for data in listing.getDefinedData(True):
+            defined_data_bytes += int(data.getLength())
+        return {
+            "total_bytes": int(program.getMemory().getNumAddresses()),
+            "defined_code_bytes": defined_code_bytes,
+            "defined_data_bytes": defined_data_bytes,
+            "function_count": int(program.getFunctionManager().getFunctionCount()),
+        }
 
     # --- private JVM helpers (lazy imports only; never at module scope) -----------------------
     def _require_program(self) -> Any:  # pragma: no cover - JVM edge
