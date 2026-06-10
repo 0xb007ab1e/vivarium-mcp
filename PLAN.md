@@ -143,11 +143,10 @@ Contract changes route through the PM (batch-atomicity mandate).
       ignored under podman's OCI format (cosmetic; readiness is the RPC `ping`).
   - History: investigated + deferred 2026-06-08 (PR #3 review, Low-3); server built+validated +
     Python 3.14 adopted 2026-06-10 (#8); worker built+validated 2026-06-10.
-- 🔧 **Image scan↔sign binding (PR #3 review, Low-1) — FIX IMPLEMENTED, pending gated validation
-  (branch `fix/low1-scan-shipped-artifact`, 2026-06-10).** Previously `worker-image.yml` scanned a
-  *second*, cache-identical `provenance:false` docker tarball rather than the exact pushed
-  (manifest-list) artifact, so the "scanned == shipped" binding rested on intra-run buildx cache
-  determinism. **Hardened:** the second build is replaced by `skopeo copy
+- ✅ **RESOLVED — Image scan↔sign binding (PR #3 review, Low-1; PR #12, validated 2026-06-10).**
+  Previously `worker-image.yml` scanned a *second*, cache-identical `provenance:false` docker tarball
+  rather than the exact pushed (manifest-list) artifact, so the "scanned == shipped" binding rested
+  on intra-run buildx cache determinism. **Fixed:** the second build is replaced by `skopeo copy
   "docker://<image>@${{ steps.build.outputs.digest }}" docker-archive:<tar>` — Trivy now scans the
   **exact digest cosign signs**, resolving the pushed OCI index to its single linux/amd64 runtime
   manifest (`--override-os/--override-arch`) into a docker-archive (`manifest.json`) that
@@ -155,8 +154,11 @@ Contract changes route through the PM (batch-atomicity mandate).
   the ~1.3 GB worker `docker pull`; it is preinstalled on GitHub-hosted ubuntu runners (guarded
   install fallback) and reuses the GHCR creds `docker/login-action` writes to `~/.docker/config.json`.
   Prior `type=oci,dest=*.tar` attempt (CI run 27172201879) does NOT compose with Trivy `--input` and
-  was rejected. **Validation REQUIRES a gated `worker-image.yml` dispatch** (builds + pushes + signs
-  to ghcr.io) — not yet run; do not merge until green. LOW; not urgent.
+  was rejected. **Validated** by a gated `worker-image.yml` dispatch (run 27292219036, 2026-06-10):
+  the new "Export pushed image (by digest)" step → Trivy → SBOM → cosign all green on both images.
+  Surfaced two pre-existing, latent worker-image failures fixed first (PR #13 hadolint config for the
+  Wolfi/distroless bases; PR #14 stripped the unused `Features/GhidraServer`, removing the netty JAR
+  with CVE-2026-44249/45416 — unreachable: headless worker, no GhidraServer, no-net).
 - ✅ **RESOLVED — adapter builder hardening: malformed-worker result → `WORKER_UNAVAILABLE` (PR #6
   review, Low-2; INFO).** The `_build_*` builders in `ghidra/rpc_client.py` read required keys
   directly; a worker result with a missing key / wrong type previously raised a raw
