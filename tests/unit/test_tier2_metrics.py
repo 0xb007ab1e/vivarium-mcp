@@ -22,7 +22,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+import pytest
+
 from ghidra_mcp.core.envelope import DataOrigin, Untrusted
+from ghidra_mcp.core.errors import ErrorType, GhidraMcpError
 from ghidra_mcp.core.iocscan import CRYPTO_SIGNATURES
 from ghidra_mcp.ghidra import rpc_client as rc
 from ghidra_mcp.tools import schemas as s
@@ -259,8 +262,14 @@ def test_crypto_constant_scan_composes_searches_and_shapes() -> None:
     aes = "637c777bf26b6fc53001672bfed7ab76"
 
     def _search(params: dict[str, Any]) -> dict[str, Any]:
+        # crypto_constant_scan composes the fail-closed search_bytes adapter method, which builds
+        # full ByteMatch rows — so the worker shape must carry context_hex (the real worker does).
         if params["pattern_hex"] == aes:
-            return {"matches": [{"address": "0x8000"}], "total": 1, "truncated": False}
+            return {
+                "matches": [{"address": "0x8000", "context_hex": aes}],
+                "total": 1,
+                "truncated": False,
+            }
         return {"matches": [], "total": 0, "truncated": False}
 
     adapter = _make({"search_bytes": _search})
@@ -427,3 +436,34 @@ def test_program_summary_skips_complexity_and_iocs_when_capped_to_zero() -> None
     # string_count still calls list_strings (limit=1), but the IOC scan's bounded budget never runs
     list_strings_limits = [p["limit"] for m, p in adapter.calls if m == "list_strings"]
     assert list_strings_limits == [1]
+
+
+# --- fail-closed on malformed worker result (ADR-008 review Low-2; topic-error-handling) -------
+def test_malformed_worker_result_in_builder_maps_to_worker_unavailable() -> None:
+    """A builder method fails CLOSED (WORKER_UNAVAILABLE) when the worker omits a required key.
+
+    Proves the ``_fail_closed`` guard fires on a known-bad result rather than letting a raw
+    ``KeyError`` escape the adapter (which the server shell would mislabel as a generic internal
+    error). The untrusted worker detail is never surfaced — only the safe mapped type.
+    """
+    # decompile_function builds via _build_decompiled, which requires c_code/signature.
+    adapter = _make({"decompile_function": lambda _p: {"address": "0x1", "name": "f"}})
+    with pytest.raises(GhidraMcpError) as excinfo:
+        adapter.decompile_function(_SID, s.DecompileFunctionIn(session_id=_SID, function="f"))
+    assert excinfo.value.envelope.type is ErrorType.WORKER_UNAVAILABLE
+
+
+def test_malformed_worker_result_on_validate_path_maps_too() -> None:
+    """The ``model_validate`` path (xrefs) also fails closed on a wrong-typed worker result."""
+    adapter = _make({"xrefs_to": lambda _p: {"xrefs": [], "total": "not-an-int"}})
+    with pytest.raises(GhidraMcpError) as excinfo:
+        adapter.xrefs_to(_SID, s.XrefsIn(session_id=_SID, target="main"))
+    assert excinfo.value.envelope.type is ErrorType.WORKER_UNAVAILABLE
+
+
+def test_malformed_function_cfg_maps_to_worker_unavailable() -> None:
+    """The Tier-2 ``cyclomatic_complexity`` builder fails closed on a malformed CFG result."""
+    adapter = _make({"function_cfg": lambda _p: {"address": "0x1", "name": "f"}})  # no counts
+    with pytest.raises(GhidraMcpError) as excinfo:
+        adapter.cyclomatic_complexity(_SID, s.CyclomaticComplexityIn(session_id=_SID, function="f"))
+    assert excinfo.value.envelope.type is ErrorType.WORKER_UNAVAILABLE
