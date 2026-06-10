@@ -38,49 +38,38 @@
 
 ---
 
-## Phase 1 — Pin the 4 base images by digest (5 occurrences)
+## Phase 1 — Pin the base images by digest (both images on Chainguard/Wolfi)
 
 Pull each base, capture its repo digest, and rewrite the `@REPLACE_WITH_DIGEST_FOR_*` placeholder.
-Mirrors the `BASES` map in `infra/pin-supply-chain.sh` (which automates this):
-- **Worker** (`Containerfile.worker`): `eclipse-temurin:21-jdk`, `eclipse-temurin:21-jre`,
-  `python:3.12-slim` (pybuilder + runtime — 2 occurrences).
+Mirrors the `BASES` map in `infra/pin-supply-chain.sh` (which automates this). After the distroless
+migration (PLAN §9) there is **no Debian (temurin/slim)** base left — both images use Chainguard/
+Wolfi, pinned by digest. Chainguard publishes `:latest` only, so the *tag* is mutable but the pinned
+*digest* is immutable; re-pin on each rebuild.
+- **Worker** (`Containerfile.worker`): `cgr.dev/chainguard/wolfi-base` (one base, all 3 stages;
+  `apk add python-3.12 openjdk-21` at build).
 - **Server** (`Containerfile.server`): `cgr.dev/chainguard/python:latest-dev` (builder) +
-  `cgr.dev/chainguard/python:latest` (runtime) — the Wolfi distroless migration (PLAN §9). Chainguard
-  publishes `:latest` only, so the *tag* is mutable but the pinned *digest* is immutable; re-pin on
-  each rebuild.
+  `cgr.dev/chainguard/python:latest` (runtime).
 
 ```bash
-# 1a. eclipse-temurin:21-jdk  (Containerfile.worker builder)
-$ENGINE pull eclipse-temurin:21-jdk
-JDK_DIGEST=$($ENGINE inspect --format '{{index .RepoDigests 0}}' eclipse-temurin:21-jdk | sed 's/.*@//')
-echo "21-jdk -> $JDK_DIGEST"
+# 1a. cgr.dev/chainguard/wolfi-base  (Containerfile.worker — all 3 stages)
+$ENGINE pull cgr.dev/chainguard/wolfi-base
+WOLFI_DIGEST=$($ENGINE inspect --format '{{index .RepoDigests 0}}' cgr.dev/chainguard/wolfi-base | sed 's/.*@//')
+echo "wolfi-base -> $WOLFI_DIGEST"
 
-# 1b. eclipse-temurin:21-jre  (Containerfile.worker runtime)
-$ENGINE pull eclipse-temurin:21-jre
-JRE_DIGEST=$($ENGINE inspect --format '{{index .RepoDigests 0}}' eclipse-temurin:21-jre | sed 's/.*@//')
-echo "21-jre -> $JRE_DIGEST"
-
-# 1c. python:3.12-slim  (Containerfile.worker pybuilder + runtime — 2 occurrences; WORKER ONLY)
-$ENGINE pull python:3.12-slim
-PY_DIGEST=$($ENGINE inspect --format '{{index .RepoDigests 0}}' python:3.12-slim | sed 's/.*@//')
-echo "python:3.12-slim -> $PY_DIGEST"
-
-# 1d. cgr.dev/chainguard/python  (Containerfile.server: -dev builder + latest runtime; distroless)
+# 1b. cgr.dev/chainguard/python  (Containerfile.server: -dev builder + latest runtime)
 $ENGINE pull cgr.dev/chainguard/python:latest-dev
 CG_DEV_DIGEST=$($ENGINE inspect --format '{{index .RepoDigests 0}}' cgr.dev/chainguard/python:latest-dev | sed 's/.*@//')
 $ENGINE pull cgr.dev/chainguard/python:latest
 CG_RUN_DIGEST=$($ENGINE inspect --format '{{index .RepoDigests 0}}' cgr.dev/chainguard/python:latest | sed 's/.*@//')
 echo "chainguard -dev -> $CG_DEV_DIGEST ; latest -> $CG_RUN_DIGEST"
 
-# 1e. Rewrite the placeholders (exact-match sed; @<placeholder> -> @<sha256:...>):
-sed -i "s|eclipse-temurin:21-jdk@REPLACE_WITH_DIGEST_FOR_eclipse-temurin:21-jdk|eclipse-temurin:21-jdk@${JDK_DIGEST}|" Containerfile.worker
-sed -i "s|eclipse-temurin:21-jre@REPLACE_WITH_DIGEST_FOR_eclipse-temurin:21-jre|eclipse-temurin:21-jre@${JRE_DIGEST}|" Containerfile.worker
-sed -i "s|python:3.12-slim@REPLACE_WITH_DIGEST_FOR_python:3.12-slim|python:3.12-slim@${PY_DIGEST}|g" Containerfile.worker
+# 1c. Rewrite the placeholders (exact-match sed; @<placeholder> -> @<sha256:...>):
+sed -i "s|cgr.dev/chainguard/wolfi-base@REPLACE_WITH_DIGEST_FOR_cgr.dev/chainguard/wolfi-base|cgr.dev/chainguard/wolfi-base@${WOLFI_DIGEST}|g" Containerfile.worker
 sed -i "s|cgr.dev/chainguard/python:latest-dev@REPLACE_WITH_DIGEST_FOR_cgr.dev/chainguard/python:latest-dev|cgr.dev/chainguard/python:latest-dev@${CG_DEV_DIGEST}|" Containerfile.server
 sed -i "s|cgr.dev/chainguard/python:latest@REPLACE_WITH_DIGEST_FOR_cgr.dev/chainguard/python:latest|cgr.dev/chainguard/python:latest@${CG_RUN_DIGEST}|" Containerfile.server
 
-# 1f. Confirm no base-image placeholder remains:
-grep -n "REPLACE_WITH_DIGEST_FOR_eclipse\|REPLACE_WITH_DIGEST_FOR_python\|REPLACE_WITH_DIGEST_FOR_cgr" Containerfile.* || echo "base images pinned ✓"
+# 1d. Confirm no base-image placeholder remains:
+grep -n "REPLACE_WITH_DIGEST_FOR_cgr" Containerfile.* || echo "base images pinned ✓"
 ```
 
 ## Phase 2 — Pin the Ghidra release (4 ARGs) with verified integrity (ADR-003)
