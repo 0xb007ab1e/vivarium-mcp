@@ -27,22 +27,26 @@ sources = ["cJSON.c"]          # relative to the extracted source root
 driver = "driver_cjson.c"      # committed here (tests/fixtures/oss/) — provides main()
 target_name = "cjson_fixture"  # output binary basename
 
-# --- GNU coreutils: classic linux utils; analyze `wc` (compact, clean control flow). -----------
+# --- zlib: analyze `minigzip` (the bundled gzip-ish tool → deflate/inflate/crc call graph). -----
+# Robust build: zlib's own hand-written `./configure --static` (NOT autotools/gnulib) builds only
+# libz.a (no .so), so the global -no-pie is safe; `make minigzip` links a non-PIE ET_EXEC.
 [[tool]]
-name = "coreutils"
-version = "9.5"
-url = "https://ftp.gnu.org/gnu/coreutils/coreutils-9.5.tar.xz"
-sha256 = "cd328edeac92f6a665de9f323c93b712af1858bc2e0d88f3f7100469470a1b8a"
-build = "autotools"            # ./configure && make (CFLAGS/LDFLAGS injected by the builder)
-target = "src/wc"              # built binary path within the source tree
-target_name = "wc"
+name = "zlib"
+version = "1.3.1"
+url = "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
+sha256 = "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23"
+build = "zlib"                 # CFLAGS=... ./configure --static ; make <target>
+target = "minigzip"            # built binary (also the make target name)
+target_name = "minigzip"
 
-# --- util-linux: analyze `col` (small, self-contained text filter). ----------------------------
+# --- lua: analyze the `lua` interpreter (rich VM + stdlib call graph). ---------------------------
+# Robust build: a plain hand-written Makefile (NO autotools); `make posix` builds a static
+# ET_EXEC. Flags injected via MYCFLAGS/MYLDFLAGS (lua's documented user-flag hooks).
 [[tool]]
-name = "util-linux"
-version = "2.40.2"
-url = "https://cdn.kernel.org/pub/linux/utils/util-linux/v2.40/util-linux-2.40.2.tar.xz"
-sha256 = "d78b37a66f5922d70edf3bdfb01a6b33d34ed3c3cafd6628203b2a2b67c8e8b3"
-build = "autotools"
-target = "col"                 # util-linux builds tools at the tree root
-target_name = "col"
+name = "lua"
+version = "5.4.7"
+url = "https://www.lua.org/ftp/lua-5.4.7.tar.gz"
+sha256 = "9fbf5e28ef86c69858f6d3d34eccc32e911c1a28b4120ff3e84aaa70cfbf1e30"
+build = "lua"                  # make posix MYCFLAGS=... MYLDFLAGS=...
+target = "src/lua"             # built interpreter binary
+target_name = "lua"

@@ -2,7 +2,7 @@
 
 The truest end-to-end path: drive the real MCP server over **stdio** (FastMCP, real
 ``RpcGhidraAdapter`` → real hardened Ghidra **worker container**) on stripped real-tool fixtures
-(cJSON / coreutils `wc` / util-linux `col`), then compare Ghidra's RECOVERED structure to a
+(cJSON / zlib minigzip / lua), then compare Ghidra's RECOVERED structure to a
 GROUND TRUTH extracted from the unstripped, ``-no-pie`` build (so truth addresses == Ghidra's).
 
 Per tool the journey is: ``session_create`` → ``session_import`` (the stripped fixture) →
@@ -49,12 +49,13 @@ _ENV_FIXTURES = "GHIDRA_MCP_FIXTURES"
 _ENV_WORKER_IMAGE = "GHIDRA_MCP_WORKER_IMAGE"
 _ENV_ENGINE = "GHIDRA_MCP_CONTAINER_ENGINE"
 
-# Per-tool tolerances. coreutils/util-linux pull in more thunks/PLT stubs Ghidra may merge, so
-# their edge-recall bar is slightly looser; cJSON (self-contained) holds the default.
+# Per-tool tolerances. lua's large VM (computed-goto dispatch, many small helpers) and zlib's
+# asm/intrinsic paths give Ghidra slightly more to miss/merge, so their bars are a touch looser;
+# cJSON (small, self-contained) holds the default.
 _THRESHOLDS: dict[str, Thresholds] = {
     "cjson": Thresholds(function_recall=0.90, edge_recall=0.85),
-    "coreutils": Thresholds(function_recall=0.85, edge_recall=0.75),
-    "util-linux": Thresholds(function_recall=0.85, edge_recall=0.75),
+    "zlib": Thresholds(function_recall=0.85, edge_recall=0.75),
+    "lua": Thresholds(function_recall=0.85, edge_recall=0.70),
 }
 _DEFAULT_THRESHOLDS = Thresholds(function_recall=0.85, edge_recall=0.75)
 
