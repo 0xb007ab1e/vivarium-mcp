@@ -9,9 +9,13 @@ failure-threshold: warning
 
 # Treat unpinned base images / apt versions strictly — but our bases are pinned BY DIGEST
 # (REPLACE_WITH_DIGEST_FOR_* placeholders), which hadolint accepts as pinned.
+# cgr.dev is the Chainguard registry: the worker + server runtime/builder stages are
+# distroless Wolfi (`cgr.dev/chainguard/wolfi-base`, pinned by digest) — DL3026 requires it
+# be explicitly trusted.
 trustedRegistries:
   - docker.io
   - ghcr.io
+  - cgr.dev
 
 # Ignored rules (each justified):
 ignored:
@@ -31,6 +35,14 @@ ignored:
   #         nothing over hashes + offline resolution, so DL3013 is a false positive for our install
   #         pattern. (The lockfile, not `==`, is the reproducibility control — std-supplychain.)
   - DL3013
+  # DL3018: pin apk versions. The Wolfi apk equivalent of DL3008. By design the Wolfi bases install
+  #         the CURRENT apk packages at build (`python-3.12`, `openjdk-21`, builder ca-certs/curl/
+  #         unzip) — Wolfi ships rolling, auto-patched/CVE-clean packages, so pinning an exact
+  #         `=<version>` would FREEZE us onto stale, CVE-bearing versions and defeat the reason we
+  #         moved to Wolfi (see Containerfile.worker header). The digest-pinned base + rolling
+  #         patched packages IS the supply-chain stance here; Trivy (infra/trivy.yaml) gates the
+  #         resulting package set for CVEs. Consistent with DL3008 above.
+  - DL3018
 
 # Everything else (no-root-user checks, COPY/ADD hygiene, etc.) stays at default severity.
 # Note: hadolint cannot see runtime hardening (USER is set; ro-rootfs/caps/seccomp/no-net are
