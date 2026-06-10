@@ -82,6 +82,40 @@ jobs:
           podman pull "$WORKER_IMAGE"
           echo "GHIDRA_MCP_WORKER_IMAGE=$WORKER_IMAGE" >> "$GITHUB_ENV"
 
+      # TEMP DIAGNOSTIC (remove once the runner-fit cause is pinned): the gated e2e fails on
+      # GitHub-hosted runners with the worker spawning but the RPC dying ~10s in (worker-unavailable),
+      # while the same images pass locally. The adapter --rm's the worker so its logs are lost. This
+      # step runs the worker STANDALONE (no --rm) with the launcher's exact hardening, then dumps its
+      # own logs + exit/OOM state + runner memory so we see WHY it dies (suspected JVM OOM under
+      # --memory 4g, or a rootless/crun limit). continue-on-error so it never blocks the real e2e.
+      - name: Diagnose worker on the runner (standalone smoke, no --rm)
+        continue-on-error: true
+        run: |
+          set -uxo pipefail
+          echo "## runner resources"; free -m || true; nproc || true
+          podman info --format 'cgroups={{.Host.CgroupsVersion}} mgr={{.Host.CgroupManager}} oci={{.Host.OCIRuntime.Name}} rootless={{.Host.Security.Rootless}} memTotal={{.Host.MemTotal}}' || true
+          sid=diag; sess="${RUNNER_TEMP:-/tmp}/ghidra-run/$sid"; rm -rf "$sess"; mkdir -p "$sess"; chmod 700 "$sess"
+          src="${GITHUB_WORKSPACE}/_fixtures/cjson.stripped"
+          podman rm -f "w-$sid" >/dev/null 2>&1 || true
+          podman run --name "w-$sid" --detach --runtime crun --network none \
+            --user "$(id -u):$(id -g)" --userns keep-id --cap-drop ALL \
+            --security-opt no-new-privileges --read-only \
+            --tmpfs /tmp/ghidra:rw,noexec,nosuid,nodev,mode=1777,size=2g \
+            --tmpfs /work/project:rw,noexec,nosuid,nodev,mode=1777,size=4g \
+            --memory 4g --memory-swap 4g --cpus 2 --pids-limit 512 --oom-kill-disable=false \
+            --volume "$sess":/run/ghidra-mcp:rw,Z \
+            --volume "${GITHUB_WORKSPACE}/_fixtures":"${GITHUB_WORKSPACE}/_fixtures":ro,Z \
+            --env GHIDRA_MCP_SESSION_ID="$sid" --env GHIDRA_MCP_RPC_SOCKET_DIR=/run/ghidra-mcp \
+            --env GHIDRA_MCP_ANALYSIS_TIMEOUT_SECONDS=600 --env-host=false \
+            "$GHIDRA_MCP_WORKER_IMAGE" || echo "RUN_RC=$?"
+          for i in $(seq 1 20); do [ -S "$sess/$sid.sock" ] && { echo "socket bound after ~${i}x0.5s"; break; }; sleep 0.5; done
+          echo "## container state"; podman ps -a --filter "name=w-$sid" --format '{{.Status}}'
+          echo "## inspect (OOM/exit)"; podman inspect "w-$sid" -f 'OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}} Error={{.State.Error}}' || true
+          echo "## socket dir"; ls -la "$sess" || true
+          echo "## worker logs >>>"; podman logs "w-$sid" 2>&1 | tail -60 || true
+          echo "## <<< worker logs"
+          podman rm -f "w-$sid" >/dev/null 2>&1 || true
+
       - name: Run ground-truth e2e (gated real-worker suite)
         env:
           GHIDRA_MCP_INTEGRATION: "1"
