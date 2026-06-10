@@ -101,31 +101,29 @@ jobs:
             GHIDRA_ZIP_URL=${{ vars.GHIDRA_ZIP_URL }}
             GHIDRA_ZIP_SHA256=${{ vars.GHIDRA_ZIP_SHA256 }}
 
-      # Export the SAME image as a PLAIN single-manifest docker tarball for Trivy to scan locally —
-      # no registry re-pull (which died on HTTP/2 for the ~1.3 GB worker) and no manifest list (so the
-      # docker exporter is happy; `provenance: false` keeps it a single manifest). Cache hit from the
-      # push build above, so this only adds the local tar export. We scan/​SBOM this tarball below.
+      # Export the EXACT pushed-by-digest artifact as a docker-archive for Trivy to scan locally
+      # (PR #3 review, Low-1 — hardened). Instead of a second cache-built tarball (whose manifest
+      # digest differs from the signed image, leaving the "scanned == shipped" binding resting on
+      # buildx cache determinism), we `skopeo copy` the precise digest that `cosign` signs below.
+      # `skopeo` resolves the pushed OCI image index to its single linux/amd64 runtime manifest and
+      # writes a docker-archive (`manifest.json`) that `trivy --input` reads — so Trivy now inspects
+      # the exact layers that were pushed AND signed, not a re-built equivalent.
       #
-      # ASSURANCE NOTE (PR #3 review, Low-1): this is a SECOND build, so its manifest digest differs
-      # from the pushed/signed image's. The binding "scanned == shipped" therefore rests on intra-run
-      # buildx CACHE DETERMINISM — every layer here is a cache hit from the push build above, so the
-      # filesystem/package set Trivy inspects is byte-identical to what was pushed (only the
-      # attestation-manifest wrapping, which the docker exporter can't carry, differs). The hardening
-      # to scan the exact pushed artifact (single build, multi-output type=oci) is tracked in
-      # PLAN.md §9 — it needs a real `docker buildx` env to validate Trivy-on-OCI-with-attestations.
-      - name: Export image tarball for scanning (${{ matrix.name }})
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # docker/build-push-action@v7.2.0
-        with:
-          context: .
-          file: ${{ matrix.containerfile }}
-          tags: ${{ matrix.image }}:${{ github.sha }}
-          outputs: type=docker,dest=/tmp/image-${{ matrix.name }}.tar
-          provenance: false         # plain manifest — the docker exporter cannot export manifest lists.
-          build-args: |
-            GHIDRA_VERSION=${{ vars.GHIDRA_VERSION }}
-            GHIDRA_RELEASE_TAG=${{ vars.GHIDRA_RELEASE_TAG }}
-            GHIDRA_ZIP_URL=${{ vars.GHIDRA_ZIP_URL }}
-            GHIDRA_ZIP_SHA256=${{ vars.GHIDRA_ZIP_SHA256 }}
+      # Why skopeo (not `docker pull`): the ~1.3 GB worker re-pull died on HTTP/2 PROTOCOL_ERROR;
+      # skopeo speaks HTTP/1.1, retries, and copies straight to a local archive. It is preinstalled
+      # on GitHub-hosted ubuntu runners; the guard installs it if absent (e.g. self-hosted).
+      - name: Export pushed image (by digest) for scanning (${{ matrix.name }})
+        env:
+          IMAGE_REF: ${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          DEST: /tmp/image-${{ matrix.name }}.tar
+          ARCHIVE_TAG: ${{ matrix.image }}:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          command -v skopeo >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y skopeo; }
+          # --override-os/arch pin the single runtime image out of the pushed OCI index (which also
+          # carries the SLSA/SBOM attestation manifest); docker-archive holds exactly one platform.
+          skopeo copy --retry-times 3 --override-os linux --override-arch amd64 \
+            "docker://${IMAGE_REF}" "docker-archive:${DEST}:${ARCHIVE_TAG}"
 
       # IMAGE vulnerability + misconfig + secret scan (gate #8 for the image). Fail on HIGH/CRITICAL.
       - name: Trivy image scan (${{ matrix.name }})
