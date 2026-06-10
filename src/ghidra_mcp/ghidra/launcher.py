@@ -29,6 +29,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ghidra_mcp.ghidra.rpc_client import WorkerProcess
+from ghidra_mcp.logging import get_logger
+
+_log = get_logger(__name__)
 
 #: A subprocess runner: takes an argv list, returns the completed process. Injected so tests can
 #: assert the exact command (and simulate failures) with no real engine.
@@ -187,7 +190,18 @@ class ContainerWorkerLauncher:
         ]
         result = self.runner(argv)
         if result.returncode != 0:
-            # Boundary-safe: no host detail beyond the engine's own (already non-sensitive) message.
+            # Full engine detail stays SERVER-SIDE (CI/ops diagnosability — e.g. an absent OCI
+            # runtime or rootless cgroup-delegation refusal); the engine's own stderr carries no
+            # binary content or secrets. The raised error is boundary-safe (rc only, no host
+            # detail) so nothing leaks to the MCP client (topic-logging-observability, master §5).
+            _log.error(
+                "worker.launch_failed",
+                extra={
+                    "rc": result.returncode,
+                    "runtime": self.runtime,
+                    "engine_stderr": (result.stderr or "")[:2000],
+                },
+            )
             raise WorkerLaunchError(f"worker launch failed (rc={result.returncode})")
         return ContainerWorkerProcess(container_name=name, engine=self.engine, runner=self.runner)
 

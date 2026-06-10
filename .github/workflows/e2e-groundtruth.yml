@@ -87,6 +87,13 @@ jobs:
           GHIDRA_MCP_INTEGRATION: "1"
           GHIDRA_MCP_FIXTURES: ${{ github.workspace }}/_fixtures
           GHIDRA_MCP_CONTAINER_ENGINE: podman
+          # This is a CORRECTNESS ground-truth gate (does Ghidra recover the call graph), not an
+          # isolation-tier test. Stock GitHub runners have no gVisor (runsc) — the production
+          # strong-isolation runtime (ADR-004) — so run under crun (podman's default OCI runtime,
+          # always present). The OCI runtime does not change Ghidra's recovered output; the gVisor
+          # tier is validated separately at deploy. Without this the worker spawn fails fast
+          # (`--runtime runsc` rejected) → every tool returns worker-unavailable.
+          GHIDRA_MCP_WORKER_RUNTIME: crun
           GHIDRA_MCP_E2E_TIMEOUT: "900"
         run: |
           set -euo pipefail
