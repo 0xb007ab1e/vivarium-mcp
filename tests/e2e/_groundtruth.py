@@ -134,9 +134,7 @@ def compare(
     # --- function recall: truth functions whose entry addr Ghidra also recovered ---
     truth_addrs = set(truth.name_by_addr)
     found = {a for a in truth_addrs if a in rec_funcs}
-    missing_fn = tuple(
-        sorted(truth.name_by_addr[a] for a in truth_addrs - found)
-    )
+    missing_fn = tuple(sorted(truth.name_by_addr[a] for a in truth_addrs - found))
     function_recall = (len(found) / len(truth_addrs)) if truth_addrs else 1.0
 
     # --- edge recall: only over edges whose BOTH endpoints were recovered (fair denominator) ---
@@ -150,9 +148,7 @@ def compare(
         considered.append((caller, callee))
         if (ca, ce) not in rec_edges:
             missing_edges.append((caller, callee))
-    edge_recall = (
-        (len(considered) - len(missing_edges)) / len(considered) if considered else 1.0
-    )
+    edge_recall = (len(considered) - len(missing_edges)) / len(considered) if considered else 1.0
 
     # --- leaf-first consistency: for every truth edge present in recovery, the callee's
     #     component must come at-or-before the caller's (leaves first). Same component = a cycle

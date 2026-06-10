@@ -143,7 +143,8 @@ async def _drive_one(tool: str, fixtures_dir: Path) -> None:
         sid = created["session_id"]
         try:
             await session.call_tool(
-                "session_import", {"session_id": sid, "source_ref": str(stripped)},
+                "session_import",
+                {"session_id": sid, "source_ref": str(stripped)},
                 read_timeout_seconds=timeout,
             )
             await session.call_tool(

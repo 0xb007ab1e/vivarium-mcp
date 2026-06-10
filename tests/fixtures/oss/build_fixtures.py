@@ -112,8 +112,16 @@ def _build_single_file(tool: dict[str, Any], src_root: Path) -> Path:
     sources = [src_root / s for s in tool["sources"]]
     driver = _HERE / str(tool["driver"])
     out = src_root / str(tool["target_name"])
-    cmd = ["gcc", *(_CFLAGS.split()), f"-I{src_root}", *map(str, sources), str(driver),
-           "-lm", "-o", str(out)]
+    cmd = [
+        "gcc",
+        *(_CFLAGS.split()),
+        f"-I{src_root}",
+        *map(str, sources),
+        str(driver),
+        "-lm",
+        "-o",
+        str(out),
+    ]
     _run(cmd, cwd=src_root)
     return out
 
@@ -153,9 +161,21 @@ def build_one(tool: dict[str, Any], work: Path, out: Path, jobs: int) -> dict[st
         raise SystemExit(msg)
 
     truth_path = out / f"{name}.groundtruth.json"
-    _run([sys.executable, str(_EXTRACTOR), "--binary", str(unstripped),
-          "--tool", name, "--version", str(tool["version"]), "--out", str(truth_path)],
-         cwd=out)
+    _run(
+        [
+            sys.executable,
+            str(_EXTRACTOR),
+            "--binary",
+            str(unstripped),
+            "--tool",
+            name,
+            "--version",
+            str(tool["version"]),
+            "--out",
+            str(truth_path),
+        ],
+        cwd=out,
+    )
 
     stripped = out / f"{name}.stripped"
     _strip(unstripped, stripped)
