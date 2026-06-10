@@ -80,8 +80,16 @@ RUN set -eux; \
     rm -f ghidra.zip ghidra.zip.sha256; \
     # The zip extracts to ghidra_<version>_PUBLIC/. Normalize to a stable path.
     mv ghidra_*_PUBLIC /opt/ghidra; \
-    # Strip components a headless analyzer never needs (docs) to shrink attack surface + image size.
-    rm -rf /opt/ghidra/docs /opt/ghidra/GPL/DemanglerGnu/build 2>/dev/null || true
+    # Strip components a headless analyzer never needs, to shrink attack surface + image size.
+    #   * docs / DemanglerGnu build artifacts — never used at runtime.
+    #   * Features/GhidraServer — the multi-user repository server (run via the bundled yajsw Java
+    #     service wrapper, which vendors netty-handler). This worker ONLY runs headless analysis
+    #     (analyzeHeadless / PyGhidra) and has NO network listener, so GhidraServer is never invoked.
+    #     Removing it drops the vendored netty-handler JAR that carries CVE-2026-44249 (IPv6 subnet
+    #     filter bypass) + CVE-2026-45416 (SNI handler over-allocation) — both unreachable here, but
+    #     deleting the dead feature is better than waiving (minimize attack surface — master §2).
+    rm -rf /opt/ghidra/docs /opt/ghidra/GPL/DemanglerGnu/build \
+           /opt/ghidra/Ghidra/Features/GhidraServer 2>/dev/null || true
 
 # =============================================================================
 # Stage 2: pybuilder — build the ghidra_mcp wheel (PEP 517) so the runtime install is OFFLINE.
