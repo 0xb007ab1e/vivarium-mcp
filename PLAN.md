@@ -116,13 +116,29 @@ Contract changes route through the PM (batch-atomicity mandate).
       branch-protection check (gated admin) to be merge-blocking.** The (gated) dependency lockfile,
       when generated, must carry cp314 wheels for `mcp`/`pydantic` (the placeholder build installed
       `--no-deps`, so the 3.14 dep closure is first proven by the `quality-py314` CI leg).
-  - **Worker — still DEFERRED (separate, harder spike).** `python:3.12-slim` + JDK 21 + Ghidra.
-    Risks: (1) shell-free runtime — confirm PyGhidra/Ghidra never shells out (silent-break);
-    (2) copy CPython + JDK + Ghidra into a Wolfi/distroless base; (3) scratch dirs via deploy tmpfs
-    mounts, not `RUN mkdir`; (4) the **full functional suite** re-validated per attempt, only via
-    gated builds ⇒ many iterations; (5) PyGhidra (bundled in Ghidra 12.1.2) must support the chosen
-    Python before the worker can also move to 3.14. The `.trivyignore.yaml` waivers stay in force
-    for the **worker** scan until this lands; tackle before the 2026-09-06 expiry.
+  - **Worker — viability CONFIRMED 2026-06-10; build not yet authored (the harder spike).**
+    Current: `python:3.12-slim` + digest-pinned eclipse-temurin JDK 21 + Ghidra. **Wolfi base
+    probed (cgr.dev/chainguard/wolfi-base via cot):** has everything the worker needs —
+    `python-3.12` (keep the worker on 3.12 to match PyGhidra/Ghidra), `openjdk-21` (JDK) /
+    `openjdk-21-jre`, and `unzip`/`curl`/`ca-certificates`. Recipe: `apk add` those on `wolfi-base`
+    in a builder (fetch+verify+unzip Ghidra, build the wheel), then a runtime with
+    `python-3.12 openjdk-21[-jre]` + Ghidra + PyGhidra. **Two design trade-offs to decide before
+    authoring** (vs. the server, which was turnkey):
+    1. **Runtime is NOT shell-free.** `wolfi-base` carries apk + a shell (the Chainguard `python`
+       image the server used has neither, but there's no equivalent turnkey python+JDK image). So
+       the worker would be CVE-clean (Wolfi: no perl, Trivy-0 like the server) but less minimal than
+       distroless. Fully shell-free would mean hand-copying CPython+JDK+Ghidra into a scratch/cc
+       base — much more effort, marginal gain (the worker is already a hardened, no-net, ro-rootfs,
+       gVisor fault domain per ADR-004).
+    2. **`apk add` floats package versions** (resolved at build) vs. the current **digest-pinned**
+       temurin JDK. Trade-off: Wolfi auto-patched/CVE-clean vs. reproducible-pinned. Mitigation
+       options: pin apk package versions (`pkg=ver`), or accept floating + rely on the digest-pinned
+       wolfi-base + rebuild currency.
+    Remaining after the decision: rework `Containerfile.worker`, then **gated build marathon**
+    (each build downloads Ghidra ~400 MB + the full **functional/integration validation** — real
+    PyGhidra boot + ELF analysis on Wolfi glibc) ⇒ several iterations. The `.trivyignore.yaml`
+    waivers stay in force for the **worker** scan until this lands; tackle before the 2026-09-06
+    expiry.
   - History: investigated + deferred 2026-06-08 (PR #3 review, Low-3); server-first built + validated
     2026-06-10 (adopted Python 3.14 for the server).
 - ⏳ **Image scan↔sign binding (PR #3 review, Low-1).** `worker-image.yml` scans a *second*,
