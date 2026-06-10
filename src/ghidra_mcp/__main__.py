@@ -49,6 +49,8 @@ def _default_port_factory(config: Config) -> GhidraPort:
         worker_image=config.worker_image,
         import_root=config.import_root,
         runtime=config.worker_runtime,
+        run_as_uid=config.worker_uid,
+        run_as_gid=config.worker_gid,
         analysis_timeout_s=config.limits.analysis_timeout_s,
     )
     return RpcGhidraAdapter(
@@ -72,9 +74,18 @@ def _default_session_manager_factory(config: Config, port: GhidraPort) -> Sessio
     Returns:
         A constructed :class:`ghidra_mcp.sessions.manager.SessionManager`.
     """
-    # SessionManager is constructible with safe defaults today; WS2 finalizes the wiring that
-    # injects ``port``/``config`` here at the composition root.
-    return SessionManager()
+    # Wire the worker-lifecycle port + validated lifecycle policy into the manager (it owns
+    # worker lifetimes: it spawns on first import and kills on eviction via the port). Without the
+    # port the manager can neither spawn nor kill a worker — every import fails closed as
+    # worker-unavailable. store_root stays None: the per-session project store is the worker's
+    # in-container /work/project tmpfs (ADR-004), destroyed when the container is removed on
+    # eviction, so the container kill IS the verified store wipe (ADR-002).
+    return SessionManager(
+        port=port,
+        ttl_s=config.session_ttl_s,
+        idle_s=config.session_idle_s,
+        max_sessions=config.limits.max_sessions,
+    )
 
 
 def main(

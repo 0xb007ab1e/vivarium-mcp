@@ -77,7 +77,11 @@ def test_launch_builds_hardened_podman_argv(tmp_path: Path) -> None:
     assert "--env-host=false" in argv
     # The image is the final argument.
     assert argv[-1] == "ghcr.io/o/ghidra-mcp-worker@sha256:" + "a" * 64
-    assert "seccomp=RuntimeDefault" in joined
+    # Default seccomp ("RuntimeDefault") = the engine's built-in profile, applied by OMITTING the
+    # flag (passing the literal value would be read as a profile path and fail to launch). So no
+    # explicit seccomp option is present for the default; only no-new-privileges.
+    assert "seccomp=RuntimeDefault" not in joined
+    assert "seccomp=" not in joined
 
 
 def test_runtime_is_configurable(tmp_path: Path) -> None:
@@ -87,6 +91,37 @@ def test_runtime_is_configurable(tmp_path: Path) -> None:
     (argv,) = runner.calls
     i = argv.index("--runtime")
     assert argv[i + 1] == "runc"
+
+
+def test_default_runs_as_hardened_uid(tmp_path: Path) -> None:
+    """The default worker uid/gid is the hardened non-root 65532:65532 (ADR-004)."""
+    runner = _Recorder()
+    _launcher(tmp_path, runner)("s", str(tmp_path / "s" / "s.sock"))
+    (argv,) = runner.calls
+    i = argv.index("--user")
+    assert argv[i + 1] == "65532:65532"
+
+
+def test_run_as_uid_gid_is_configurable(tmp_path: Path) -> None:
+    """A host-run server can align the worker uid/gid to its own (socket-dir mapping — ADR-009)."""
+    runner = _Recorder()
+    _launcher(tmp_path, runner, run_as_uid=1000, run_as_gid=1000)(
+        "s", str(tmp_path / "s" / "s.sock")
+    )
+    (argv,) = runner.calls
+    i = argv.index("--user")
+    assert argv[i + 1] == "1000:1000"
+
+
+def test_custom_seccomp_profile_is_passed(tmp_path: Path) -> None:
+    """A non-default seccomp value is passed as an explicit ``seccomp=<profile>`` option."""
+    runner = _Recorder()
+    _launcher(tmp_path, runner, seccomp="/etc/ghidra-seccomp.json")(
+        "s", str(tmp_path / "s" / "s.sock")
+    )
+    (argv,) = runner.calls
+    assert "--security-opt" in argv
+    assert "seccomp=/etc/ghidra-seccomp.json" in argv
 
 
 def test_launch_failure_fails_closed(tmp_path: Path) -> None:

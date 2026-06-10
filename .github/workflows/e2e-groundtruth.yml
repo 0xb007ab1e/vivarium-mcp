@@ -97,4 +97,13 @@ jobs:
           GHIDRA_MCP_E2E_TIMEOUT: "900"
         run: |
           set -euo pipefail
+          # The e2e drives a HOST-run server (not containerized). Under rootless podman + --userns
+          # keep-id the worker must run as THIS runner's uid/gid to write the server-created
+          # per-session socket dir (0700), and that dir must be a user-writable path (not /run).
+          # In production the server is itself containerized as 65532 and these stay at their
+          # hardened defaults (deploy/socket-dir.md, ADR-009).
+          export GHIDRA_MCP_RPC_SOCKET_DIR="${RUNNER_TEMP:-/tmp}/ghidra-run"
+          export GHIDRA_MCP_WORKER_UID="$(id -u)"
+          export GHIDRA_MCP_WORKER_GID="$(id -g)"
+          mkdir -p "$GHIDRA_MCP_RPC_SOCKET_DIR"
           pytest tests/e2e/test_groundtruth_oss.py -m integration -v --no-cov

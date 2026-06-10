@@ -89,9 +89,15 @@ class ContainerWorkerLauncher:
         import_root: Host dir (read-only mount) under which ``source_ref`` inputs must live.
         runtime: OCI runtime (``runsc`` for gVisor — ADR-004; falls back at deploy if absent).
         engine: Container CLI (``podman``).
+        run_as_uid / run_as_gid: Worker process uid/gid (default the hardened ``65532``). Must
+            match the uid owning the bind-mounted socket dir under ``--userns keep-id`` (see the
+            note at the ``--user`` flag); overridable so a host-run server can align the worker.
         mem / cpus / pids / tmpfs_scratch / tmpfs_project: Resource bounds (F7 DoS).
         analysis_timeout_s: Passed to the worker as defense-in-depth (it enforces its own too).
-        seccomp: Seccomp profile (``RuntimeDefault``; stricter is opt-in after validation).
+        seccomp: Seccomp policy. ``"RuntimeDefault"`` (default) applies the engine's built-in
+            profile by OMITTING the flag (passing the literal value would be read as a file path
+            and fail to launch); any other value is passed as ``seccomp=<value>`` (a custom profile
+            path, or ``unconfined`` to disable — never the default).
         runner: Injected subprocess runner (default real ``subprocess``).
     """
 
@@ -99,6 +105,8 @@ class ContainerWorkerLauncher:
     import_root: str
     runtime: str = "runsc"
     engine: str = "podman"
+    run_as_uid: int = 65532
+    run_as_gid: int = 65532
     mem: str = "4g"
     cpus: str = "2"
     pids: int = 512
@@ -140,19 +148,23 @@ class ContainerWorkerLauncher:
             # No network / no egress — removes the exfiltration path entirely.
             "--network",
             "none",
-            # Non-root (image USER is 65532); rootless maps to an unprivileged host uid.
+            # Non-root (image USER is 65532); rootless maps to an unprivileged host uid. With
+            # --userns keep-id the worker uid must match the uid that owns the bind-mounted socket
+            # dir (the server's): in production the server also runs containerized as 65532
+            # (deploy/server-run.sh + socket-dir.md), so both map to the same host subuid. It is
+            # configurable so a host-run server (e.g. the gated ground-truth e2e) can align the
+            # worker to its own uid — the default stays the hardened 65532 (ADR-004).
             "--user",
-            "65532:65532",
+            f"{self.run_as_uid}:{self.run_as_gid}",
             "--userns",
             "keep-id",
             # Drop ALL capabilities; a headless analyzer needs none.
             "--cap-drop",
             "ALL",
-            # No setuid privilege escalation; seccomp filter (RuntimeDefault, verified to load).
+            # No setuid privilege escalation. (Seccomp is appended below — see the note: the
+            # engine's default profile is applied by OMITTING the flag, not by a magic value.)
             "--security-opt",
             "no-new-privileges",
-            "--security-opt",
-            f"seccomp={self.seccomp}",
             # Immutable rootfs; writable scratch + per-session project store ONLY via tmpfs
             # (noexec,nosuid,nodev; mode=1777 so the non-root worker can write under ro-rootfs).
             "--read-only",
@@ -186,8 +198,17 @@ class ContainerWorkerLauncher:
             "--env",
             f"GHIDRA_MCP_ANALYSIS_TIMEOUT_SECONDS={self.analysis_timeout_s}",
             "--env-host=false",
-            self.worker_image,
         ]
+        # Seccomp: ``"RuntimeDefault"`` is the OCI/K8s sentinel for "use the engine's built-in
+        # default profile". podman/docker apply that profile when NO seccomp option is passed, and
+        # interpret ``seccomp=<value>`` as a PROFILE FILE PATH — so passing the literal string
+        # "RuntimeDefault" makes the engine try to open a file by that name and fail to launch.
+        # Therefore: omit the flag for the default (the default profile still blocks the dangerous
+        # syscalls — hardening preserved, ADR-004) and pass ``seccomp=<path>`` only for a custom
+        # profile (or ``unconfined`` to disable, which is never the default).
+        if self.seccomp != "RuntimeDefault":
+            argv += ["--security-opt", f"seccomp={self.seccomp}"]
+        argv.append(self.worker_image)
         result = self.runner(argv)
         if result.returncode != 0:
             # Full engine detail stays SERVER-SIDE (CI/ops diagnosability — e.g. an absent OCI

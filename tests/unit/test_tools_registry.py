@@ -37,7 +37,12 @@ class FakeSessionManager:
         """Initialize with empty audit trails."""
         self.authorized: list[str] = []
         self.evicted: list[tuple[str, str]] = []
+        self.ensured: list[str] = []
         self.created = 0
+
+    def ensure_worker(self, session_id: str) -> None:
+        """Record an idempotent worker-spawn request (the import handler calls this)."""
+        self.ensured.append(session_id)
 
     def create(self, *, label: str | None = None) -> s.SessionInfo:
         """Create a session, returning a fixed valid id."""
@@ -315,6 +320,8 @@ def ctx() -> reg.ToolContext:
         limits=Limits(),
         worker_image="x",
         worker_runtime="runsc",
+        worker_uid=65532,
+        worker_gid=65532,
         rpc_socket_dir="/run/x",
         import_root="/work/imports",
     )
@@ -444,6 +451,9 @@ def test_session_import_uses_manager_lifecycle_keeps_worker_sha256(ctx: reg.Tool
     assert info.expires_at == 10
     # Worker-only contribution survives the overlay.
     assert info.binary_sha256 == "a" * 64
+    # Import triggers the manager-owned worker spawn (idempotent) before contacting the worker.
+    sessions = cast(FakeSessionManager, ctx.sessions)
+    assert sessions.ensured == [_VALID_SID]
 
 
 @pytest.mark.critical

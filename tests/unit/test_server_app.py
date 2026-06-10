@@ -33,6 +33,8 @@ def _config() -> Config:
         limits=Limits(),
         worker_image="x",
         worker_runtime="runsc",
+        worker_uid=65532,
+        worker_gid=65532,
         rpc_socket_dir="/run/x",
         import_root="/work/imports",
     )

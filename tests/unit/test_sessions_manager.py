@@ -166,6 +166,48 @@ def test_authorize_expired_session_is_session_invalid_and_evicts() -> None:
         mgr.authorize(info.session_id)
 
 
+# --- worker spawn (ensure_worker) -------------------------------------------------------------
+@pytest.mark.critical
+def test_ensure_worker_spawns_once_and_is_idempotent() -> None:
+    port = _FakePort()
+    mgr, _ = _mgr(port=port)
+    info = mgr.create()
+    assert port.started == []  # create spawns nothing (spawn-on-first-import)
+    mgr.ensure_worker(info.session_id)
+    mgr.ensure_worker(info.session_id)  # idempotent: second call is a no-op
+    assert port.started == [info.session_id]
+    assert mgr._sessions[info.session_id].worker_started is True
+
+
+@pytest.mark.critical
+def test_ensure_worker_no_port_is_noop() -> None:
+    mgr, _ = _mgr()  # no port wired (guard/test construction)
+    info = mgr.create()
+    mgr.ensure_worker(info.session_id)  # must not raise
+    assert mgr._sessions[info.session_id].worker_started is False
+
+
+@pytest.mark.critical
+def test_ensure_worker_unknown_session_is_session_invalid() -> None:
+    port = _FakePort()
+    mgr, _ = _mgr(port=port)
+    with pytest.raises(GhidraMcpError) as ei:
+        mgr.ensure_worker("nonexistent-session-id")
+    assert ei.value.envelope.type is ErrorType.SESSION_INVALID
+    assert port.started == []  # fail closed: no spawn for an unknown session
+
+
+@pytest.mark.critical
+def test_ensure_worker_started_worker_is_killed_on_eviction(tmp_path: Path) -> None:
+    """The worker_started flag set by ensure_worker drives the eviction kill (containment)."""
+    port = _FakePort()
+    mgr, _ = _mgr(port=port, store_root=str(tmp_path))
+    info = mgr.create()
+    mgr.ensure_worker(info.session_id)
+    mgr.evict(info.session_id, reason="close")
+    assert port.killed == [info.session_id]
+
+
 # --- eviction: kill + verified wipe -----------------------------------------------------------
 @pytest.mark.critical
 def test_evict_kills_worker_then_wipes_store(tmp_path: Path) -> None:
