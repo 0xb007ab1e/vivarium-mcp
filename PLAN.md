@@ -112,10 +112,13 @@ Contract changes route through the PM (batch-atomicity mandate).
       (`:3.12`/`:3.12-dev` are paid-tier). Decision (2026-06-10): **adopt 3.14** for the server.
       `requires-python = ">=3.12"` is unchanged (the worker stays 3.12), so BOTH runtimes are in
       scope; CI gains a `quality-py314` job running the suite on 3.14 (dev/prod parity —
-      topic-config-environments) alongside `quality` on 3.12. **Make `quality-py314` a REQUIRED
-      branch-protection check (gated admin) to be merge-blocking.** The (gated) dependency lockfile,
-      when generated, must carry cp314 wheels for `mcp`/`pydantic` (the placeholder build installed
-      `--no-deps`, so the 3.14 dep closure is first proven by the `quality-py314` CI leg).
+      topic-config-environments) alongside `quality` on 3.12. ✅ **DONE (2026-06-10):** `main`
+      branch protection enabled (via `gh api`; was previously unprotected — a `workflow-git` gap) —
+      all 6 CI checks are required incl. `quality-py314` (so it's merge-blocking), strict +
+      linear-history + no-force-push/no-deletions; no required PR reviews (solo repo; review is via
+      `sdlc-reviewer`) + admin-bypass on so the maintainer isn't locked out. The (gated) dependency
+      lockfile, when generated, must carry cp314 wheels for `mcp`/`pydantic` (the placeholder build
+      installed `--no-deps`, so the 3.14 dep closure is first proven by the `quality-py314` CI leg).
   - **Worker — DONE/validated on `infra/worker-distroless` (2026-06-10).** Base: a single
     **`cgr.dev/chainguard/wolfi-base`** (digest-pinned) + `apk add python-3.12 openjdk-21`
     (replaces `python:3.12-slim` + the copied eclipse-temurin JDK). Worker stays on **Python 3.12**
