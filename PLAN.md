@@ -98,24 +98,33 @@ Contract changes route through the PM (batch-atomicity mandate).
   The 6 no-upstream-fix Debian-base CVEs in `.trivyignore.yaml` (perl-base + ncurses) are waived
   not-reachable, **auto-expiring 2026-09-06**. Durable remediation = move the images off
   `python:3.12-slim` to a perl/ncurses-free base.
-  - **Server — IN PROGRESS (server-first proof, `infra/server-distroless`, 2026-06-10).** Base
-    chosen: **Chainguard/Wolfi `cgr.dev/chainguard/python`** (glibc → manylinux wheels resolve;
-    current Python 3.12; built-in non-root uid/gid 65532; shell-free + no pkg-mgr + ~0 CVEs).
-    `Containerfile.server` rewritten to the standard `-dev` (venv build) → shell-free runtime
-    pattern; `infra/pin-supply-chain.sh` `BASES` updated (Chainguard digests for the server, slim
-    now worker-only). **Remaining = GATED build validation** (one or more `make build-server` runs
-    via cot): resolve+pin the Chainguard digests, build, run the runtime import/console-script smoke
-    (`ghidra-mcp` resolves; venv portable across `-dev`→runtime), and Trivy-scan to confirm the
-    perl/ncurses CVEs are GONE for the server image. Open build-validate items flagged in-file as
-    `integration-validate` (venv path portability; nonroot home `/home/nonroot`; DL3007 ignore).
-  - **Worker — still DEFERRED (separate, harder spike).** Python 3.12 + JDK 21 + Ghidra. Risks:
-    (1) shell-free runtime — confirm PyGhidra/Ghidra never shells out (silent-break); (2) copy
-    CPython + JDK + Ghidra into a Wolfi/distroless base; (3) scratch dirs via deploy tmpfs mounts,
-    not `RUN mkdir`; (4) the **full functional suite** re-validated per attempt, only via gated
-    builds ⇒ many iterations. The `.trivyignore.yaml` waivers stay in force for the **worker** scan
-    until this lands; tackle before the 2026-09-06 expiry.
-  - History: investigated + deferred 2026-06-08 (PR #3 review, Low-3); server-first started
-    2026-06-10.
+  - **Server — DONE/validated on `infra/server-distroless` (server-first proof, 2026-06-10).** Base:
+    **Chainguard/Wolfi `cgr.dev/chainguard/python`** (glibc → manylinux wheels resolve; built-in
+    non-root uid/gid 65532; shell-free + no pkg-mgr + ~0 CVEs). `Containerfile.server` rewritten to
+    the standard `-dev` (venv build) → shell-free runtime pattern (digests pinned);
+    `infra/pin-supply-chain.sh` `BASES` updated (Chainguard for the server, slim now worker-only).
+    **Gated build validated** (podman build via cot): builds clean, venv is portable `-dev`→runtime,
+    runs as uid 65532, `import ghidra_mcp` + the `ghidra-mcp` console script resolve, no shell/apk
+    (25 Wolfi packages). **Trivy HIGH,CRITICAL scan: 0 findings** — the 5 perl CVEs are eliminated
+    (perl absent) and the ncurses CVE is not flagged on Wolfi's build. The `.trivyignore.yaml`
+    waivers are now needed ONLY for the worker scan.
+    - **Python 3.14 (parity note).** Chainguard's FREE tier is `:latest`-only = **Python 3.14**
+      (`:3.12`/`:3.12-dev` are paid-tier). Decision (2026-06-10): **adopt 3.14** for the server.
+      `requires-python = ">=3.12"` is unchanged (the worker stays 3.12), so BOTH runtimes are in
+      scope; CI gains a `quality-py314` job running the suite on 3.14 (dev/prod parity —
+      topic-config-environments) alongside `quality` on 3.12. **Make `quality-py314` a REQUIRED
+      branch-protection check (gated admin) to be merge-blocking.** The (gated) dependency lockfile,
+      when generated, must carry cp314 wheels for `mcp`/`pydantic` (the placeholder build installed
+      `--no-deps`, so the 3.14 dep closure is first proven by the `quality-py314` CI leg).
+  - **Worker — still DEFERRED (separate, harder spike).** `python:3.12-slim` + JDK 21 + Ghidra.
+    Risks: (1) shell-free runtime — confirm PyGhidra/Ghidra never shells out (silent-break);
+    (2) copy CPython + JDK + Ghidra into a Wolfi/distroless base; (3) scratch dirs via deploy tmpfs
+    mounts, not `RUN mkdir`; (4) the **full functional suite** re-validated per attempt, only via
+    gated builds ⇒ many iterations; (5) PyGhidra (bundled in Ghidra 12.1.2) must support the chosen
+    Python before the worker can also move to 3.14. The `.trivyignore.yaml` waivers stay in force
+    for the **worker** scan until this lands; tackle before the 2026-09-06 expiry.
+  - History: investigated + deferred 2026-06-08 (PR #3 review, Low-3); server-first built + validated
+    2026-06-10 (adopted Python 3.14 for the server).
 - ⏳ **Image scan↔sign binding (PR #3 review, Low-1).** `worker-image.yml` scans a *second*,
   cache-identical `provenance:false` docker tarball rather than the exact pushed (manifest-list)
   artifact — layers are byte-identical (intra-run buildx cache) but the manifest digests differ, so

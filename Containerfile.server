@@ -50,7 +50,7 @@
 # which ship to the runtime stage). hadolint DL3007: `:latest` is intentional + digest-pinned
 # (Chainguard free tier is :latest-only); the digest is the real pin.
 # hadolint ignore=DL3007
-FROM cgr.dev/chainguard/python:latest-dev@REPLACE_WITH_DIGEST_FOR_cgr.dev/chainguard/python:latest-dev AS builder
+FROM cgr.dev/chainguard/python:latest-dev@sha256:cdd4cc5ab682d51162af0be628ceeca4e938b8fc8c7fcf2a486f810849abaed6 AS builder
 
 # `-dev` defaults to the non-root user; switch to root to own /venv + /run during the build.
 USER root
@@ -93,7 +93,7 @@ RUN set -eux; \
 # =============================================================================
 # GATED ITEM S2: pin this base by digest. Shell-free, non-root (uid/gid 65532), no package manager.
 # hadolint ignore=DL3007
-FROM cgr.dev/chainguard/python:latest@REPLACE_WITH_DIGEST_FOR_cgr.dev/chainguard/python:latest AS runtime
+FROM cgr.dev/chainguard/python:latest@sha256:15c25640085de8df6ea342f0f4a0064b85ebb5c6e1fcc306c59f78724c070c9a AS runtime
 
 LABEL org.opencontainers.image.title="ghidra-mcp-server" \
       org.opencontainers.image.description="Secure MCP control-plane server for headless Ghidra (stdio, v1)." \
