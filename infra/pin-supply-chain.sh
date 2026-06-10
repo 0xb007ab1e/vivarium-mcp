@@ -50,12 +50,12 @@ UNRESOLVED=()
 # ---------------------------------------------------------------------------
 note "Phase 1 — base images by digest"
 if command -v "$ENGINE" >/dev/null 2>&1; then
+  # Both images now use Chainguard/Wolfi bases (distroless migration — PLAN §9); no more Debian
+  # slim / eclipse-temurin. Chainguard publishes :latest only, so we pin each one's digest.
   declare -A BASES=(
-    [eclipse-temurin:21-jdk]=Containerfile.worker
-    [eclipse-temurin:21-jre]=Containerfile.worker
-    # python:3.12-slim is now the WORKER base only (the server moved to Chainguard/Wolfi — PLAN §9).
-    [python:3.12-slim]=Containerfile.worker
-    # Server (distroless migration): Chainguard publishes :latest only, so we pin its digest.
+    # Worker: single Wolfi base + apk add python-3.12 + openjdk-21 (replaces slim + copied temurin).
+    [cgr.dev/chainguard/wolfi-base]=Containerfile.worker
+    # Server: turnkey Chainguard python (-dev builder + shell-free runtime).
     [cgr.dev/chainguard/python:latest-dev]=Containerfile.server
     [cgr.dev/chainguard/python:latest]=Containerfile.server
   )
