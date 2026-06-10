@@ -56,6 +56,8 @@
 FROM cgr.dev/chainguard/python:latest-dev@sha256:cdd4cc5ab682d51162af0be628ceeca4e938b8fc8c7fcf2a486f810849abaed6 AS builder
 
 # `-dev` defaults to the non-root user; switch to root to own /venv + /run during the build.
+# hadolint ignore=DL3002  (builder stage only — throwaway; the runtime stage ends as
+#                          USER 65532:65532, which is what ships.)
 USER root
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
