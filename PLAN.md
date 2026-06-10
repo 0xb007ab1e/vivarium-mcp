@@ -143,16 +143,20 @@ Contract changes route through the PM (batch-atomicity mandate).
       ignored under podman's OCI format (cosmetic; readiness is the RPC `ping`).
   - History: investigated + deferred 2026-06-08 (PR #3 review, Low-3); server built+validated +
     Python 3.14 adopted 2026-06-10 (#8); worker built+validated 2026-06-10.
-- ⏳ **Image scan↔sign binding (PR #3 review, Low-1).** `worker-image.yml` scans a *second*,
-  cache-identical `provenance:false` docker tarball rather than the exact pushed (manifest-list)
-  artifact — layers are byte-identical (intra-run buildx cache) but the manifest digests differ, so
-  the binding rests on cache determinism. **ATTEMPTED single-build multi-output `type=oci,dest=*.tar`
-  (CI run 27172201879): does NOT compose with Trivy `--input` — Trivy reads only a docker-save tar
-  (`manifest.json`) or an OCI *directory* (`index.json`), not an OCI-archive tar; the docker exporter
-  Trivy does read can't carry the provenance manifest-list. Reverted; the mitigated two-build
-  (cache-identical layers, documented) stays accepted.** Future options if hardening is revisited:
-  `type=oci,dest=<dir>,tar=false` (OCI layout dir) → `trivy --input <dir>`, or `skopeo copy` the
-  pushed image to a docker-archive then scan that. LOW; not urgent.
+- 🔧 **Image scan↔sign binding (PR #3 review, Low-1) — FIX IMPLEMENTED, pending gated validation
+  (branch `fix/low1-scan-shipped-artifact`, 2026-06-10).** Previously `worker-image.yml` scanned a
+  *second*, cache-identical `provenance:false` docker tarball rather than the exact pushed
+  (manifest-list) artifact, so the "scanned == shipped" binding rested on intra-run buildx cache
+  determinism. **Hardened:** the second build is replaced by `skopeo copy
+  "docker://<image>@${{ steps.build.outputs.digest }}" docker-archive:<tar>` — Trivy now scans the
+  **exact digest cosign signs**, resolving the pushed OCI index to its single linux/amd64 runtime
+  manifest (`--override-os/--override-arch`) into a docker-archive (`manifest.json`) that
+  `trivy --input` reads. skopeo (HTTP/1.1, retried) sidesteps the HTTP/2 PROTOCOL_ERROR that killed
+  the ~1.3 GB worker `docker pull`; it is preinstalled on GitHub-hosted ubuntu runners (guarded
+  install fallback) and reuses the GHCR creds `docker/login-action` writes to `~/.docker/config.json`.
+  Prior `type=oci,dest=*.tar` attempt (CI run 27172201879) does NOT compose with Trivy `--input` and
+  was rejected. **Validation REQUIRES a gated `worker-image.yml` dispatch** (builds + pushes + signs
+  to ghcr.io) — not yet run; do not merge until green. LOW; not urgent.
 - ✅ **RESOLVED — adapter builder hardening: malformed-worker result → `WORKER_UNAVAILABLE` (PR #6
   review, Low-2; INFO).** The `_build_*` builders in `ghidra/rpc_client.py` read required keys
   directly; a worker result with a missing key / wrong type previously raised a raw
