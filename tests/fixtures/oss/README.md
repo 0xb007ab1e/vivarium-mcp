@@ -54,12 +54,14 @@ Per-tool thresholds live in `test_groundtruth_oss.py`.
   `GHIDRA_MCP_WORKER_IMAGE` + a container engine are all present.
 - The **pure scorer + extractor methodology** are validated offline in the normal CI run.
 
-## Supply-chain pins (resolve before first real run — fail closed)
+## Supply-chain pins
 
-- `manifest.toml` `sha256` values are `REPLACE_WITH_SHA256_*` placeholders; resolve each against the
-  upstream release (`build_fixtures.py` refuses to build an unresolved pin).
-- `e2e-groundtruth.yml` actions are `REPLACE_WITH_DIGEST_FOR_*` placeholders (repo convention); the
-  worker image is pulled **by digest** and `cosign verify`d before use.
+- `manifest.toml` `sha256` values are **pinned** to the upstream releases (cJSON 1.7.18,
+  coreutils 9.5, util-linux 2.40.2); `build_fixtures.py` verifies each and fails closed on a
+  mismatch. Re-pin when bumping a version.
+- `e2e-groundtruth.yml` actions are pinned **by digest**; the worker image is pulled **by digest**
+  from `vars.WORKER_IMAGE_DIGEST` (the signed digest of the most recent `worker-image.yml` run) and
+  `cosign verify`d (scoped to this repo's `worker-image.yml` OIDC identity) before it is run.
 
 ## Run it
 
