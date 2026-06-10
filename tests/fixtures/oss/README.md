@@ -11,8 +11,10 @@ order, and return results — and is what it returns actually correct?*
 | Tool | Analyzed binary | Why |
 |------|-----------------|-----|
 | **cJSON** 1.7.18 | a tiny driver linked with `cJSON.c` | single-file MIT parser; rich self-contained `parse_*`/`print_*` call graph |
-| **GNU coreutils** 9.5 | `wc` | classic linux util; compact, clean control flow |
-| **util-linux** 2.40.2 | `col` | small, self-contained text filter |
+| **zlib** 1.3.1 | `minigzip` | the bundled gzip-ish tool → deflate/inflate/crc call graph; robust hand-written `./configure --static` (no autotools) |
+| **lua** 5.4.7 | `lua` interpreter | rich VM + stdlib call graph; plain Makefile (`make posix`), no autotools |
+
+(coreutils/util-linux were evaluated but dropped: GNU autotools + gnulib makes them CI-build-fragile on a moving glibc/toolchain — wrong dependency for a *sanity check*.)
 
 ## How the ground truth is made (`build_fixtures.py` → `extract_ground_truth.py`)
 
@@ -57,7 +59,7 @@ Per-tool thresholds live in `test_groundtruth_oss.py`.
 ## Supply-chain pins
 
 - `manifest.toml` `sha256` values are **pinned** to the upstream releases (cJSON 1.7.18,
-  coreutils 9.5, util-linux 2.40.2); `build_fixtures.py` verifies each and fails closed on a
+  zlib 1.3.1, lua 5.4.7); `build_fixtures.py` verifies each and fails closed on a
   mismatch. Re-pin when bumping a version.
 - `e2e-groundtruth.yml` actions are pinned **by digest**; the worker image is pulled **by digest**
   from `vars.WORKER_IMAGE_DIGEST` (the signed digest of the most recent `worker-image.yml` run) and

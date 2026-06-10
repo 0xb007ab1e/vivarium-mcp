@@ -16,7 +16,7 @@ on an unresolved ``REPLACE_WITH_SHA256_*`` pin, a checksum mismatch, a build fai
 target binary.
 
 Usage:
-    build_fixtures.py --out <artifact-dir> [--only cjson,coreutils] [--jobs N]
+    build_fixtures.py --out <artifact-dir> [--only cjson,zlib] [--jobs N]
 """
 
 from __future__ import annotations
@@ -126,15 +126,34 @@ def _build_single_file(tool: dict[str, Any], src_root: Path) -> Path:
     return out
 
 
-def _build_autotools(tool: dict[str, Any], src_root: Path, jobs: int) -> Path:
-    """./configure + make with DWARF/non-PIE flags; return the target binary path."""
-    _run(["./configure", f"CFLAGS={_CFLAGS}", f"LDFLAGS={_LDFLAGS}"], cwd=src_root)
-    _run(["make", f"-j{jobs}"], cwd=src_root)
+def _checked_target(tool: dict[str, Any], src_root: Path) -> Path:
+    """Resolve + existence-check the built target binary (fail closed)."""
     target = src_root / str(tool["target"])
     if not target.exists():
         msg = f"{tool['name']}: built target not found at {target}"
         raise SystemExit(msg)
     return target
+
+
+def _build_zlib(tool: dict[str, Any], src_root: Path, jobs: int) -> Path:
+    """zlib: hand-written `./configure --static` (CFLAGS carries -no-pie → ET_EXEC, no .so), then
+    build ONLY the target program (e.g. `make minigzip`) so no shared lib is linked."""
+    _run(
+        ["./configure", "--static"],
+        cwd=src_root,
+        env_extra={"CFLAGS": _CFLAGS, "LDFLAGS": _LDFLAGS},
+    )
+    _run(["make", f"-j{jobs}", str(tool["target"])], cwd=src_root)
+    return _checked_target(tool, src_root)
+
+
+def _build_lua(tool: dict[str, Any], src_root: Path, jobs: int) -> Path:
+    """lua: plain Makefile (no autotools); `make posix` builds a static ET_EXEC. Flags go through
+    lua's documented MYCFLAGS/MYLDFLAGS hooks (command-line vars propagate to the src sub-make)."""
+    _run(
+        ["make", f"-j{jobs}", "posix", f"MYCFLAGS={_CFLAGS}", f"MYLDFLAGS={_LDFLAGS}"], cwd=src_root
+    )
+    return _checked_target(tool, src_root)
 
 
 def _strip(src: Path, dest: Path) -> None:
@@ -152,13 +171,16 @@ def build_one(tool: dict[str, Any], work: Path, out: Path, jobs: int) -> dict[st
     _verify(tarball, tool["sha256"], name)
     src_root = _extract_tarball(tarball, work / name)
 
-    if tool["build"] == "single-file":
-        unstripped = _build_single_file(tool, src_root)
-    elif tool["build"] == "autotools":
-        unstripped = _build_autotools(tool, src_root, jobs)
-    else:
+    builders = {
+        "single-file": lambda: _build_single_file(tool, src_root),
+        "zlib": lambda: _build_zlib(tool, src_root, jobs),
+        "lua": lambda: _build_lua(tool, src_root, jobs),
+    }
+    builder = builders.get(tool["build"])
+    if builder is None:
         msg = f"{name}: unknown build kind {tool['build']!r}"
         raise SystemExit(msg)
+    unstripped = builder()
 
     truth_path = out / f"{name}.groundtruth.json"
     _run(
