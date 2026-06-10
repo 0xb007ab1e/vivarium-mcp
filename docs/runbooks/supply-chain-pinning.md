@@ -170,8 +170,8 @@ uv run pip-audit --strict --desc        # or: pip-audit --strict --desc
 uv run pip-licenses --format=markdown --with-urls   # review output; no copyleft surprises
 
 # 5d. (Optional, needs trivy) scan the pinned base images for known CVEs:
-trivy image --config infra/trivy.yaml "eclipse-temurin:21-jre@${JRE_DIGEST}"
-trivy image --config infra/trivy.yaml "python:3.12-slim@${PY_DIGEST}"
+trivy image --config infra/trivy.yaml "cgr.dev/chainguard/wolfi-base@${WOLFI_DIGEST}"
+trivy image --config infra/trivy.yaml "cgr.dev/chainguard/python:latest@${CG_RUN_DIGEST}"
 ```
 
 ## Verification — run the full gate suite locally (must be green)

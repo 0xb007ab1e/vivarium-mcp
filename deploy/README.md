@@ -44,10 +44,11 @@ Supporting config lives in `infra/`: `seccomp/` (profiles + verification note), 
 ### 0. Resolve + pin all digests (supply-chain gate — see the gate list in the WS3 handoff)
 ```
 # Resolve each REPLACE_WITH_DIGEST_FOR_<tag> to its @sha256 and replace in-place after VETTING.
-podman pull eclipse-temurin:21-jdk   && podman inspect --format '{{index .RepoDigests 0}}' eclipse-temurin:21-jdk
-podman pull eclipse-temurin:21-jre   && podman inspect --format '{{index .RepoDigests 0}}' eclipse-temurin:21-jre
-podman pull python:3.12-slim         && podman inspect --format '{{index .RepoDigests 0}}' python:3.12-slim
-# Ghidra release: download the 11.x zip + verify the publisher SHA-256 (set the build ARGs).
+# Both images are on Chainguard/Wolfi (PLAN §9 distroless migration); see infra/pin-supply-chain.sh.
+podman pull cgr.dev/chainguard/wolfi-base        && podman inspect --format '{{index .RepoDigests 0}}' cgr.dev/chainguard/wolfi-base         # worker
+podman pull cgr.dev/chainguard/python:latest-dev && podman inspect --format '{{index .RepoDigests 0}}' cgr.dev/chainguard/python:latest-dev  # server build
+podman pull cgr.dev/chainguard/python:latest     && podman inspect --format '{{index .RepoDigests 0}}' cgr.dev/chainguard/python:latest      # server run
+# Ghidra release: download the 12.1.2 zip + verify the publisher SHA-256 (set the build ARGs).
 # Generate the hash-pinned Python lockfile (gated): uv lock   (or pip-compile --generate-hashes)
 ```
 

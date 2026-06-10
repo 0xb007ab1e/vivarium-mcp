@@ -43,5 +43,6 @@ misconfiguration:
 # Waivers live in `.trivyignore.yaml` (repo root) — TIME-BOXED, justified, owned, AUTO-EXPIRING CVE
 # waivers ONLY, never a permanent ignore (workflow-cve-management). Each entry: CVE id + statement
 # (VEX reachability + compensating controls) + `expired_at`. Wired via the `trivyignores:` input on
-# the image-scan step in .github/workflows/worker-image.yml. Current waivers: 6 no-upstream-fix
-# Debian-base CVEs (perl-base + ncurses) not reachable in our execution path — re-evaluate on expiry.
+# the image-scan step in .github/workflows/worker-image.yml. NO active waivers (both images on
+# Chainguard/Wolfi after the PLAN §9 distroless migration — Trivy HIGH,CRITICAL OS scan = 0 each;
+# the former 6 Debian-base perl/ncurses waivers are retired). Add a future waiver only if needed.
