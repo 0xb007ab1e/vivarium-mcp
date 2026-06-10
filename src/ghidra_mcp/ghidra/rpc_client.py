@@ -478,8 +478,7 @@ class RpcGhidraAdapter:
                 "referenced_strings",
                 {"function": a.function, "max_strings": a.max_strings},
             )
-            referenced_strings = [_w(str(v), DataOrigin.BINARY) for v in rs.get("strings", [])]
-            strings_trunc = bool(rs.get("truncated", False))
+            referenced_strings, strings_trunc = _build_referenced_strings(rs)
 
         # The function's own attributes come from its graph node when present (``is_external`` /
         # ``has_unresolved_calls`` are graph-only facts); fall back to ``get_function`` otherwise.
@@ -1271,6 +1270,25 @@ def _build_call_graph_node(r: dict[str, Any]) -> s.CallGraphNode:
     )
 
 
+@_fail_closed
+def _build_referenced_strings(rs: dict[str, Any]) -> tuple[list[Untrusted[str]], bool]:
+    """Shape a ``referenced_strings`` RPC result into (BINARY-wrapped values, truncation flag).
+
+    Used by ``function_context`` (ADR-007). Each referenced string VALUE is attacker-controlled and
+    BINARY-origin wrapped (ADR-005). Failing closed here keeps the worker-fault mapping uniform: a
+    malformed result (e.g. a non-iterable ``strings``) maps to ``WORKER_UNAVAILABLE`` rather than
+    surfacing as a generic internal error.
+
+    Args:
+        rs: The worker's plain ``referenced_strings`` result.
+
+    Returns:
+        A ``(referenced_strings, truncated)`` tuple.
+    """
+    values = [_w(str(v), DataOrigin.BINARY) for v in rs.get("strings", [])]
+    return values, bool(rs.get("truncated", False))
+
+
 def _adjacency_from_graph(graph: s.CallGraphOut) -> tuple[dict[str, list[str]], list[str]]:
     """Project a :class:`CallGraphOut` into a plain adjacency map + unresolved-caller list.
 
@@ -1380,6 +1398,7 @@ def _build_program_metadata(r: dict[str, Any]) -> s.ProgramMetadata:
 
 
 # --- Tier-2 builders (v1.1 — ADR-008) --------------------------------------------------------
+@_fail_closed
 def _build_imported_symbol(r: dict[str, Any]) -> s.ImportedSymbol:
     """Build one :class:`ImportedSymbol`: name/library=BINARY (extracted); address safe-optional."""
     return s.ImportedSymbol(
