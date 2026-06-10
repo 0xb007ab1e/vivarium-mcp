@@ -16,9 +16,12 @@
 # -----------------------------------------------------------------------------
 # Migrated OFF `python:3.12-slim` (Debian) to `cgr.dev/chainguard/python` (Wolfi) to durably retire
 # the no-upstream-fix Debian-base CVEs that were waived in `.trivyignore.yaml` (perl-base, ncurses).
-# Chainguard `python` is glibc-based (manylinux wheels resolve — pydantic-core etc.), ships a
-# current Python 3.12, runs as the built-in non-root `nonroot` (uid/gid 65532), and carries NO
-# shell / NO package manager / ~0 known CVEs. The build venv is produced in the `-dev` variant
+# Chainguard `python` is glibc-based (manylinux wheels resolve — pydantic-core etc.), runs as the
+# built-in non-root `nonroot` (uid/gid 65532), and carries NO shell / NO package manager / ~0 known
+# CVEs. NOTE on the Python version: Chainguard's FREE tier publishes only `:latest` = **Python
+# 3.14** (`:3.12`/`:3.12-dev` are paid-tier), so this image's runtime is 3.14. The project stays
+# `requires-python = ">=3.12"` (the worker remains 3.12); CI's `quality-py314` job exercises the
+# suite on 3.14 for dev/prod parity (see PLAN §9). The build venv is produced in the `-dev` variant
 # (shell + pip) and copied into the shell-free runtime — the standard Chainguard multi-stage pattern.
 #
 # Consequences of a shell-free runtime (vs. the old slim image):

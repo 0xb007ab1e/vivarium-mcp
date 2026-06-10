@@ -14,12 +14,13 @@
 # Owner: 0xb007ab1e.  Filed: 2026-06-08.  Re-evaluate on/before each expiry.
 vulnerabilities:
   # ncurses (libncursesw6 / libtinfo6 / ncurses-base / ncurses-bin) — terminal/terminfo library.
-  # Not reachable: neither image runs an interactive TTY or feeds untrusted terminfo/terminal input
-  # to ncurses. HIGH; no Debian fix as of 2026-06-08.
+  # Not reachable: the worker image does not run an interactive TTY or feed untrusted terminfo/
+  # terminal input to ncurses. HIGH; no Debian fix as of 2026-06-08. (The server image moved to
+  # Wolfi and is no longer affected — Trivy HIGH/CRITICAL = 0 there.)
   - id: CVE-2025-69720
     statement: >-
-      ncurses in the Debian base layer; no upstream fix. Not reachable — no interactive TTY and no
-      untrusted terminfo/terminal input in the worker or server. Compensating controls per ADR-004
+      ncurses in the WORKER's Debian base layer; no upstream fix. Not reachable — no interactive TTY
+      and no untrusted terminfo/terminal input in the worker. Compensating controls per ADR-004
       (no-net, read-only rootfs, caps dropped, non-root, seccomp, gVisor).
     expired_at: 2026-09-06
   # perl-base — never invoked by either image (Python server / Python+JDK+Ghidra worker run no perl);
