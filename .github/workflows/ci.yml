@@ -65,6 +65,29 @@ jobs:
           name: coverage
           path: coverage.xml
 
+  # 4b. Parity gate — the SERVER image runs on Chainguard/Wolfi Python 3.14 (PLAN §9 distroless
+  # migration); the worker stays on 3.12. `requires-python = ">=3.12"` covers both, so the suite
+  # MUST also pass on the server's 3.14 runtime (dev/prod parity — topic-config-environments). The
+  # version-agnostic lint + the 3.12-min-targeted type-check stay in `quality`; this leg proves the
+  # deps install and the tests pass on 3.14. To make it merge-blocking, add `quality-py314` to the
+  # branch-protection required checks (a GATED admin step) alongside `quality`.
+  quality-py314:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # actions/checkout@v6.0.3
+      - name: Set up Python 3.14
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # actions/setup-python@v6.2.0
+        with:
+          python-version: "3.14"
+      - name: Install (hash-pinned lockfile — GATED; see pyproject lockfile-intent note)
+        run: |
+          python -m pip install --upgrade pip
+          # pip install --require-hashes -r requirements-dev.lock   # <- enable once the lock exists
+          pip install -e ".[dev]"
+      - name: Unit tests + coverage (server runtime — Python 3.14)
+        run: pytest -m "not integration"
+
   # 5. SAST — first-party static analysis.
   sast:
     runs-on: ubuntu-latest

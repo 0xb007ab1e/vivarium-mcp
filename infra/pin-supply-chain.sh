@@ -53,7 +53,11 @@ if command -v "$ENGINE" >/dev/null 2>&1; then
   declare -A BASES=(
     [eclipse-temurin:21-jdk]=Containerfile.worker
     [eclipse-temurin:21-jre]=Containerfile.worker
-    [python:3.12-slim]=Containerfile.server
+    # python:3.12-slim is now the WORKER base only (the server moved to Chainguard/Wolfi — PLAN §9).
+    [python:3.12-slim]=Containerfile.worker
+    # Server (distroless migration): Chainguard publishes :latest only, so we pin its digest.
+    [cgr.dev/chainguard/python:latest-dev]=Containerfile.server
+    [cgr.dev/chainguard/python:latest]=Containerfile.server
   )
   for img in "${!BASES[@]}"; do
     "$ENGINE" pull "$img" >/dev/null
