@@ -34,6 +34,7 @@ def _config() -> Config:
         worker_image="x",
         worker_runtime="runsc",
         rpc_socket_dir="/run/x",
+        import_root="/work/imports",
     )
 
 

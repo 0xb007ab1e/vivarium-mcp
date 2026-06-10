@@ -32,6 +32,7 @@ _ENV_MAX_RESPONSE_BYTES = "GHIDRA_MCP_MAX_RESPONSE_BYTES"
 _ENV_WORKER_IMAGE = "GHIDRA_MCP_WORKER_IMAGE"
 _ENV_WORKER_RUNTIME = "GHIDRA_MCP_WORKER_RUNTIME"
 _ENV_RPC_SOCKET_DIR = "GHIDRA_MCP_RPC_SOCKET_DIR"
+_ENV_IMPORT_ROOT = "GHIDRA_MCP_IMPORT_ROOT"
 
 # Secure defaults for non-limit operational knobs (12-Factor: safe-by-default).
 _DEFAULT_LOG_LEVEL = "INFO"
@@ -40,6 +41,7 @@ _DEFAULT_SESSION_TTL_S = 3600
 _DEFAULT_SESSION_IDLE_S = 900
 _DEFAULT_WORKER_RUNTIME = "runsc"
 _DEFAULT_RPC_SOCKET_DIR = "/run/ghidra-mcp"
+_DEFAULT_IMPORT_ROOT = "/work/imports"
 
 # Allow-lists for enum-like values.
 _VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR"})
@@ -62,6 +64,8 @@ class Config:
         worker_image: Pinned-by-digest worker image reference (ADR-003).
         worker_runtime: Container runtime for the worker (e.g. ``runsc`` for gVisor — ADR-004).
         rpc_socket_dir: Directory for per-session RPC sockets.
+        import_root: Host dir (read-only mount) under which importable inputs live; the confined
+            ``source_ref`` resolver rejects refs outside it (CWE-22) — ADR-009.
     """
 
     log_level: str
@@ -72,6 +76,7 @@ class Config:
     worker_image: str
     worker_runtime: str
     rpc_socket_dir: str
+    import_root: str
 
 
 def _startup_error(detail: str) -> GhidraMcpError:
@@ -223,6 +228,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     worker_image = _read_str(src, _ENV_WORKER_IMAGE, "", required=True)
     worker_runtime = _read_str(src, _ENV_WORKER_RUNTIME, _DEFAULT_WORKER_RUNTIME, required=False)
     rpc_socket_dir = _read_str(src, _ENV_RPC_SOCKET_DIR, _DEFAULT_RPC_SOCKET_DIR, required=False)
+    import_root = _read_str(src, _ENV_IMPORT_ROOT, _DEFAULT_IMPORT_ROOT, required=False)
 
     # Limit overrides: only include keys that were explicitly set (let resolve_limits apply its own
     # defaults + hard clamps for the rest). resolve_limits is fail-closed (WS4).
@@ -248,4 +254,5 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         worker_image=worker_image,
         worker_runtime=worker_runtime,
         rpc_socket_dir=rpc_socket_dir,
+        import_root=import_root,
     )

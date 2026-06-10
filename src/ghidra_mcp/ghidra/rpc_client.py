@@ -903,7 +903,11 @@ class RpcGhidraAdapter:
             sess.sock = None
 
     def _socket_path(self, session_id: str) -> str:
-        """Compute the per-session UDS path (``<socket_dir>/<sid>.sock``).
+        """Compute the per-session UDS path (``<socket_dir>/<sid>/<sid>.sock`` — ADR-009).
+
+        The socket lives in a **per-session subdirectory** so the launcher can bind-mount only
+        that dir into the worker — a hostile worker therefore sees no sibling sessions' sockets
+        (rpc-protocol.md §2; reconciled with the WS3 launcher mount scheme).
 
         Args:
             session_id: The opaque session id (CSPRNG-generated; safe as a filename component).
@@ -911,7 +915,8 @@ class RpcGhidraAdapter:
         Returns:
             The socket path string.
         """
-        return f"{self._socket_dir.rstrip('/')}/{session_id}.sock"
+        base = self._socket_dir.rstrip("/")
+        return f"{base}/{session_id}/{session_id}.sock"
 
 
 def _xrefs_params(a: s.XrefsIn) -> dict[str, Any]:

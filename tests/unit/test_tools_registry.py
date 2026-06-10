@@ -316,6 +316,7 @@ def ctx() -> reg.ToolContext:
         worker_image="x",
         worker_runtime="runsc",
         rpc_socket_dir="/run/x",
+        import_root="/work/imports",
     )
     # The fakes implement the methods the handlers exercise; ``cast`` satisfies the static types
     # (``SessionManager`` is a concrete class, ``GhidraPort`` a Protocol) without a real worker/JVM.
