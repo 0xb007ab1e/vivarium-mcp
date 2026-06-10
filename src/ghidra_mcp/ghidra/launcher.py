@@ -23,7 +23,7 @@ are unit-tested without a real container engine; the real spawn is validated by 
 
 from __future__ import annotations
 
-import subprocess
+import subprocess  # nosec B404 - argv lists only, never shell=True (see _default_runner)
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,7 +41,9 @@ def _default_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:  # pra
     The real-subprocess default; tests inject a fake runner, so this thin shim is excluded from
     coverage (exercised only by the gated real-engine e2e/integration runs).
     """
-    return subprocess.run(argv, capture_output=True, text=True, check=False)  # noqa: S603
+    # argv is a fixed list (no shell, no string interpolation into a command line); all elements
+    # are our own constants + the manifest-pinned image + server-minted ids.
+    return subprocess.run(argv, capture_output=True, text=True, check=False)  # noqa: S603  # nosec B603
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +155,7 @@ class ContainerWorkerLauncher:
             "--read-only",
             "--tmpfs",
             # In-container mount spec, NOT a host temp path — the worker's scratch tmpfs (ADR-004).
-            f"/tmp/ghidra:rw,noexec,nosuid,nodev,mode=1777,size={self.tmpfs_scratch}",  # noqa: S108
+            f"/tmp/ghidra:rw,noexec,nosuid,nodev,mode=1777,size={self.tmpfs_scratch}",  # noqa: S108  # nosec B108
             "--tmpfs",
             f"/work/project:rw,noexec,nosuid,nodev,mode=1777,size={self.tmpfs_project}",
             # Resource bounds (F7): OOM/pids/cpu caps; OOM-kill → server evicts.
