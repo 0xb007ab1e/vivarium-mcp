@@ -42,9 +42,24 @@ def _default_port_factory(config: Config) -> GhidraPort:
     Returns:
         A :class:`ghidra_mcp.ghidra.port.GhidraPort` implementation.
     """
+    from ghidra_mcp.ghidra.launcher import ContainerWorkerLauncher, make_confined_resolver
     from ghidra_mcp.ghidra.rpc_client import RpcGhidraAdapter
 
-    return RpcGhidraAdapter()  # type: ignore[call-arg]  # WS2 finalizes the constructor signature.
+    launcher = ContainerWorkerLauncher(
+        worker_image=config.worker_image,
+        import_root=config.import_root,
+        runtime=config.worker_runtime,
+        analysis_timeout_s=config.limits.analysis_timeout_s,
+    )
+    return RpcGhidraAdapter(
+        launcher=launcher,
+        socket_dir=config.rpc_socket_dir,
+        tool_timeout_s=config.limits.tool_timeout_s,
+        analysis_timeout_s=config.limits.analysis_timeout_s,
+        max_response_bytes=config.limits.max_response_bytes,
+        limits=config.limits,
+        source_resolver=make_confined_resolver(config.import_root),
+    )
 
 
 def _default_session_manager_factory(config: Config, port: GhidraPort) -> SessionManager:

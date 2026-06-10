@@ -20,11 +20,18 @@ mis-networked. Aligns with the worker's **no-network** stance (ADR-004).
 
 ## 2. Transport & addressing
 
-- One **UDS per session** at `${GHIDRA_MCP_RPC_SOCKET_DIR}/<session_id>.sock` (default dir
-  `/run/ghidra-mcp`), created with restrictive perms (`0600`, owner = server user) in a private,
-  non-world-readable directory. The session id is opaque/high-entropy (BOLA defense).
+- One **UDS per session** in a **per-session subdirectory**:
+  `${GHIDRA_MCP_RPC_SOCKET_DIR}/<session_id>/<session_id>.sock` (default dir `/run/ghidra-mcp`).
+  The per-session dir is created `0700` (owner = server user) and is the **only** thing bind-mounted
+  into that worker (mounted at the in-container `/run/ghidra-mcp`), so a worker can reach **only its
+  own** socket — sibling sessions' sockets are not present in its mount namespace (ADR-009). The
+  session id is opaque/high-entropy (BOLA defense). *(Reconciled 2026-06-10: the path gained the
+  per-session subdir so the WS3 launcher mount could isolate sockets per session; previously the
+  flat `<dir>/<sid>.sock` would have required mounting the shared dir — PM-routed contract update.)*
+- Inside the container the worker still binds `/run/ghidra-mcp/<session_id>.sock`; the host side of
+  that is the per-session path above via the bind mount.
 - The worker connects to (or listens on) only its own session socket; there is no shared socket.
-- The socket is removed on session eviction (part of the verified cleanup).
+- The socket (and its per-session dir) is removed on session eviction (part of the verified cleanup).
 
 ## 3. Framing
 

@@ -314,7 +314,7 @@ def test_socket_path_uses_session_id() -> None:
         analysis_timeout_s=1.0,
         max_response_bytes=_CAP,
     )
-    assert adapter._socket_path("abc") == "/run/ghidra-mcp/abc.sock"
+    assert adapter._socket_path("abc") == "/run/ghidra-mcp/abc/abc.sock"
 
 
 # --- #9: untrusted-data wrap chokepoint (ADR-005) ---------------------------------------------
@@ -765,6 +765,7 @@ def test_ensure_connected_dials_real_uds(tmp_path: Path) -> None:
     )
     adapter.start_worker("s")
     sock_path = adapter._socket_path("s")
+    Path(sock_path).parent.mkdir(parents=True, exist_ok=True)  # per-session subdir (ADR-009)
 
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(sock_path)
