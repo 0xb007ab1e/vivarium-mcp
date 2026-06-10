@@ -1,0 +1,93 @@
+# =============================================================================
+# e2e-groundtruth.yml — full ground-truth e2e on real OSS binaries (WS5; GATED, on-demand)
+# =============================================================================
+# A known-answer sanity check: build 3 source-available Linux tools (cJSON / coreutils `wc` /
+# util-linux `col`) WITH DWARF + non-PIE, extract a call-graph GROUND TRUTH from the unstripped
+# build, STRIP a copy, then drive the real MCP stdio server → real hardened Ghidra worker on the
+# stripped copy and assert Ghidra's recovered functions/edges/leaf-first order match the truth
+# (within tolerance). The pure scorer + extractor are unit-tested hermetically in ci.yml; THIS
+# workflow exercises the real, gated chain (network source build + a signed-worker container run).
+#
+# GATED (PLAN §6, std-supplychain): manual dispatch only. Source tarballs are SHA-256-pinned in
+# tests/fixtures/oss/manifest.toml (build fails closed on a mismatch). Actions are pinned BY DIGEST.
+# The worker image is pulled BY DIGEST (vars.WORKER_IMAGE_DIGEST — the signed digest from the most
+# recent worker-image.yml run) and cosign-verified before it is trusted/run.
+name: e2e-groundtruth
+
+on:
+  workflow_dispatch: {}        # manual, gated trigger only.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-groundtruth-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # One job: build the ground-truth fixtures from pinned source, then drive the real stdio server
+  # → real worker on them. Combining avoids an artifact handoff and keeps the pin surface minimal.
+  groundtruth:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read           # pull the worker image from GHCR.
+      id-token: write           # cosign keyless verify of the pulled image.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # actions/checkout@v6.0.3
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install toolchain + package (e2e extras) + fixtures-build deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential xz-utils binutils skopeo
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install pyelftools capstone   # (pin via a lock before first real run)
+
+      - name: Build ground-truth fixtures (fetch + verify sha256 + build -g -no-pie + truth + strip)
+        run: |
+          set -euo pipefail
+          python tests/fixtures/oss/build_fixtures.py --out "$GITHUB_WORKSPACE/_fixtures" --jobs 2
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # docker/login-action@v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # sigstore/cosign-installer@v3.7.0
+
+      - name: Verify + pull the signed worker image (by digest)
+        env:
+          WORKER_IMAGE: ghcr.io/${{ github.repository_owner }}/ghidra-mcp-worker@${{ vars.WORKER_IMAGE_DIGEST }}
+        run: |
+          set -euo pipefail
+          if [ -z "${{ vars.WORKER_IMAGE_DIGEST }}" ]; then
+            echo "::error::vars.WORKER_IMAGE_DIGEST is unset — set it to the signed worker digest" >&2
+            exit 1
+          fi
+          # Keyless cosign verify scoped to THIS repo's worker-image.yml OIDC identity before trust.
+          cosign verify \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/worker-image.yml@" \
+            "$WORKER_IMAGE"
+          podman pull "$WORKER_IMAGE"
+          echo "GHIDRA_MCP_WORKER_IMAGE=$WORKER_IMAGE" >> "$GITHUB_ENV"
+
+      - name: Run ground-truth e2e (gated real-worker suite)
+        env:
+          GHIDRA_MCP_INTEGRATION: "1"
+          GHIDRA_MCP_FIXTURES: ${{ github.workspace }}/_fixtures
+          GHIDRA_MCP_CONTAINER_ENGINE: podman
+          GHIDRA_MCP_E2E_TIMEOUT: "900"
+        run: |
+          set -euo pipefail
+          pytest tests/e2e/test_groundtruth_oss.py -m integration -v --no-cov
