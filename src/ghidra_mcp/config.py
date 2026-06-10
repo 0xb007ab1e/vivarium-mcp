@@ -31,6 +31,8 @@ _ENV_TOOL_TIMEOUT = "GHIDRA_MCP_TOOL_TIMEOUT_SECONDS"
 _ENV_MAX_RESPONSE_BYTES = "GHIDRA_MCP_MAX_RESPONSE_BYTES"
 _ENV_WORKER_IMAGE = "GHIDRA_MCP_WORKER_IMAGE"
 _ENV_WORKER_RUNTIME = "GHIDRA_MCP_WORKER_RUNTIME"
+_ENV_WORKER_UID = "GHIDRA_MCP_WORKER_UID"
+_ENV_WORKER_GID = "GHIDRA_MCP_WORKER_GID"
 _ENV_RPC_SOCKET_DIR = "GHIDRA_MCP_RPC_SOCKET_DIR"
 _ENV_IMPORT_ROOT = "GHIDRA_MCP_IMPORT_ROOT"
 
@@ -40,6 +42,8 @@ _DEFAULT_LOG_FORMAT = "json"
 _DEFAULT_SESSION_TTL_S = 3600
 _DEFAULT_SESSION_IDLE_S = 900
 _DEFAULT_WORKER_RUNTIME = "runsc"
+_DEFAULT_WORKER_UID = 65532
+_DEFAULT_WORKER_GID = 65532
 _DEFAULT_RPC_SOCKET_DIR = "/run/ghidra-mcp"
 _DEFAULT_IMPORT_ROOT = "/work/imports"
 
@@ -63,6 +67,9 @@ class Config:
         limits: Resolved resource limits (see :class:`ghidra_mcp.security.limits.Limits`).
         worker_image: Pinned-by-digest worker image reference (ADR-003).
         worker_runtime: Container runtime for the worker (e.g. ``runsc`` for gVisor — ADR-004).
+        worker_uid: Worker container uid (default hardened ``65532``; must own the socket dir
+            under ``--userns keep-id`` — a host-run server overrides it to its own uid, ADR-009).
+        worker_gid: Worker container gid (default ``65532``).
         rpc_socket_dir: Directory for per-session RPC sockets.
         import_root: Host dir (read-only mount) under which importable inputs live; the confined
             ``source_ref`` resolver rejects refs outside it (CWE-22) — ADR-009.
@@ -75,6 +82,8 @@ class Config:
     limits: Limits
     worker_image: str
     worker_runtime: str
+    worker_uid: int
+    worker_gid: int
     rpc_socket_dir: str
     import_root: str
 
@@ -227,6 +236,11 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     # the limits layer).
     worker_image = _read_str(src, _ENV_WORKER_IMAGE, "", required=True)
     worker_runtime = _read_str(src, _ENV_WORKER_RUNTIME, _DEFAULT_WORKER_RUNTIME, required=False)
+    # Worker uid/gid (strictly positive — never root) the launcher runs the container as; must
+    # match the socket-dir owner under --userns keep-id. Default is the hardened 65532; a host-run
+    # server (e.g. the gated e2e) overrides these to its own uid/gid (see ADR-009 / socket-dir.md).
+    worker_uid = _read_positive_int(src, _ENV_WORKER_UID, _DEFAULT_WORKER_UID)
+    worker_gid = _read_positive_int(src, _ENV_WORKER_GID, _DEFAULT_WORKER_GID)
     rpc_socket_dir = _read_str(src, _ENV_RPC_SOCKET_DIR, _DEFAULT_RPC_SOCKET_DIR, required=False)
     import_root = _read_str(src, _ENV_IMPORT_ROOT, _DEFAULT_IMPORT_ROOT, required=False)
 
@@ -253,6 +267,8 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         limits=limits,
         worker_image=worker_image,
         worker_runtime=worker_runtime,
+        worker_uid=worker_uid,
+        worker_gid=worker_gid,
         rpc_socket_dir=rpc_socket_dir,
         import_root=import_root,
     )

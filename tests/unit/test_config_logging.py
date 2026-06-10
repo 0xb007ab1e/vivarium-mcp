@@ -50,10 +50,24 @@ def test_load_config_minimal_uses_secure_defaults(
     assert cfg.session_ttl_s == 3600
     assert cfg.session_idle_s == 900
     assert cfg.worker_runtime == "runsc"
+    assert cfg.worker_uid == 65532
+    assert cfg.worker_gid == 65532
     assert cfg.rpc_socket_dir == "/run/ghidra-mcp"
     assert isinstance(cfg.limits, Limits)
     # No overrides set → resolve_limits called with None.
     assert fake_resolve_limits == [None]
+
+
+def test_load_config_worker_uid_gid_overridable(
+    fake_resolve_limits: list[dict[str, int] | None],
+) -> None:
+    """A host-run server can align the worker uid/gid to its own (ADR-009 socket-dir mapping)."""
+    env = dict(_MINIMAL_ENV)
+    env["GHIDRA_MCP_WORKER_UID"] = "1000"
+    env["GHIDRA_MCP_WORKER_GID"] = "1000"
+    cfg = cfgmod.load_config(env)
+    assert cfg.worker_uid == 1000
+    assert cfg.worker_gid == 1000
 
 
 def test_load_config_collects_only_set_limit_overrides(

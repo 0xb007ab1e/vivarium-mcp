@@ -161,6 +161,10 @@ def _handle_session_import(ctx: ToolContext, args: s.SessionImportIn) -> s.Sessi
         Updated :class:`SessionInfo` after import, with authoritative lifecycle fields.
     """
     authoritative = ctx.sessions.authorize(args.session_id)
+    # Spawn the session's hardened worker on first import (idempotent; the manager owns worker
+    # lifetime — ADR-002). Without this the adapter has no worker socket for the session and the
+    # import fails closed as worker-unavailable.
+    ctx.sessions.ensure_worker(args.session_id)
     imported = ctx.port.import_binary(args.session_id, args)
     return _merge_session_info(authoritative, imported)
 

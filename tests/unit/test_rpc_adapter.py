@@ -797,6 +797,75 @@ def test_ensure_connected_dials_real_uds(tmp_path: Path) -> None:
     listener.close()
 
 
+def test_ensure_connected_retries_until_worker_binds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The connect retries past the worker-bind race (ENOENT/ECONNREFUSED), not one-shot.
+
+    The spawn (`podman run --detach`) returns before the worker binds its UDS; a single connect
+    would lose the race and fail closed as worker-unavailable. Here connect fails twice (not bound
+    yet) then succeeds — the adapter must keep trying within the connect budget.
+    """
+    from ghidra_mcp.ghidra import rpc_client as rc
+
+    # String targets (not rc.time/rc.socket attribute access) so --strict mypy doesn't flag the
+    # imported modules as non-reexported attributes; monkeypatch resolves them on the module.
+    monkeypatch.setattr("ghidra_mcp.ghidra.rpc_client.time.sleep", lambda *_: None)
+    attempts = {"n": 0}
+
+    class _FlakySock:
+        def settimeout(self, *_: object) -> None: ...
+
+        def connect(self, path: str) -> None:
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise FileNotFoundError(path)  # socket not bound yet
+
+        def close(self) -> None: ...
+
+    monkeypatch.setattr("ghidra_mcp.ghidra.rpc_client.socket.socket", lambda *a, **k: _FlakySock())
+    adapter = RpcGhidraAdapter(
+        launcher=lambda sid, path: _FakeWorker(),
+        socket_dir="/run/x",
+        tool_timeout_s=2.0,
+        analysis_timeout_s=2.0,
+        max_response_bytes=_CAP,
+        connect_timeout_s=5.0,
+    )
+    sess = rc._Session(_FakeWorker(), "/run/x/s/s.sock")
+    got = adapter._ensure_connected(sess)
+    assert attempts["n"] == 3
+    assert got is sess.sock
+
+
+def test_ensure_connected_gives_up_after_connect_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A worker that never binds within the budget makes connect raise (→ worker-unavailable)."""
+    from ghidra_mcp.ghidra import rpc_client as rc
+
+    monkeypatch.setattr("ghidra_mcp.ghidra.rpc_client.time.sleep", lambda *_: None)
+    clock = iter([0.0, 100.0])  # start, then a check already past the connect budget
+    monkeypatch.setattr("ghidra_mcp.ghidra.rpc_client.time.monotonic", lambda: next(clock))
+
+    class _DeadSock:
+        def settimeout(self, *_: object) -> None: ...
+
+        def connect(self, path: str) -> None:
+            raise ConnectionRefusedError(path)  # bound but never accepting
+
+        def close(self) -> None: ...
+
+    monkeypatch.setattr("ghidra_mcp.ghidra.rpc_client.socket.socket", lambda *a, **k: _DeadSock())
+    adapter = RpcGhidraAdapter(
+        launcher=lambda sid, path: _FakeWorker(),
+        socket_dir="/run/x",
+        tool_timeout_s=2.0,
+        analysis_timeout_s=2.0,
+        max_response_bytes=_CAP,
+        connect_timeout_s=5.0,
+    )
+    sess = rc._Session(_FakeWorker(), "/run/x/s/s.sock")
+    with pytest.raises(ConnectionRefusedError):
+        adapter._ensure_connected(sess)
+
+
 # --- worker dispatcher (JVM-free) -------------------------------------------------------------
 class _FakeBackend:
     """A fake :class:`worker.dispatch.GhidraBackend` recording calls and returning canned dicts."""

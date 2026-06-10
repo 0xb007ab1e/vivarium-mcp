@@ -223,6 +223,41 @@ class SessionManager:
             sess.last_used_mono = now
             return self._to_info(sess)
 
+    def ensure_worker(self, session_id: str) -> None:
+        """Idempotently spawn the session's worker (manager owns worker lifetime — ADR-002).
+
+        Called on first import: the session exists (created with no worker — "spawn nothing until
+        import") and now needs its one-per-session hardened worker. Spawning here (not at
+        ``create``) keeps a bare session cheap and bounds resource use to sessions that actually
+        import (DoS — F7). Marks ``worker_started`` so eviction kills the real worker and the
+        per-session store is wiped (the symmetric counterpart to ``evict`` → ``kill_worker``).
+
+        Idempotent: a second call is a no-op (a worker already runs). No-ops when no port is wired
+        (test/guard construction). Re-validates the session under the lock (fails closed if it was
+        evicted between authorize and here — a race).
+
+        Args:
+            session_id: The opaque id of a live session.
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` if the session is unknown/evicted (BOLA-safe).
+        """
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if sess is None or sess.state == STATE_EVICTED:
+                raise _errors.session_invalid()
+            if sess.worker_started or self._port is None:
+                return
+            # Spawn BEFORE flipping the flag: if the launcher raises, the session has no worker and
+            # eviction won't try to kill a non-existent one (fail closed — the import then surfaces
+            # worker-unavailable from the adapter).
+            self._port.start_worker(session_id)
+            sess.worker_started = True
+            _LOG.info(
+                "session.worker_started",
+                extra={"event": "worker_started", "session_id": session_id},
+            )
+
     def evict(self, session_id: str, *, reason: str) -> bool:
         """Evict a session: kill its worker and verified-wipe its store. Idempotent.
 

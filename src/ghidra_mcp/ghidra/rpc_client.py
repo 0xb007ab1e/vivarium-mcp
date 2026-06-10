@@ -33,6 +33,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import socket
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -88,6 +89,10 @@ _IOC_STRING_BUDGET = 10_000
 #: Max ``search_bytes`` matches requested per crypto signature (each search is already bounded; this
 #: caps the per-signature contribution to the aggregate and feeds ``truncated``).
 _CRYPTO_MATCH_BUDGET = 1_000
+#: Poll interval between worker-socket connect attempts while the worker is still binding/warming
+#: up (bounded overall by ``connect_timeout_s``). Small enough for a snappy first call, large
+#: enough not to busy-spin.
+_CONNECT_RETRY_INTERVAL_S = 0.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -829,11 +834,26 @@ class RpcGhidraAdapter:
         """
         if sess.sock is not None:
             return sess.sock
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(self._connect_timeout_s)
-        sock.connect(sess.socket_path)
-        sess.sock = sock
-        return sock
+        # The worker binds its per-session UDS only AFTER its container starts (and the backend
+        # warms up), but the spawn (`podman run --detach`) returns before that. A single connect
+        # would lose the race and fail closed as worker-unavailable, so retry until the worker is
+        # bound and accepting or the connect budget elapses. The two expected transient conditions
+        # are ENOENT (socket file not created yet) and ECONNREFUSED (created but not yet
+        # listening); any other OSError is non-transient and propagates immediately (fail fast).
+        start = time.monotonic()
+        while True:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(self._connect_timeout_s)
+            try:
+                sock.connect(sess.socket_path)
+            except (FileNotFoundError, ConnectionRefusedError):
+                sock.close()
+                if time.monotonic() - start >= self._connect_timeout_s:
+                    raise
+                time.sleep(_CONNECT_RETRY_INTERVAL_S)
+                continue
+            sess.sock = sock
+            return sock
 
     @staticmethod
     def _send_all(sock: socket.socket, data: bytes) -> None:
