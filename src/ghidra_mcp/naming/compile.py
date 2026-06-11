@@ -88,9 +88,13 @@ class ContainerCompileRunner:
             non-compiling source as compiling).
         """
         with tempfile.TemporaryDirectory(prefix="gmcp-compile-") as workdir:
+            # mkdtemp is 0700; the non-root container user (a rootless subuid != the host owner)
+            # must traverse the dir + read the file on the ro mount. Make both world-readable —
+            # the dir holds only the about-to-be-compiled untrusted source, no secrets.
+            Path(workdir).chmod(0o755)
             src = Path(workdir) / "src.c"
             src.write_text(c_source)
-            src.chmod(0o644)  # world-readable so the non-root container user can read the ro mount
+            src.chmod(0o644)
             argv = [
                 self.engine,
                 "run",
@@ -112,7 +116,8 @@ class ContainerCompileRunner:
                 # own scratch — the object output itself is discarded to /dev/null below).
                 "--read-only",
                 "--tmpfs",
-                f"/tmp:rw,noexec,nosuid,nodev,size={self.scratch_size}",  # noqa: S108  # nosec B108
+                # mode=1777 so the non-root compiler can write its intermediates under ro-rootfs.
+                f"/tmp:rw,noexec,nosuid,nodev,mode=1777,size={self.scratch_size}",  # noqa: S108  # nosec B108
                 # Resource bounds (F7 DoS): a compiler bomb is OOM/CPU/time-capped, not unbounded.
                 "--memory",
                 self.mem,
