@@ -8,6 +8,12 @@
 # (within tolerance). The pure scorer + extractor are unit-tested hermetically in ci.yml; THIS
 # workflow exercises the real, gated chain (network source build + a signed-worker container run).
 #
+# It then runs the NAMING-EVAL e2e (ADR-010): drive the same server→worker chain to pull the
+# leaf-first plan + per-function context via the read-only tools, run the pure orchestration loop
+# with a deterministic stub namer, and MEASURE the assembled translation unit by compiling it in a
+# worker-style sandbox (ContainerCompileRunner / TB5) — proving the whole tools→loop→compile→metrics
+# machinery end to end. The compiler image is pinned BY DIGEST (std-supplychain).
+#
 # GATED (PLAN §6, std-supplychain): manual dispatch only. Source tarballs are SHA-256-pinned in
 # tests/fixtures/oss/manifest.toml (build fails closed on a mismatch). Actions are pinned BY DIGEST.
 # The worker image is pulled BY DIGEST (vars.WORKER_IMAGE_DIGEST — the signed digest from the most
@@ -109,3 +115,25 @@ jobs:
           export GHIDRA_MCP_WORKER_GID="$(id -g)"
           mkdir -p "$GHIDRA_MCP_RPC_SOCKET_DIR"
           pytest tests/e2e/test_groundtruth_oss.py -m integration -v --no-cov
+
+      - name: Run naming-eval e2e (reference loop + sandboxed compile; ADR-010 / TB5)
+        env:
+          GHIDRA_MCP_INTEGRATION: "1"
+          GHIDRA_MCP_FIXTURES: ${{ github.workspace }}/_fixtures
+          GHIDRA_MCP_CONTAINER_ENGINE: podman
+          GHIDRA_MCP_WORKER_RUNTIME: crun     # no gVisor on stock runners — see note above.
+          GHIDRA_MCP_E2E_TIMEOUT: "900"
+          # The compile sandbox (TB5) needs a C compiler image, pinned BY DIGEST + immutable
+          # (std-supplychain). Public docker.io gcc digest (multi-arch; resolves on amd64 runners).
+          GHIDRA_MCP_COMPILER_IMAGE: docker.io/library/gcc@sha256:5e927c284bf55a7dc796262e311a0703344f62f41f5621eb56843111b1d37e15
+        run: |
+          set -euo pipefail
+          # Same host-run-server / rootless-keep-id constraints as the ground-truth step above:
+          # short socket dir for AF_UNIX, worker runs as this runner's uid/gid (ADR-009).
+          export GHIDRA_MCP_RPC_SOCKET_DIR="/tmp/gmcp-run"
+          export GHIDRA_MCP_WORKER_UID="$(id -u)"
+          export GHIDRA_MCP_WORKER_GID="$(id -g)"
+          mkdir -p "$GHIDRA_MCP_RPC_SOCKET_DIR"
+          # Pre-pull the pinned compiler image so the timed sandbox run isn't racing the pull.
+          podman pull "$GHIDRA_MCP_COMPILER_IMAGE"
+          pytest tests/e2e/test_naming_eval_oss.py -m integration -v --no-cov
