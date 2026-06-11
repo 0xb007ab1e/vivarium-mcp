@@ -28,10 +28,14 @@ the server never imports it; it never loads the JVM — ADR-001):
   `Namer` (client LLM in prod; deterministic stub in tests/eval) is injected.
 - **`naming/metrics.py` — measured quality (decision #3: MEASURED, not guaranteed).**
   `name_coverage` (fraction renamed away from Ghidra `FUN_`-placeholders — pure); `score(program,
-  compile_runner=…)` adds compilability via an injected **`CompileRunner`**; `behavioral_equivalence`
-  is a present-but-deferred field. Compilability and behavioral equivalence are **honest metrics to
-  track, never guarantees** — turning decompiler pseudo-C into a recompilable, equivalent program is
-  not solvable in general; flagged + accepted as best-effort.
+  compile_runner=…, ground_truth=…)` adds compilability via an injected **`CompileRunner`** and
+  **`naming_accuracy`** (proposed names vs a known ground truth — strict `exact_match_rate` + a
+  token-set `mean_token_f1` that credits `get_array_size` ≈ `cJSON_GetArraySize`); pure, given an
+  injected address→name map. `behavioral_equivalence` is a present-but-deferred field. Compilability,
+  accuracy, and behavioral equivalence are **honest metrics to track, never guarantees** — turning
+  decompiler pseudo-C into a recompilable, equivalent program is not solvable in general; flagged +
+  accepted as best-effort. Only the *client* namer (decision #1) yields a meaningful accuracy; the
+  eval's stub scores ~0 by design.
 
 Ports (`Namer`, `CompileRunner`) keep the cores hermetic and unit-tested with fakes; the real
 implementations (LLM, sandboxed compiler) plug in at the edges.
@@ -55,7 +59,11 @@ par with the worker (ADR-001/004). Mandate, before any real compile/run lands:
 - **This slice (pure, hermetic):** the orchestration core + `name_coverage` + the `score()` scorer
   with injected ports; 100%-covered unit tests with a stub namer + fake compiler. No untrusted code
   is executed anywhere yet.
-- **Deferred (gated increments):** the sandboxed `CompileRunner` (TB5 isolation), the
-  behavioral-equivalence differential-run harness, and a **gated naming-eval e2e** that drives the
-  reference loop over the real OSS ground-truth fixtures (cJSON/zlib/lua) and reports coverage +
-  compilability — paired with a threat-model update (workflow-threat-model) for TB5.
+- **Shipped (gated increments):** the sandboxed `CompileRunner` (TB5 isolation, PR #27/#28) and the
+  **gated naming-eval e2e** driving the reference loop over the real cJSON ground-truth fixture —
+  it reports coverage + compilability and tracks **`naming_accuracy`** against the DWARF symbol
+  truth the fixtures carry. The e2e's stub namer scores ~0 accuracy by design (a real client namer
+  is the meaningful source); a truth-echoing namer asserts the real Ghidra↔DWARF address join +
+  exact-match plumbing scores 1.0 end to end.
+- **Deferred:** the behavioral-equivalence differential-run harness (research-hard; field present,
+  `None`).
