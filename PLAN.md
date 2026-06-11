@@ -75,11 +75,18 @@ Contract changes route through the PM (batch-atomicity mandate).
 
 ## 7. Sequence
 1. ✅ Plan → red-team challenge → consensus → human decisions locked.
-2. **▶ NOW: Threat model + Bootstrap (WS0)** — Software Architect; skeleton + frozen contracts +
-   STRIDE threat model; **stops at first-commit gate**.
-3. Parallel build fan-out **WS1–WS5** (worktree-isolated) once contracts frozen.
-4. Integrate → **`sdlc-reviewer`** (security/quality) + all CI gates green + threat-model abuse
-   tests pass.
+2. ✅ Threat model + Bootstrap (WS0) — skeleton + frozen contracts + STRIDE threat model.
+3. ✅ Parallel build fan-out **WS1–WS5** (worktree-isolated) — all merged to `main`.
+4. ✅ **Integrate — real `server → worker` chain WIRED end-to-end + gated e2e GREEN (2026-06-11).**
+   The ground-truth e2e (`tests/e2e/test_groundtruth_oss.py`) drives the real stdio server → hardened
+   Ghidra worker on stripped OSS binaries and matches Ghidra's recovered functions/edges/leaf-first
+   order to a source-derived (DWARF/disasm) ground truth. **Passes on GitHub-hosted CI**
+   (`e2e-groundtruth.yml`) for **cJSON (113 fns/168 edges), zlib (149/216), lua (1087/3156)** —
+   `3 passed`. Wiring the chain surfaced + fixed: the unwired SessionManager→port spawn (ADR-009),
+   `seccomp=RuntimeDefault` (→ engine default), worker uid vs socket-dir owner under rootless
+   keep-id, single-shot connect (→ retry), and the **AF_UNIX `sun_path` overflow** from doubling the
+   256-bit session id in the UDS path (a latent prod bug — fixed via a short per-session dir token).
+   CI gates green; `sdlc-reviewer` security/quality pass still pending before release.
 5. Release prep (**`sdlc-release-manager`**) — tag/deploy gated.
 
 ## 8. ADR log (decisions to record in `docs/adr/`)
@@ -87,6 +94,9 @@ Contract changes route through the PM (batch-atomicity mandate).
   eviction (F2). ADR-003 Container-only; Ghidra 12.1.2 + JDK 21 pinned by digest (F5).
   ADR-004 Isolation tier (rootless podman baseline; gVisor for worker) (F8). ADR-005 Untrusted-data
   envelope for binary-derived output (F3). ADR-006 stdio-first; HTTP gated v1.1 (F9).
+  ADR-007/008 v1.1 semantic-naming + Tier-2 extraction primitives. **ADR-009 Concrete worker
+  launcher + import-root mount + per-session socket dir** (WS2/WS3 seam; the chain-wiring work —
+  short per-session UDS dir token keeps the path under the AF_UNIX limit).
 
 ## 9. Open items
 - ✅ **RESOLVED (WS0):** worker RPC = **JSON-RPC 2.0 over per-session UDS** (ratified 2026-06-03;
@@ -171,3 +181,21 @@ Contract changes route through the PM (batch-atomicity mandate).
   NOT caught (the latter still surfaces as `internal-error`). Proven with negative tests
   (`tests/unit/test_tier2_metrics.py`) that the guard fires on a known-bad result; 100% coverage on
   `rpc_client.py`. Applied uniformly across ALL builders (Tier-1 + semantic + Tier-2).
+- ✅ **RESOLVED — real `server → worker` chain wired end-to-end + gated ground-truth e2e GREEN on CI
+  (2026-06-11; PRs #17–#24).** The unit suite injected fakes, so v1 was never actually exercised
+  through the real stdio-server → launcher → hardened-worker → RPC → Ghidra path. Driving the gated
+  ground-truth e2e (build OSS fixtures `-g -no-pie` → DWARF/disasm truth → strip → real worker →
+  compare recovered functions/edges/leaf-first) wired it and fixed, in order surfaced: (1) the
+  composition root never built the launcher / never triggered `start_worker` (ADR-009 concrete
+  `ContainerWorkerLauncher` + manager-owned `ensure_worker`); (2) `--security-opt seccomp=RuntimeDefault`
+  is read by podman as a profile path → omit it for the engine default; (3) under rootless podman
+  `--userns keep-id` the worker uid must own the server-created 0700 socket dir (made worker uid/gid
+  configurable; prod default stays 65532); (4) `_ensure_connected` was single-shot → retry on
+  ENOENT/ECONNREFUSED within `connect_timeout_s`; (5) **the per-session UDS host path doubled the
+  43-char (256-bit) session id (`{base}/{sid}/{sid}.sock`) and overflowed the AF_UNIX `sun_path`
+  limit — 108 at the default `/run/ghidra-mcp` (a LATENT PROD BUG, not just CI) — fixed by using a
+  short per-session dir token (`session_id[:16]`); the full id stays the socket filename + identity
+  (rpc-protocol §2 / ADR-009 updated).** Also added permanent server-side `worker.rpc_failed`
+  adapter logging (boundary-safe; named the AF_UNIX cause). **Validated:** ground-truth e2e passes
+  locally and on GitHub-hosted CI (`e2e-groundtruth.yml`) for cJSON/zlib/lua; unit suite 468 passing
+  at 98% coverage; ruff/format/mypy --strict/bandit clean.
