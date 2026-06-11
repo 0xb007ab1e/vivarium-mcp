@@ -95,6 +95,12 @@ _CRYPTO_MATCH_BUDGET = 1_000
 #: enough not to busy-spin.
 _CONNECT_RETRY_INTERVAL_S = 0.1
 
+#: Length of the per-session socket *directory* token (a prefix of the session id). Keeps the
+#: AF_UNIX host path well under the ~107-byte limit while staying collision-free for the small
+#: live-session set (the full id is still the socket filename + the server-side identity). See
+#: :meth:`RpcGhidraAdapter._socket_path`.
+_SOCKET_DIR_TOKEN_LEN = 16
+
 #: Module logger. RPC-layer failures are logged SERVER-SIDE with the underlying exception
 #: (socket/framing errors — no binary content or secrets) before being mapped to the
 #: boundary-safe public envelope, so operability does not depend on the client-facing message
@@ -954,11 +960,20 @@ class RpcGhidraAdapter:
             sess.sock = None
 
     def _socket_path(self, session_id: str) -> str:
-        """Compute the per-session UDS path (``<socket_dir>/<sid>/<sid>.sock`` — ADR-009).
+        """Compute the per-session UDS path (``<socket_dir>/<token>/<sid>.sock`` — ADR-009).
 
         The socket lives in a **per-session subdirectory** so the launcher can bind-mount only
         that dir into the worker — a hostile worker therefore sees no sibling sessions' sockets
         (rpc-protocol.md §2; reconciled with the WS3 launcher mount scheme).
+
+        The directory is a SHORT prefix of the session id, not the full id: ``AF_UNIX`` paths are
+        capped (~107 bytes on Linux), and the 43-char (256-bit) session id already appears in the
+        ``<sid>.sock`` filename — using it for the directory too overflowed the limit on realistic
+        socket dirs (the default ``/run/ghidra-mcp`` alone reached 108 → ``AF_UNIX path too long``).
+        The prefix stays unique per live session (small concurrency cap, high-entropy id), the dir
+        is ``0700``, and the full id remains both the socket filename and the server-side identity,
+        so isolation/BOLA are unchanged. The in-container path the worker binds is still
+        ``/run/ghidra-mcp/<session_id>.sock`` (rpc-protocol §2 unchanged).
 
         Args:
             session_id: The opaque session id (CSPRNG-generated; safe as a filename component).
@@ -967,7 +982,7 @@ class RpcGhidraAdapter:
             The socket path string.
         """
         base = self._socket_dir.rstrip("/")
-        return f"{base}/{session_id}/{session_id}.sock"
+        return f"{base}/{session_id[:_SOCKET_DIR_TOKEN_LEN]}/{session_id}.sock"
 
 
 def _xrefs_params(a: s.XrefsIn) -> dict[str, Any]:

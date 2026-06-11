@@ -866,6 +866,30 @@ def test_ensure_connected_gives_up_after_connect_timeout(monkeypatch: pytest.Mon
         adapter._ensure_connected(sess)
 
 
+def test_socket_path_fits_af_unix_limit_with_real_session_id() -> None:
+    """The per-session UDS path stays under the AF_UNIX limit with a 256-bit id + default dir.
+
+    Regression: using the full 43-char session id for BOTH the dir and the filename overflowed
+    AF_UNIX (~107 bytes) at the default /run/ghidra-mcp (108). The dir is now a short id prefix;
+    the filename keeps the full id (in-container contract unchanged).
+    """
+    import secrets as _secrets
+
+    adapter = RpcGhidraAdapter(
+        launcher=lambda sid, path: _FakeWorker(),
+        socket_dir="/run/ghidra-mcp",  # the production default
+        tool_timeout_s=2.0,
+        analysis_timeout_s=2.0,
+        max_response_bytes=_CAP,
+    )
+    sid = _secrets.token_urlsafe(32)  # 43 chars — the real session-id width
+    path = adapter._socket_path(sid)
+    assert len(path) < 108, f"AF_UNIX path too long: {len(path)}"
+    parent, _, name = path.rpartition("/")
+    assert parent.rpartition("/")[2] == sid[:16]  # dir = short prefix
+    assert name == f"{sid}.sock"  # filename keeps the full id
+
+
 # --- worker dispatcher (JVM-free) -------------------------------------------------------------
 class _FakeBackend:
     """A fake :class:`worker.dispatch.GhidraBackend` recording calls and returning canned dicts."""

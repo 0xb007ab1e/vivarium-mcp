@@ -37,9 +37,15 @@ launcher). Reading the contracts to build the launcher also exposed two inconsis
   (so the worker opens it directly). `make_confined_resolver` enforces the input resolves strictly
   under the root (CWE-22) and returns its size for the pre-Ghidra cap — **before** the worker is
   contacted (ADR-001/F7 preserved). A hostile worker gets the input **read-only** and nothing else.
-- **Per-session socket subdir.** `<dir>/<sid>/<sid>.sock` (adapter `_socket_path` + rpc-protocol §2
+- **Per-session socket subdir.** `<dir>/<token>/<sid>.sock` (adapter `_socket_path` + rpc-protocol §2
   reconciled, PM-routed). The launcher creates the `0700` per-session dir and mounts **only it** to
-  the in-container `/run/ghidra-mcp` → a worker sees only its own socket.
+  the in-container `/run/ghidra-mcp` → a worker sees only its own socket. `<token>` is a SHORT prefix
+  of the session id (first 16 chars), **not** the full id: `AF_UNIX` paths are capped (~107 bytes on
+  Linux) and the 43-char (256-bit) id already appears in the `<sid>.sock` filename — using it for the
+  directory too overflowed the limit (the default `/run/ghidra-mcp` reached 108 → `AF_UNIX path too
+  long`, surfaced by the gated e2e on GitHub runners and latent in prod). The token stays unique for
+  the small live-session set; the full id remains the filename + the server-side identity, so
+  isolation/BOLA are unchanged.
 - **Composition root** wires the launcher + confined resolver + timeouts/caps from `Config`.
 
 ## Consequences

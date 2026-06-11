@@ -159,7 +159,9 @@ jobs:
           # per-session socket dir (0700), and that dir must be a user-writable path (not /run).
           # In production the server is itself containerized as 65532 and these stay at their
           # hardened defaults (deploy/socket-dir.md, ADR-009).
-          export GHIDRA_MCP_RPC_SOCKET_DIR="${RUNNER_TEMP:-/tmp}/ghidra-run"
+          # Keep the socket dir SHORT: the per-session UDS path must fit AF_UNIX (~107 bytes); a
+          # long RUNNER_TEMP prefix + the session id overflowed it. /tmp is writable on the runner.
+          export GHIDRA_MCP_RPC_SOCKET_DIR="/tmp/gmcp-run"
           export GHIDRA_MCP_WORKER_UID="$(id -u)"
           export GHIDRA_MCP_WORKER_GID="$(id -g)"
           mkdir -p "$GHIDRA_MCP_RPC_SOCKET_DIR"
