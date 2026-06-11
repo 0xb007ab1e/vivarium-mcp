@@ -57,6 +57,7 @@ flowchart LR
 | **TB2** | server → worker | process/container line; server is sole client | internal RPC, no external clients, bounded |
 | **TB3** | binary → analyzer | **HOSTILE**; primary containment | isolate, no egress, bounded, kill-on-timeout |
 | **TB4** | worker → server → LLM | untrusted output (prompt injection) | untrusted-data envelope, never auto-execute |
+| **TB5** | naming eval → compiler | **attacker-derived C compiled** (v1.1 eval; ADR-010) | sandbox like TB3: rootless container, no egress, ro-rootfs, caps dropped, resource caps, kill-on-timeout, compile-only (no link/run) |
 
 ## 3. STRIDE per element / flow
 
@@ -108,6 +109,19 @@ Likelihood × Impact → severity (master §7). "L/M/H".
 | **I** | **Cross-session leakage** of one binary's store to another | M×H=**High** | one worker/session; per-session store path; **verified wipe on evict** (ADR-002); cross-session isolation abuse test (WS4) |
 | **D** | Stores accumulate and exhaust disk | M×M=**Med** | TTL/idle eviction reclaims; concurrency cap bounds live stores; tmpfs option |
 
+### TB5 — Naming eval → compiler (attacker-derived C; v1.1 — ADR-010)
+The naming-quality eval measures whether the renamed translation unit compiles; that source is
+attacker-derived (from a hostile binary's decompilation, via the namer). Compiling it is a new
+hostile boundary, sandboxed like TB3 (`ContainerCompileRunner`). The eval **never links or runs**
+the output — compile-only (`-c`) into a throwaway tmpfs.
+
+| STRIDE | Threat | L×I | Mitigation |
+|--------|--------|-----|------------|
+| **T** | Malicious source corrupts host/toolchain state | L×H=**Med** | compile in a rootless container; read-only rootfs; source mounted **ro**; output only to ephemeral tmpfs; non-root, all caps dropped |
+| **I** | `#include`/`#embed`/pragma reads host files or exfiltrates | M×M=**Med** | `--network none` (no egress); read-only rootfs (no host paths mounted but the ro source); diagnostics truncated; sandbox holds no secrets |
+| **D** | Compiler bomb (macro/template/`#include` blowup) exhausts CPU/mem/time | M×M=**Med** | memory/cpu/pids caps + **kill-on-timeout** (engine `--timeout`); fail closed → `ok=False` |
+| **E** | Compiler/sandbox escape to host | L×H=**Med** | gVisor runtime in prod (ADR-004); `no-new-privileges` + seccomp; caps dropped; pinned + verified compiler image (supply chain) |
+
 ## 4. Supply chain (build-time)
 | Threat | L×I | Mitigation |
 |--------|-----|------------|
@@ -147,6 +161,10 @@ attack (the control holds) and be a deterministic, hermetic test.
    **backpressure** (`LIMIT_EXCEEDED`), not exhaustion; timeouts reclaim stuck workers. (TB1-D/TB3-D)
 8. **Cross-session project-store leakage** — one session cannot read another's store; eviction
    performs a **verified wipe** (assert the store is gone). (store-I / ADR-002)
+9. **Naming-eval compiler abuse** — a malicious decompilation (compiler bomb, `#include`/pragma
+   abuse, oversized TU) fed to the eval compiler is **bounded + contained**, not an escape or DoS:
+   compile-only in a no-network, read-only, resource-capped, timeout-killed sandbox; failure maps to
+   `ok=False`. (TB5 — ADR-010)
 
 ## 7. Open items feeding the model (PLAN §9)
 - Exact Ghidra 12.1.2 patch version + headless integration (SME) — affects TB3 CVE surface.
