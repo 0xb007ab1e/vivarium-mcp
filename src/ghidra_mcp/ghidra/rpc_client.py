@@ -50,6 +50,7 @@ from ghidra_mcp.ghidra.rpc_framing import (
     RpcCallError,
     RpcProtocolError,
 )
+from ghidra_mcp.logging import get_logger
 from ghidra_mcp.security.limits import Limits, check_binary_size
 from ghidra_mcp.tools import schemas as s
 
@@ -93,6 +94,12 @@ _CRYPTO_MATCH_BUDGET = 1_000
 #: up (bounded overall by ``connect_timeout_s``). Small enough for a snappy first call, large
 #: enough not to busy-spin.
 _CONNECT_RETRY_INTERVAL_S = 0.1
+
+#: Module logger. RPC-layer failures are logged SERVER-SIDE with the underlying exception
+#: (socket/framing errors — no binary content or secrets) before being mapped to the
+#: boundary-safe public envelope, so operability does not depend on the client-facing message
+#: (topic-logging-observability; master §5).
+_log = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -805,18 +812,42 @@ class RpcGhidraAdapter:
             etype = _errors.map_worker_slug(exc.error.type_slug)
             raise _errors.make_error(etype, exc.error.message) from exc
         except TimeoutError as exc:
+            _log.warning(
+                "worker.rpc_failed",
+                extra={"method": method, "cause": "timeout", "detail": str(exc)[:300]},
+            )
             self.kill_worker(session_id)
             raise _errors.make_error(
                 ErrorType.TIMEOUT, "operation exceeded its time limit"
             ) from exc
         except (FramingError, RpcProtocolError) as exc:
             # Hostile/buggy worker: protocol/framing violation → kill + evict.
+            _log.warning(
+                "worker.rpc_failed",
+                extra={
+                    "method": method,
+                    "cause": "protocol",
+                    "exc": type(exc).__name__,
+                    "detail": str(exc)[:300],
+                },
+            )
             self.kill_worker(session_id)
             raise _errors.make_error(
                 ErrorType.WORKER_UNAVAILABLE, "worker protocol violation"
             ) from exc
         except (ConnectionError, EOFError, OSError) as exc:
-            # Crash / closed socket mid-call → kill + evict.
+            # Crash / closed socket mid-call → kill + evict. Log the underlying socket error
+            # server-side (boundary-safe: errno/type only, no binary content) so the cause of a
+            # worker-unavailable (e.g. ECONNREFUSED on the connect, EOF mid-frame) is diagnosable.
+            _log.warning(
+                "worker.rpc_failed",
+                extra={
+                    "method": method,
+                    "cause": "transport",
+                    "exc": type(exc).__name__,
+                    "detail": str(exc)[:300],
+                },
+            )
             self.kill_worker(session_id)
             raise _errors.make_error(ErrorType.WORKER_UNAVAILABLE, "worker unavailable") from exc
 
