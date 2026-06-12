@@ -19,6 +19,7 @@ for a deployable service; they are validated in a drill before being relied on.
 | [`evict-poisoned-worker.md`](evict-poisoned-worker.md) | **service-specific:** evict/rotate a poisoned/hung worker |
 | [`dependency-patch.md`](dependency-patch.md) | **service-specific:** patch a Ghidra/JDK/dep CVE via a digest bump |
 | [`supply-chain-pinning.md`](supply-chain-pinning.md) | **service-specific (GATED):** pin base images/Ghidra/CI-actions by digest + generate the hash-pinned lockfile |
+| [`http-exposure.md`](http-exposure.md) | **service-specific (v1.1):** expose the server over HTTP (loopback / UDS / network+TLS+bearer); reverse-proxy; token/TLS secret handling |
 
 Standard structure (`_TEMPLATE`): When to use · Severity · Prerequisites/access · Steps (commands +
 expected output) · Verification · Rollback/abort · Escalation · Related.
