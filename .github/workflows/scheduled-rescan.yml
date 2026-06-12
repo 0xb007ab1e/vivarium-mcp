@@ -1,0 +1,102 @@
+# scheduled-rescan.yml — recurring CVE rescan of `main` between releases.
+#
+# Why: the release image pipeline (worker-image.yml) only runs on tag/dispatch, and ci.yml's SCA
+# only runs per-PR — so a HIGH/CRITICAL CVE newly disclosed against an UNCHANGED dependency or a
+# digest-pinned base image would not surface until the next release (exactly what happened with
+# CVE-2026-45447 / openssl on the v0.1.0 tag). workflow-vuln-mgmt mandates SCA on a schedule against
+# `main` so new CVEs surface without a code change. This rescans both surfaces against the LIVE
+# vulnerability DB and FAILS CLOSED on a new HIGH/CRITICAL — a failed scheduled run is the alert
+# (GitHub notifies the repo owner of scheduled-workflow failures on the default branch).
+#
+# It SCANS ONLY — it never builds-to-push, signs, or publishes. Remediation is a base-digest bump /
+# dependency upgrade via the normal PR + release flow (see docs/runbooks/dependency-patch.md).
+
+name: scheduled-rescan
+
+on:
+  schedule:
+    - cron: "17 6 * * *" # daily 06:17 UTC (off the top-of-hour load spike)
+  workflow_dispatch: {} # manual rescan on demand
+
+permissions:
+  contents: read # least privilege; scan-only, nothing is pushed
+
+concurrency:
+  group: scheduled-rescan-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # --- Dependency CVE rescan (SCA) — the project's pinned runtime + dev lockfiles ----------------
+  deps-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # actions/checkout@v6.0.3
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # actions/setup-python@v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install --upgrade pip pip-audit
+      - name: pip-audit (runtime lockfile)
+        # Audit OUR hash-pinned lockfiles (the real dependency surface), mirroring ci.yml's `sca`
+        # gate but on a schedule so new advisories against unchanged deps surface between PRs.
+        run: pip-audit --strict --desc --requirement requirements.lock
+      - name: pip-audit (dev lockfile)
+        run: pip-audit --strict --desc --requirement requirements-dev.lock
+
+  # --- Container image CVE rescan — rebuild from the digest-pinned Containerfiles + Trivy ---------
+  # Rebuilding from the pinned bases re-materializes the exact base layers that shipped, so a new
+  # OS/library CVE in a pinned base (the openssl case) is caught against the current Trivy DB. Build
+  # is local-only (load, no push/sign): this is detection, not publication.
+  image-rescan:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # scan BOTH images even if one is dirty — surface every finding per run
+      matrix:
+        include:
+          - name: worker
+            containerfile: Containerfile.worker
+          - name: server
+            containerfile: Containerfile.server
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # actions/checkout@v6.0.3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # docker/setup-buildx-action@v4.1.0
+
+      - name: Build locally for scanning (${{ matrix.name }}) — no push, no sign
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # docker/build-push-action@v7.2.0
+        with:
+          context: .
+          file: ${{ matrix.containerfile }}
+          push: false
+          load: true # load into the local daemon so Trivy can scan by image-ref
+          tags: ghidra-mcp-${{ matrix.name }}:rescan
+          build-args: |
+            GHIDRA_VERSION=${{ vars.GHIDRA_VERSION }}
+            GHIDRA_RELEASE_TAG=${{ vars.GHIDRA_RELEASE_TAG }}
+            GHIDRA_ZIP_URL=${{ vars.GHIDRA_ZIP_URL }}
+            GHIDRA_ZIP_SHA256=${{ vars.GHIDRA_ZIP_SHA256 }}
+
+      - name: Trivy image rescan (${{ matrix.name }})
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ghidra-mcp-${{ matrix.name }}:rescan
+          # Identical gate to the release pipeline: same config + the same time-boxed waivers, so a
+          # waiver that expires here re-blocks exactly as it would at release time.
+          trivy-config: infra/trivy.yaml
+          trivyignores: .trivyignore.yaml
+          format: sarif
+          output: rescan-trivy-${{ matrix.name }}.sarif
+          severity: HIGH,CRITICAL
+          exit-code: "1" # fail closed on a new HIGH/CRITICAL — the failed run is the alert
+
+      - name: Upload Trivy SARIF (${{ matrix.name }})
+        if: always() # keep the report even when the gate fails, for triage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact@v7.0.1
+        with:
+          name: rescan-trivy-${{ matrix.name }}
+          path: rescan-trivy-${{ matrix.name }}.sarif
