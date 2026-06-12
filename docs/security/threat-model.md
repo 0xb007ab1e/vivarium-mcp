@@ -3,8 +3,9 @@
 > Method: STRIDE over a data-flow diagram (`workflow-threat-model`). Scope: v1 (Tier-1 read-only,
 > **stdio only**). v1.1 increments are modeled inline as they land: Tier-2 reporting (§9, ADR-008),
 > semantic-naming (§8, ADR-007), the naming-eval compiler (TB5, ADR-010), the **HTTP transport
-> network boundary (TB6, ADR-011)**, and the **mutation (write) boundary (TB7, §10, ADR-012 —
-> PROPOSED)**. Source of truth: [`PLAN.md`](../../PLAN.md).
+> network boundary (TB6, ADR-011)**, the **annotation-mutation (write) boundary (TB7, §10,
+> ADR-012)**, and the **structural-mutation increment (TB7 structural, §10, ADR-013 — PROPOSED)**.
+> Source of truth: [`PLAN.md`](../../PLAN.md).
 > **Data classification:** the analyzed binary and all derived artifacts are **confidential** and
 > of **hostile origin** (master §5).
 
@@ -166,12 +167,21 @@ applies `std-owasp-api` + `std-zero-trust` + `topic-authn-authz`.
 - **Out of scope (v1):** remote/network attackers (no HTTP), authn/multi-tenant authz, mutation.
 - **v1.1 HTTP (TB6, ADR-011):** the network attacker is now in scope, mitigated by secure-by-default
   exposure (stdio→loopback→gated network) + fail-closed TLS/auth.
-- **v1.1 mutation (TB7, ADR-012 — PROPOSED):** the write/agency boundary is now in scope (see §10),
+- **v1.1 mutation (TB7, ADR-012):** the annotation write/agency boundary is in scope (see §10),
   mitigated by default-deny write consent + atomic+reversible+audited annotation writes + session
-  ephemerality. **Still out of scope:** multi-tenant authZ (single-principal); structural writes
-  (locals/signatures/types) and cross-session annotation **persistence** (each its own future gated,
-  separately-threat-modeled increment — ADR-012 §1/§4); `runScript`/arbitrary script execution
-  (permanently out of scope — PLAN §2).
+  ephemerality.
+- **v1.1 structural mutation (TB7 structural, ADR-013 — PROPOSED):** Phase A adds the first
+  **structural** writes — `rename_local_variable`/`rename_parameter` via the HighFunction path, gated
+  by the existing `allow_structural` opt-in (see §10 "TB7 (structural)"), mitigated by the two-level
+  default-deny consent + one-transaction rollback (incl. the §4 commit-time CWE-460 fix) +
+  `session_undo` + per-write audit + ADR-002 ephemerality. The highest-risk surface
+  (attacker-influenced type/signature strings parsed by the C parser) is **deferred to Phase B and
+  design-decided as structured/constrained** — absent from this increment by construction.
+  **Still out of scope:** multi-tenant authZ (single-principal); **Phase B structural writes**
+  (`set_function_signature`, `define_data_type`, `apply_data_type` — type-string parsing) and
+  cross-session **persistence** (each its own future gated, separately-threat-modeled increment —
+  ADR-012 §1/§4, ADR-013 §1); `runScript`/arbitrary script execution (permanently out of scope —
+  PLAN §2).
 
 ## 6. Abuse-case list for WS4 (REQUIRED — acceptance criteria)
 
@@ -301,7 +311,7 @@ unattributable mutation), and **D** (a write-flood). STRIDE:
 | **R** | **Unattributable mutation** — operator/agent denies a write, or a bad annotation can't be traced | M×M=**Med** | **per-write audit log: intent + outcome** (tool, session id (opaque), target address, value sizes, applied/denied — **never** the binary-derived content or the new value verbatim beyond size; redacted — `topic-logging-observability`); append-only stream; the write-consent grant/revoke is itself audited |
 | **I** | Write result over-discloses / echoes hostile content as instructions | M×M=**Med** | a write echoes only `address` (server-normalized, safe), `applied`/`kind` (safe), and the prior `old_name` **wrapped `Untrusted[...]`** (ADR-005); session-scoped (BOLA — TB1/TB6); no cross-session reuse |
 | **D** | **Write-flood / unbounded consumption** — a burst of writes (LLM04 cost-DoS) exhausts the worker or grows state without bound | M×M=**Med** | each write is **one bounded transaction** (no unbounded growth); same per-tool **timeout that kills the worker**, concurrency cap + backpressure, and (HTTP) per-client rate limit as reads (`topic-reliability`, ADR-011 §5); abuse-case 6 |
-| **E** | **Excessive agency** — the LLM autonomously performs destructive writes without human intent; or escalates beyond the annotation set | **H×H=Critical** | **default-deny: sessions are read-only**; mutation requires the explicit, auditable, revocable, per-session, non-transferable `session_enable_writes` **human-in-the-loop consent gate** (LLM08 least-agency); the catalog is a **fixed allow-list of annotation-only writes** (no locals/signatures/types/`runScript` — those are deferred/forbidden); structural writes will need a **separate** `allow_structural` opt-in; `session_undo` bounds a mistake (ADR-012 §1/§3/§4, abuse-cases 1/7) |
+| **E** | **Excessive agency** — the LLM autonomously performs destructive writes without human intent; or escalates beyond the annotation set | **H×H=Critical** | **default-deny: sessions are read-only**; mutation requires the explicit, auditable, revocable, per-session, non-transferable `session_enable_writes` **human-in-the-loop consent gate** (LLM08 least-agency); the catalog is a **fixed allow-list of annotation-only writes** (no locals/signatures/types/`runScript` — those are deferred/forbidden); structural writes require a **separate** `allow_structural` opt-in (Phase A renames land in ADR-013 — see TB7 (structural) below; signatures/types stay deferred to Phase B); `session_undo` bounds a mistake (ADR-012 §1/§3/§4, abuse-cases 1/7) |
 | **E** | A write bypasses the server to reach the JVM directly | L×H=**Med** | **ADR-001 invariant unchanged** — no JVM/PyGhidra import server-side (the architecture-invariant CI test covers the new write handlers too); the write is a typed worker RPC, not in-process (abuse-case 8) |
 
 **Residual risk (added to §5).** Mutation **raises LLM08 agency**: the read-only "no destructive
@@ -334,3 +344,80 @@ attack (the control holds), deterministic + hermetic, synthetic fixtures only (m
     same `session-invalid` envelope (no oracle). (TB7-E / BOLA — extends abuse-case 6)
 21. **ADR-001 invariant under writes** — the architecture-invariant test still passes: no JVM/
     PyGhidra import on any server-side module, including the new write handlers. (TB7-E)
+
+### TB7 (structural) — Structural mutation increment (v1.1 — ADR-013, PROPOSED)
+
+ADR-013 **Phase A** extends TB7 from annotation writes to the **first structural writes** —
+`rename_local_variable` and `rename_parameter` — via Ghidra's HighFunction path
+(`DecompInterface` → `HighFunction` → `HighSymbol` → `HighFunctionDBUtil.updateDBVariable`), gated by
+the **already-built** `allow_structural` opt-in on `session_enable_writes` (ADR-012 §3 forward hook —
+`require_write_consent(structural=True)`). It is **the same trust boundary** (TB7), **not a new one**:
+the boundary still sits on TB1/TB6 (client args/network), TB2 (server→worker RPC — gains two new write
+methods, same channel), and TB4 (untrusted worker output — echoed `function`/`old_name` stay
+`Untrusted[...]`). **ADR-001 still holds: the server never loads the JVM or mutates; the write — and
+the decompile to obtain the HighSymbol — execute only in the hardened worker.** The hostile-binary
+containment (TB3) and worker isolation (ADR-004) are **unchanged and unaffected**.
+
+What is **new vs the annotation writes** (the crux — ADR-013 §2): structural writes carry **three risk
+classes annotations did not** — (a) **type/signature strings parsed by Ghidra's C parser** (highest
+injection-into-API surface — *deferred to Phase B*, but the input model is design-decided now as
+structured/constrained, NOT free-form C); (b) **stateful HighFunction re-decompile** (the live Phase-A
+mechanism — failure-prone, version-sensitive); (c) **larger re-flow/re-render blast radius** (a local
+rename re-renders one function; a signature/type change — Phase B — re-flows callers / re-renders
+dependent data). The dominant residual classes remain **T** (type-string injection into the C parser
+in Phase B; signature/storage re-flow corruption) and **E** (more agency).
+
+| STRIDE | Threat (structural) | L×I | Mitigation (control · module) |
+|--------|---------------------|-----|-------------------------------|
+| **E** | **Structural agency without intent / escalation beyond the annotation set** — the LLM autonomously performs a structural write (rename a local/param) | **H×H=Critical** | **two-level default-deny**: writes off by default → `session_enable_writes{allow_structural:false}` permits annotations only → **`allow_structural:true` is a SEPARATE, explicit, audited human opt-in** for the structural set; each structural handler calls `require_write_consent(structural=True)` (the existing chokepoint — `manager.py:301-331`); fixed allow-list (only `rename_local_variable`/`rename_parameter` in Phase A; signatures/types/`runScript` deferred/forbidden); `session_undo` reverts in one step (ADR-013 §1/§3) |
+| **T** | **Type/signature string injection into Ghidra's C parser** — an injection-steered `DataTypeParser`/`CParser`/`ApplyFunctionSignatureCmd` string causes parser-bomb consumption, unintended type definitions, or smuggled markup in type names | **H×M=High** (Phase B) | **DEFERRED to Phase B** AND **neutralized by design**: Phase B accepts a **structured/constrained signature** (resolved `TypeRef`s + bounded `ParamSpec` list + closed-vocabulary calling convention) assembled from already-resolved `DataType` handles — **no C string is parsed** (`std-owasp-llm` LLM07, ADR-013 §2a). Phase A does **NOT** parse any type string (name-only; `updateDBVariable` data type is `null`) — the C-parser surface is **absent** from this increment by construction. Any future free-form-C path is a narrower opt-in bounded by `validate_type_decl` (length/depth/decl-count, no preprocessor/pragma) parsing under worker kill-on-timeout |
+| **T** | **HighFunction re-decompile failure → partial/corrupting write** — the decompile-to-HighSymbol step (stateful, version-sensitive) fails mid-operation | M×M=**Med** | **resolution (decompile → HighSymbol) happens BEFORE `startTransaction`** (read-only) → a resolution failure is a clean `not-found` with no transaction opened; only the `updateDBVariable` DB write is transacted; **one transaction per write, rollback on any exception incl. commit-time (the §4 CWE-460 fix)**; bounded `DecompInterface` timeout + the per-call timeout that **kills the worker** on a hung decompile (ADR-013 §2b/§4, abuse-cases 4/5) |
+| **T** | **Larger re-flow/re-render tampering blast radius** — a structural write re-renders more than its target (Phase A: one function; Phase B: callers / dependent data) | M×M=**Med** (Phase A); M×H=**High** (Phase B) | bounded by **one-transaction rollback** + **`session_undo`** (revert the last committed transaction) + **ADR-002 session ephemerality** (worst case is a mis-restructured **disposable** session, wiped on evict — never host/durable compromise); Phase B's wider re-flow is a reason it is deferred to its own threat-modeled increment (ADR-013 §2c) |
+| **T** | **Structural stored-injection / data-poisoning** — a malicious local/param `new_name` (markup/path/zero-width/RTL/control) persisted and re-served by `decompile_function`/`function_context` | M×M=**Med** | **reuse `validate_write_name`** (the identifier allow-list — `validation.py:303-337`) on the way IN; the read path re-wraps `Untrusted[...]` + re-normalizes on the way OUT (ADR-005) — same two-sided defense as ADR-012 §7 (abuse-case 3) |
+| **R** | **Unattributable structural mutation** | M×M=**Med** | **per-write audit: intent + outcome** (tool, session id (opaque), target sizes/flags, applied/denied — **never** binary-derived content or the new value verbatim; redacted — `topic-logging-observability`); the `allow_structural` grant/revoke is itself audited (same posture as ADR-012 TB7-R) |
+| **D** | **Structural-write-flood** — a burst of structural writes (each triggering a decompile) exhausts the worker | M×M=**Med** | each write is **one bounded transaction**; same per-tool **timeout that kills the worker** (covers a hung decompile), concurrency cap + backpressure, and (HTTP) rate limit as reads (`topic-reliability`, ADR-011 §5; abuse-case 7) |
+| **E** | A structural write bypasses the server to reach the JVM directly | L×H=**Med** | **ADR-001 invariant unchanged** — no JVM/PyGhidra import server-side (the architecture-invariant CI test covers the new structural handlers); the write + the decompile-for-HighSymbol are a typed worker RPC, not in-process (abuse-case 9) |
+
+**Residual risk (added to §5).** Phase A raises LLM08 agency again: within a session enabled with
+`allow_structural`, the structural renames are autonomous, so an injection during that window can
+mis-name a local/param (re-rendering one function) before the operator notices — bounded, not
+prevented, by the two-level opt-in, transaction rollback (incl. the §4 commit-time fix), per-write
+audit, `session_undo`, and ADR-002 ephemerality. **The highest-risk surface — attacker-influenced
+type/signature strings parsed by the C parser — is DEFERRED to Phase B and design-decided as
+structured/constrained (no free-form C), so it is absent from this increment by construction**
+(ADR-013 §2a). The worst case is a mis-restructured **disposable** session, not host or durable-data
+compromise. **Still out of scope:** Phase B structural writes (`set_function_signature`,
+`define_data_type`, `apply_data_type` — their own gated, separately-threat-modeled increment) and
+cross-session persistence (ADR-012 §4); `runScript`/arbitrary script execution (permanently out of
+scope — PLAN §2).
+
+### Abuse cases for the structural-mutation increment (append to §6; benign/synthetic fixtures only)
+
+These map 1:1 to new cases in `tests/security/test_abuse_cases.py` (ADR-013 §7). Each must FAIL the
+attack (the control holds), deterministic + hermetic, synthetic fixtures only (master §5):
+
+22. **Structural-without-`allow_structural`** — `rename_local_variable`/`rename_parameter` on a session
+    enabled with `allow_structural=false` is denied with `VALIDATION` "structural writes not
+    permitted" (the `require_write_consent(structural=True)` chokepoint — `manager.py:326-330`).
+    (TB7-E / gating)
+23. **Structural-without-any-consent** — the same tools on a read-only session (no
+    `session_enable_writes`) are denied "session is read-only" (default-deny). (TB7-E)
+24. **Injection-steered malicious local/param name** — a `new_name` with markup/`../path`/zero-width/
+    RTL/control chars is rejected by `validate_write_name` (never written). (TB7-T — extends case 15)
+25. **HighFunction resolution failure → no partial write** — a `variable`/`parameter` that does not
+    resolve to a HighSymbol (or a decompile that fails/times out) surfaces `not-found`/
+    `analysis-failed` with the program unchanged (resolution is before `startTransaction`). (TB7-T)
+26. **Commit-time atomicity (the §4 fix)** — a write that raises in `write()` **or in the commit**
+    (`endTransaction(txn, True)`) rolls back and surfaces `analysis-failed`; no dangling transaction,
+    no untyped escape (CWE-460). The program is unchanged. (TB7-T — extends case 17)
+27. **Cross-session structural isolation** — `allow_structural` + a local rename on session A does not
+    enable or mutate session B. (TB7-T / store-I — extends case 18)
+28. **Structural-write-flood** — a burst of structural writes (each decompiling) is bounded by the
+    per-tool timeout (kills the worker on a hung decompile) + concurrency cap + (HTTP) rate limit.
+    (TB7-D — extends case 19)
+29. **BOLA on the structural grant** — `session_enable_writes{allow_structural:true}` against an
+    unknown/foreign session id yields the same `session-invalid` envelope (no oracle). (TB7-E / BOLA —
+    extends case 20)
+30. **ADR-001 invariant under structural writes** — the architecture-invariant test still passes: no
+    JVM/PyGhidra import on any server-side module, including the new structural handlers (the write +
+    the decompile-for-HighSymbol execute only in the worker). (TB7-E — extends case 21)
