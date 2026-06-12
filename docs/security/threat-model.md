@@ -60,7 +60,7 @@ flowchart LR
 | **TB3** | binary → analyzer | **HOSTILE**; primary containment | isolate, no egress, bounded, kill-on-timeout |
 | **TB4** | worker → server → LLM | untrusted output (prompt injection) | untrusted-data envelope, never auto-execute |
 | **TB5** | naming eval → compiler | **attacker-derived C compiled** (v1.1 eval; ADR-010) | sandbox like TB3: rootless container, no egress, ro-rootfs, caps dropped, resource caps, kill-on-timeout, compile-only (no link/run) |
-| **TB6** | network client → server (HTTP) | **first network attack surface** (v1.1; ADR-011) | secure-by-default: stdio default, else loopback; network bind needs TLS+auth (fail closed); bearer auth (mTLS/OAuth-pluggable); rate-limit + size caps + strict CORS; per-request authZ + session-ownership; same read-only catalog |
+| **TB6** | network client → server (HTTP) | **first network attack surface** (v1.1; ADR-011) | secure-by-default: stdio default, else loopback; network bind needs TLS+auth (fail closed); bearer auth (mTLS/OAuth-pluggable); rate-limit + size caps + strict CORS; per-request authZ; BOLA closed by construction (CSPRNG session-id capability + single principal; per-principal owner deferred to multi-principal); same read-only catalog |
 
 ## 3. STRIDE per element / flow
 
@@ -136,7 +136,7 @@ applies `std-owasp-api` + `std-zero-trust` + `topic-authn-authz`.
 | **S** | Unauthenticated/forged caller invokes the tool surface | M×H=**High** | **default-deny auth** on every TCP bind: required bearer token (constant-time, secret-managed), mTLS/OAuth-pluggable; generic `401` (no user/credential oracle); network bind without auth refuses to start |
 | **T** | Request tampering / MITM on the wire | M×H=**High** | **TLS required off-loopback** (1.2+, prefer 1.3); plaintext only on loopback/UDS; HSTS + security headers; proxy-terminated TLS supported |
 | **R** | Caller denies issuing a request | L×M=**Low** | structured audit log per request (principal, tool, sizes, outcome — redacted, `topic-logging-observability`); append-only stream |
-| **I** | Cross-principal/session data disclosure (BOLA) or verbose errors leak internals | M×H=**High** | **session ownership bound to the authenticated principal** (API1); per-request authZ server-side (complete mediation); consistent error envelope, no stack traces/internals (`topic-error-handling`); strict CORS (no `*`+creds; default no origins) |
+| **I** | Cross-principal/session data disclosure (BOLA) or verbose errors leak internals | M×H=**High** | BOLA closed by construction (API1): 256-bit CSPRNG session-id capability + single principal + uniform `SESSION_INVALID` (per-principal owner check deferred to multi-principal — ADR-011 §6); per-request authZ server-side (complete mediation); consistent error envelope, no stack traces/internals (`topic-error-handling`); strict CORS (no `*`+creds; default no origins) |
 | **D** | Request flood / huge payloads exhaust the worker pool or server | M×H=**High** | per-client **rate limit + quota**, **request size caps**, timeouts + backpressure (`topic-reliability`); bounded by ADR-002 one-worker-per-session + eviction; loopback default limits reach |
 | **E** | Remote caller escalates via the network edge to actions beyond the read-only catalog | L×H=**Med** | **same frozen read-only catalog** (no new/mutation tools); the network edge does not bypass per-call validation/allow-listing (defense in depth); least privilege; the hostile-binary containment (TB3) is unchanged and unaffected by transport |
 
@@ -176,8 +176,12 @@ attack (the control holds) and be a deterministic, hermetic test.
 5. **Indirect prompt injection via strings/symbols/comments** — payloads in binary-derived content
    are returned **wrapped in the untrusted-data envelope**, normalized/annotated, never as bare
    instruction text. (TB4-S/E)
-6. **Session-ID guessing / BOLA** — foreign or guessed session ids return `SESSION_INVALID` without
-   revealing whether other sessions exist; one session cannot address another's data. (TB1/TB4-I)
+6. **Session-ID guessing / BOLA (TB6-I)** — closed by construction in single-principal v1.1: a
+   `session_id` is a 256-bit CSPRNG capability and `authorize()` returns the *same* `SESSION_INVALID`
+   for unknown/expired/evicted ids (never revealing whether other sessions exist), while there is
+   exactly one authenticated principal — so no cross-principal addressing surface exists. A
+   per-principal `owner` check is **deferred to the multi-principal increment** (it would be vacuous
+   against one constant identity); see ADR-011 §6. (TB1/TB4-I/TB6-I)
 7. **Worker-pool starvation / resource exhaustion** — exceeding the concurrency cap yields
    **backpressure** (`LIMIT_EXCEEDED`), not exhaustion; timeouts reclaim stuck workers. (TB1-D/TB3-D)
 8. **Cross-session project-store leakage** — one session cannot read another's store; eviction

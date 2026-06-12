@@ -74,9 +74,21 @@ Required on the HTTP surface, enforced in the shell (the tool/session layer is a
 
 ### 6. Authorization & sessions
 - v1.1 remains **single-principal** (one operator). Per-request **authZ** = authenticated principal
-  may use the allow-listed read-only catalog; **session ownership is bound to the principal** so one
-  caller cannot drive another's session/worker (BOLA / `std-owasp-api` API1). The session model is
-  unchanged (persistent per-binary, TTL+idle evict, one worker per session — ADR-002).
+  may use the allow-listed read-only catalog. The session model is unchanged (persistent per-binary,
+  TTL+idle evict, one worker per session — ADR-002).
+- **BOLA / `std-owasp-api` API1 is closed by construction in v1.1, not by a per-principal owner
+  check.** Two facts compose to eliminate the cross-principal surface: (a) `session_id` is a 256-bit
+  CSPRNG `secrets.token_urlsafe` — an *unguessable capability*; `SessionManager.authorize()` is the
+  single BOLA chokepoint and returns the *same* `SESSION_INVALID` for unknown/expired/evicted ids,
+  never revealing another session's existence (`docs/contracts/error-envelope.md`); and (b) there is
+  exactly **one** authenticated principal, so every session_id that exists was minted for, and is
+  held only by, that one operator. There is therefore **no second principal** against whom to scope
+  ownership — a per-principal `owner` field would be recorded and checked against a single constant
+  identity (vacuous). Binding sessions to a *distinct* principal becomes load-bearing **only when
+  multi-principal lands**, and is explicitly that increment's work (record `owner` at `create`,
+  verify at `authorize`, deny-on-mismatch). Until then the capability + single-identity invariant is
+  the control; the live HTTP edge (auth before any session reference) is validated by the slice-5
+  abuse tests rather than asserted.
 - No new tools, no mutation, no `runScript`: the HTTP surface exposes the **same frozen read-only
   catalog** (`docs/contracts/tool-catalog.md`). Adding HTTP does **not** change the tool/RPC/
   untrusted-envelope contracts.
