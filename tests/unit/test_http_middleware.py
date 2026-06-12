@@ -10,6 +10,9 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
+
+from ghidra_mcp.server import http_middleware as _mw
 from ghidra_mcp.server.auth import BearerAuthenticator, NullAuthenticator, Principal
 from ghidra_mcp.server.http_middleware import (
     _SCOPE_PRINCIPAL_KEY,
@@ -107,6 +110,28 @@ def test_rate_limit_refills_over_time() -> None:
     assert _drive(mw, _scope())[0] == 429  # empty
     t[0] += 1.0  # one second → one token refilled
     assert _drive(mw, _scope())[0] == 200
+
+
+def test_rate_limit_bucket_map_is_bounded_lru(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The per-client bucket map is a size-bounded LRU (CWE-400) — review Low-1."""
+    monkeypatch.setattr(_mw, "_MAX_RATE_LIMIT_BUCKETS", 3)
+    mw = RateLimitMiddleware(_App(), rate_per_second=1000, burst=1000, clock=lambda: 1000.0)
+    for k in ("A", "B", "C", "D"):  # 4 distinct clients, cap 3
+        mw._allow(k)
+    assert len(mw._buckets) == 3  # bounded
+    assert "A" not in mw._buckets  # least-recently-used evicted
+    assert set(mw._buckets) == {"B", "C", "D"}
+
+
+def test_rate_limit_lru_keeps_recently_seen_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-touching a client refreshes its recency so it survives eviction (LRU, not FIFO)."""
+    monkeypatch.setattr(_mw, "_MAX_RATE_LIMIT_BUCKETS", 3)
+    mw = RateLimitMiddleware(_App(), rate_per_second=1000, burst=1000, clock=lambda: 1000.0)
+    for k in ("A", "B", "C", "A"):  # touch A again → B is now least-recently-used
+        mw._allow(k)
+    mw._allow("D")  # overflow → evicts B, not A
+    assert "A" in mw._buckets and "B" not in mw._buckets
+    assert set(mw._buckets) == {"A", "C", "D"}
 
 
 def test_rate_limit_is_per_client() -> None:

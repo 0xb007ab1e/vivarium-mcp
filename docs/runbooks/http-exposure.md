@@ -114,6 +114,12 @@ directly; the proxy owns the public cert. Keep the bearer token (or proxy-inject
 - `GHIDRA_MCP_HTTP_RATE_PER_SECOND` / `_BURST` are a **per-client** token bucket; raise the burst for
   a chatty single operator, lower the rate to harden against a flood. `_MAX_BODY_BYTES` caps request
   size (`413` over it). These are DoS controls (`std-owasp-api` API4) — keep them tight.
+- **Reverse-proxy caveat:** the per-client bucket keys on the **TCP peer IP**. Behind a reverse
+  proxy (the Rung-3 alternative) every request arrives from the **proxy's** IP, so all clients share
+  one bucket — the limit degrades to **per-proxy**, not per-client. The server does **not** trust
+  `X-Forwarded-For` (it is spoofable — CWE-290). In proxied deployments, **enforce per-client rate
+  limiting at the proxy** (nginx `limit_req`, Caddy `rate_limit`, Envoy local rate limit) and treat
+  the server's limiter as a coarse backstop.
 
 ## Verification
 

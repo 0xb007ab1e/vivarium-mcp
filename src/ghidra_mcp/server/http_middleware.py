@@ -20,7 +20,8 @@ frozen :class:`~ghidra_mcp.core.errors.ErrorEnvelope` shape and leak nothing.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, MutableMapping
+from collections import OrderedDict
+from collections.abc import Callable
 from typing import Any, cast
 
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -30,6 +31,13 @@ from ghidra_mcp.server.auth import AuthContext, Authenticator
 _SCOPE_PRINCIPAL_KEY = (
     "ghidra_mcp.principal"  # where AuthenticationMiddleware stashes the principal
 )
+
+# Cap on distinct per-client rate-limit buckets so the limiter (itself the TB6-D DoS control)
+# cannot become an unbounded memory-growth vector under many-source traffic (CWE-400). The LRU
+# evicts the least-recently-seen client; on a network bind this is far above any real client count
+# (the default exposure is single-key loopback), and an evicted, long-idle bucket would have
+# refilled anyway, so dropping it is safe.
+_MAX_RATE_LIMIT_BUCKETS = 8192
 
 
 def _header(scope: Scope, name: bytes) -> bytes | None:
@@ -99,19 +107,25 @@ class RateLimitMiddleware:
         self.rate = float(rate_per_second)
         self.burst = float(burst)
         self._clock = clock
-        # client-key -> (tokens, last_refill_ts)
-        self._buckets: MutableMapping[str, tuple[float, float]] = {}
+        # client-key -> (tokens, last_refill_ts); LRU-ordered + size-bounded (see _allow).
+        self._buckets: OrderedDict[str, tuple[float, float]] = OrderedDict()
 
     def _allow(self, key: str) -> bool:
-        """Token-bucket decision for ``key``: refill by elapsed time, spend a token if any."""
+        """Token-bucket decision for ``key``: refill by elapsed time, spend a token if any.
+
+        Maintains the bucket map as a bounded LRU: the touched key moves to the most-recent end,
+        and once the map exceeds ``_MAX_RATE_LIMIT_BUCKETS`` the least-recently-seen client is
+        evicted, so the map cannot grow without bound under many-source traffic (CWE-400).
+        """
         now = self._clock()
         tokens, last = self._buckets.get(key, (self.burst, now))
         tokens = min(self.burst, tokens + (now - last) * self.rate)
-        if tokens >= 1.0:
-            self._buckets[key] = (tokens - 1.0, now)
-            return True
-        self._buckets[key] = (tokens, now)
-        return False
+        allowed = tokens >= 1.0
+        self._buckets[key] = (tokens - 1.0 if allowed else tokens, now)
+        self._buckets.move_to_end(key)  # mark most-recently-used
+        if len(self._buckets) > _MAX_RATE_LIMIT_BUCKETS:
+            self._buckets.popitem(last=False)  # evict least-recently-used
+        return allowed
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Allow or ``429`` based on the per-client bucket (client host, or ``"local"`` for UDS)."""
