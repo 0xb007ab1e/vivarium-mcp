@@ -192,3 +192,14 @@ class GhidraPort(Protocol):
     def undo(self, sid: str, a: s.SessionUndoIn) -> s.SessionUndoOut:
         """Undo the last committed mutation transaction in the session (ADR-012 §4)."""
         ...
+
+    # --- structural writes (v1.1 — ADR-013 Phase A; HighFunction path, name-only) ---
+    def rename_local_variable(
+        self, sid: str, a: s.RenameLocalVariableIn
+    ) -> s.StructuralRenameResult:
+        """Rename one function-local variable (name-only; transaction-wrapped — ADR-013)."""
+        ...
+
+    def rename_parameter(self, sid: str, a: s.RenameParameterIn) -> s.StructuralRenameResult:
+        """Rename one function parameter (name-only; transaction-wrapped — ADR-013)."""
+        ...

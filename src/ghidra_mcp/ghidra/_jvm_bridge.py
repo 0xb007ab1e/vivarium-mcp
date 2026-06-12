@@ -301,6 +301,35 @@ class PyGhidraBackend:
         """
         return self._gh_undo()
 
+    def rename_local_variable(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rename one function-local variable (write; HighFunction path, name-only — ADR-013).
+
+        Args:
+            params: ``{"function": str, "variable": str, "new_name": str}``.
+
+        Returns:
+            ``{"address", "function", "old_name", "new_name", "applied"}`` (plain; the server wraps
+            ``function``/``old_name`` as untrusted).
+        """
+        function = str(_require(params, "function"))
+        variable = str(_require(params, "variable"))
+        new_name = str(_require(params, "new_name"))
+        return self._gh_rename_high_variable(function, variable, new_name, is_parameter=False)
+
+    def rename_parameter(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rename one function parameter (write; HighFunction path, name-only — ADR-013).
+
+        Args:
+            params: ``{"function": str, "parameter": str, "new_name": str}``.
+
+        Returns:
+            ``{"address", "function", "old_name", "new_name", "applied"}`` (plain).
+        """
+        function = str(_require(params, "function"))
+        parameter = str(_require(params, "parameter"))
+        new_name = str(_require(params, "new_name"))
+        return self._gh_rename_high_variable(function, parameter, new_name, is_parameter=True)
+
     # --- JVM edge (PyGhidra calls live ONLY here; imported lazily) ---------------------------
     # NOTE: these helpers are the worker-only JVM boundary. They are excluded from server unit
     # coverage and exercised only by the integration suite against a real pinned worker image. The
@@ -1422,6 +1451,81 @@ class PyGhidraBackend:
             raise WorkerError(CODE_ANALYSIS_FAILED, "undo failed") from exc
         return {"undone": True}
 
+    def _gh_rename_high_variable(
+        self, function: str, target: str, new_name: str, *, is_parameter: bool
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Rename a decompiler local/parameter via the HighFunction path (name-only — ADR-013 §2b).
+
+        Decompiles the function to obtain its ``HighFunction``, selects the target ``HighSymbol`` by
+        its assigned name (parameters only when ``is_parameter``) and renames it inside one
+        transaction with a **null** data type (no type change — Phase A). PyGhidra symbol bindings
+        (``HighFunctionDBUtil.updateDBVariable``, ``getLocalSymbolMap``) are confirmed at the WS3
+        image build (ADR-003 open item), like the other ``_gh_*`` helpers.
+
+        Args:
+            function: Owning function (entry address hex or current name).
+            target: The local/parameter selector (the decompiler-assigned name).
+            new_name: The server-validated new name to set.
+            is_parameter: Restrict the search to parameters (``rename_parameter``) vs locals.
+
+        Returns:
+            ``{"address", "function", "old_name", "new_name", "applied"}`` (plain).
+
+        Raises:
+            WorkerError: ``not-found`` if the function or target symbol does not resolve;
+                ``analysis-failed`` if decompilation or the rename fails (rolled back).
+        """
+        from ghidra.app.decompiler import DecompInterface
+        from ghidra.program.model.pcode import (  # type: ignore[import-not-found]
+            HighFunctionDBUtil,
+        )
+        from ghidra.program.model.symbol import SourceType
+        from ghidra.util.task import ConsoleTaskMonitor
+        from worker.dispatch import CODE_ANALYSIS_FAILED, CODE_NOT_FOUND, WorkerError
+
+        program = self._require_program()
+        func = self._resolve_function(function)
+        address = str(func.getEntryPoint())
+        func_name = _to_text(func.getName())
+
+        decompiler = DecompInterface()
+        try:
+            decompiler.openProgram(program)
+            results = decompiler.decompileFunction(func, 0, ConsoleTaskMonitor())
+            high = results.getHighFunction() if results is not None else None
+            if high is None:
+                raise WorkerError(
+                    CODE_ANALYSIS_FAILED, "decompilation did not produce a high function"
+                )
+            symbol = None
+            for candidate in high.getLocalSymbolMap().getSymbols():
+                if _to_text(candidate.getName()) != target:
+                    continue
+                if bool(candidate.isParameter()) != is_parameter:
+                    continue  # params vs locals, selected per is_parameter
+                symbol = candidate
+                break
+            if symbol is None:
+                raise WorkerError(CODE_NOT_FOUND, "local/parameter not found")
+            old_name = _to_text(symbol.getName())
+            tool = "rename_parameter" if is_parameter else "rename_local_variable"
+            # Name-only: pass a null DataType (no type change — ADR-013 §1). One transaction (§4).
+            self._in_transaction(
+                tool,
+                lambda: HighFunctionDBUtil.updateDBVariable(
+                    symbol, new_name, None, SourceType.USER_DEFINED
+                ),
+            )
+        finally:
+            decompiler.dispose()
+        return {
+            "address": address,
+            "function": func_name,
+            "old_name": old_name,
+            "new_name": new_name,
+            "applied": True,
+        }
+
     def _in_transaction(
         self, tool_name: str, write: Callable[[], None]
     ) -> None:  # pragma: no cover - JVM edge
@@ -1439,16 +1543,30 @@ class PyGhidraBackend:
         Raises:
             WorkerError: ``analysis-failed`` if the write raised (after rolling back).
         """
+        import contextlib
+
         from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
 
         program = self._require_program()
         txn = program.startTransaction(tool_name)
+        committed = False
         try:
             write()
+            # Commit INSIDE the try: Ghidra runs end-of-transaction fixups here (the decompiler/
+            # analysis manager re-flows dependent state — esp. for structural writes), so the commit
+            # itself can raise. A commit-time failure must also roll back + surface a typed error,
+            # not leave the txn dangling with a raw exception (CWE-460 — ADR-013 §4).
+            program.endTransaction(txn, True)
+            committed = True
         except Exception as exc:
-            program.endTransaction(txn, False)
-            raise WorkerError(CODE_ANALYSIS_FAILED, "write failed and was rolled back") from exc
-        program.endTransaction(txn, True)
+            if not committed:
+                # The write OR the commit failed; end the still-open transaction WITHOUT committing.
+                # Best-effort rollback, suppressed so a secondary failure never masks the original
+                # cause (topic-resource-management — clean-up must not throw).
+                with contextlib.suppress(Exception):
+                    program.endTransaction(txn, False)
+                raise WorkerError(CODE_ANALYSIS_FAILED, "write failed and was rolled back") from exc
+            raise  # commit ok but a later statement raised — explicit; unreachable in practice
 
     def _require_program(self) -> Any:  # pragma: no cover - JVM edge
         """Return the open program or raise a safe ``analysis-failed`` error.

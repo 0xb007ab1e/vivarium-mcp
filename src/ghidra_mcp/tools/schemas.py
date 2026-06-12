@@ -1343,3 +1343,56 @@ class SessionUndoOut(_Out):
 
     session_id: str
     undone: bool
+
+
+# --- structural writes (v1.1 — ADR-013 Phase A; GATED by allow_structural; name-only) ---
+class RenameLocalVariableIn(_SessionScopedIn):
+    """Arguments for ``rename_local_variable`` — set a function-local's name (structural write).
+
+    Gated by ``session_enable_writes{allow_structural: true}`` + ``require_write_consent(
+    structural=True)``. **Name-only** (the worker passes a null data type — no type change in this
+    increment, ADR-013 §1).
+
+    Attributes:
+        function: The owning function, by entry address (hex) or current name (resolved by worker).
+        variable: The target local's stable identifier (the decompiler-assigned name, e.g.
+            ``local_28``, as surfaced by ``function_context``) — a selector, not a persisted value.
+        new_name: The new name to set — validated against the write-name allow-list before write.
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    variable: str = Field(min_length=1, max_length=_MAX_NAME)
+    new_name: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class RenameParameterIn(_SessionScopedIn):
+    """Arguments for ``rename_parameter`` — set a function parameter's name (structural write).
+
+    Attributes:
+        function: The owning function (address hex or current name).
+        parameter: The target parameter's stable identifier (name as surfaced by
+            ``function_context``) — a selector, not a persisted value.
+        new_name: The new name to set — validated against the write-name allow-list before write.
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    parameter: str = Field(min_length=1, max_length=_MAX_NAME)
+    new_name: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class StructuralRenameResult(_Out):
+    """Result of a structural local/parameter rename (ADR-013 §6).
+
+    Attributes:
+        address: The owning function's entry address (hex) — server-normalized, safe.
+        function: The function's current name — binary-derived → untrusted (ADR-005).
+        old_name: The PRIOR decompiler name of the local/param — binary-derived → untrusted.
+        new_name: The name we set — SAFE (server-validated before the write).
+        applied: Whether the write committed — server/worker-controlled, safe.
+    """
+
+    address: str
+    function: Untrusted[str]
+    old_name: Untrusted[str]
+    new_name: str
+    applied: bool
