@@ -96,7 +96,11 @@ Contract changes route through the PM (batch-atomicity mandate).
   envelope for binary-derived output (F3). ADR-006 stdio-first; HTTP gated v1.1 (F9).
   ADR-007/008 v1.1 semantic-naming + Tier-2 extraction primitives. **ADR-009 Concrete worker
   launcher + import-root mount + per-session socket dir** (WS2/WS3 seam; the chain-wiring work —
-  short per-session UDS dir token keeps the path under the AF_UNIX limit).
+  short per-session UDS dir token keeps the path under the AF_UNIX limit). ADR-010 semantic-naming
+  eval (sandboxed compile / TB5). **ADR-011 HTTP transport (v1.1; DESIGN started)** — secure-by-
+  default exposure (stdio→loopback→gated network), bearer auth (mTLS/OAuth-pluggable), TLS off-
+  loopback, fail-closed startup; network boundary threat-modeled as **TB6**; activates
+  `std-owasp-api`/`std-zero-trust`/`topic-authn-authz`; plan in `docs/design/http-transport.md`.
 
 ## 9. Open items
 - ✅ **RESOLVED (WS0):** worker RPC = **JSON-RPC 2.0 over per-session UDS** (ratified 2026-06-03;

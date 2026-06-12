@@ -1,8 +1,10 @@
 # Threat Model — `ghidra-mcp` (v1, stdio)
 
 > Method: STRIDE over a data-flow diagram (`workflow-threat-model`). Scope: v1 (Tier-1 read-only,
-> **stdio only**). HTTP transport, Tier-2 reporting, and mutation tools are out of scope (separate
-> threat model in v1.1 — ADR-006). Source of truth: [`PLAN.md`](../../PLAN.md).
+> **stdio only**). v1.1 increments are modeled inline as they land: Tier-2 reporting (§9, ADR-008),
+> semantic-naming (§8, ADR-007), the naming-eval compiler (TB5, ADR-010), and the **HTTP transport
+> network boundary (TB6, ADR-011)**. Mutation tools remain out of scope. Source of truth:
+> [`PLAN.md`](../../PLAN.md).
 > **Data classification:** the analyzed binary and all derived artifacts are **confidential** and
 > of **hostile origin** (master §5).
 
@@ -58,6 +60,7 @@ flowchart LR
 | **TB3** | binary → analyzer | **HOSTILE**; primary containment | isolate, no egress, bounded, kill-on-timeout |
 | **TB4** | worker → server → LLM | untrusted output (prompt injection) | untrusted-data envelope, never auto-execute |
 | **TB5** | naming eval → compiler | **attacker-derived C compiled** (v1.1 eval; ADR-010) | sandbox like TB3: rootless container, no egress, ro-rootfs, caps dropped, resource caps, kill-on-timeout, compile-only (no link/run) |
+| **TB6** | network client → server (HTTP) | **first network attack surface** (v1.1; ADR-011) | secure-by-default: stdio default, else loopback; network bind needs TLS+auth (fail closed); bearer auth (mTLS/OAuth-pluggable); rate-limit + size caps + strict CORS; per-request authZ + session-ownership; same read-only catalog |
 
 ## 3. STRIDE per element / flow
 
@@ -122,6 +125,21 @@ the output — compile-only (`-c`) into a throwaway tmpfs.
 | **D** | Compiler bomb (macro/template/`#include` blowup) exhausts CPU/mem/time | M×M=**Med** | memory/cpu/pids caps + **kill-on-timeout** (engine `--timeout`); fail closed → `ok=False` |
 | **E** | Compiler/sandbox escape to host | L×H=**Med** | gVisor runtime in prod (ADR-004); `no-new-privileges` + seccomp; caps dropped; pinned + verified compiler image (supply chain) |
 
+### TB6 — Network client → Server over HTTP (v1.1 — ADR-011)
+HTTP is the first **network** boundary. Default stays stdio; HTTP defaults to loopback; a network
+bind is opt-in + gated and **fails closed at startup without TLS + an authenticator**. Mitigations
+live in the `server/` shell (the tool/session/worker layers are unchanged and already bounded);
+applies `std-owasp-api` + `std-zero-trust` + `topic-authn-authz`.
+
+| STRIDE | Threat | L×I | Mitigation |
+|--------|--------|-----|------------|
+| **S** | Unauthenticated/forged caller invokes the tool surface | M×H=**High** | **default-deny auth** on every TCP bind: required bearer token (constant-time, secret-managed), mTLS/OAuth-pluggable; generic `401` (no user/credential oracle); network bind without auth refuses to start |
+| **T** | Request tampering / MITM on the wire | M×H=**High** | **TLS required off-loopback** (1.2+, prefer 1.3); plaintext only on loopback/UDS; HSTS + security headers; proxy-terminated TLS supported |
+| **R** | Caller denies issuing a request | L×M=**Low** | structured audit log per request (principal, tool, sizes, outcome — redacted, `topic-logging-observability`); append-only stream |
+| **I** | Cross-principal/session data disclosure (BOLA) or verbose errors leak internals | M×H=**High** | **session ownership bound to the authenticated principal** (API1); per-request authZ server-side (complete mediation); consistent error envelope, no stack traces/internals (`topic-error-handling`); strict CORS (no `*`+creds; default no origins) |
+| **D** | Request flood / huge payloads exhaust the worker pool or server | M×H=**High** | per-client **rate limit + quota**, **request size caps**, timeouts + backpressure (`topic-reliability`); bounded by ADR-002 one-worker-per-session + eviction; loopback default limits reach |
+| **E** | Remote caller escalates via the network edge to actions beyond the read-only catalog | L×H=**Med** | **same frozen read-only catalog** (no new/mutation tools); the network edge does not bypass per-call validation/allow-listing (defense in depth); least privilege; the hostile-binary containment (TB3) is unchanged and unaffected by transport |
+
 ## 4. Supply chain (build-time)
 | Threat | L×I | Mitigation |
 |--------|-----|------------|
@@ -137,6 +155,9 @@ the output — compile-only (`-c`) into a throwaway tmpfs.
 - **Sandbox escape from gVisor + no-network** is assumed hard but not impossible; defense-in-depth
   (ADR-001/004) and CVE patching are the controls. A confirmed escape → incident response.
 - **Out of scope (v1):** remote/network attackers (no HTTP), authn/multi-tenant authz, mutation.
+- **v1.1 HTTP (TB6, ADR-011):** the network attacker is now in scope, mitigated by secure-by-default
+  exposure (stdio→loopback→gated network) + fail-closed TLS/auth. **Still out of scope:** multi-
+  tenant authZ (v1.1 is single-principal) and mutation tools (raise LLM08 sharply — revisit separately).
 
 ## 6. Abuse-case list for WS4 (REQUIRED — acceptance criteria)
 

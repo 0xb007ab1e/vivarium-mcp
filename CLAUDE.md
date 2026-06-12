@@ -20,9 +20,10 @@
 @~/.claude/rules/workflow-threat-model.md  # STRIDE over the 4 trust boundaries (docs/security/threat-model.md)
 @~/.claude/rules/workflow-cve-management.md # track CVEs in Ghidra, the JDK, the base image, and Python deps
 @~/.claude/rules/workflow-runbooks.md      # operational runbooks incl. evict-poisoned-worker, CVE digest-bump
-# --- Deferred to v1.1 (HTTP transport / network surface) — DO NOT build in v1 ---
-# @~/.claude/rules/std-owasp-api.md         # v1.1: only when HTTP transport lands (v1 is stdio-only — no API surface)
-# @~/.claude/rules/std-zero-trust.md        # v1.1: mTLS / per-request authZ once the server is network-reachable
+# --- Activated for the v1.1 HTTP transport increment (network surface; ADR-011 / threat-model TB6) ---
+@~/.claude/rules/std-owasp-api.md          # HTTP API surface: authN, rate-limit, CORS, payload caps, BOLA/API1
+@~/.claude/rules/std-zero-trust.md         # network-reachable server: per-request authZ, mTLS-capable, default-deny
+@~/.claude/rules/topic-authn-authz.md      # bearer baseline + mTLS/OAuth-pluggable; session-ownership bound to principal
 
 > **Import-lean justification (master §6).** v1 is a single stdio process whose dominant risk is
 > *running a hostile binary through Ghidra and feeding its output to an LLM*. The set above targets
@@ -31,11 +32,11 @@
 > `topic-resource-management`, `topic-reliability`, `topic-container-k8s`), supply chain for the
 > pinned Ghidra/JDK image (`std-supplychain`, `workflow-cve-management`), and the verification +
 > ops machinery (`topic-testing`, `workflow-cicd`, `workflow-threat-model`, `workflow-runbooks`).
-> Deliberately **omitted in v1**: `std-owasp-api` and `std-zero-trust` (no network surface until the
-> HTTP transport v1.1 increment — they get re-imported and separately threat-modeled then);
-> `topic-authn-authz` (no authentication boundary inside a single stdio process); `std-privacy`
-> (no personal data — analyzed artifacts are confidential but not PII by design). Add a module when
-> a real need appears (HTTP, multi-tenant, persistence), not preemptively.
+> **v1.1 HTTP transport (ADR-011 / TB6) activates** `std-owasp-api` + `std-zero-trust` +
+> `topic-authn-authz` — the network surface they were deferred for has arrived (separately threat-
+> modeled as TB6). Still deliberately **omitted**: `std-privacy` (no personal data — artifacts are
+> confidential but not PII by design) and multi-tenant modules (v1.1 HTTP is single-principal). Add
+> a module when a real need appears (multi-tenant, persistence), not preemptively.
 
 ## Stack
 - **Language/runtime:** Python 3.12+ (CPython). Isolated env (`uv`/venv); deps pinned with a
