@@ -79,7 +79,7 @@ def test_deterministic_order() -> None:
 def test_crypto_signatures_well_formed() -> None:
     """Every crypto signature has valid even-length lowercase hex + closed-vocab labels."""
     assert CRYPTO_SIGNATURES
-    kinds = {"sbox", "iv", "magic"}
+    kinds = {"sbox", "iv", "magic", "table"}
     for sig in CRYPTO_SIGNATURES:
         assert isinstance(sig, CryptoSignature)
         assert re.fullmatch(r"[0-9a-f]+", sig.pattern_hex), sig
@@ -115,3 +115,33 @@ def test_scan_crypto_constants_empty() -> None:
     """No matches → no hits."""
     sig = CryptoSignature("AES", "sbox", "637c")
     assert scan_crypto_constants([(sig, [])]) == []
+
+
+def test_crc32_table_signature_present() -> None:
+    """CRC-32 (the reflected IEEE table zlib/gzip/PNG embed) is a known signature."""
+    crc = [s for s in CRYPTO_SIGNATURES if s.algorithm == "CRC-32"]
+    assert len(crc) == 1 and crc[0].kind == "table"
+    # entries 1..4 little-endian: 0x77073096 0xEE0E612C 0x990951BA 0x076DC419
+    assert crc[0].pattern_hex == "963007772c610eeeba51099919c46d07"
+
+
+def test_domain_requires_known_tld_drops_elf_section_noise() -> None:
+    """ELF section/symbol names (dotted, but non-TLD) must NOT be reported as domains."""
+    noise = [
+        ("0x1", "note.gnu.property"),
+        ("0x2", "gnu.hash"),
+        ("0x3", "rela.dyn"),
+        ("0x4", "gnu.version_r"),
+    ]
+    assert scan_iocs(noise, categories=("domain",)) == []
+
+
+def test_domain_keeps_real_domains() -> None:
+    """Genuine domains (known TLD) still match after the TLD filter."""
+    rows = [
+        ("0x1", "exfil to login.microsoft.com now"),
+        ("0x2", "fetch a.co.uk"),
+        ("0x3", "cdn.evil-corp.example"),
+    ]
+    values = {h.value for h in scan_iocs(rows, categories=("domain",))}
+    assert values == {"login.microsoft.com", "a.co.uk", "cdn.evil-corp.example"}

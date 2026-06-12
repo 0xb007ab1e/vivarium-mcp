@@ -1056,7 +1056,7 @@ class CryptoConstantFinding(_Out):
 
     Attributes:
         algorithm: Algorithm label (closed vocabulary, e.g. ``"AES"``, ``"SHA-256"``) — safe.
-        kind: Constant kind (``"sbox"`` / ``"iv"`` / ``"magic"``) — safe.
+        kind: Constant kind (``"sbox"`` / ``"iv"`` / ``"magic"`` / ``"table"``) — safe.
         address: Address where the constant was found (hex) — safe.
     """
 

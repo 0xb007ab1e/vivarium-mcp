@@ -16,7 +16,7 @@ std-cwe CWE-1333), and inputs are length-capped by the caller before matching.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
 #: Hard cap on the characters of any single string scanned for IOCs (defense against pathological
@@ -38,6 +38,100 @@ _IOC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("unc_path", re.compile(r"\\\\[A-Za-z0-9_.$\-]{1,255}\\[^\r\n]{1,255}")),
     ("registry_key", re.compile(r"\bHK(?:LM|CU|CR|U|CC)\\[^\r\n]{1,512}")),
 )
+
+#: Curated set of common top-level domains. The bare ``domain`` regex matches ANY dotted token, so
+#: binary artifacts like ELF section/symbol names (``note.gnu.property``, ``gnu.hash``) were
+#: reported as "domains" on essentially every binary. Requiring the final label to be a real TLD
+#: removes that noise. HEURISTIC: obscure ccTLDs are intentionally omitted (precision over recall —
+#: a missed exotic domain is cheaper than a section name on every scan).
+_DOMAIN_TLDS: frozenset[str] = frozenset(
+    {
+        # generic
+        "com",
+        "net",
+        "org",
+        "info",
+        "biz",
+        "io",
+        "co",
+        "dev",
+        "app",
+        "xyz",
+        "online",
+        "site",
+        "top",
+        "live",
+        "cloud",
+        "tech",
+        "ai",
+        "me",
+        "tv",
+        "cc",
+        "gov",
+        "edu",
+        "mil",
+        "int",
+        "name",
+        "pro",
+        "mobi",
+        "asia",
+        "link",
+        "click",
+        "work",
+        "shop",
+        "store",
+        "blog",
+        "game",
+        "fun",
+        "example",  # example: RFC 2606 reserved documentation TLD
+        # country-code (common)
+        "us",
+        "uk",
+        "ca",
+        "au",
+        "de",
+        "fr",
+        "es",
+        "it",
+        "nl",
+        "ru",
+        "cn",
+        "jp",
+        "kr",
+        "in",
+        "br",
+        "mx",
+        "za",
+        "se",
+        "no",
+        "fi",
+        "dk",
+        "pl",
+        "ch",
+        "at",
+        "be",
+        "ie",
+        "nz",
+        "sg",
+        "hk",
+        "tw",
+        "ua",
+        "tr",
+        "ir",
+        "kp",
+        "eu",
+    }
+)
+
+
+def _domain_has_known_tld(text: str) -> bool:
+    """Whether a ``domain``-pattern match ends in a curated common TLD (drops ELF-section noise)."""
+    _, _, tld = text.rpartition(".")
+    return tld.lower() in _DOMAIN_TLDS
+
+
+#: Per-category acceptance filters applied after the regex (precision the regex can't express).
+_IOC_ACCEPT: dict[str, Callable[[str], bool]] = {"domain": _domain_has_known_tld}
 
 #: All IOC category names, in deterministic scan order.
 IOC_CATEGORIES: tuple[str, ...] = tuple(name for name, _ in _IOC_PATTERNS)
@@ -85,7 +179,10 @@ def scan_iocs(
         scanned = value[:MAX_SCAN_LEN]
         for name, pat in selected:
             # Every pattern uses only non-capturing groups, so findall yields whole-match strings.
+            accept = _IOC_ACCEPT.get(name)
             for text in pat.findall(scanned):
+                if accept is not None and not accept(text):
+                    continue
                 key = (name, text)
                 if key in seen:
                     continue
@@ -101,7 +198,7 @@ class CryptoSignature:
 
     Attributes:
         algorithm: The algorithm label (e.g. ``"AES"``, ``"SHA-256"``) — safe.
-        kind: What the constant is (``"sbox"``, ``"iv"``, ``"magic"``) — safe.
+        kind: What the constant is (``"sbox"``, ``"iv"``, ``"magic"``, ``"table"``) — safe.
         pattern_hex: Lowercase hex of the constant byte sequence, fed to the ``search_bytes`` RPC.
     """
 
@@ -128,6 +225,11 @@ CRYPTO_SIGNATURES: tuple[CryptoSignature, ...] = (
     ),
     # SHA-512 init H0..H1 prefix (big-endian) — prefix kept short to bound the search.
     CryptoSignature("SHA-512", "iv", "6a09e667f3bcc908bb67ae8584caa73b"),
+    # CRC-32 (IEEE, reflected) lookup table entries 1..4, little-endian as stored in memory:
+    # 0x77073096 0xEE0E612C 0x990951BA 0x076DC419. Skips entry 0 (all-zero, too generic). This is
+    # the table zlib/gzip/PNG and countless others embed. (Adler-32 has no constant table — it is
+    # pure arithmetic mod 65521 — so it is not byte-signaturable and is intentionally omitted.)
+    CryptoSignature("CRC-32", "table", "963007772c610eeeba51099919c46d07"),
 )
 
 
@@ -137,7 +239,7 @@ class CryptoHit:
 
     Attributes:
         algorithm: Algorithm label (closed vocabulary) — safe.
-        kind: Constant kind (``"sbox"``/``"iv"``/``"magic"``) — safe.
+        kind: Constant kind (``"sbox"``/``"iv"``/``"magic"``/``"table"``) — safe.
         address: Address where the constant was found (hex) — safe.
     """
 
