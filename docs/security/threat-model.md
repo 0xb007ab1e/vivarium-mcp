@@ -2,9 +2,9 @@
 
 > Method: STRIDE over a data-flow diagram (`workflow-threat-model`). Scope: v1 (Tier-1 read-only,
 > **stdio only**). v1.1 increments are modeled inline as they land: Tier-2 reporting (§9, ADR-008),
-> semantic-naming (§8, ADR-007), the naming-eval compiler (TB5, ADR-010), and the **HTTP transport
-> network boundary (TB6, ADR-011)**. Mutation tools remain out of scope. Source of truth:
-> [`PLAN.md`](../../PLAN.md).
+> semantic-naming (§8, ADR-007), the naming-eval compiler (TB5, ADR-010), the **HTTP transport
+> network boundary (TB6, ADR-011)**, and the **mutation (write) boundary (TB7, §10, ADR-012 —
+> PROPOSED)**. Source of truth: [`PLAN.md`](../../PLAN.md).
 > **Data classification:** the analyzed binary and all derived artifacts are **confidential** and
 > of **hostile origin** (master §5).
 
@@ -61,6 +61,7 @@ flowchart LR
 | **TB4** | worker → server → LLM | untrusted output (prompt injection) | untrusted-data envelope, never auto-execute |
 | **TB5** | naming eval → compiler | **attacker-derived C compiled** (v1.1 eval; ADR-010) | sandbox like TB3: rootless container, no egress, ro-rootfs, caps dropped, resource caps, kill-on-timeout, compile-only (no link/run) |
 | **TB6** | network client → server (HTTP) | **first network attack surface** (v1.1; ADR-011) | secure-by-default: stdio default, else loopback; network bind needs TLS+auth (fail closed); bearer auth (mTLS/OAuth-pluggable); rate-limit + size caps + strict CORS; per-request authZ; BOLA closed by construction (CSPRNG session-id capability + single principal; per-principal owner deferred to multi-principal); same read-only catalog |
+| **TB7** | client write-request → program mutation | **first write/agency boundary** — an LLM-exposed tool now *mutates* the per-session analysis (rename/comment) (v1.1 PROPOSED; ADR-012, §10) | **default-deny write consent** per session (human-in-the-loop gate — LLM08); annotation-only minimal set (rename function/symbol, set comment); allow-list write-name validation + comment normalization on the way IN (stored-injection defense); **one Ghidra transaction per write → rollback on failure**; per-write audit (intent+outcome); **session-scoped + ephemeral** (no persistence — wiped on evict, ADR-002); server NEVER mutates (ADR-001 — write executes only in the worker) |
 
 ## 3. STRIDE per element / flow
 
@@ -149,15 +150,28 @@ applies `std-owasp-api` + `std-zero-trust` + `topic-authn-authz`.
 
 ## 5. Residual risk & assumptions
 
-- **Prompt injection is not fully preventable** — the envelope + read-only tools + never-auto-execute
-  **limit blast radius**; the agent host must honor the rendering contract. Tracked as the top
-  residual risk; revisit when mutation tools (v1.1) are considered (they raise LLM08 sharply).
+- **Prompt injection is not fully preventable** — the envelope + never-auto-execute **limit blast
+  radius**; the agent host must honor the rendering contract. Tracked as the top residual risk.
+  **Re-rated for TB7 (ADR-012 PROPOSED):** the read-only "no destructive action exists to trigger"
+  bound (TB4-E) **no longer holds once mutation lands** — an injection that reaches the client can
+  now steer a *write*. The compensating controls are TB7's: default-deny write consent (human gate),
+  allow-list write-name validation, per-write audit, transaction rollback, optional `session_undo`,
+  and the unchanged ADR-002 ephemerality (a poisoned session is disposable and wiped on evict). The
+  worst case shifts from "wrong data shown" to "wrong annotation persisted in a disposable session",
+  not host/durable compromise. **Residual:** within a write-enabled session the annotation writes are
+  autonomous, so an injection during that window can mis-annotate before the operator notices —
+  bounded by reversibility + audit, not prevented.
 - **Sandbox escape from gVisor + no-network** is assumed hard but not impossible; defense-in-depth
   (ADR-001/004) and CVE patching are the controls. A confirmed escape → incident response.
 - **Out of scope (v1):** remote/network attackers (no HTTP), authn/multi-tenant authz, mutation.
 - **v1.1 HTTP (TB6, ADR-011):** the network attacker is now in scope, mitigated by secure-by-default
-  exposure (stdio→loopback→gated network) + fail-closed TLS/auth. **Still out of scope:** multi-
-  tenant authZ (v1.1 is single-principal) and mutation tools (raise LLM08 sharply — revisit separately).
+  exposure (stdio→loopback→gated network) + fail-closed TLS/auth.
+- **v1.1 mutation (TB7, ADR-012 — PROPOSED):** the write/agency boundary is now in scope (see §10),
+  mitigated by default-deny write consent + atomic+reversible+audited annotation writes + session
+  ephemerality. **Still out of scope:** multi-tenant authZ (single-principal); structural writes
+  (locals/signatures/types) and cross-session annotation **persistence** (each its own future gated,
+  separately-threat-modeled increment — ADR-012 §1/§4); `runScript`/arbitrary script execution
+  (permanently out of scope — PLAN §2).
 
 ## 6. Abuse-case list for WS4 (REQUIRED — acceptance criteria)
 
@@ -260,3 +274,63 @@ New/relevant threats and controls:
 **Residual risk (added to §5).** IOC/crypto scans are heuristic — a client must not treat a hit as
 proof or a miss as clean. The same indirect-prompt-injection residual as abuse-case 5 applies to all
 binary-derived Tier-2 strings (the envelope is defense-in-depth, not a guarantee).
+
+## 10. TB7 — Client write-request → program mutation (v1.1 — ADR-012, PROPOSED)
+
+The **first write/agency boundary.** Until now every tool was read-only/output-only (§8, §9 record
+"no mutation tool exists"). ADR-012's annotation-only write set (`rename_function`, `rename_symbol`,
+`set_comment`, gated by the server-side `session_enable_writes`) lets an **LLM-driven client mutate
+the per-session program DB**. This is **new agency** (`std-owasp-llm` LLM08) and a new trust boundary
+over the **integrity of the analysis the operator relies on** — *not* a host-compromise boundary
+(**ADR-001 still holds: the server never loads the JVM or mutates; the write executes only inside the
+hardened worker** over the internal RPC). The boundary sits on the existing TB1/TB6 (client args/
+network), TB2 (server→worker RPC — gains new write methods, same channel), and TB4 (untrusted
+worker output — a write tool's echoed prior name stays `Untrusted[...]`). The hostile-binary
+containment (TB3) and worker isolation (ADR-004) are **unchanged and unaffected** by adding writes.
+
+The dominant new risk classes are **E**levation (write = new agency / LLM08), **T**ampering (a
+mutation corrupting analysis state, or one session's writes reaching another), **R**epudiation (an
+unattributable mutation), and **D** (a write-flood). STRIDE:
+
+| STRIDE | Threat | L×I | Mitigation (control · module) |
+|--------|--------|-----|-------------------------------|
+| **S** | Caller forges identity to issue writes | N/A stdio (single trusted host); on HTTP same as TB6 (bearer/mTLS authn, generic `401`) — writes add no new identity surface | reuse TB6 authn; write **consent** is bound to the authenticated principal + session (ADR-012 §3) |
+| **T** | **Injection-steered malicious write** — indirect prompt injection (TB4) steers the client into a `new_name`/comment carrying markup/path/zero-width/RTL/control chars, **persisted** into the DB and later re-served (stored injection / data poisoning) | **H×M=High** | write payload validated as **untrusted, attacker-influenced** input at the boundary — allow-list **`validate_write_name`** (identifier charset) + bounded `validate_comment_text` normalization on the way **IN**; closed-vocabulary `comment_type`; the **read path still wraps `Untrusted` + normalizes on the way OUT** (ADR-005) — two-sided defense in depth (`std-owasp-proactive` #5, CWE-20, abuse-cases 2/3) |
+| **T** | **Partial / corrupting write** — a write that fails mid-operation leaves the program in an inconsistent state | M×M=**Med** | **one Ghidra transaction per mutation**; commit only on success, **`endTransaction(commit=False)` rollback on any exception** → fail closed, surfaced as `analysis-failed`; program unchanged (ADR-012 §4, abuse-case 4) |
+| **T** | **Cross-session write contamination** — a write (or write-consent) for session A affects session B's analysis state | M×H=**High** | one worker + one program per session (ADR-002); write consent is **per session**; `authorize()` BOLA chokepoint scopes every call; stores independent and verified-wiped on evict (abuse-cases 5/8) |
+| **R** | **Unattributable mutation** — operator/agent denies a write, or a bad annotation can't be traced | M×M=**Med** | **per-write audit log: intent + outcome** (tool, session id (opaque), target address, value sizes, applied/denied — **never** the binary-derived content or the new value verbatim beyond size; redacted — `topic-logging-observability`); append-only stream; the write-consent grant/revoke is itself audited |
+| **I** | Write result over-discloses / echoes hostile content as instructions | M×M=**Med** | a write echoes only `address` (server-normalized, safe), `applied`/`kind` (safe), and the prior `old_name` **wrapped `Untrusted[...]`** (ADR-005); session-scoped (BOLA — TB1/TB6); no cross-session reuse |
+| **D** | **Write-flood / unbounded consumption** — a burst of writes (LLM04 cost-DoS) exhausts the worker or grows state without bound | M×M=**Med** | each write is **one bounded transaction** (no unbounded growth); same per-tool **timeout that kills the worker**, concurrency cap + backpressure, and (HTTP) per-client rate limit as reads (`topic-reliability`, ADR-011 §5); abuse-case 6 |
+| **E** | **Excessive agency** — the LLM autonomously performs destructive writes without human intent; or escalates beyond the annotation set | **H×H=Critical** | **default-deny: sessions are read-only**; mutation requires the explicit, auditable, revocable, per-session, non-transferable `session_enable_writes` **human-in-the-loop consent gate** (LLM08 least-agency); the catalog is a **fixed allow-list of annotation-only writes** (no locals/signatures/types/`runScript` — those are deferred/forbidden); structural writes will need a **separate** `allow_structural` opt-in; `session_undo` bounds a mistake (ADR-012 §1/§3/§4, abuse-cases 1/7) |
+| **E** | A write bypasses the server to reach the JVM directly | L×H=**Med** | **ADR-001 invariant unchanged** — no JVM/PyGhidra import server-side (the architecture-invariant CI test covers the new write handlers too); the write is a typed worker RPC, not in-process (abuse-case 8) |
+
+**Residual risk (added to §5).** Mutation **raises LLM08 agency**: the read-only "no destructive
+action exists" bound (TB4-E) no longer holds — an injection reaching the client can steer a write
+*within a write-enabled session*, before the operator notices. Bounded — not prevented — by
+default-deny consent (the human gate), allow-list write validation, transaction rollback, per-write
+audit, optional `session_undo`, and ADR-002 session ephemerality (a poisoned session is disposable
+and wiped on evict; mutations do not persist). The worst case is a mis-annotated **disposable**
+session, not host or durable-data compromise.
+
+### Abuse cases for the mutation increment (append to §6; benign/synthetic fixtures only)
+
+These map 1:1 to new cases in `tests/security/test_abuse_cases.py` (ADR-012 §7). Each must FAIL the
+attack (the control holds), deterministic + hermetic, synthetic fixtures only (master §5):
+
+14. **Write-without-consent** — a mutation tool on a session lacking `session_enable_writes` is
+    denied (read-only default; fail closed). (TB7-E)
+15. **Injection-steered malicious name** — a `new_name` with markup/`../path`/zero-width/RTL/control
+    chars is rejected by `validate_write_name` (never written to the DB). (TB7-T)
+16. **Comment stored-injection** — a `set_comment` `text` carrying a prompt-injection + bidi/
+    zero-width payload is normalized/annotated on write and returned `Untrusted`-wrapped on read-back,
+    never bare instructions. (TB7-T / TB4 — extends abuse-case 5)
+17. **Failed-write atomicity** — a worker write that raises mid-transaction rolls back
+    (`commit=False`) and surfaces `analysis-failed`; the program is unchanged. (TB7-T)
+18. **Cross-session write isolation** — write consent + a rename on session A does not enable writes
+    on, or mutate, session B. (TB7-T / store-I — extends abuse-case 8)
+19. **Write-flood / consumption** — a burst of writes is bounded by the per-tool timeout +
+    concurrency cap + (HTTP) rate limit; a hung write kills the worker. (TB7-D)
+20. **BOLA on the grant** — `session_enable_writes` against an unknown/foreign session id yields the
+    same `session-invalid` envelope (no oracle). (TB7-E / BOLA — extends abuse-case 6)
+21. **ADR-001 invariant under writes** — the architecture-invariant test still passes: no JVM/
+    PyGhidra import on any server-side module, including the new write handlers. (TB7-E)
