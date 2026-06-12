@@ -4,7 +4,9 @@
 > **stdio only**). v1.1 increments are modeled inline as they land: Tier-2 reporting (§9, ADR-008),
 > semantic-naming (§8, ADR-007), the naming-eval compiler (TB5, ADR-010), the **HTTP transport
 > network boundary (TB6, ADR-011)**, the **annotation-mutation (write) boundary (TB7, §10,
-> ADR-012)**, and the **structural-mutation increment (TB7 structural, §10, ADR-013 — PROPOSED)**.
+> ADR-012)**, the **structural-mutation Phase A (TB7 structural, §10, ADR-013)**, and the
+> **structural-mutation Phase B — signature + data-type apply (TB7 structural Phase B, §10,
+> ADR-014 — PROPOSED)**.
 > Source of truth: [`PLAN.md`](../../PLAN.md).
 > **Data classification:** the analyzed binary and all derived artifacts are **confidential** and
 > of **hostile origin** (master §5).
@@ -170,18 +172,22 @@ applies `std-owasp-api` + `std-zero-trust` + `topic-authn-authz`.
 - **v1.1 mutation (TB7, ADR-012):** the annotation write/agency boundary is in scope (see §10),
   mitigated by default-deny write consent + atomic+reversible+audited annotation writes + session
   ephemerality.
-- **v1.1 structural mutation (TB7 structural, ADR-013 — PROPOSED):** Phase A adds the first
-  **structural** writes — `rename_local_variable`/`rename_parameter` via the HighFunction path, gated
-  by the existing `allow_structural` opt-in (see §10 "TB7 (structural)"), mitigated by the two-level
-  default-deny consent + one-transaction rollback (incl. the §4 commit-time CWE-460 fix) +
-  `session_undo` + per-write audit + ADR-002 ephemerality. The highest-risk surface
-  (attacker-influenced type/signature strings parsed by the C parser) is **deferred to Phase B and
-  design-decided as structured/constrained** — absent from this increment by construction.
-  **Still out of scope:** multi-tenant authZ (single-principal); **Phase B structural writes**
-  (`set_function_signature`, `define_data_type`, `apply_data_type` — type-string parsing) and
-  cross-session **persistence** (each its own future gated, separately-threat-modeled increment —
-  ADR-012 §1/§4, ADR-013 §1); `runScript`/arbitrary script execution (permanently out of scope —
-  PLAN §2).
+- **v1.1 structural mutation Phase A (TB7 structural, ADR-013):** the first **structural** writes —
+  `rename_local_variable`/`rename_parameter` via the HighFunction path, gated by the existing
+  `allow_structural` opt-in (see §10 "TB7 (structural)"), mitigated by the two-level default-deny
+  consent + one-transaction rollback (incl. the §4 commit-time CWE-460 fix) + `session_undo` +
+  per-write audit + ADR-002 ephemerality.
+- **v1.1 structural mutation Phase B (TB7 structural Phase B, ADR-014 — PROPOSED):** the first
+  **type-aware** structural writes — `set_function_signature` + `apply_data_type` over a
+  **structured/constrained `TypeRef`** input (resolved/base types, NOT free-form C — ADR-013 §2a,
+  ratified), so the C-parser injection surface is **absent by construction** (see §10 "TB7 (structural
+  Phase B)"). Same `allow_structural` gate + one-transaction rollback + `session_undo` + audit +
+  ephemerality; the live new concerns are the wider re-flow/re-render blast radius (signature → callers)
+  and construction-time DoS (bounded params/depth/array-length).
+  **Still out of scope:** multi-tenant authZ (single-principal); **Phase C composite-type creation**
+  (`define_data_type`/`create_struct` — its own future gated, separately-threat-modeled increment,
+  ADR-014 §1) and cross-session **persistence** (ADR-012 §4); `runScript`/arbitrary script execution
+  (permanently out of scope — PLAN §2).
 
 ## 6. Abuse-case list for WS4 (REQUIRED — acceptance criteria)
 
@@ -421,3 +427,89 @@ attack (the control holds), deterministic + hermetic, synthetic fixtures only (m
 30. **ADR-001 invariant under structural writes** — the architecture-invariant test still passes: no
     JVM/PyGhidra import on any server-side module, including the new structural handlers (the write +
     the decompile-for-HighSymbol execute only in the worker). (TB7-E — extends case 21)
+
+### TB7 (structural Phase B) — Signature + data-type apply (v1.1 — ADR-014, PROPOSED)
+
+ADR-014 **Phase B** extends TB7 (structural) from the Phase-A name-only renames to the first
+**type-aware** structural writes — `set_function_signature` (set a function's prototype) and
+`apply_data_type` (lay a resolvable type at an address). It is **the same trust boundary** (TB7),
+**not a new one**: same TB1/TB6 (client args/network), TB2 (server→worker RPC — gains two new write
+methods, same channel), TB4 (untrusted worker output — echoed `function`/`old_signature`/
+`new_signature`/`type_name` stay `Untrusted[...]`). **ADR-001 still holds: the server never loads the
+JVM or mutates; the type resolution and the write execute only in the hardened worker.** Hostile-binary
+containment (TB3) and worker isolation (ADR-004) are **unchanged**.
+
+What is **new vs the Phase-A renames** (ADR-014 §1/§2): Phase B is where the structural risk class (a)
+flagged in ADR-013 §2 — **type/signature strings parsed by Ghidra's C parser** — would have landed,
+**and it is eliminated by construction**: ADR-014 honors the human-ratified ADR-013 §2(a) pre-decision
+and accepts a **structured/constrained `TypeRef` + bounded `ParamSpec` + closed-vocabulary
+calling-convention** input assembled in the worker from **already-resolved `DataType` handles** — **no
+client string ever reaches `CParser`/`DataTypeParser`** (`std-owasp-llm` LLM07). The two live new
+concerns are therefore **(c)** the **larger re-flow blast radius** — a signature change re-renders
+every **caller**'s decompiled view, an applied type re-renders dependent items (ADR-013 §2c) — and the
+**construction-time DoS** of unbounded params/pointer-depth/array-length (now in *our* assembly code,
+not a parser). Phase B keeps composite-type *creation* (`define_data_type`/`create_struct`) **deferred
+to Phase C** (the widest surface + recursive-definition risk).
+
+| STRIDE | Threat (structural Phase B) | L×I | Mitigation (control · module) |
+|--------|------------------------------|-----|-------------------------------|
+| **E** | **Type-aware structural agency without intent / escalation beyond the rename set** — the LLM autonomously sets a signature or applies a type | **H×H=Critical** | **same two-level default-deny** as Phase A: `session_enable_writes{allow_structural:true}` + each handler calls `require_write_consent(structural=True)` (the existing chokepoint — `manager.py:301-331`, **no new gate**); fixed allow-list (only `set_function_signature`/`apply_data_type` in Phase B; composite-type *creation* deferred to Phase C; `runScript` forbidden); `session_undo` reverts in one step (ADR-014 §1/§4) |
+| **T** | **Type/signature C-parser injection** — an injection-steered type/signature string causes parser-bomb consumption, unintended type definitions, or smuggled markup in type names | **N/A — ELIMINATED by construction** | the input is a **structured `TypeRef`/`ParamSpec`/closed-vocab CC** model; the worker assembles typed Java `DataType`/`FunctionDefinitionDataType` objects from already-resolved handles — **`CParser`/`DataTypeParser` are never instantiated on a client value** (ADR-014 §2; abuse-case 31). A `named` `TypeRef` is a bounded identifier *looked up* in the `DataTypeManager`, never parsed; free-form C is the rejected alternative (ADR-013 §2a, ratified) |
+| **T** | **Signature/storage re-flow corruption** — `updateFunction` (re-flowing params/storage) or its commit-time re-render of callers fails mid-operation → inconsistent program | M×M=**Med** | **type/function resolution is read-only and BEFORE `startTransaction`** (an unresolvable `TypeRef`/function is a clean `not-found`, no txn opened); **one transaction per write, rollback on any exception incl. commit-time** (the ADR-013 §4 CWE-460 fix — `_jvm_bridge.py:1533-1569` — which already covers the commit-time re-flow a signature change makes *more* likely to raise); bounded per-call timeout **kills the worker** on a hung re-flow (ADR-014 §4, abuse-cases 32/33) |
+| **T** | **Larger re-flow/re-render tampering blast radius** — a signature change re-renders every **caller**; an applied type re-renders dependent data/decompilation (wider than a Phase-A one-function rename — ADR-013 §2c) | M×H=**High** | bounded by **one-transaction rollback** + **`session_undo`** (revert the last committed transaction) + **ADR-002 session ephemerality** (worst case is a mis-restructured **disposable** session, wiped on evict — never host/durable compromise); composite-type *creation* (the widest re-render) is deferred to Phase C (ADR-014 §1, abuse-case 36) |
+| **T** | **Structural stored-injection / data-poisoning via parameter names** — a malicious `ParamSpec.name` (markup/path/zero-width/RTL/control) persisted and re-served by `function_context`/`decompile_function` | M×M=**Med** | **reuse `validate_write_name`** (the identifier allow-list — `validation.py:303-337`) on every parameter name IN; the read path re-wraps `Untrusted[...]` + re-normalizes OUT (ADR-005) — same two-sided defense as ADR-012/013 §7 (abuse-case 35) |
+| **D** | **Construction-time / re-flow consumption** — oversized `parameters`, pointer depth, or array length, or a burst of signature changes each re-flowing callers, exhausts the worker | M×M=**Med** | **bounded at the boundary BEFORE any worker call**: `_MAX_PARAMS` (≈64), `_MAX_POINTER_DEPTH` (≈8), `_MAX_ARRAY_LEN` (≈65536) rejected as `VALIDATION`/`LIMIT_EXCEEDED`; an applied array/type footprint is **map-confined** by the worker before write; each write is one bounded transaction; the per-tool **timeout kills the worker** on a hung re-flow; concurrency cap + (HTTP) rate limit (CWE-400, `topic-reliability`, ADR-014 §2.5/§7, abuse-cases 34/40) |
+| **R** | **Unattributable Phase-B mutation** | M×M=**Med** | **per-write audit: intent + outcome** (tool, session id (opaque), target sizes/param-count/flags, applied/denied — **never** binary-derived content or the new signature/type verbatim; redacted — `topic-logging-observability`); same posture as ADR-012/013 TB7-R |
+| **E** | A Phase-B write bypasses the server to reach the JVM directly | L×H=**Med** | **ADR-001 invariant unchanged** — no JVM/PyGhidra import server-side (the architecture-invariant CI test covers the new `set_function_signature`/`apply_data_type` handlers); the write **and** the type resolution are a typed worker RPC, not in-process (abuse-case 39) |
+
+**Residual risk (added to §5).** Phase B raises LLM08 agency once more: within an `allow_structural`
+session the type-aware writes are autonomous, so an injection during that window can corrupt a
+function's prototype (re-rendering its callers) or mis-apply a type before the operator notices —
+bounded, not prevented, by the two-level opt-in, transaction rollback (incl. the commit-time fix),
+per-write audit, `session_undo`, and ADR-002 ephemerality. **The highest-risk surface that ADR-013 §2
+named — attacker-influenced type/signature strings parsed by the C parser — is ABSENT from this
+increment by construction** (structured input, not free-form C — ADR-013 §2a, ratified). The worst
+case is a mis-restructured **disposable** session, not host or durable-data compromise. **Still out of
+scope:** Phase C composite-type *creation* (`define_data_type`/`create_struct` — its own gated,
+separately-threat-modeled increment) and cross-session persistence (ADR-012 §4); `runScript`/arbitrary
+script execution (permanently out of scope — PLAN §2).
+
+### Abuse cases for the structural Phase-B increment (append to §6; benign/synthetic fixtures only)
+
+These map 1:1 to new cases in `tests/security/test_abuse_cases.py` (ADR-014 §7). Each must FAIL the
+attack (the control holds), deterministic + hermetic, synthetic fixtures only (master §5):
+
+31. **Type-ref injection attempt rejected** — a `TypeRef.named` carrying C-declaration syntax / markup
+    / `*`-laden text / a struct body (`"struct{int x;}"`, `"int*"`, `"a;b"`) is rejected by
+    `validate_type_ref` (not a valid identifier; never parsed) → `VALIDATION`; no type defined/applied.
+    (TB7-T — the design-eliminated C-parser surface, proven absent)
+32. **Unresolvable-type fail-closed** — a well-formed but **unknown** `named` `TypeRef` surfaces
+    `not-found` with the program unchanged (resolution is before `startTransaction`; no partial write).
+    (TB7-T / atomicity)
+33. **Signature re-flow corruption / commit-time atomicity** — a signature change whose
+    `updateFunction` **or its commit-time re-flow** raises rolls back and surfaces `analysis-failed`;
+    no dangling transaction, no untyped escape (the ADR-013 §4 CWE-460 fix). The program is unchanged.
+    (TB7-T — extends case 26)
+34. **Oversized-params / construction DoS** — `parameters` > `_MAX_PARAMS`, `pointer_levels` >
+    `_MAX_POINTER_DEPTH`, or `array_len` > `_MAX_ARRAY_LEN` is rejected at the boundary
+    (`VALIDATION`/`LIMIT_EXCEEDED`) before any worker call; a hung re-flow is bounded by the per-tool
+    timeout that kills the worker. (TB7-D — extends case 28)
+35. **Injection-steered malicious parameter name** — a `ParamSpec.name` with markup/`../path`/
+    zero-width/RTL/control chars is rejected by `validate_write_name` (never written). (TB7-T —
+    extends case 24)
+36. **Cross-session structural isolation** — `allow_structural` + a signature/type apply on session A
+    does not enable or mutate session B. (TB7-T / store-I — extends case 27)
+37. **Structural-consent-required** — `set_function_signature`/`apply_data_type` on a session with
+    `allow_structural=false` is denied "structural writes not permitted"; on a read-only session,
+    "session is read-only" (the `require_write_consent(structural=True)` chokepoint —
+    `manager.py:326-330`). (TB7-E / gating — extends cases 22/23)
+38. **BOLA on the structural grant** — unchanged: a grant against an unknown/foreign session id yields
+    the same `session-invalid` envelope (no oracle). (TB7-E / BOLA — same chokepoint as case 29)
+39. **ADR-001 invariant under Phase-B writes** — the architecture-invariant test still passes: no
+    JVM/PyGhidra import on any server-side module, including the new `set_function_signature`/
+    `apply_data_type` handlers (the write **and** the type resolution execute only in the worker).
+    (TB7-E — extends case 30)
+40. **Address-not-in-map / out-of-bounds apply** — `apply_data_type` at an address outside the program
+    memory map (or where the type footprint would overrun a region) fails closed
+    (`analysis-failed`/`not-found`) with no write — worker map-confinement before the transaction.
+    (TB7-T)
