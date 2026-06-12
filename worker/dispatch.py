@@ -86,6 +86,9 @@ RPC_METHODS = frozenset(
         # structural writes (v1.1 — ADR-013 Phase A; HighFunction path; gated by allow_structural)
         "rename_local_variable",
         "rename_parameter",
+        # structural type-aware writes (v1.1 — ADR-014 Phase B; resolved TypeRefs, NO C parser)
+        "set_function_signature",
+        "apply_data_type",
         "ping",
         "shutdown",
     }
@@ -245,6 +248,15 @@ class GhidraBackend(Protocol):
 
     def rename_parameter(self, params: dict[str, Any]) -> dict[str, Any]:
         """Rename one function parameter inside a transaction (name-only) — v1.1."""
+        ...
+
+    # --- structural type-aware writes (v1.1 — ADR-014 Phase B; resolved TypeRefs, one txn) ---
+    def set_function_signature(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Set a function's structured signature from resolved types inside a transaction — v1.1."""
+        ...
+
+    def apply_data_type(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Apply a resolvable type at an address inside a transaction — v1.1."""
         ...
 
 

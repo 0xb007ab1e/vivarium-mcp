@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ghidra_mcp.core.envelope import Untrusted
 
@@ -36,6 +36,11 @@ _MAX_LIMIT = 10_000
 _MAX_READ = 1_048_576  # 1 MiB
 _DEFAULT_LIMIT = 100
 _MAX_COMMENT = 4096  # max accepted/written comment text length (ADR-012 §6; bounded write payload)
+
+# --- structured type-model bounds (ADR-014 §2.5; construction-time DoS guard — CWE-400) ---
+_MAX_PARAMS = 64  # a function with >64 params is pathological; bounds construction + re-flow cost
+_MAX_POINTER_DEPTH = 8  # sane ``****…`` cap on a TypeRef's pointer modifiers
+_MAX_ARRAY_LEN = 65_536  # bounds an array element-count; the worker confines its byte footprint too
 
 
 class _In(BaseModel):
@@ -1395,4 +1400,170 @@ class StructuralRenameResult(_Out):
     function: Untrusted[str]
     old_name: Untrusted[str]
     new_name: str
+    applied: bool
+
+
+# --- structural type-aware writes (v1.1 — ADR-014 Phase B; GATED by allow_structural) ----------
+#
+# The signature/type input is STRUCTURED, never free-form C (ADR-014 §2): a `TypeRef` names a base
+# type (closed vocabulary) or an existing `named` type (looked up — never parsed) plus bounded
+# pointer/array modifiers; a `ParamSpec` is a bounded (name, type) pair; the calling convention is a
+# closed allow-list. The worker assembles every Ghidra type object from already-resolved `DataType`
+# handles — `CParser`/`DataTypeParser` are NEVER instantiated on a client value. An unresolvable /
+# out-of-vocab / out-of-bounds `TypeRef` fails closed (VALIDATION at the boundary; not-found at the
+# worker for an unknown `named`). Asymmetry (ADR-005/ADR-012 §6): values WE set / closed-vocab are
+# SAFE; echoed binary-derived fields (`function`/`old_signature`/`new_signature`/`type_name`) are
+# `Untrusted` — note `new_signature` is untrusted because Ghidra RE-RENDERS our applied prototype.
+
+# Closed base-type vocabulary mapped to Ghidra built-ins in the worker (NOT client-extensible —
+# ADR-014 §2.5). Admits no free text; a value outside this Literal is rejected by pydantic.
+BaseType = Literal[
+    "void",
+    "bool",
+    "char",
+    "uchar",
+    "wchar_t",
+    "int8",
+    "uint8",
+    "int16",
+    "uint16",
+    "int32",
+    "uint32",
+    "int64",
+    "uint64",
+    "int",
+    "uint",
+    "long",
+    "ulong",
+    "float",
+    "double",
+]
+
+
+class TypeRef(_In):
+    """A structured reference to a data type — resolved against the program's DataTypeManager.
+
+    Exactly one of ``base``/``named`` identifies the leaf type; the modifiers are bounded. NO C
+    string is parsed — the worker assembles a ``DataType`` from already-resolved handles (ADR-014
+    §2.1). A ``named`` reference must already EXIST in the program (validated at the worker; an
+    unknown name → ``not-found``); ``base`` is mapped to a Ghidra built-in.
+
+    Attributes:
+        base: One of the closed :data:`BaseType` vocabulary, or ``None``. Mutually exclusive with
+            ``named`` (exactly one must be set — model-validated).
+        named: The name of a type already present in the program's ``DataTypeManager`` — looked up,
+            never parsed. Mutually exclusive with ``base``.
+        pointer_levels: Number of ``*`` modifiers to wrap the leaf in (``0..=_MAX_POINTER_DEPTH``).
+        array_len: Fixed array length (``1..=_MAX_ARRAY_LEN``), or ``None`` for a non-array.
+    """
+
+    base: BaseType | None = None
+    named: str | None = Field(default=None, min_length=1, max_length=_MAX_NAME)
+    pointer_levels: int = Field(default=0, ge=0, le=_MAX_POINTER_DEPTH)
+    array_len: int | None = Field(default=None, ge=1, le=_MAX_ARRAY_LEN)
+
+    @model_validator(mode="after")
+    def _exactly_one_leaf(self) -> TypeRef:
+        """Enforce that exactly one of ``base``/``named`` identifies the leaf type (ADR-014 §2.1).
+
+        Returns:
+            ``self`` when the shape is valid.
+
+        Raises:
+            ValueError: When neither or both of ``base``/``named`` are set (the server boundary maps
+                a pydantic ``ValidationError`` to a ``VALIDATION`` envelope — fail closed).
+        """
+        if (self.base is None) == (self.named is None):
+            raise ValueError("exactly one of `base` or `named` must be set")
+        return self
+
+
+class ParamSpec(_In):
+    """One parameter of a structured signature (ADR-014 §2.2).
+
+    Attributes:
+        name: The parameter name — PERSISTED into the program DB, so it is held to the strict
+            write-name identifier allow-list (``validate_write_name``) server-side before the write.
+        type: The parameter's type as a resolved :class:`TypeRef`.
+    """
+
+    name: str = Field(min_length=1, max_length=_MAX_NAME)
+    type: TypeRef
+
+
+class SetFunctionSignatureIn(_SessionScopedIn):
+    """Arguments for ``set_function_signature`` — a structured signature (NO C string — ADR-014 §2).
+
+    Gated by ``session_enable_writes{allow_structural: true}`` + ``require_write_consent(
+    structural=True)``. The worker resolves ``return_type`` and each parameter ``type`` against the
+    program's ``DataTypeManager`` BEFORE the transaction (resolution is read-only — ADR-014 §4); an
+    unresolvable type is a clean ``not-found`` with no transaction opened.
+
+    Attributes:
+        function: The existing function to retype, by entry address (hex) or current name.
+        return_type: The function's return type as a resolved :class:`TypeRef`.
+        parameters: The ordered parameter list — bounded to ``_MAX_PARAMS`` (DoS guard, CWE-400).
+        calling_convention: A closed-allow-list convention name (program-derived + static fallback),
+            or ``None`` to leave the convention unchanged. Never a free-form string.
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    return_type: TypeRef
+    parameters: list[ParamSpec] = Field(default_factory=list, max_length=_MAX_PARAMS)
+    calling_convention: str | None = Field(default=None, max_length=_MAX_NAME)
+
+
+class SetFunctionSignatureResult(_Out):
+    """Result of ``set_function_signature`` (ADR-014 §5).
+
+    Attributes:
+        address: The function's entry address (hex) — server-normalized, safe.
+        function: The function's current name — binary-derived → untrusted (ADR-005).
+        old_signature: The PRIOR prototype string — binary-derived → untrusted.
+        new_signature: The re-rendered applied prototype — binary-derived → untrusted (Ghidra
+            RE-RENDERS our input, which can normalize/expand it).
+        applied: Whether the write committed — server/worker-controlled, safe.
+    """
+
+    address: str
+    function: Untrusted[str]
+    old_signature: Untrusted[str]
+    new_signature: Untrusted[str]
+    applied: bool
+
+
+class ApplyDataTypeIn(_SessionScopedIn):
+    """Arguments for ``apply_data_type`` — lay a RESOLVABLE type at an address (ADR-014 §2.4).
+
+    Gated by ``session_enable_writes{allow_structural: true}`` + ``require_write_consent(
+    structural=True)``. The worker resolves ``type`` (read-only) and confines ``address`` to the
+    program memory map BEFORE the transaction; an unresolvable type → ``not-found``, an out-of-map
+    address or an over-running footprint → fail closed (no write).
+
+    Attributes:
+        address: The address (hex) to apply the type at — validated via ``parse_address`` + worker
+            map-confinement.
+        type: The type to apply as a resolved :class:`TypeRef` (existing/base/derived) — never
+            parsed.
+        clear_existing: Whether to clear conflicting defined data first (default ``False``).
+    """
+
+    address: str = Field(min_length=1, max_length=_MAX_NAME)
+    type: TypeRef
+    clear_existing: bool = Field(default=False)
+
+
+class ApplyDataTypeResult(_Out):
+    """Result of ``apply_data_type`` (ADR-014 §5).
+
+    Attributes:
+        address: Server-normalized address (hex) — safe.
+        type_name: The resolved type's name — binary-derived → untrusted (ADR-005).
+        size: The applied size in bytes — worker-computed scalar, safe.
+        applied: Whether the write committed — safe.
+    """
+
+    address: str
+    type_name: Untrusted[str]
+    size: int
     applied: bool

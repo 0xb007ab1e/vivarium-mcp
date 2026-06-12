@@ -73,11 +73,12 @@ def test_expected_sha256_pattern_enforced() -> None:
 
 @pytest.mark.critical
 def test_catalog_count_matches_registry() -> None:
-    # 43 tools per the frozen catalog: 22 Tier-1 read-only + 5 v1.1 semantic-naming (ADR-007)
+    # 45 tools per the frozen catalog: 22 Tier-1 read-only + 5 v1.1 semantic-naming (ADR-007)
     # + 8 v1.1 Tier-2 reporting/metrics (ADR-008) + 6 v1.1 mutation/write (ADR-012) + 2 v1.1
-    # structural mutation (ADR-013 Phase A). The registry list is the single source.
+    # structural mutation (ADR-013 Phase A) + 2 v1.1 structural type-aware mutation (ADR-014
+    # Phase B). The registry list is the single source.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 43
+    assert len(TIER1_TOOL_NAMES) == 45
 
 
 @pytest.mark.critical

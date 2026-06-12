@@ -96,6 +96,9 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     # structural writes (v1.1 — ADR-013 Phase A; additionally GATED by allow_structural)
     "rename_local_variable",
     "rename_parameter",
+    # structural type-aware writes (v1.1 — ADR-014 Phase B; additionally GATED by allow_structural)
+    "set_function_signature",
+    "apply_data_type",
 )
 
 
@@ -714,6 +717,60 @@ def _handle_rename_parameter(
     return result
 
 
+# --- structural type-aware writes (v1.1 — ADR-014 Phase B). Same gate as Phase A (the
+# allow_structural opt-in) PLUS structured-input validation: the signature/type is validated as a
+# resolved TypeRef + bounded ParamSpec + closed-vocab convention BEFORE the worker — NO C string is
+# parsed (validate_signature / validate_type_ref / validate_calling_convention; ADR-014 §2/§3).
+def _handle_set_function_signature(
+    ctx: ToolContext, args: s.SetFunctionSignatureIn
+) -> s.SetFunctionSignatureResult:
+    """Set a function's structured signature (structural; gated by allow_structural — ADR-014)."""
+    ctx.sessions.require_write_consent(args.session_id, structural=True)
+    v.validate_signature(args)  # function selector + bounded params + resolved TypeRefs + cc
+    _log.info(
+        "tool.set_function_signature.intent",
+        extra={
+            "tool": "set_function_signature",
+            "session": args.session_id,
+            "function_len": len(args.function),
+            "param_count": len(args.parameters),
+            "has_calling_convention": args.calling_convention is not None,
+        },
+    )
+    result = ctx.port.set_function_signature(args.session_id, args)
+    _log.info(
+        "tool.set_function_signature.outcome",
+        extra={
+            "tool": "set_function_signature",
+            "session": args.session_id,
+            "applied": result.applied,
+        },
+    )
+    return result
+
+
+def _handle_apply_data_type(ctx: ToolContext, args: s.ApplyDataTypeIn) -> s.ApplyDataTypeResult:
+    """Apply a resolvable type at an address (structural; gated by allow_structural — ADR-014)."""
+    ctx.sessions.require_write_consent(args.session_id, structural=True)
+    v.parse_address(args.address)  # validate/confine the target address (CWE-22/190)
+    v.validate_type_ref(args.type)  # resolved TypeRef shape/bounds (worker not-founds an unknown)
+    _log.info(
+        "tool.apply_data_type.intent",
+        extra={
+            "tool": "apply_data_type",
+            "session": args.session_id,
+            "address_len": len(args.address),
+            "clear_existing": args.clear_existing,
+        },
+    )
+    result = ctx.port.apply_data_type(args.session_id, args)
+    _log.info(
+        "tool.apply_data_type.outcome",
+        extra={"tool": "apply_data_type", "session": args.session_id, "applied": result.applied},
+    )
+    return result
+
+
 # Map of tool name → (handler, input-schema). The input schema is the handler's single argument
 # type, from which FastMCP derives the tool's JSON schema. The output schema is the return type.
 _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
@@ -762,6 +819,9 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     # structural writes (v1.1 — ADR-013 Phase A; gated additionally by allow_structural)
     "rename_local_variable": (_handle_rename_local_variable, s.RenameLocalVariableIn),
     "rename_parameter": (_handle_rename_parameter, s.RenameParameterIn),
+    # structural type-aware writes (v1.1 — ADR-014 Phase B; gated additionally by allow_structural)
+    "set_function_signature": (_handle_set_function_signature, s.SetFunctionSignatureIn),
+    "apply_data_type": (_handle_apply_data_type, s.ApplyDataTypeIn),
 }
 
 

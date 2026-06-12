@@ -330,6 +330,47 @@ class PyGhidraBackend:
         new_name = str(_require(params, "new_name"))
         return self._gh_rename_high_variable(function, parameter, new_name, is_parameter=True)
 
+    def set_function_signature(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Set a function's structured signature (write; resolved types, one txn — ADR-014).
+
+        Args:
+            params: ``{"function": str, "return_type": TypeRef, "parameters": [ParamSpec],
+                "calling_convention": str | None}`` where ``TypeRef`` is
+                ``{"base", "named", "pointer_levels", "array_len"}`` and ``ParamSpec`` is
+                ``{"name", "type": TypeRef}``. The worker resolves each ``TypeRef`` against the
+                ``DataTypeManager`` (NO C parser) before the transaction.
+
+        Returns:
+            ``{"address", "function", "old_signature", "new_signature", "applied"}`` (plain; the
+            server wraps the signature fields as untrusted).
+        """
+        function = str(_require(params, "function"))
+        return_type = _require(params, "return_type")
+        parameters = _require(params, "parameters")
+        calling_convention = params.get("calling_convention")
+        return self._gh_set_function_signature(
+            function,
+            return_type,
+            parameters,
+            None if calling_convention is None else str(calling_convention),
+        )
+
+    def apply_data_type(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Apply a resolvable type at an address (write; resolved type, one txn — ADR-014).
+
+        Args:
+            params: ``{"address": str, "type": TypeRef, "clear_existing": bool}``. The worker
+                resolves the ``TypeRef`` (NO C parser) and confines the address to the memory map
+                before the transaction.
+
+        Returns:
+            ``{"address", "type_name", "size", "applied"}`` (plain; the server wraps ``type_name``).
+        """
+        address = str(_require(params, "address"))
+        type_ref = _require(params, "type")
+        clear_existing = bool(params.get("clear_existing", False))
+        return self._gh_apply_data_type(address, type_ref, clear_existing)
+
     # --- JVM edge (PyGhidra calls live ONLY here; imported lazily) ---------------------------
     # NOTE: these helpers are the worker-only JVM boundary. They are excluded from server unit
     # coverage and exercised only by the integration suite against a real pinned worker image. The
@@ -1527,6 +1568,241 @@ class PyGhidraBackend:
             "function": func_name,
             "old_name": old_name,
             "new_name": new_name,
+            "applied": True,
+        }
+
+    # --- structural type-aware write JVM edges (ADR-014 Phase B; resolve→assemble→one txn) -----
+    # The TypeRef resolution is read-only and runs BEFORE startTransaction (ADR-014 §4): an
+    # unresolvable type is a clean not-found with no transaction opened. NO CParser/DataTypeParser
+    # is ever instantiated — every Ghidra type object is assembled from already-resolved DataType
+    # handles looked up in the DataTypeManager (the same lookup _gh_get_data_type uses).
+    _BASE_TYPE_VOCAB = frozenset(
+        {
+            "void",
+            "bool",
+            "char",
+            "uchar",
+            "wchar_t",
+            "int8",
+            "uint8",
+            "int16",
+            "uint16",
+            "int32",
+            "uint32",
+            "int64",
+            "uint64",
+            "int",
+            "uint",
+            "long",
+            "ulong",
+            "float",
+            "double",
+        }
+    )
+
+    def _gh_resolve_type_ref(self, ref: dict[str, Any]) -> Any:  # pragma: no cover - JVM edge
+        """Resolve a structured ``TypeRef`` to a Ghidra ``DataType`` (read-only — ADR-014 §2.1).
+
+        Resolves the leaf (a closed ``base`` mapped to a built-in, or a ``named`` type looked up in
+        the ``DataTypeManager`` — must already exist), then wraps it in bounded
+        ``PointerDataType``/``ArrayDataType`` modifiers. NEVER parses a string.
+
+        Args:
+            ref: ``{"base", "named", "pointer_levels", "array_len"}`` (server-validated shape).
+
+        Returns:
+            The resolved Ghidra ``DataType``.
+
+        Raises:
+            WorkerError: ``not-found`` if a ``named`` type does not exist; ``invalid-params`` on a
+                malformed/out-of-vocab ref (defense in depth — the server already allow-listed it).
+        """
+        from ghidra.program.model.data import (  # type: ignore[import-not-found]
+            ArrayDataType,
+            BooleanDataType,
+            CharDataType,
+            DoubleDataType,
+            FloatDataType,
+            IntegerDataType,
+            LongDataType,
+            LongLongDataType,
+            PointerDataType,
+            ShortDataType,
+            SignedByteDataType,
+            UnsignedCharDataType,
+            UnsignedIntegerDataType,
+            UnsignedLongDataType,
+            UnsignedLongLongDataType,
+            UnsignedShortDataType,
+            VoidDataType,
+            WideCharDataType,
+        )
+        from worker.dispatch import CODE_INVALID_PARAMS, CODE_NOT_FOUND, WorkerError
+
+        program = self._require_program()
+        manager = program.getDataTypeManager()
+        base = ref.get("base")
+        named = ref.get("named")
+        if (base is None) == (named is None):
+            raise WorkerError(CODE_INVALID_PARAMS, "type reference must set exactly one leaf")
+
+        leaf: Any
+        if base is not None:
+            if base not in self._BASE_TYPE_VOCAB:
+                raise WorkerError(CODE_INVALID_PARAMS, "type reference base not in the allow-list")
+            builtins = {
+                "void": VoidDataType,
+                "bool": BooleanDataType,
+                "char": CharDataType,
+                "uchar": UnsignedCharDataType,
+                "wchar_t": WideCharDataType,
+                "int8": SignedByteDataType,
+                "uint8": UnsignedCharDataType,
+                "int16": ShortDataType,
+                "uint16": UnsignedShortDataType,
+                "int32": IntegerDataType,
+                "uint32": UnsignedIntegerDataType,
+                "int64": LongLongDataType,
+                "uint64": UnsignedLongLongDataType,
+                "int": IntegerDataType,
+                "uint": UnsignedIntegerDataType,
+                "long": LongDataType,
+                "ulong": UnsignedLongDataType,
+                "float": FloatDataType,
+                "double": DoubleDataType,
+            }
+            leaf = builtins[str(base)].dataType
+        else:
+            leaf = None
+            for data_type in manager.getAllDataTypes():
+                if str(data_type.getName()) == str(named):
+                    leaf = data_type
+                    break
+            if leaf is None:
+                raise WorkerError(CODE_NOT_FOUND, "named type not found")
+
+        for _ in range(int(ref.get("pointer_levels") or 0)):
+            leaf = PointerDataType(leaf)
+        array_len = ref.get("array_len")
+        if array_len is not None:
+            leaf = ArrayDataType(leaf, int(array_len), leaf.getLength())
+        return leaf
+
+    def _gh_set_function_signature(
+        self,
+        function: str,
+        return_type: dict[str, Any],
+        parameters: list[dict[str, Any]],
+        calling_convention: str | None,
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Set a function's signature from resolved types inside one transaction (ADR-014 §1).
+
+        Resolves the return type + each parameter type (read-only, before the transaction), builds
+        ``ParameterImpl`` handles, then applies via ``Function.updateFunction`` inside one
+        transaction (commit-time re-flow re-renders callers — the corrected ``_in_transaction``
+        rolls back on a write/commit failure). NO C string is parsed.
+
+        Args:
+            function: The target function (entry address hex or current name).
+            return_type: The return type as a ``TypeRef`` dict.
+            parameters: Ordered ``[{"name", "type": TypeRef}]`` (server-validated names + shapes).
+            calling_convention: A closed-allow-list convention name, or ``None`` (leave unchanged).
+
+        Returns:
+            ``{"address", "function", "old_signature", "new_signature", "applied"}`` (plain).
+
+        Raises:
+            WorkerError: ``not-found`` if the function or a ``named`` type does not resolve;
+                ``invalid-params`` for an unknown convention; ``analysis-failed`` on a rolled-back
+                write.
+        """
+        from ghidra.program.model.listing import Function, ParameterImpl
+        from ghidra.program.model.symbol import SourceType
+        from worker.dispatch import CODE_INVALID_PARAMS, WorkerError
+
+        program = self._require_program()
+        func = self._resolve_function(function)
+        address = str(func.getEntryPoint())
+        func_name = _to_text(func.getName())
+        old_signature = _to_text(func.getPrototypeString(False, False))
+
+        # Resolve everything BEFORE the transaction (fail closed with no txn opened — ADR-014 §4).
+        resolved_return = self._gh_resolve_type_ref(return_type)
+        params: list[Any] = []
+        for spec in parameters:
+            dt = self._gh_resolve_type_ref(_require(spec, "type"))
+            params.append(ParameterImpl(str(_require(spec, "name")), dt, program))
+        if calling_convention is not None:
+            known = {str(c) for c in program.getCompilerSpec().getCallingConventions()}
+            if calling_convention != "default" and calling_convention not in known:
+                raise WorkerError(CODE_INVALID_PARAMS, "calling convention not known for program")
+
+        def _write() -> None:
+            func.updateFunction(
+                None if calling_convention is None else calling_convention,
+                resolved_return,
+                Function.FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS,
+                True,
+                SourceType.USER_DEFINED,
+                *params,
+            )
+
+        self._in_transaction("set_function_signature", _write)
+        new_signature = _to_text(func.getPrototypeString(False, False))
+        return {
+            "address": address,
+            "function": func_name,
+            "old_signature": old_signature,
+            "new_signature": new_signature,
+            "applied": True,
+        }
+
+    def _gh_apply_data_type(
+        self, address: str, type_ref: dict[str, Any], clear_existing: bool
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Apply a resolvable type at an address inside one transaction (ADR-014 §1).
+
+        Resolves the ``TypeRef`` and parses+confines the address (read-only, before the txn), then
+        lays the type down via ``DataUtilities.createData``. NO C string is parsed.
+
+        Args:
+            address: The target address (hex).
+            type_ref: The type to apply as a ``TypeRef`` dict.
+            clear_existing: Whether to clear conflicting defined data first.
+
+        Returns:
+            ``{"address", "type_name", "size", "applied"}`` (plain).
+
+        Raises:
+            WorkerError: ``not-found`` if the ``named`` type does not resolve; ``invalid-params``
+                on a bad address; ``analysis-failed`` on a rolled-back write (incl.
+                conflict-without-clear / out-of-map footprint).
+        """
+        from ghidra.program.model.data import DataUtilities
+        from ghidra.program.model.data.DataUtilities import (  # type: ignore[import-not-found]
+            ClearDataMode,
+        )
+
+        program = self._require_program()
+        dt = self._gh_resolve_type_ref(type_ref)  # before the txn (fail closed, no partial write)
+        addr = self._parse_address(address)
+        clear_mode = (
+            ClearDataMode.CLEAR_ALL_CONFLICT_DATA
+            if clear_existing
+            else ClearDataMode.CHECK_FOR_SPACE
+        )
+        applied_holder: dict[str, Any] = {}
+
+        def _write() -> None:
+            data = DataUtilities.createData(program, addr, dt, dt.getLength(), False, clear_mode)
+            applied_holder["name"] = _to_text(data.getDataType().getName())
+            applied_holder["size"] = int(data.getLength())
+
+        self._in_transaction("apply_data_type", _write)
+        return {
+            "address": str(addr),
+            "type_name": applied_holder["name"],
+            "size": applied_holder["size"],
             "applied": True,
         }
 
