@@ -13,7 +13,7 @@ so a misconfigured environment can only make a bound *stricter* within hard ceil
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from ghidra_mcp.security.limits import Limits, resolve_limits
@@ -36,6 +36,19 @@ _ENV_WORKER_GID = "GHIDRA_MCP_WORKER_GID"
 _ENV_RPC_SOCKET_DIR = "GHIDRA_MCP_RPC_SOCKET_DIR"
 _ENV_IMPORT_ROOT = "GHIDRA_MCP_IMPORT_ROOT"
 
+# HTTP transport (v1.1 — ADR-011 / threat-model TB6). Default transport stays stdio; these are read
+# only when transport=http. (These are env-var NAMES, not secrets.)
+_ENV_TRANSPORT = "GHIDRA_MCP_TRANSPORT"
+_ENV_HTTP_BIND = "GHIDRA_MCP_HTTP_BIND"
+_ENV_HTTP_TLS_CERT = "GHIDRA_MCP_HTTP_TLS_CERT"
+_ENV_HTTP_TLS_KEY = "GHIDRA_MCP_HTTP_TLS_KEY"
+_ENV_HTTP_AUTH = "GHIDRA_MCP_HTTP_AUTH"
+_ENV_HTTP_BEARER_TOKEN = "GHIDRA_MCP_HTTP_BEARER_TOKEN"  # noqa: S105  # nosec B105 - env var name
+_ENV_HTTP_CORS_ORIGINS = "GHIDRA_MCP_HTTP_CORS_ORIGINS"
+_ENV_HTTP_RATE_PER_S = "GHIDRA_MCP_HTTP_RATE_PER_SECOND"
+_ENV_HTTP_RATE_BURST = "GHIDRA_MCP_HTTP_RATE_BURST"
+_ENV_HTTP_MAX_BODY_BYTES = "GHIDRA_MCP_HTTP_MAX_BODY_BYTES"
+
 # Secure defaults for non-limit operational knobs (12-Factor: safe-by-default).
 _DEFAULT_LOG_LEVEL = "INFO"
 _DEFAULT_LOG_FORMAT = "json"
@@ -50,9 +63,55 @@ _DEFAULT_IMPORT_ROOT = "/work/imports"
 # Allow-lists for enum-like values.
 _VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR"})
 _VALID_LOG_FORMATS = frozenset({"json", "text"})
+_VALID_TRANSPORTS = frozenset({"stdio", "http"})
+_VALID_HTTP_AUTH = frozenset({"none", "bearer", "mtls", "oauth"})
 
 # Cap on string-valued config to bound startup input (worker image refs, socket dirs).
 _MAX_CONFIG_STR_LEN = 512
+
+# HTTP transport defaults (ADR-011). Secure-by-default: stdio transport; HTTP binds loopback.
+_DEFAULT_TRANSPORT = "stdio"
+_DEFAULT_HTTP_BIND = "127.0.0.1:8765"
+_DEFAULT_HTTP_RATE_PER_S = 10
+_DEFAULT_HTTP_RATE_BURST = 20
+_DEFAULT_HTTP_MAX_BODY_BYTES = 1_048_576  # 1 MiB request cap
+_MIN_BEARER_TOKEN_LEN = 16
+# Hosts that need no TLS/auth guard (no network hop). Bracketed IPv6 is stripped before lookup.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+@dataclass(frozen=True, slots=True)
+class HttpConfig:
+    """Validated HTTP-transport config (v1.1 — ADR-011 / TB6); ``None`` unless transport=http.
+
+    Built by :func:`_load_http_config`, which enforces the secure-by-default fail-closed rules
+    (network bind ⇒ TLS + auth; bearer ⇒ token; no ``*`` CORS). All values are safe to log EXCEPT
+    ``bearer_token`` (excluded from ``repr`` — it is a secret, `workflow-secrets`).
+
+    Attributes:
+        bind: ``host:port`` or ``unix:/path.sock``.
+        is_network: True iff a non-loopback TCP bind (network-reachable) — the gated, TLS+auth case.
+        is_unix_socket: True iff a UDS bind (same-host; filesystem-permission auth).
+        tls_cert / tls_key: PEM paths for in-app TLS, or ``None`` (e.g. plaintext loopback or
+            reverse-proxy-terminated TLS). Both-or-neither.
+        auth_mode: ``"none"`` (loopback/UDS only) / ``"bearer"`` (built) / ``"mtls"`` / ``"oauth"``.
+        bearer_token: The bearer secret when ``auth_mode == "bearer"`` (else ``None``) — NOT logged.
+        cors_origins: Explicit allowed origins (never ``*``); empty = no cross-origin.
+        rate_per_second / rate_burst: Per-client token-bucket rate limit (DoS — API4).
+        max_body_bytes: Request body size cap.
+    """
+
+    bind: str
+    is_network: bool
+    is_unix_socket: bool
+    tls_cert: str | None
+    tls_key: str | None
+    auth_mode: str
+    bearer_token: str | None = field(repr=False)
+    cors_origins: tuple[str, ...]
+    rate_per_second: int
+    rate_burst: int
+    max_body_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +132,8 @@ class Config:
         rpc_socket_dir: Directory for per-session RPC sockets.
         import_root: Host dir (read-only mount) under which importable inputs live; the confined
             ``source_ref`` resolver rejects refs outside it (CWE-22) — ADR-009.
+        transport: ``"stdio"`` (default) or ``"http"`` (v1.1 — ADR-011).
+        http: Validated :class:`HttpConfig` when ``transport == "http"``, else ``None``.
     """
 
     log_level: str
@@ -86,6 +147,8 @@ class Config:
     worker_gid: int
     rpc_socket_dir: str
     import_root: str
+    transport: str = _DEFAULT_TRANSPORT
+    http: HttpConfig | None = None
 
 
 def _startup_error(detail: str) -> GhidraMcpError:
@@ -206,6 +269,92 @@ def _read_str(env: dict[str, str], name: str, default: str, *, required: bool) -
     return value
 
 
+def _parse_bind(bind: str) -> tuple[bool, bool]:
+    """Classify an HTTP bind string. Returns ``(is_unix_socket, is_network)``.
+
+    ``unix:/path`` → UDS (no network). ``host:port`` → network iff ``host`` is non-loopback.
+    Bracketed IPv6 (``[::1]:8765``) is supported.
+
+    Raises:
+        GhidraMcpError: ``VALIDATION`` if the bind is not ``host:port`` or ``unix:/path``.
+    """
+    if bind.startswith("unix:"):
+        if len(bind) <= len("unix:"):
+            raise _startup_error(f"environment variable {_ENV_HTTP_BIND} unix bind needs a path")
+        return True, False
+    host, sep, port = bind.rpartition(":")
+    if sep == "" or not port.isdigit() or not (1 <= int(port) <= 65535):
+        raise _startup_error(
+            f"environment variable {_ENV_HTTP_BIND} must be host:port or unix:/path"
+        )
+    host = host.strip("[]")  # unwrap bracketed IPv6
+    return False, host not in _LOOPBACK_HOSTS
+
+
+def _load_http_config(src: dict[str, str]) -> HttpConfig:
+    """Build + validate the HTTP config (fail-closed, secure-by-default — ADR-011 §2/§4/§5).
+
+    Args:
+        src: The environment mapping.
+
+    Returns:
+        A validated :class:`HttpConfig`.
+
+    Raises:
+        GhidraMcpError: ``VALIDATION`` if a non-loopback bind lacks TLS or an authenticator, if
+            bearer auth lacks a sufficiently long token, if TLS cert/key are not both-or-neither, or
+            if CORS contains ``*``. The process must refuse to boot.
+    """
+    bind = _read_str(src, _ENV_HTTP_BIND, _DEFAULT_HTTP_BIND, required=False)
+    is_unix_socket, is_network = _parse_bind(bind)
+
+    tls_cert = _read_str(src, _ENV_HTTP_TLS_CERT, "", required=False) or None
+    tls_key = _read_str(src, _ENV_HTTP_TLS_KEY, "", required=False) or None
+    if (tls_cert is None) != (tls_key is None):
+        raise _startup_error("HTTP TLS cert and key must both be set or both unset")
+
+    # Loopback/UDS may run unauthenticated (single trusted host); a network bind defaults to bearer.
+    auth_mode = _read_choice(
+        src, _ENV_HTTP_AUTH, "bearer" if is_network else "none", _VALID_HTTP_AUTH
+    )
+    bearer_token = _read_str(src, _ENV_HTTP_BEARER_TOKEN, "", required=False) or None
+
+    cors_raw = _read_str(src, _ENV_HTTP_CORS_ORIGINS, "", required=False)
+    cors_origins = tuple(o for o in (part.strip() for part in cors_raw.split(",")) if o)
+
+    rate_per_second = _read_positive_int(src, _ENV_HTTP_RATE_PER_S, _DEFAULT_HTTP_RATE_PER_S)
+    rate_burst = _read_positive_int(src, _ENV_HTTP_RATE_BURST, _DEFAULT_HTTP_RATE_BURST)
+    max_body_bytes = _read_positive_int(src, _ENV_HTTP_MAX_BODY_BYTES, _DEFAULT_HTTP_MAX_BODY_BYTES)
+
+    # Fail-closed rules — the safe config is the only one that boots (master §2, ADR-011).
+    if is_network and tls_cert is None:
+        raise _startup_error("a non-loopback HTTP bind requires TLS (set cert and key)")
+    if is_network and auth_mode == "none":
+        raise _startup_error(
+            "a non-loopback HTTP bind requires an authenticator (auth must not be none)"
+        )
+    if auth_mode == "bearer" and (
+        bearer_token is None or len(bearer_token) < _MIN_BEARER_TOKEN_LEN
+    ):
+        raise _startup_error("bearer auth requires a token of at least 16 characters")
+    if "*" in cors_origins:
+        raise _startup_error("HTTP CORS origins must be explicit; '*' is not allowed")
+
+    return HttpConfig(
+        bind=bind,
+        is_network=is_network,
+        is_unix_socket=is_unix_socket,
+        tls_cert=tls_cert,
+        tls_key=tls_key,
+        auth_mode=auth_mode,
+        bearer_token=bearer_token,
+        cors_origins=cors_origins,
+        rate_per_second=rate_per_second,
+        rate_burst=rate_burst,
+        max_body_bytes=max_body_bytes,
+    )
+
+
 def load_config(env: dict[str, str] | None = None) -> Config:
     """Load and validate configuration from the environment; fail closed on error.
 
@@ -244,6 +393,11 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     rpc_socket_dir = _read_str(src, _ENV_RPC_SOCKET_DIR, _DEFAULT_RPC_SOCKET_DIR, required=False)
     import_root = _read_str(src, _ENV_IMPORT_ROOT, _DEFAULT_IMPORT_ROOT, required=False)
 
+    # Transport selection (v1.1 — ADR-011). HTTP config is built + validated (fail-closed) only when
+    # transport=http; stdio remains the secure default and needs no network config.
+    transport = _read_choice(src, _ENV_TRANSPORT, _DEFAULT_TRANSPORT, _VALID_TRANSPORTS)
+    http = _load_http_config(src) if transport == "http" else None
+
     # Limit overrides: only include keys that were explicitly set (let resolve_limits apply its own
     # defaults + hard clamps for the rest). resolve_limits is fail-closed (WS4).
     overrides: dict[str, int] = {}
@@ -271,4 +425,6 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         worker_gid=worker_gid,
         rpc_socket_dir=rpc_socket_dir,
         import_root=import_root,
+        transport=transport,
+        http=http,
     )
