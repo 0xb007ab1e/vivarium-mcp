@@ -36,6 +36,10 @@ _MAX_GRAPH_NODES = 50_000
 _MAX_GRAPH_EDGES = 200_000
 _MAX_GRAPH_DEPTH = 256
 _DEFAULT_MAX_FRAME_BYTES = 4 * 1024 * 1024  # 4 MiB (mirrors security.limits default)
+# Composite-type construction caps (v1.1 — ADR-015 §2.5): mirror schemas._MAX_COMPOSITE_SIZE. The
+# total computed size of an assembled struct/union is bounded INSIDE the txn after each member's
+# DataType.getLength() is known (the running-sum backstop against the recursion/fan-out DoS).
+_MAX_COMPOSITE_SIZE = 1_048_576  # 1 MiB
 
 
 def _require(params: dict[str, Any], key: str) -> Any:
@@ -370,6 +374,39 @@ class PyGhidraBackend:
         type_ref = _require(params, "type")
         clear_existing = bool(params.get("clear_existing", False))
         return self._gh_apply_data_type(address, type_ref, clear_existing)
+
+    def define_struct(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Create a new struct from a resolved field list (write; one txn — ADR-015 §3).
+
+        Args:
+            params: ``{"name": str, "fields": [FieldSpec], "packed": bool}`` where ``FieldSpec`` is
+                ``{"name", "type": TypeRef, "offset": int | None}``. The worker pre-registers the
+                empty struct, resolves each ``TypeRef`` (NO C parser), adds members (size-checked),
+                REJECTs a name collision, and finalizes — all inside one transaction.
+
+        Returns:
+            ``{"name", "kind", "size", "field_count", "applied"}`` (plain server/worker scalars).
+        """
+        name = str(_require(params, "name"))
+        fields = _require(params, "fields")
+        packed = bool(params.get("packed", False))
+        return self._gh_define_struct(name, fields, packed)
+
+    def define_union(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Create a new union from a resolved field list (write; one txn — ADR-015 §3).
+
+        Args:
+            params: ``{"name": str, "fields": [FieldSpec]}`` (a union ignores ``offset``/``packed``;
+                all members overlay at offset 0). The worker pre-registers the empty union, resolves
+                each ``TypeRef`` (NO C parser), adds members (size-checked), REJECTs a name
+                collision, and finalizes — all inside one transaction.
+
+        Returns:
+            ``{"name", "kind", "size", "field_count", "applied"}`` (plain server/worker scalars).
+        """
+        name = str(_require(params, "name"))
+        fields = _require(params, "fields")
+        return self._gh_define_union(name, fields)
 
     # --- JVM edge (PyGhidra calls live ONLY here; imported lazily) ---------------------------
     # NOTE: these helpers are the worker-only JVM boundary. They are excluded from server unit
@@ -1806,6 +1843,215 @@ class PyGhidraBackend:
             "size": applied_holder["size"],
             "applied": True,
         }
+
+    def _gh_define_struct(
+        self, name: str, fields: list[dict[str, Any]], packed: bool
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Create a new struct from a resolved field list inside one transaction (ADR-015 §3).
+
+        Mirrors the ADR-015 ratified recursion model: name-collision REJECT (read-only lookup before
+        the txn), then INSIDE the one transaction — pre-register the empty ``StructureDataType``
+        (so a self-``named`` pointer resolves), resolve + add each member (size-checked against
+        ``_MAX_COMPOSITE_SIZE``), and let ``_in_transaction`` finalize/roll back. Any failure rolls
+        back and removes the pre-registered type (no partial/orphan type). NO C string is parsed.
+
+        Args:
+            name: The new struct's name (server-validated identifier).
+            fields: The ordered ``[{"name", "type": TypeRef, "offset": int | None}]`` member list.
+            packed: Whether to pack the struct (no alignment padding).
+
+        Returns:
+            ``{"name", "kind": "struct", "size", "field_count", "applied"}`` (plain scalars).
+
+        Raises:
+            WorkerError: ``analysis-failed`` on a name collision or a rolled-back write;
+                ``not-found`` if a member ``TypeRef`` does not resolve; ``limit-exceeded`` if the
+                total computed size exceeds ``_MAX_COMPOSITE_SIZE``.
+        """
+        from ghidra.program.model.data import CategoryPath, StructureDataType
+
+        program = self._require_program()
+        manager = program.getDataTypeManager()
+        self._reject_type_collision(manager, name)
+
+        # Resolve every member type BEFORE the txn (read-only fail-closed — no partial type opened),
+        # EXCEPT a self-``named`` pointer, which can only resolve against the pre-registered type.
+        resolved = self._resolve_composite_fields(name, fields)
+
+        result_holder: dict[str, Any] = {}
+
+        def _write() -> None:
+            struct = StructureDataType(CategoryPath.ROOT, name, 0, manager)
+            if packed:
+                struct.setPackingEnabled(True)
+            # Pre-register the empty struct so a self-``named`` pointer member resolves (§3).
+            registered = manager.addDataType(struct, None)
+            total = 0
+            for field, dt in self._iter_composite_members(name, fields, resolved, registered):
+                length = int(dt.getLength())
+                total += max(length, 0)
+                if total > _MAX_COMPOSITE_SIZE:
+                    self._raise_composite_too_large()
+                offset = field.get("offset")
+                if offset is None:
+                    registered.add(dt, length, str(field["name"]), None)
+                else:
+                    registered.insertAtOffset(int(offset), dt, length, str(field["name"]), None)
+            result_holder["size"] = int(registered.getLength())
+            result_holder["field_count"] = int(registered.getNumComponents())
+
+        self._in_transaction("define_struct", _write)
+        return {
+            "name": name,
+            "kind": "struct",
+            "size": result_holder["size"],
+            "field_count": result_holder["field_count"],
+            "applied": True,
+        }
+
+    def _gh_define_union(
+        self, name: str, fields: list[dict[str, Any]]
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Create a new union from a resolved field list inside one transaction (ADR-015 §3).
+
+        Same ratified model as :meth:`_gh_define_struct` (name-collision REJECT, pre-register empty
+        ``UnionDataType`` inside the one txn so a self-``named`` pointer resolves, resolve + add
+        each member size-checked, finalize/roll back). A union overlays all members at offset 0
+        (``offset`` is ignored). NO C string is parsed.
+
+        Args:
+            name: The new union's name (server-validated identifier).
+            fields: The ``[{"name", "type": TypeRef}]`` member list (``offset`` ignored).
+
+        Returns:
+            ``{"name", "kind": "union", "size", "field_count", "applied"}`` (plain scalars).
+
+        Raises:
+            WorkerError: ``analysis-failed`` on a name collision or a rolled-back write;
+                ``not-found`` if a member ``TypeRef`` does not resolve; ``limit-exceeded`` if the
+                total computed size exceeds ``_MAX_COMPOSITE_SIZE``.
+        """
+        from ghidra.program.model.data import CategoryPath, UnionDataType
+
+        program = self._require_program()
+        manager = program.getDataTypeManager()
+        self._reject_type_collision(manager, name)
+        resolved = self._resolve_composite_fields(name, fields)
+
+        result_holder: dict[str, Any] = {}
+
+        def _write() -> None:
+            union = UnionDataType(CategoryPath.ROOT, name, manager)
+            registered = manager.addDataType(union, None)
+            total = 0
+            for field, dt in self._iter_composite_members(name, fields, resolved, registered):
+                length = int(dt.getLength())
+                # A union overlays members; its size is the max member size — but bound the running
+                # SUM too so a flood of large members is rejected (ADR-015 §3 backstop).
+                total += max(length, 0)
+                if total > _MAX_COMPOSITE_SIZE:
+                    self._raise_composite_too_large()
+                registered.add(dt, length, str(field["name"]), None)
+            result_holder["size"] = int(registered.getLength())
+            result_holder["field_count"] = int(registered.getNumComponents())
+
+        self._in_transaction("define_union", _write)
+        return {
+            "name": name,
+            "kind": "union",
+            "size": result_holder["size"],
+            "field_count": result_holder["field_count"],
+            "applied": True,
+        }
+
+    def _reject_type_collision(  # pragma: no cover - JVM edge
+        self, manager: Any, name: str
+    ) -> None:
+        """Fail-closed REJECT if a type of ``name`` already exists (ADR-015 §6).
+
+        A read-only ``DataTypeManager`` lookup BEFORE assembly: a collision surfaces
+        ``analysis-failed`` with no write (never a silent replace/rename — the redefine-in-use
+        re-render / data-poisoning vector is closed by construction).
+
+        Args:
+            manager: The program's ``DataTypeManager``.
+            name: The candidate composite name.
+
+        Raises:
+            WorkerError: ``analysis-failed`` if a type of that name already exists.
+        """
+        from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+        for data_type in manager.getAllDataTypes():
+            if str(data_type.getName()) == name:
+                raise WorkerError(CODE_ANALYSIS_FAILED, "a type of that name already exists")
+
+    def _resolve_composite_fields(
+        self, name: str, fields: list[dict[str, Any]]
+    ) -> dict[int, Any]:  # pragma: no cover - JVM edge
+        """Resolve each member's ``TypeRef`` BEFORE the txn, deferring self-``named`` refs (§3).
+
+        A member whose ``TypeRef`` names the composite itself cannot resolve until the empty type is
+        pre-registered inside the transaction, so it is left out of this pre-resolution map and
+        resolved later by :meth:`_iter_composite_members` against the registered handle.
+
+        Args:
+            name: The composite's own (not-yet-registered) name.
+            fields: The member list.
+
+        Returns:
+            A map of member index → resolved ``DataType`` for every NON-self member.
+
+        Raises:
+            WorkerError: ``not-found`` if a non-self member ``TypeRef`` does not resolve.
+        """
+        resolved: dict[int, Any] = {}
+        for index, field in enumerate(fields):
+            type_ref = _require(field, "type")
+            if type_ref.get("named") == name:
+                continue  # a self-``named`` ref — resolved post-registration (pointer-to-self)
+            resolved[index] = self._gh_resolve_type_ref(type_ref)
+        return resolved
+
+    def _iter_composite_members(
+        self,
+        name: str,
+        fields: list[dict[str, Any]],
+        resolved: dict[int, Any],
+        registered: Any,
+    ) -> Any:  # pragma: no cover - JVM edge
+        """Yield ``(field, DataType)`` per member, resolving self-``named`` refs vs. ``registered``.
+
+        Args:
+            name: The composite's own name (now pre-registered as ``registered``).
+            fields: The member list.
+            resolved: The pre-resolved non-self member types (by index).
+            registered: The pre-registered (empty) composite handle for self-references.
+
+        Yields:
+            ``(field, DataType)`` pairs in declaration order.
+        """
+        from ghidra.program.model.data import ArrayDataType, PointerDataType
+
+        for index, field in enumerate(fields):
+            if index in resolved:
+                yield field, resolved[index]
+                continue
+            # A self-``named`` member: wrap pointer/array modifiers around the registered handle.
+            type_ref = _require(field, "type")
+            leaf = registered
+            for _ in range(int(type_ref.get("pointer_levels") or 0)):
+                leaf = PointerDataType(leaf)
+            array_len = type_ref.get("array_len")
+            if array_len is not None:
+                leaf = ArrayDataType(leaf, int(array_len), leaf.getLength())
+            yield field, leaf
+
+    def _raise_composite_too_large(self) -> None:  # pragma: no cover - JVM edge
+        """Raise ``limit-exceeded`` for an over-cap composite size (ADR-015 §3 backstop)."""
+        from worker.dispatch import CODE_LIMIT_EXCEEDED, WorkerError
+
+        raise WorkerError(CODE_LIMIT_EXCEEDED, "composite size exceeds the maximum")
 
     def _in_transaction(self, tool_name: str, write: Callable[[], None]) -> None:
         """Run ``write`` inside one Ghidra transaction; commit on success, roll back on failure.

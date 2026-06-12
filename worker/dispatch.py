@@ -89,6 +89,9 @@ RPC_METHODS = frozenset(
         # structural type-aware writes (v1.1 — ADR-014 Phase B; resolved TypeRefs, NO C parser)
         "set_function_signature",
         "apply_data_type",
+        # composite-type creation (v1.1 — ADR-015 Phase C; resolved FieldSpec list, NO C parser)
+        "define_struct",
+        "define_union",
         "ping",
         "shutdown",
     }
@@ -257,6 +260,15 @@ class GhidraBackend(Protocol):
 
     def apply_data_type(self, params: dict[str, Any]) -> dict[str, Any]:
         """Apply a resolvable type at an address inside a transaction — v1.1."""
+        ...
+
+    # --- composite-type creation (v1.1 — ADR-015 Phase C; resolved FieldSpec list, one txn) ---
+    def define_struct(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Create a new struct from a resolved field list inside a transaction — v1.1."""
+        ...
+
+    def define_union(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Create a new union from a resolved field list inside a transaction — v1.1."""
         ...
 
 

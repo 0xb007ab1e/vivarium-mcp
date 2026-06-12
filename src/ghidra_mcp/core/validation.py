@@ -21,7 +21,13 @@ from typing import TYPE_CHECKING
 from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 
 if TYPE_CHECKING:  # avoid an import cycle at runtime (schemas imports nothing from this module).
-    from ghidra_mcp.tools.schemas import SetFunctionSignatureIn, TypeRef
+    from ghidra_mcp.tools.schemas import (
+        DefineStructIn,
+        DefineUnionIn,
+        FieldSpec,
+        SetFunctionSignatureIn,
+        TypeRef,
+    )
 
 # Frozen domain bounds (also surfaced via env config in security/limits.py at runtime).
 # Declared here so validation has stable, testable constants independent of I/O.
@@ -80,6 +86,15 @@ MAX_POINTER_DEPTH = 8
 
 MAX_ARRAY_LEN = 65_536
 """Maximum fixed array length on a :class:`TypeRef` (element count; footprint worker-confined)."""
+
+# --- composite-type bounds (ADR-015 §2.5; mirror schemas._MAX_FIELDS / _MAX_COMPOSITE_SIZE). A new
+# composite is assembled field-by-field from resolved TypeRefs (NEVER free-form C), so these
+# validators are allow-list resolution + bounds (CWE-20/CWE-400), not parsing. ---
+MAX_FIELDS = 256
+"""Maximum members accepted in a new composite (construction/cycle-summation DoS guard)."""
+
+MAX_COMPOSITE_SIZE = 1_048_576
+"""Maximum total computed size of an assembled composite (1 MiB; worker enforces post-resolve)."""
 
 # Closed base-type vocabulary (ADR-014 §2.5). Mirrors schemas.BaseType; mapped to Ghidra built-ins
 # in the worker. A ``base`` outside this set fails closed — never extensible by the client.
@@ -555,3 +570,78 @@ def validate_signature(sig: SetFunctionSignatureIn) -> None:
         validate_write_name(param.name)  # persisted → strict allow-list (stored-injection defense)
         validate_type_ref(param.type)
     validate_calling_convention(sig.calling_convention)
+
+
+def validate_field_spec(field: FieldSpec) -> None:
+    """Validate one composite member (ADR-015 §4) — allow-list, never parsed.
+
+    A member ``name`` is PERSISTED into the program DB and re-served by the read tools, so it is
+    held to the strict :func:`validate_write_name` identifier allow-list (stored-injection defense —
+    identical profile to a Phase-B ``ParamSpec.name``). Its ``type`` is the EXISTING Phase-B
+    :class:`TypeRef`, validated by :func:`validate_type_ref` (resolved, never parsed). ``offset`` is
+    ``None`` (append sequentially) or a bounded non-negative int ``< MAX_COMPOSITE_SIZE``. NO type
+    string is parsed (CParser/DataTypeParser are never instantiated on a client value).
+
+    Args:
+        field: The :class:`FieldSpec` to validate (pydantic has applied coarse field bounds; this
+            re-asserts defensively + applies the allow-lists pydantic cannot express).
+
+    Raises:
+        GhidraMcpError: With a ``VALIDATION`` envelope on any name/type/offset shape/bounds
+            violation. The detail names the condition, never the (untrusted) value.
+    """
+    validate_write_name(field.name)  # persisted → strict allow-list (stored-injection defense)
+    validate_type_ref(field.type)
+    if field.offset is not None:
+        if not isinstance(field.offset, int) or isinstance(field.offset, bool):
+            raise _validation_error("field offset must be an integer")
+        if field.offset < 0 or field.offset >= MAX_COMPOSITE_SIZE:
+            raise _validation_error("field offset is out of range")
+
+
+def validate_composite(payload: DefineStructIn | DefineUnionIn, *, kind: str) -> None:
+    """Validate a ``define_struct`` / ``define_union`` payload end-to-end (ADR-015 §4) — allow-list.
+
+    Enforces, fail-closed and value-free: ``name`` via :func:`validate_write_name` (persisted type
+    name); ``1 <= len(fields) <= MAX_FIELDS`` (non-empty, bounded — CWE-400); **no duplicate member
+    name** within the composite (two ``x`` members are rejected); each member via
+    :func:`validate_field_spec`; the **by-value self-embed boundary check** (the recursion crux,
+    ADR-015 §3.2 — reject any ``field.type.named == payload.name`` with ``pointer_levels == 0``, an
+    embedded self incl. an array-of-self); for ``kind == "union"`` every member ``offset`` MUST be
+    ``None`` (a struct-only field — total schema per variant). The **total computed size** cap
+    (``MAX_COMPOSITE_SIZE``) is enforced at the worker after resolution (it needs each resolved
+    ``DataType.getLength()`` — a worker concern, like the Phase-B ``not-found``). NO value is parsed
+    by a C-type parser — the structured model assembles typed Java objects (ADR-015 §2).
+
+    Args:
+        payload: The :class:`DefineStructIn` or :class:`DefineUnionIn` to validate.
+        kind: ``"struct"`` or ``"union"`` — selects the variant rules (``offset`` is union-illegal).
+
+    Raises:
+        GhidraMcpError: With a ``VALIDATION`` envelope on any name/duplicate/self-embed/variant
+            violation; with a ``LIMIT_EXCEEDED`` envelope when the field count exceeds the max.
+    """
+    validate_write_name(payload.name)  # persisted type name → strict allow-list
+    fields = payload.fields
+    if len(fields) < 1:
+        raise _validation_error("a composite must have at least one member")
+    if len(fields) > MAX_FIELDS:
+        raise _limit_error("member count exceeds the maximum")
+
+    seen: set[str] = set()
+    for field in fields:
+        validate_field_spec(field)
+        if field.name in seen:
+            raise _validation_error("composite members must have unique names")
+        seen.add(field.name)
+        # The recursion crux (ADR-015 §3.2): a by-value embed of self (named == this composite's
+        # name, no pointer) would resolve against the pre-registered empty type into an
+        # infinite-size type — reject it actively at the boundary (defense in depth; the schema
+        # model validator enforces it too — never trust the caller). An ARRAY-of-self
+        # (pointer_levels == 0, array_len set) is equally a by-value embed and is rejected (ADR-015
+        # §3.2 "incl. array-of-self"); only a pointer-to-self (pointer_levels >= 1) is fixed-size.
+        if field.type.named == payload.name and field.type.pointer_levels == 0:
+            raise _validation_error("a composite member may not embed the composite by value")
+        # A union overlays all members at offset 0 — an offset is a struct-only field (foot-gun).
+        if kind == "union" and field.offset is not None:
+            raise _validation_error("a union member may not carry an offset")

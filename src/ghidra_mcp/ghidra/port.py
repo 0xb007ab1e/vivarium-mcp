@@ -219,3 +219,18 @@ class GhidraPort(Protocol):
     def apply_data_type(self, sid: str, a: s.ApplyDataTypeIn) -> s.ApplyDataTypeResult:
         """Apply a resolvable type at an address (transaction-wrapped — ADR-014)."""
         ...
+
+    # --- composite-type creation (v1.1 — ADR-015 Phase C; structured FieldSpec input) ---
+    # The server checks structural write consent + validates the composite (validate_composite:
+    # bounded FieldSpec list of resolved TypeRefs, no duplicate/self-embed) BEFORE calling these;
+    # the worker pre-registers the empty composite in the DataTypeManager, resolves each field's
+    # TypeRef (read-only), adds members (size-checked), REJECTs a name collision, and finalizes —
+    # ALL inside one transaction so any failure rolls back the pre-registered type (no partial type
+    # — ADR-015 §3). Every result field is server/worker-controlled (no binary-derived echo).
+    def define_struct(self, sid: str, a: s.DefineStructIn) -> s.DefineStructResult:
+        """Create a new struct from a resolved field list (one transaction — ADR-015)."""
+        ...
+
+    def define_union(self, sid: str, a: s.DefineUnionIn) -> s.DefineUnionResult:
+        """Create a new union from a resolved field list (one transaction — ADR-015)."""
+        ...

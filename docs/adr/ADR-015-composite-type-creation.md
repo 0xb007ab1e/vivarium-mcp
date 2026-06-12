@@ -237,8 +237,10 @@ Pure, I/O-free, allow-list, fail-closed — the established `validation.py` post
   `name` via `validate_write_name`; `1 ≤ len(fields) ≤ _MAX_FIELDS` (non-empty, bounded — CWE-400);
   **no duplicate `FieldSpec.name`** within the composite (a struct/union with two `x` members is
   rejected — `VALIDATION`); each field via `validate_field_spec`; the **self-embed boundary check**
-  (§3.2: reject `field.type.named == payload.name and field.type.pointer_levels == 0 and
-  field.type.array_len is None` — an embedded self); `offset` only meaningful for `kind == "struct"`
+  (§3.2: reject `field.type.named == payload.name and field.type.pointer_levels == 0` — a by-value
+  embed of self, **including an array-of-self** (`array_len` set), which is equally infinite-size;
+  only a *pointer*-to-self, `pointer_levels >= 1`, is allowed); `offset` only meaningful for
+  `kind == "struct"`
   (a non-`None` `offset` on a union is a `VALIDATION` — total schema per variant). The **total
   computed size** cap (`_MAX_COMPOSITE_SIZE`) is enforced **at the worker** after resolution (it needs
   the resolved `DataType.getLength()` of each `named`/derived field — a worker concern, like the

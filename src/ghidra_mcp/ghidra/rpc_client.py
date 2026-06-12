@@ -855,6 +855,38 @@ class RpcGhidraAdapter:
             )
         )
 
+    # --- composite-type creation (v1.1 — ADR-015 Phase C; structured FieldSpec params) ---
+    # The server has already checked structural consent and validated the composite payload
+    # (validate_composite: bounded FieldSpec list of resolved TypeRefs, no duplicate/self-embed).
+    # Here the adapter serializes each field's TypeRef to plain RPC params (one composite per call)
+    # and builds the typed result — every field is server/worker-controlled (no Untrusted echo).
+    def define_struct(self, sid: str, a: s.DefineStructIn) -> s.DefineStructResult:
+        """Create a new struct from a resolved field list (one composite — ADR-015)."""
+        return _build_define_struct_result(
+            self._tool_call(
+                sid,
+                "define_struct",
+                {
+                    "name": a.name,
+                    "fields": [_field_spec_params(f) for f in a.fields],
+                    "packed": a.packed,
+                },
+            )
+        )
+
+    def define_union(self, sid: str, a: s.DefineUnionIn) -> s.DefineUnionResult:
+        """Create a new union from a resolved field list (one composite — ADR-015)."""
+        return _build_define_union_result(
+            self._tool_call(
+                sid,
+                "define_union",
+                {
+                    "name": a.name,
+                    "fields": [_field_spec_params(f) for f in a.fields],
+                },
+            )
+        )
+
     # --- internal: call orchestration -------------------------------------------------------
     def _tool_call(self, sid: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Issue a read-only tool RPC bounded by the per-tool timeout.
@@ -1754,5 +1786,47 @@ def _build_apply_data_type_result(r: dict[str, Any]) -> s.ApplyDataTypeResult:
         address=str(r["address"]),
         type_name=_w(r["type_name"], DataOrigin.BINARY),
         size=int(r["size"]),
+        applied=bool(r["applied"]),
+    )
+
+
+# --- composite-type creation (ADR-015 Phase C) — every result field is server/worker-controlled
+# (the name is the one WE set + validated; size/field_count/applied are worker scalars), so NONE is
+# Untrusted-wrapped (ADR-015 §7). A future field echoing Ghidra's rendered layout MUST be Untrusted.
+def _field_spec_params(field: s.FieldSpec) -> dict[str, Any]:
+    """Serialize a :class:`FieldSpec` into plain RPC params (no C string — ADR-015 §2).
+
+    The worker resolves ``type`` against the program's ``DataTypeManager`` (NEVER parses it); the
+    bounded ``name``/``offset`` are passed through as-is.
+
+    Args:
+        field: The validated :class:`FieldSpec` to serialize.
+
+    Returns:
+        A plain, JSON-serializable dict mirroring the ``FieldSpec`` shape (``type`` a TypeRef dict).
+    """
+    return {"name": field.name, "type": _type_ref_params(field.type), "offset": field.offset}
+
+
+@_fail_closed
+def _build_define_struct_result(r: dict[str, Any]) -> s.DefineStructResult:
+    """Build a ``DefineStructResult`` — all fields server/worker-controlled, SAFE (ADR-015 §7)."""
+    return s.DefineStructResult(
+        name=str(r["name"]),
+        kind=str(r["kind"]),
+        size=int(r["size"]),
+        field_count=int(r["field_count"]),
+        applied=bool(r["applied"]),
+    )
+
+
+@_fail_closed
+def _build_define_union_result(r: dict[str, Any]) -> s.DefineUnionResult:
+    """Build a ``DefineUnionResult`` — all fields server/worker-controlled, SAFE (ADR-015 §7)."""
+    return s.DefineUnionResult(
+        name=str(r["name"]),
+        kind=str(r["kind"]),
+        size=int(r["size"]),
+        field_count=int(r["field_count"]),
         applied=bool(r["applied"]),
     )
