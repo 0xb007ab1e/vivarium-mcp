@@ -83,6 +83,9 @@ RPC_METHODS = frozenset(
         "rename_symbol",
         "set_comment",
         "undo",
+        # structural writes (v1.1 — ADR-013 Phase A; HighFunction path; gated by allow_structural)
+        "rename_local_variable",
+        "rename_parameter",
         "ping",
         "shutdown",
     }
@@ -233,6 +236,15 @@ class GhidraBackend(Protocol):
 
     def undo(self, params: dict[str, Any]) -> dict[str, Any]:
         """Undo the last committed mutation transaction in this session — v1.1."""
+        ...
+
+    # --- structural writes (v1.1 — ADR-013 Phase A; one transaction per call) ---
+    def rename_local_variable(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rename one function-local variable inside a transaction (name-only) — v1.1."""
+        ...
+
+    def rename_parameter(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rename one function parameter inside a transaction (name-only) — v1.1."""
         ...
 
 

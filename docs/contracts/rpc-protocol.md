@@ -77,7 +77,10 @@ Error response (worker → server):
 (write) primitives** `rename_function`, `rename_symbol`, `set_comment`, and `undo` (ADR-012 — each
 performs a single Ghidra write inside **one transaction**, commit on success / `endTransaction(…,
 False)` roll-back + `analysis-failed` on failure; the server gates these behind per-session
-write-consent and validates the inputs first), plus a `ping`/`shutdown` control pair.
+write-consent and validates the inputs first), the v1.1 **structural-write primitives**
+`rename_local_variable` and `rename_parameter` (ADR-013 Phase A — decompiler HighFunction path,
+**name-only**, gated additionally by `allow_structural`; same one-transaction + rollback semantics),
+plus a `ping`/`shutdown` control pair.
 (Session create/status/close **and the write-consent grant/revoke** `session_enable_writes`/
 `session_disable_writes` are **server-side** lifecycle, not worker RPC methods. The derived
 tools compute server-side with **no dedicated worker method**: `callees`/`callers`/`analysis_order`/

@@ -536,6 +536,16 @@ class FakeGhidraPort:
         """Reserved mutation stub (ADR-012)."""
         raise NotImplementedError("RESERVED (v1.1 ADR-012): undo")
 
+    def rename_local_variable(
+        self, sid: str, a: s.RenameLocalVariableIn
+    ) -> s.StructuralRenameResult:
+        """Reserved structural-mutation stub (ADR-013; mutation tests use a dedicated fake port)."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-013): rename_local_variable")
+
+    def rename_parameter(self, sid: str, a: s.RenameParameterIn) -> s.StructuralRenameResult:
+        """Reserved structural-mutation stub (ADR-013)."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-013): rename_parameter")
+
 
 @pytest.fixture
 def fake_port() -> FakeGhidraPort:

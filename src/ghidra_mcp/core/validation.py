@@ -337,6 +337,29 @@ def validate_write_name(name: str) -> str:
     return name
 
 
+def validate_target_ref(value: str) -> str:
+    """Validate a structural-write TARGET REFERENCE — the local/parameter selector (ADR-013 §6).
+
+    The ``variable``/``parameter`` argument identifies *which* existing local/param to rename (a
+    decompiler-assigned name like ``local_28`` / ``param_1``). It is a **selector, not a value we
+    persist**, so it is NOT held to the strict write-name identifier allow-list (that charset would
+    wrongly reject legitimate decompiler names). It is still attacker-influenceable, so it gets the
+    baseline :func:`validate_name` treatment (bounded length, reject control/separator/zero-width
+    chars); the worker's ``not-found`` is the authoritative confinement if it does not resolve to a
+    ``HighSymbol``.
+
+    Args:
+        value: The raw target-reference string from the client.
+
+    Returns:
+        The validated reference, unchanged on success.
+
+    Raises:
+        GhidraMcpError: ``VALIDATION`` on a length or control/separator-char violation.
+    """
+    return validate_name(value)
+
+
 def validate_comment_text(text: str) -> str:
     """Validate and normalize WRITE-target comment text (``set_comment``).
 

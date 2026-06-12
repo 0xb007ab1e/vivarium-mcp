@@ -6,10 +6,11 @@
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **41** tools (asserted in tests) —
+- **Allow-list only:** the catalog is fixed; there are exactly **43** tools (asserted in tests) —
   22 Tier-1 read-only (v1) + 5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
-  reporting/metrics tools (ADR-008; all read-only) + **6 v1.1 mutation/write tools (ADR-012; GATED
-  by per-session write-consent)**.
+  reporting/metrics tools (ADR-008; all read-only) + **6 v1.1 mutation/write tools (ADR-012) + 2
+  v1.1 structural-write tools (ADR-013 Phase A)** — the last 8 GATED by per-session write-consent
+  (structural additionally by `allow_structural`).
 - **Session-scoped:** every tool except `session_create` takes an opaque `session_id`, authorized
   server-side (BOLA defense). Inputs are `frozen` and reject unknown fields (`extra="forbid"`).
 - **Bounded by default:** list/search/read tools take `offset` + `limit` (or `length`) with hard
@@ -131,16 +132,25 @@ identifier allow-list / `validate_comment_text` normalization — stored-injecti
 | `rename_function` | `RenameFunctionIn{function, new_name}` | `RenameResult{address, old_name*, new_name, applied}` | transaction-wrapped; `new_name` allow-listed |
 | `rename_symbol` | `RenameSymbolIn{identifier, new_name}` | `RenameSymbolResult{address, old_name*, new_name, kind, applied}` | transaction-wrapped |
 | `set_comment` | `SetCommentIn{address, comment_type∈{EOL,PRE,POST,PLATE,REPEATABLE}, text?}` | `SetCommentResult{address, comment_type, applied}` | `text=null` clears; text normalized on the way in |
+| `rename_local_variable` | `RenameLocalVariableIn{function, variable, new_name}` | `StructuralRenameResult{address, function*, old_name*, new_name, applied}` | **structural** (ADR-013); HighFunction path, name-only; gated by `allow_structural` |
+| `rename_parameter` | `RenameParameterIn{function, parameter, new_name}` | `StructuralRenameResult{address, function*, old_name*, new_name, applied}` | **structural**; name-only; gated by `allow_structural` |
 
-> **Deferred** within mutation (separate, separately-threat-modeled gated increments): local/parameter
-> rename, `set_function_signature`, data-type define/apply (the **structural** set — gated behind
-> `allow_structural`). The `old_name` we echo is `Untrusted` (binary-derived); the `new_name` we set
-> is bare (server-validated). See `docs/adr/ADR-012-mutation-tools.md`.
+> **Structural writes** (`rename_local_variable`/`rename_parameter`, ADR-013 Phase A) require, in
+> addition to write consent, the `allow_structural` opt-in (`session_enable_writes{allow_structural:
+> true}` → `require_write_consent(structural=True)`); they are **name-only** (no type change — the
+> worker passes a null data type) via the decompiler HighFunction path.
+> **Deferred** within mutation (separate, separately-threat-modeled gated increments — ADR-013
+> Phase B): `set_function_signature` and data-type define/apply, with a **structured (not free-form
+> C)** type/signature input. The `old_name`/`function` we echo are `Untrusted` (binary-derived); the
+> `new_name` we set is bare (server-validated). See `docs/adr/ADR-012-mutation-tools.md`,
+> `docs/adr/ADR-013-structural-mutation.md`.
 
 > `*` marks an `Untrusted[...]`-wrapped (binary-derived) field.
 
 ## Deferred (NOT yet built — gated, reviewed catalog additions)
-**Structural mutation** (local/parameter rename, `set_function_signature`, data-type define/apply —
-gated behind `allow_structural`) and `runScript`/arbitrary script execution remain deferred — each a
-separate, separately-threat-modeled increment (`runScript` is permanently out of scope, PLAN §2).
-Adding any deferred tool is a reviewed, gated change to this allow-list (ADR-006 extensibility seam).
+**Phase B structural mutation** (`set_function_signature`, data-type define/apply — with a
+**structured, not free-form C** type/signature input; gated behind `allow_structural`) and
+`runScript`/arbitrary script execution remain deferred — each a separate, separately-threat-modeled
+increment (`runScript` is permanently out of scope, PLAN §2). Adding any deferred tool is a reviewed,
+gated change to this allow-list (ADR-006 extensibility seam). Phase A structural renames
+(`rename_local_variable`/`rename_parameter`) shipped — see the Mutation section above.

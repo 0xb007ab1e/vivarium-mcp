@@ -93,6 +93,9 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "rename_function",
     "rename_symbol",
     "set_comment",
+    # structural writes (v1.1 — ADR-013 Phase A; additionally GATED by allow_structural)
+    "rename_local_variable",
+    "rename_parameter",
 )
 
 
@@ -653,6 +656,64 @@ def _handle_set_comment(ctx: ToolContext, args: s.SetCommentIn) -> s.SetCommentR
     return result
 
 
+# --- structural writes (v1.1 — ADR-013 Phase A). Same gate as annotation writes PLUS the
+# allow_structural opt-in (require_write_consent(structural=True)); name-only (no type change).
+def _handle_rename_local_variable(
+    ctx: ToolContext, args: s.RenameLocalVariableIn
+) -> s.StructuralRenameResult:
+    """Rename a function-local variable (structural; gated by allow_structural — ADR-013)."""
+    ctx.sessions.require_write_consent(args.session_id, structural=True)
+    v.validate_name(args.function)  # function selector (read-path baseline)
+    v.validate_target_ref(args.variable)  # local selector (bounded, control-free)
+    v.validate_write_name(args.new_name)  # persisted name → strict allow-list
+    _log.info(
+        "tool.rename_local_variable.intent",
+        extra={
+            "tool": "rename_local_variable",
+            "session": args.session_id,
+            "function_len": len(args.function),
+            "variable_len": len(args.variable),
+            "new_name_len": len(args.new_name),
+        },
+    )
+    result = ctx.port.rename_local_variable(args.session_id, args)
+    _log.info(
+        "tool.rename_local_variable.outcome",
+        extra={
+            "tool": "rename_local_variable",
+            "session": args.session_id,
+            "applied": result.applied,
+        },
+    )
+    return result
+
+
+def _handle_rename_parameter(
+    ctx: ToolContext, args: s.RenameParameterIn
+) -> s.StructuralRenameResult:
+    """Rename a function parameter (structural; gated by allow_structural — ADR-013)."""
+    ctx.sessions.require_write_consent(args.session_id, structural=True)
+    v.validate_name(args.function)
+    v.validate_target_ref(args.parameter)
+    v.validate_write_name(args.new_name)
+    _log.info(
+        "tool.rename_parameter.intent",
+        extra={
+            "tool": "rename_parameter",
+            "session": args.session_id,
+            "function_len": len(args.function),
+            "parameter_len": len(args.parameter),
+            "new_name_len": len(args.new_name),
+        },
+    )
+    result = ctx.port.rename_parameter(args.session_id, args)
+    _log.info(
+        "tool.rename_parameter.outcome",
+        extra={"tool": "rename_parameter", "session": args.session_id, "applied": result.applied},
+    )
+    return result
+
+
 # Map of tool name → (handler, input-schema). The input schema is the handler's single argument
 # type, from which FastMCP derives the tool's JSON schema. The output schema is the return type.
 _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
@@ -698,6 +759,9 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "rename_function": (_handle_rename_function, s.RenameFunctionIn),
     "rename_symbol": (_handle_rename_symbol, s.RenameSymbolIn),
     "set_comment": (_handle_set_comment, s.SetCommentIn),
+    # structural writes (v1.1 — ADR-013 Phase A; gated additionally by allow_structural)
+    "rename_local_variable": (_handle_rename_local_variable, s.RenameLocalVariableIn),
+    "rename_parameter": (_handle_rename_parameter, s.RenameParameterIn),
 }
 
 

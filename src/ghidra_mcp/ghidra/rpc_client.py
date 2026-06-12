@@ -795,6 +795,28 @@ class RpcGhidraAdapter:
         """Undo the last committed mutation transaction in the session (convenience — ADR-012)."""
         return _build_undo_out(sid, self._tool_call(sid, "undo", {}))
 
+    def rename_local_variable(
+        self, sid: str, a: s.RenameLocalVariableIn
+    ) -> s.StructuralRenameResult:
+        """Rename one function-local variable (structural, name-only — ADR-013)."""
+        return _build_structural_rename_result(
+            self._tool_call(
+                sid,
+                "rename_local_variable",
+                {"function": a.function, "variable": a.variable, "new_name": a.new_name},
+            )
+        )
+
+    def rename_parameter(self, sid: str, a: s.RenameParameterIn) -> s.StructuralRenameResult:
+        """Rename one function parameter (structural, name-only — ADR-013)."""
+        return _build_structural_rename_result(
+            self._tool_call(
+                sid,
+                "rename_parameter",
+                {"function": a.function, "parameter": a.parameter, "new_name": a.new_name},
+            )
+        )
+
     # --- internal: call orchestration -------------------------------------------------------
     def _tool_call(self, sid: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Issue a read-only tool RPC bounded by the per-tool timeout.
@@ -1636,3 +1658,15 @@ def _build_set_comment_result(r: dict[str, Any]) -> s.SetCommentResult:
 def _build_undo_out(sid: str, r: dict[str, Any]) -> s.SessionUndoOut:
     """Build a ``SessionUndoOut`` (session id is server-known/safe; ``undone`` from the worker)."""
     return s.SessionUndoOut(session_id=sid, undone=bool(r["undone"]))
+
+
+@_fail_closed
+def _build_structural_rename_result(r: dict[str, Any]) -> s.StructuralRenameResult:
+    """Build a ``StructuralRenameResult`` (function + prior name → Untrusted; ADR-013)."""
+    return s.StructuralRenameResult(
+        address=str(r["address"]),
+        function=_w(r["function"], DataOrigin.BINARY),
+        old_name=_w(r["old_name"], DataOrigin.BINARY),
+        new_name=str(r["new_name"]),
+        applied=bool(r["applied"]),
+    )
