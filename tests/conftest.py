@@ -520,6 +520,22 @@ class FakeGhidraPort:
         """Reserved Tier-2 stub."""
         raise NotImplementedError("RESERVED (v1.1 ADR-008): program_summary")
 
+    def rename_function(self, sid: str, a: s.RenameFunctionIn) -> s.RenameResult:
+        """Reserved mutation stub (ADR-012; mutation tests use a dedicated fake port)."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-012): rename_function")
+
+    def rename_symbol(self, sid: str, a: s.RenameSymbolIn) -> s.RenameSymbolResult:
+        """Reserved mutation stub (ADR-012)."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-012): rename_symbol")
+
+    def set_comment(self, sid: str, a: s.SetCommentIn) -> s.SetCommentResult:
+        """Reserved mutation stub (ADR-012)."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-012): set_comment")
+
+    def undo(self, sid: str, a: s.SessionUndoIn) -> s.SessionUndoOut:
+        """Reserved mutation stub (ADR-012)."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-012): undo")
+
 
 @pytest.fixture
 def fake_port() -> FakeGhidraPort:
