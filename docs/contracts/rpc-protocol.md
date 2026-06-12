@@ -80,7 +80,10 @@ False)` roll-back + `analysis-failed` on failure; the server gates these behind 
 write-consent and validates the inputs first), the v1.1 **structural-write primitives**
 `rename_local_variable` and `rename_parameter` (ADR-013 Phase A — decompiler HighFunction path,
 **name-only**, gated additionally by `allow_structural`; same one-transaction + rollback semantics),
-plus a `ping`/`shutdown` control pair.
+`set_function_signature` and `apply_data_type` (ADR-014 Phase B — **structured** input: each `TypeRef`
+is RESOLVED against the program's `DataTypeManager` / a closed base vocab, **never parsed from a C
+string**; an unresolvable ref fails closed; same gate + transaction semantics), plus a
+`ping`/`shutdown` control pair.
 (Session create/status/close **and the write-consent grant/revoke** `session_enable_writes`/
 `session_disable_writes` are **server-side** lifecycle, not worker RPC methods. The derived
 tools compute server-side with **no dedicated worker method**: `callees`/`callers`/`analysis_order`/

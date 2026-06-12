@@ -546,6 +546,16 @@ class FakeGhidraPort:
         """Reserved structural-mutation stub (ADR-013)."""
         raise NotImplementedError("RESERVED (v1.1 ADR-013): rename_parameter")
 
+    def set_function_signature(
+        self, sid: str, a: s.SetFunctionSignatureIn
+    ) -> s.SetFunctionSignatureResult:
+        """Reserved structural type-aware stub (ADR-014; mutation tests use a dedicated fake)."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-014): set_function_signature")
+
+    def apply_data_type(self, sid: str, a: s.ApplyDataTypeIn) -> s.ApplyDataTypeResult:
+        """Reserved structural type-aware stub (ADR-014)."""
+        raise NotImplementedError("RESERVED (v1.1 ADR-014): apply_data_type")
+
 
 @pytest.fixture
 def fake_port() -> FakeGhidraPort:

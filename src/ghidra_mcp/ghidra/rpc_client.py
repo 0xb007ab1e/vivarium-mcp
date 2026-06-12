@@ -817,6 +817,44 @@ class RpcGhidraAdapter:
             )
         )
 
+    # --- structural type-aware writes (v1.1 — ADR-014 Phase B; structured TypeRef params) ---
+    # The server has already checked structural consent and validated the structured payload
+    # (validate_signature / validate_type_ref / validate_calling_convention). Here the adapter
+    # serializes the typed schema into plain RPC params (the TypeRef/ParamSpec are dumped to plain
+    # dicts) and wraps the binary-derived result fields as ``Untrusted`` (ADR-005 chokepoint).
+    def set_function_signature(
+        self, sid: str, a: s.SetFunctionSignatureIn
+    ) -> s.SetFunctionSignatureResult:
+        """Set a function's structured signature (resolved types — ADR-014)."""
+        return _build_set_function_signature_result(
+            self._tool_call(
+                sid,
+                "set_function_signature",
+                {
+                    "function": a.function,
+                    "return_type": _type_ref_params(a.return_type),
+                    "parameters": [
+                        {"name": p.name, "type": _type_ref_params(p.type)} for p in a.parameters
+                    ],
+                    "calling_convention": a.calling_convention,
+                },
+            )
+        )
+
+    def apply_data_type(self, sid: str, a: s.ApplyDataTypeIn) -> s.ApplyDataTypeResult:
+        """Apply a resolvable type at an address (resolved type — ADR-014)."""
+        return _build_apply_data_type_result(
+            self._tool_call(
+                sid,
+                "apply_data_type",
+                {
+                    "address": a.address,
+                    "type": _type_ref_params(a.type),
+                    "clear_existing": a.clear_existing,
+                },
+            )
+        )
+
     # --- internal: call orchestration -------------------------------------------------------
     def _tool_call(self, sid: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Issue a read-only tool RPC bounded by the per-tool timeout.
@@ -1668,5 +1706,53 @@ def _build_structural_rename_result(r: dict[str, Any]) -> s.StructuralRenameResu
         function=_w(r["function"], DataOrigin.BINARY),
         old_name=_w(r["old_name"], DataOrigin.BINARY),
         new_name=str(r["new_name"]),
+        applied=bool(r["applied"]),
+    )
+
+
+# --- structural type-aware (ADR-014 Phase B) — echoed signature/type fields are binary-derived ---
+def _type_ref_params(ref: s.TypeRef) -> dict[str, Any]:
+    """Serialize a :class:`TypeRef` into plain RPC params (no C string — ADR-014 §2).
+
+    The worker resolves these fields against the program's ``DataTypeManager``; only one of
+    ``base``/``named`` is set (model-validated), and the modifiers are bounded.
+
+    Args:
+        ref: The validated :class:`TypeRef` to serialize.
+
+    Returns:
+        A plain, JSON-serializable dict mirroring the ``TypeRef`` shape.
+    """
+    return {
+        "base": ref.base,
+        "named": ref.named,
+        "pointer_levels": ref.pointer_levels,
+        "array_len": ref.array_len,
+    }
+
+
+@_fail_closed
+def _build_set_function_signature_result(r: dict[str, Any]) -> s.SetFunctionSignatureResult:
+    """Build a ``SetFunctionSignatureResult`` (echoed signatures → Untrusted; ADR-014 §6).
+
+    ``new_signature`` is untrusted because Ghidra RE-RENDERS our applied prototype (the worker is
+    untrusted on the way out — ADR-005); ``address``/``applied`` are server/worker-controlled.
+    """
+    return s.SetFunctionSignatureResult(
+        address=str(r["address"]),
+        function=_w(r["function"], DataOrigin.BINARY),
+        old_signature=_w(r["old_signature"], DataOrigin.BINARY),
+        new_signature=_w(r["new_signature"], DataOrigin.BINARY),
+        applied=bool(r["applied"]),
+    )
+
+
+@_fail_closed
+def _build_apply_data_type_result(r: dict[str, Any]) -> s.ApplyDataTypeResult:
+    """Build an ``ApplyDataTypeResult`` (resolved type name → Untrusted; ADR-014 §6)."""
+    return s.ApplyDataTypeResult(
+        address=str(r["address"]),
+        type_name=_w(r["type_name"], DataOrigin.BINARY),
+        size=int(r["size"]),
         applied=bool(r["applied"]),
     )

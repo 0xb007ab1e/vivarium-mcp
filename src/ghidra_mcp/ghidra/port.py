@@ -203,3 +203,19 @@ class GhidraPort(Protocol):
     def rename_parameter(self, sid: str, a: s.RenameParameterIn) -> s.StructuralRenameResult:
         """Rename one function parameter (name-only; transaction-wrapped — ADR-013)."""
         ...
+
+    # --- structural type-aware writes (v1.1 — ADR-014 Phase B; structured TypeRef input) ---
+    # The server checks structural write consent + validates the structured signature/type
+    # (validate_signature / validate_type_ref / validate_calling_convention) BEFORE calling these;
+    # the worker resolves every TypeRef against the DataTypeManager (read-only, before the txn —
+    # NO C parser) then performs one transacted write. The adapter wraps binary-derived fields
+    # (function/old_signature/new_signature/type_name) as Untrusted.
+    def set_function_signature(
+        self, sid: str, a: s.SetFunctionSignatureIn
+    ) -> s.SetFunctionSignatureResult:
+        """Set a function's structured signature (resolved types; transaction-wrapped — ADR-014)."""
+        ...
+
+    def apply_data_type(self, sid: str, a: s.ApplyDataTypeIn) -> s.ApplyDataTypeResult:
+        """Apply a resolvable type at an address (transaction-wrapped — ADR-014)."""
+        ...

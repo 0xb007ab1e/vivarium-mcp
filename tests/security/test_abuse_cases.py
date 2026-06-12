@@ -466,3 +466,271 @@ def test_write_handlers_do_not_import_jvm_or_pyghidra() -> None:
                 if any(bad in n.lower() for bad in forbidden)
             ]
     assert not offenders, "ADR-001 violation on a write path: " + "; ".join(offenders)
+
+
+# ==============================================================================================
+# TB7 STRUCTURAL PHASE B (ADR-014) — abuse cases 31-40 (threat-model §10).
+# The structured signature/type input ELIMINATES the C-parser surface by construction (ADR-014
+# §2): no client string ever reaches CParser/DataTypeParser. Cases whose control lives in
+# WS4-owned modules (the structured-type validators) are HERMETIC here; cases that need the real
+# worker (resolution-before-transaction, commit-time re-flow, map-confinement) keep the
+# ``skip``-marked integration convention used above for write-flood.
+# ==============================================================================================
+from ghidra_mcp.tools import schemas as _s  # noqa: E402  # local to the TB7 Phase-B block
+
+
+def _typeref(**kw: object) -> _s.TypeRef:
+    """Build a ``TypeRef`` for an abuse fixture (model_construct bypasses pydantic to hit the
+    validator's own fail-closed branches with a known-bad shape)."""
+    return _s.TypeRef.model_construct(
+        base=kw.get("base"),
+        named=kw.get("named"),
+        pointer_levels=kw.get("pointer_levels", 0),
+        array_len=kw.get("array_len"),
+    )
+
+
+# --- Case 31 — type-ref injection attempt rejected (TB7-T / design-eliminated C-parser) -----
+@pytest.mark.critical
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "struct{int x;}",  # a struct body — never parsed
+        "int*",  # pointer syntax in the name token
+        "a;b",  # statement separator
+        "../../etc/passwd",  # path traversal
+        "rtl‮name",  # U+202E right-to-left override
+    ],
+)
+def test_type_ref_injection_payload_is_rejected(payload: str) -> None:
+    """A ``TypeRef.named`` carrying C-declaration syntax / markup is rejected — never parsed.
+
+    The structured model admits only a single identifier token that is LOOKED UP (not parsed); a
+    payload that is not a valid identifier fails closed at ``validate_type_ref`` (VALIDATION), so no
+    type is defined or applied. Proves the design-eliminated C-parser surface absent.
+    """
+    with pytest.raises(GhidraMcpError) as ei:
+        _v.validate_type_ref(_typeref(named=payload))
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+    assert payload.strip() not in ei.value.envelope.detail  # the untrusted payload is never echoed
+
+
+# --- Case 32 — unresolvable-type fail-closed (TB7-T / atomicity) ---------------------------
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_unresolvable_named_type_fails_closed_with_no_write() -> None:
+    """Case 32 (live): a well-formed but UNKNOWN ``named`` TypeRef surfaces ``not-found`` with the
+    program unchanged — resolution runs before ``startTransaction`` (ADR-014 §4), so no transaction
+    is opened and there is no partial write. Promoted to live integration in WS5 (needs the worker
+    DataTypeManager lookup).
+    """
+
+
+# --- Case 33 — signature re-flow corruption / commit-time atomicity (TB7-T / CWE-460) ------
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_signature_reflow_commit_failure_rolls_back() -> None:
+    """Case 33 (live): a signature change whose ``updateFunction`` OR its commit-time re-flow
+    (re-rendering callers) raises rolls back and surfaces ``analysis-failed`` — no dangling
+    transaction, no untyped escape (the corrected ``_in_transaction``, CWE-460). The unit-level
+    three-branch proof lives in ``test_structural_mutation.test_in_transaction_*``; this is the
+    live signature-specific assertion. Promoted to WS5 (needs the real decompiler re-flow).
+    """
+
+
+# --- Case 34 — oversized-params / construction DoS (TB7-D / CWE-400) ------------------------
+@pytest.mark.critical
+def test_oversized_params_rejected_at_boundary() -> None:
+    """A parameter list longer than ``MAX_PARAMS`` is rejected before any worker call.
+
+    The bound is enforced by both the pydantic ``max_length`` (schema boundary) and
+    ``validate_signature`` (defense in depth). Here we drive the validator with a model_construct'd
+    over-long list so its own LIMIT branch fires (no worker round-trip — CWE-400).
+    """
+    over = [
+        _s.ParamSpec(name=f"p{i}", type=_s.TypeRef(base="int")) for i in range(_v.MAX_PARAMS + 1)
+    ]
+    sig = _s.SetFunctionSignatureIn.model_construct(
+        session_id="sid",
+        function="f",
+        return_type=_s.TypeRef(base="int"),
+        parameters=over,
+        calling_convention=None,
+    )
+    with pytest.raises(GhidraMcpError) as ei:
+        _v.validate_signature(sig)
+    assert ei.value.envelope.type is ErrorType.LIMIT_EXCEEDED
+
+
+@pytest.mark.critical
+@pytest.mark.parametrize(
+    "ref",
+    [
+        {"base": "int", "pointer_levels": _v.MAX_POINTER_DEPTH + 1},  # ****… past the cap
+        {"base": "int", "array_len": _v.MAX_ARRAY_LEN + 1},  # element count past the cap
+    ],
+)
+def test_oversized_type_modifiers_rejected_at_boundary(ref: dict[str, object]) -> None:
+    """Pointer depth / array length past the bound is rejected at ``validate_type_ref`` (DoS)."""
+    with pytest.raises(GhidraMcpError) as ei:
+        _v.validate_type_ref(_typeref(**ref))
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+
+
+# --- Case 35 — injection-steered malicious parameter name (TB7-T / stored-injection) -------
+@pytest.mark.critical
+@pytest.mark.parametrize(
+    "malicious",
+    [
+        "<script>x</script>",  # markup
+        "../path",  # path traversal
+        "zero​width",  # U+200B zero-width
+        "rtl‮name",  # U+202E right-to-left override
+        "ctrl\x01char",  # C0 control
+    ],
+)
+def test_malicious_parameter_name_is_rejected(malicious: str) -> None:
+    """A ``ParamSpec.name`` with markup/path/zero-width/RTL/control chars never reaches the DB.
+
+    A parameter name is PERSISTED and re-served — identical stored-injection profile as a Phase-A
+    local/param name — so ``validate_signature`` holds it to the strict ``validate_write_name``
+    allow-list (rejected at the boundary, VALIDATION).
+    """
+    sig = _s.SetFunctionSignatureIn.model_construct(
+        session_id="sid",
+        function="f",
+        return_type=_s.TypeRef(base="int"),
+        parameters=[_s.ParamSpec.model_construct(name=malicious, type=_s.TypeRef(base="int"))],
+        calling_convention=None,
+    )
+    with pytest.raises(GhidraMcpError) as ei:
+        _v.validate_signature(sig)
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+    assert malicious.strip() not in ei.value.envelope.detail
+
+
+# --- Case 36 — cross-session structural isolation (TB7-T / store-I) -------------------------
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_cross_session_structural_type_isolation() -> None:
+    """Case 36 (live): ``allow_structural`` + a signature/type apply on session A does NOT enable or
+    mutate session B; B stays read-only with an independent store. The consent-isolation unit proof
+    is in ``test_structural_type_mutation`` (gate fakes); the store-isolation half needs two live
+    workers — promoted to WS5.
+    """
+
+
+# --- Case 37 — structural-consent-required (TB7-E / gating) ---------------------------------
+@pytest.mark.critical
+@pytest.mark.parametrize("structural_granted", [False, True])
+def test_structural_type_write_requires_structural_consent(structural_granted: bool) -> None:
+    """``set_function_signature``/``apply_data_type`` need the ``allow_structural`` opt-in.
+
+    Models the ``require_write_consent(structural=True)`` chokepoint: plain write consent is not
+    enough — the structural tier must be granted, else the call fails closed (VALIDATION). The
+    handler-level proof (with ``build_handlers`` + the real gate) is in
+    ``test_structural_type_mutation``; this asserts the gate contract directly.
+    """
+    granted: dict[str, bool] = {"writes": True, "structural": structural_granted}
+
+    def _require_write_consent(*, structural: bool) -> None:
+        if not granted["writes"]:
+            raise GhidraMcpError(
+                ErrorEnvelope(
+                    type=ErrorType.VALIDATION,
+                    title="Invalid arguments",
+                    detail="session is read-only",
+                    status=400,
+                )
+            )
+        if structural and not granted["structural"]:
+            raise GhidraMcpError(
+                ErrorEnvelope(
+                    type=ErrorType.VALIDATION,
+                    title="Invalid arguments",
+                    detail="structural writes not permitted",
+                    status=400,
+                )
+            )
+
+    if structural_granted:
+        _require_write_consent(structural=True)  # no raise once the tier is granted
+    else:
+        with pytest.raises(GhidraMcpError) as ei:
+            _require_write_consent(structural=True)
+        assert ei.value.envelope.type is ErrorType.VALIDATION
+        assert "structural" in ei.value.envelope.detail
+
+
+# --- Case 38 — BOLA on the structural grant (TB7-E / BOLA) ----------------------------------
+@pytest.mark.critical
+def test_bola_on_structural_grant_is_indistinguishable() -> None:
+    """A grant/structural write against an unknown/foreign session id yields the SAME
+    SESSION_INVALID envelope (no oracle) — the same chokepoint as case 20/29, unchanged by Phase B.
+    """
+    mgr = _ConsentManager(_VALID_SID)
+
+    def _env(sid: str) -> dict[str, object]:
+        with pytest.raises(GhidraMcpError) as ei:
+            mgr.require_write_consent(sid)
+        env = ei.value.envelope
+        return {"type": env.type, "title": env.title, "detail": env.detail, "status": env.status}
+
+    assert _env("guessed-id") == _env("another-users-id")
+    assert _env("guessed-id")["type"] is ErrorType.SESSION_INVALID
+
+
+# --- Case 39 — ADR-001 invariant under Phase-B writes (TB7-E) -------------------------------
+@pytest.mark.critical
+def test_phase_b_write_path_does_not_import_jvm_or_pyghidra() -> None:
+    """No server-side Phase-B path imports the JVM/PyGhidra — the write AND the type resolution run
+    only in the worker. Scopes the AST scan to the modules that gained the type-aware surface (the
+    registry handlers, the structured-type validators, the consent gate, the adapter); the
+    architecture test's package-wide scan covers them too (ADR-014 §7 case 39).
+    """
+    src = Path(__file__).resolve().parents[2] / "src" / "ghidra_mcp"
+    write_path_modules = [
+        src / "tools" / "registry.py",
+        src / "core" / "validation.py",
+        src / "sessions" / "manager.py",
+        src / "ghidra" / "rpc_client.py",
+    ]
+    forbidden = ("pyghidra", "jpype", "ghidra_mcp.ghidra._jvm_bridge")
+    offenders: list[str] = []
+    for path in write_path_modules:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            offenders += [
+                f"{path.name}: imports {n}"
+                for n in names
+                if any(bad in n.lower() for bad in forbidden)
+            ]
+    assert not offenders, "ADR-001 violation on a Phase-B write path: " + "; ".join(offenders)
+
+
+# --- Case 40 — address-not-in-map / out-of-bounds apply (TB7-T) -----------------------------
+@pytest.mark.critical
+def test_apply_data_type_bad_address_rejected_at_boundary() -> None:
+    """A non-hex / malformed ``apply_data_type`` address is rejected at ``parse_address``.
+
+    Boundary check (CWE-22/190) before any worker call. The in-map confinement half (an address
+    outside the program memory map, or a footprint overrunning a region) is a worker concern —
+    covered live below.
+    """
+    with pytest.raises(GhidraMcpError) as ei:
+        _v.parse_address("not-an-address")
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+
+
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_apply_data_type_out_of_map_fails_closed() -> None:
+    """Case 40 (live): ``apply_data_type`` at an address outside the program memory map (or where
+    the type footprint would overrun a region) fails closed (``analysis-failed``/``not-found``) with
+    no write — worker map-confinement before the transaction. Promoted to WS5 (needs the real map).
+    """

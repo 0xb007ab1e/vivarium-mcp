@@ -16,7 +16,12 @@ envelope. The imperative shell translates that envelope to the client.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
+
+if TYPE_CHECKING:  # avoid an import cycle at runtime (schemas imports nothing from this module).
+    from ghidra_mcp.tools.schemas import SetFunctionSignatureIn, TypeRef
 
 # Frozen domain bounds (also surfaced via env config in security/limits.py at runtime).
 # Declared here so validation has stable, testable constants independent of I/O.
@@ -62,6 +67,60 @@ MAX_COMMENT_LEN = 4096
 # mangled/namespaced symbol names) \u2014 but NOT ``/``, spaces, or any byte outside this set.
 _WRITE_NAME_LEAD = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_")
 _WRITE_NAME_REST = _WRITE_NAME_LEAD | frozenset("0123456789$.")
+
+# --- structured type-model bounds + vocab (ADR-014 §2.5; mirror schemas._MAX_*). The signature/
+# type input is STRUCTURED (resolved TypeRefs, never free-form C), so these validators are
+# allow-list type-REFERENCE resolution (CWE-20), not parsing — CParser/DataTypeParser are never
+# instantiated on a client value. ---
+MAX_PARAMS = 64
+"""Maximum parameters accepted in a structured signature (construction/re-flow DoS guard)."""
+
+MAX_POINTER_DEPTH = 8
+"""Maximum pointer-modifier depth on a :class:`TypeRef` (sane ``****…`` cap)."""
+
+MAX_ARRAY_LEN = 65_536
+"""Maximum fixed array length on a :class:`TypeRef` (element count; footprint worker-confined)."""
+
+# Closed base-type vocabulary (ADR-014 §2.5). Mirrors schemas.BaseType; mapped to Ghidra built-ins
+# in the worker. A ``base`` outside this set fails closed — never extensible by the client.
+BASE_TYPE_VOCAB = frozenset(
+    {
+        "void",
+        "bool",
+        "char",
+        "uchar",
+        "wchar_t",
+        "int8",
+        "uint8",
+        "int16",
+        "uint16",
+        "int32",
+        "uint32",
+        "int64",
+        "uint64",
+        "int",
+        "uint",
+        "long",
+        "ulong",
+        "float",
+        "double",
+    }
+)
+
+# Conservative static fallback calling-convention allow-list (ADR-014 §2.5 / KEY DECISION (c)). The
+# program-derived set (``getCompilerSpec().getCallingConventions()``) is the precise source at the
+# worker; this is the closed superset the SERVER boundary membership-checks against (a value outside
+# it is rejected before the RPC). Never a free-form convention string.
+CALLING_CONVENTIONS = frozenset(
+    {
+        "default",
+        "__cdecl",
+        "__stdcall",
+        "__fastcall",
+        "__thiscall",
+        "__vectorcall",
+    }
+)
 
 
 def _validation_error(detail: str) -> GhidraMcpError:
@@ -399,3 +458,100 @@ def validate_comment_text(text: str) -> str:
     from ghidra_mcp.core.envelope import wrap
 
     return wrap(text).value
+
+
+def validate_calling_convention(name: str | None) -> str | None:
+    """Validate a structured-signature calling-convention name (ADR-014 §2.5 / §3).
+
+    ``None`` is allowed (leave the convention unchanged); otherwise the value must be a member of
+    the closed :data:`CALLING_CONVENTIONS` allow-list — never a free-form convention string. The
+    worker membership-checks again against the program-derived set; this is the boundary's closed
+    superset (fail closed on a non-member — CWE-20).
+
+    Args:
+        name: The client-supplied convention name, or ``None`` to leave it unchanged.
+
+    Returns:
+        The validated convention (``None`` unchanged), unchanged on success.
+
+    Raises:
+        GhidraMcpError: With a ``VALIDATION`` envelope when ``name`` is not a string/``None`` or is
+            outside the allow-list. The detail names the condition, never the value.
+    """
+    if name is None:
+        return None
+    if not isinstance(name, str):
+        raise _validation_error("calling convention must be a string")
+    if name not in CALLING_CONVENTIONS:
+        raise _validation_error("calling convention is not in the allow-list")
+    return name
+
+
+def validate_type_ref(ref: TypeRef) -> None:
+    """Validate a :class:`TypeRef`'s shape and bounds (ADR-014 §3) — allow-list, never parsed.
+
+    Validates the pure part — the EXISTENCE of a ``named`` type is a worker concern (resolved
+    against the program's ``DataTypeManager`` → ``not-found``). Enforced here: exactly one of
+    ``base``/``named`` is set; ``base`` ∈ :data:`BASE_TYPE_VOCAB`; ``named`` passes the strict
+    write-name identifier allow-list (it is attacker-influenceable and used as a DB lookup key — the
+    conservative choice, ADR-014 §3, which a legitimate recovered type name satisfies);
+    ``0 ≤ pointer_levels ≤ MAX_POINTER_DEPTH``; ``array_len`` is ``None`` or
+    ``1..=MAX_ARRAY_LEN``. NO type string is parsed — this is a typed reference, not a C declaration
+    (the barrier that REPLACES the C parser — CParser/DataTypeParser are never instantiated).
+
+    Args:
+        ref: The :class:`TypeRef` to validate (pydantic has already applied coarse field bounds and
+            the exactly-one-leaf model validator; this re-asserts defensively + applies the
+            allow-lists pydantic cannot express).
+
+    Raises:
+        GhidraMcpError: With a ``VALIDATION`` envelope on any shape/vocab/bounds/charset violation.
+    """
+    base = ref.base
+    named = ref.named
+    # Exactly one leaf (defense in depth — the model validator enforces it too; never trust caller).
+    if (base is None) == (named is None):
+        raise _validation_error("type reference must set exactly one of base/named")
+    if base is not None and base not in BASE_TYPE_VOCAB:
+        raise _validation_error("type reference base is not in the allow-list")
+    if named is not None:
+        # A ``named`` reference is attacker-influenceable and used as a DB lookup key → strict
+        # identifier allow-list (rejects markup / C-declaration syntax / path / control chars). A
+        # value carrying a struct body or ``int*`` is NOT a valid identifier and is never parsed.
+        validate_write_name(named)
+    if not isinstance(ref.pointer_levels, int) or isinstance(ref.pointer_levels, bool):
+        raise _validation_error("pointer depth must be an integer")
+    if ref.pointer_levels < 0 or ref.pointer_levels > MAX_POINTER_DEPTH:
+        raise _validation_error("pointer depth is out of range")
+    if ref.array_len is not None:
+        if not isinstance(ref.array_len, int) or isinstance(ref.array_len, bool):
+            raise _validation_error("array length must be an integer")
+        if ref.array_len < 1 or ref.array_len > MAX_ARRAY_LEN:
+            raise _validation_error("array length is out of range")
+
+
+def validate_signature(sig: SetFunctionSignatureIn) -> None:
+    """Validate a ``set_function_signature`` payload end-to-end (ADR-014 §3) — allow-list only.
+
+    Enforces: ``function`` via :func:`validate_name` (read-path baseline selector); the parameter
+    list bounded by :data:`MAX_PARAMS`; each ``ParamSpec.name`` via :func:`validate_write_name` (it
+    is PERSISTED into the program DB and re-served — identical stored-injection profile as a
+    local/param rename); each ``ParamSpec.type`` and ``return_type`` via :func:`validate_type_ref`;
+    ``calling_convention`` via :func:`validate_calling_convention`. Parameter names need not be
+    unique server-side (Ghidra disambiguates); an empty/duplicate-heavy list is bounded by
+    ``MAX_PARAMS``. NO value is parsed by a C-type parser.
+
+    Args:
+        sig: The :class:`SetFunctionSignatureIn` payload to validate.
+
+    Raises:
+        GhidraMcpError: With a ``VALIDATION`` envelope on any name/cc/shape/bounds violation.
+    """
+    validate_name(sig.function)
+    if len(sig.parameters) > MAX_PARAMS:
+        raise _limit_error("parameter count exceeds the maximum")
+    validate_type_ref(sig.return_type)
+    for param in sig.parameters:
+        validate_write_name(param.name)  # persisted → strict allow-list (stored-injection defense)
+        validate_type_ref(param.type)
+    validate_calling_convention(sig.calling_convention)
