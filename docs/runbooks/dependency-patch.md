@@ -6,6 +6,12 @@
 ## When to use
 - SCA (pip-audit) flags a vulnerable Python dep, OR an advisory / **CISA KEV** entry matches the
   pinned **Ghidra**, **JDK**, or **base image** in the worker (tracked via the SBOM).
+- **A scheduled rescan fails:** `.github/workflows/scheduled-rescan.yml` runs daily against `main`
+  (pip-audit on the lockfiles + Trivy on the rebuilt images) and **fails closed** on a new
+  HIGH/CRITICAL in an *unchanged* dep or pinned base — the failed run is the alert. For a base-image
+  CVE (e.g. openssl), the fix is a **base-digest bump** to a patched Chainguard/Wolfi rebuild
+  (resolve via `podman pull <ref> && podman image inspect --format '{{index .RepoDigests 0}}'`),
+  landed via the normal PR + release flow.
 
 ## Severity / impact
 - Score with CVSS + EPSS + KEV and assess **reachability** in our context (is the vulnerable code
