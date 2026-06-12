@@ -760,6 +760,41 @@ class RpcGhidraAdapter:
         measured.sort(key=lambda c: c.complexity, reverse=True)
         return _TopComplex(functions=measured[:max_functions], truncated=listing.truncated)
 
+    # --- mutation / write operations (v1.1 — ADR-012; transaction-wrapped in the worker) ---
+    # The server has already checked write consent (sessions.require_write_consent) and validated
+    # the attacker-influenced inputs (validate_write_name / validate_comment_text). Here the adapter
+    # issues the write RPC and turns the worker's PLAIN result into the typed ``*Out``, wrapping
+    # only binary-derived field, the prior ``old_name``, as ``Untrusted`` (ADR-005 chokepoint).
+    def rename_function(self, sid: str, a: s.RenameFunctionIn) -> s.RenameResult:
+        """Rename one function (write — ADR-012)."""
+        return _build_rename_result(
+            self._tool_call(
+                sid, "rename_function", {"function": a.function, "new_name": a.new_name}
+            )
+        )
+
+    def rename_symbol(self, sid: str, a: s.RenameSymbolIn) -> s.RenameSymbolResult:
+        """Rename one data/label/global symbol (write — ADR-012)."""
+        return _build_rename_symbol_result(
+            self._tool_call(
+                sid, "rename_symbol", {"identifier": a.identifier, "new_name": a.new_name}
+            )
+        )
+
+    def set_comment(self, sid: str, a: s.SetCommentIn) -> s.SetCommentResult:
+        """Set or clear one comment at an address (write — ADR-012)."""
+        return _build_set_comment_result(
+            self._tool_call(
+                sid,
+                "set_comment",
+                {"address": a.address, "comment_type": a.comment_type, "text": a.text},
+            )
+        )
+
+    def undo(self, sid: str, a: s.SessionUndoIn) -> s.SessionUndoOut:
+        """Undo the last committed mutation transaction in the session (convenience — ADR-012)."""
+        return _build_undo_out(sid, self._tool_call(sid, "undo", {}))
+
     # --- internal: call orchestration -------------------------------------------------------
     def _tool_call(self, sid: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Issue a read-only tool RPC bounded by the per-tool timeout.
@@ -1561,3 +1596,43 @@ def _build_cyclomatic_complexity(r: dict[str, Any]) -> s.CyclomaticComplexity:
         edge_count=edge_count,
         incomplete=bool(r.get("incomplete", False)),
     )
+
+
+# --- mutation (write) result builders (v1.1 — ADR-012; old_name is binary-derived → Untrusted) ---
+@_fail_closed
+def _build_rename_result(r: dict[str, Any]) -> s.RenameResult:
+    """Build a ``RenameResult`` from the worker's plain dict (wraps the prior name Untrusted)."""
+    return s.RenameResult(
+        address=str(r["address"]),
+        old_name=_w(r["old_name"], DataOrigin.BINARY),
+        new_name=str(r["new_name"]),
+        applied=bool(r["applied"]),
+    )
+
+
+@_fail_closed
+def _build_rename_symbol_result(r: dict[str, Any]) -> s.RenameSymbolResult:
+    """Build a ``RenameSymbolResult`` (adds the closed-vocabulary symbol kind)."""
+    return s.RenameSymbolResult(
+        address=str(r["address"]),
+        old_name=_w(r["old_name"], DataOrigin.BINARY),
+        new_name=str(r["new_name"]),
+        applied=bool(r["applied"]),
+        kind=str(r["kind"]),
+    )
+
+
+@_fail_closed
+def _build_set_comment_result(r: dict[str, Any]) -> s.SetCommentResult:
+    """Build a ``SetCommentResult`` (no binary-derived field — all server/closed-vocabulary)."""
+    return s.SetCommentResult(
+        address=str(r["address"]),
+        comment_type=str(r["comment_type"]),
+        applied=bool(r["applied"]),
+    )
+
+
+@_fail_closed
+def _build_undo_out(sid: str, r: dict[str, Any]) -> s.SessionUndoOut:
+    """Build a ``SessionUndoOut`` (session id is server-known/safe; ``undone`` from the worker)."""
+    return s.SessionUndoOut(session_id=sid, undone=bool(r["undone"]))

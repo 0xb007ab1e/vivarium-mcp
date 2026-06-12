@@ -73,9 +73,13 @@ Error response (worker → server):
 `get_data_type`, `get_comments`, `memory_map`, `read_bytes`, `search_bytes`, `search_strings`,
 `program_metadata`, the v1.1 semantic-naming extraction primitives `call_graph` and
 `referenced_strings` (ADR-007), the v1.1 Tier-2 extraction primitives `function_cfg`, `imports`,
-`exports`, and `coverage` (ADR-008) — all worker-only extraction per ADR-001 — plus a
-`ping`/`shutdown` control pair.
-(Session create/status/close are **server-side** lifecycle, not worker RPC methods. The derived
+`exports`, and `coverage` (ADR-008) — all worker-only extraction per ADR-001 — the v1.1 **mutation
+(write) primitives** `rename_function`, `rename_symbol`, `set_comment`, and `undo` (ADR-012 — each
+performs a single Ghidra write inside **one transaction**, commit on success / `endTransaction(…,
+False)` roll-back + `analysis-failed` on failure; the server gates these behind per-session
+write-consent and validates the inputs first), plus a `ping`/`shutdown` control pair.
+(Session create/status/close **and the write-consent grant/revoke** `session_enable_writes`/
+`session_disable_writes` are **server-side** lifecycle, not worker RPC methods. The derived
 tools compute server-side with **no dedicated worker method**: `callees`/`callers`/`analysis_order`/
 `function_context` from `call_graph`+`referenced_strings`; the Tier-2 `cyclomatic_complexity` from
 `function_cfg`, `ioc_scan` from `list_strings`, `crypto_constant_scan` from `search_bytes`,

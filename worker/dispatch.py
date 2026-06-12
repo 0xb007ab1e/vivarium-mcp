@@ -76,6 +76,13 @@ RPC_METHODS = frozenset(
         "imports",
         "exports",
         "coverage",
+        # mutation (write) methods (v1.1 — ADR-012; worker-only, ADR-001; one txn per call, §4).
+        # The server validates the name/address/comment-type as hostile input and checks write
+        # consent BEFORE routing here (ADR-012 §3/§7); a rolled-back write maps to analysis-failed.
+        "rename_function",
+        "rename_symbol",
+        "set_comment",
+        "undo",
         "ping",
         "shutdown",
     }
@@ -209,6 +216,23 @@ class GhidraBackend(Protocol):
 
     def coverage(self, params: dict[str, Any]) -> dict[str, Any]:
         """Defined-code/data byte counts for program coverage — v1.1."""
+        ...
+
+    # --- mutation (write) operations (v1.1 — ADR-012; one transaction per call, §4) ---
+    def rename_function(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rename one function inside a transaction (commit / roll back on failure) — v1.1."""
+        ...
+
+    def rename_symbol(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rename one data/label/global symbol inside a transaction — v1.1."""
+        ...
+
+    def set_comment(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Set or clear one comment at an address inside a transaction — v1.1."""
+        ...
+
+    def undo(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Undo the last committed mutation transaction in this session — v1.1."""
         ...
 
 

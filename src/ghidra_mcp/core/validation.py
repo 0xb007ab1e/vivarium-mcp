@@ -48,6 +48,21 @@ _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 # the source stays unambiguous; C0/C1 controls and DEL are handled by the code-point range below.
 _UNICODE_SEPARATORS = frozenset("\u2028\u2029")
 
+# Maximum accepted/written comment text length (ADR-012 \u00a76; mirrors schemas._MAX_COMMENT). The
+# comment is persisted into the program DB and re-served by ``get_comments``, so its size is bounded
+# on the way IN as well as out (DoS / unbounded-growth \u2014 CWE-400).
+MAX_COMMENT_LEN = 4096
+
+# Allow-listed character set for a WRITE-target identifier (function/symbol ``new_name``) \u2014 a
+# conservative C-identifier-like charset (ADR-012 \u00a77). A name the client supplies is
+# attacker-INFLUENCED (an injection-steered LLM may propose it) and is PERSISTED into the program DB
+# then re-served by the read tools, so it must not smuggle markup, path separators, whitespace,
+# zero-width/RTL formatting, or control characters (stored-injection / data-poisoning defense). The
+# leading character may not be a digit; subsequent characters add ``$`` and ``.`` (legitimate in
+# mangled/namespaced symbol names) \u2014 but NOT ``/``, spaces, or any byte outside this set.
+_WRITE_NAME_LEAD = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_")
+_WRITE_NAME_REST = _WRITE_NAME_LEAD | frozenset("0123456789$.")
+
 
 def _validation_error(detail: str) -> GhidraMcpError:
     """Build a fail-closed ``VALIDATION`` error with a safe, generic detail.
@@ -283,3 +298,81 @@ def validate_byte_pattern(pattern_hex: str) -> str:
         if pair[0] not in _HEX_DIGITS or pair[1] not in _HEX_DIGITS:
             raise _validation_error("byte pattern contains a non-hex, non-wildcard byte")
     return pattern_hex
+
+
+def validate_write_name(name: str) -> str:
+    """Validate a WRITE-target name (``rename_function`` / ``rename_symbol`` ``new_name``).
+
+    This is the strictest name validation in the system, applied only to values the client asks the
+    server to PERSIST into the program DB (ADR-012 §7); it is attacker-INFLUENCED (an indirect
+    prompt injection — std-owasp-llm LLM01 — can steer the client into proposing it) and, once
+    written, is re-served by the read tools; so beyond the baseline :func:`validate_name` checks it
+    is restricted to a conservative identifier allow-list — a leading letter/underscore followed by
+    letters, digits, underscores, ``$`` and ``.`` — rejecting markup, path separators, whitespace,
+    and any control/bidi/zero-width/separator character (stored-injection / data-poisoning defense,
+    CWE-20). The value is never interpolated into a script (no ``runScript`` exists, PLAN §2); the
+    worker passes it to a typed Java setter.
+
+    Args:
+        name: The raw new-name string from the client.
+
+    Returns:
+        The validated name, unchanged on success.
+
+    Raises:
+        GhidraMcpError: With a ``VALIDATION`` envelope on a length, baseline-charset, or
+            identifier-allow-list violation. The detail names the condition, never the value.
+    """
+    # Baseline first: type, non-empty, length, and the control/separator rejection shared with the
+    # read path. Layering keeps the allow-list below the single new concern (defense in depth).
+    validate_name(name)
+
+    if name[0] not in _WRITE_NAME_LEAD:
+        raise _validation_error("name must begin with a letter or underscore")
+
+    for ch in name[1:]:
+        if ch not in _WRITE_NAME_REST:
+            raise _validation_error("name contains characters outside the identifier allow-list")
+
+    return name
+
+
+def validate_comment_text(text: str) -> str:
+    """Validate and normalize WRITE-target comment text (``set_comment``).
+
+    The way-IN mirror of the untrusted-data envelope's normalization (ADR-005): the comment is
+    attacker-INFLUENCED input that is PERSISTED into the program DB and later re-served by
+    ``get_comments``, so it is bounded in length and its dangerous characters are neutralized on the
+    way in (so the *stored* value is conservative) — the read path still re-wraps + re-normalizes on
+    the way out, giving the two-sided defense in depth ADR-012 §7 specifies.
+
+    Normalization reuses the single envelope chokepoint (:func:`ghidra_mcp.core.envelope.wrap`):
+    control (C0/C1/DEL, except tab/newline/CR), bidirectional/override, and zero-width/invisible
+    characters are replaced with inert ``<U+XXXX>`` tokens — never silently dropped. Newlines and
+    tabs are preserved (legitimate in multi-line comments). Length is bounded BEFORE normalization
+    (so an oversized payload is rejected, not expanded then accepted).
+
+    Args:
+        text: The raw comment text from the client (a non-empty string; ``None``-clears are handled
+            by the handler before calling this — only a present value is validated/normalized).
+
+    Returns:
+        The normalized comment text, safe to persist.
+
+    Raises:
+        GhidraMcpError: With a ``VALIDATION`` envelope when ``text`` is not a string or is empty;
+            with a ``LIMIT_EXCEEDED`` envelope when it exceeds ``MAX_COMMENT_LEN``.
+    """
+    if not isinstance(text, str):
+        raise _validation_error("comment text must be a string")
+    if not text:
+        raise _validation_error("comment text must not be empty")
+    if len(text) > MAX_COMMENT_LEN:
+        raise _limit_error("comment text exceeds the maximum length")
+
+    # Reuse the single normalization chokepoint (ADR-005). Import locally to keep this pure module
+    # free of an envelope dependency at import time and to avoid any import cycle; ``wrap``'s
+    # normalization is itself pure/I/O-free.
+    from ghidra_mcp.core.envelope import wrap
+
+    return wrap(text).value

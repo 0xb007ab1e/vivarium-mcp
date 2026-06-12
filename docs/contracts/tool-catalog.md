@@ -6,9 +6,10 @@
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **35** tools (asserted in tests) —
+- **Allow-list only:** the catalog is fixed; there are exactly **41** tools (asserted in tests) —
   22 Tier-1 read-only (v1) + 5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
-  reporting/metrics tools (ADR-008) — all read-only.
+  reporting/metrics tools (ADR-008; all read-only) + **6 v1.1 mutation/write tools (ADR-012; GATED
+  by per-session write-consent)**.
 - **Session-scoped:** every tool except `session_create` takes an opaque `session_id`, authorized
   server-side (BOLA defense). Inputs are `frozen` and reject unknown fields (`extra="forbid"`).
 - **Bounded by default:** list/search/read tools take `offset` + `limit` (or `length`) with hard
@@ -112,9 +113,34 @@ node `name`s and decompiled C stay `Untrusted` (ADR-005). Bounded (`max_nodes �
 > extraction (`function_cfg`/`imports`/`exports`/`coverage`) touches the worker. See
 > `docs/design/tier2-metrics.md`.
 
+### Mutation / write tools (v1.1 — ADR-012; GATED by per-session write-consent — threat-model TB7)
+
+The first **write** surface. **Default-deny:** a session is read-only until the operator calls
+`session_enable_writes` (the single human-in-the-loop consent gate — LLM08); every write then runs
+`authorize → require_write_consent → validate → port → audit`. The server **never mutates** — the
+write executes only in the worker, inside **one Ghidra transaction** (commit on success, roll back
+on failure — ADR-012 §4). Mutations are **session-scoped + ephemeral** (lost on evict, ADR-002).
+Attacker-influenced `new_name`/`text` are validated **on the way in** (`validate_write_name`
+identifier allow-list / `validate_comment_text` normalization — stored-injection defense, §7).
+
+| Tool | Input | Output | Notes |
+|------|-------|--------|-------|
+| `session_enable_writes` | `SessionEnableWritesIn{session_id, allow_structural=false}` | `SessionWriteStateOut{session_id, writes_enabled, allow_structural}` | the consent gate; server-side, no worker RPC |
+| `session_disable_writes` | `SessionDisableWritesIn{session_id}` | `SessionWriteStateOut` | revoke → read-only; server-side |
+| `session_undo` | `SessionUndoIn{session_id}` | `SessionUndoOut{session_id, undone}` | undo last committed mutation txn (requires consent) |
+| `rename_function` | `RenameFunctionIn{function, new_name}` | `RenameResult{address, old_name*, new_name, applied}` | transaction-wrapped; `new_name` allow-listed |
+| `rename_symbol` | `RenameSymbolIn{identifier, new_name}` | `RenameSymbolResult{address, old_name*, new_name, kind, applied}` | transaction-wrapped |
+| `set_comment` | `SetCommentIn{address, comment_type∈{EOL,PRE,POST,PLATE,REPEATABLE}, text?}` | `SetCommentResult{address, comment_type, applied}` | `text=null` clears; text normalized on the way in |
+
+> **Deferred** within mutation (separate, separately-threat-modeled gated increments): local/parameter
+> rename, `set_function_signature`, data-type define/apply (the **structural** set — gated behind
+> `allow_structural`). The `old_name` we echo is `Untrusted` (binary-derived); the `new_name` we set
+> is bare (server-validated). See `docs/adr/ADR-012-mutation-tools.md`.
+
 > `*` marks an `Untrusted[...]`-wrapped (binary-derived) field.
 
 ## Deferred (NOT yet built — gated, reviewed catalog additions)
-**Mutation tools (gated)** (rename/retype/comment-write) and `runScript` remain deferred — each a
-separate, separately-threat-modeled v1.1+ increment. Adding any deferred tool is a reviewed, gated
-change to this allow-list (ADR-006 extensibility seam).
+**Structural mutation** (local/parameter rename, `set_function_signature`, data-type define/apply —
+gated behind `allow_structural`) and `runScript`/arbitrary script execution remain deferred — each a
+separate, separately-threat-modeled increment (`runScript` is permanently out of scope, PLAN §2).
+Adding any deferred tool is a reviewed, gated change to this allow-list (ADR-006 extensibility seam).

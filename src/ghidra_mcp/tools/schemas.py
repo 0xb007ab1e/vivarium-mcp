@@ -23,6 +23,8 @@ numeric values are mirrored from :mod:`ghidra_mcp.core.validation` / ``security.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from ghidra_mcp.core.envelope import Untrusted
@@ -33,6 +35,7 @@ _MAX_QUERY = 4096
 _MAX_LIMIT = 10_000
 _MAX_READ = 1_048_576  # 1 MiB
 _DEFAULT_LIMIT = 100
+_MAX_COMMENT = 4096  # max accepted/written comment text length (ADR-012 §6; bounded write payload)
 
 
 class _In(BaseModel):
@@ -94,6 +97,11 @@ class SessionInfo(_Out):
         expires_at: Unix epoch seconds at which TTL eviction occurs.
         binary_sha256: Hex SHA-256 of the imported binary, or ``None`` before import. This is a
             server-computed digest of input — safe (not binary-derived content).
+        writes_enabled: Whether this session holds write consent (annotation mutation permitted —
+            ADR-012 §3). Default-deny: ``False`` until ``session_enable_writes`` is called. Server-
+            authoritative, safe.
+        allow_structural: Whether the (deferred) structural write set is additionally permitted on
+            this session — server-authoritative, safe. Defaults to ``False``.
     """
 
     session_id: str
@@ -101,6 +109,8 @@ class SessionInfo(_Out):
     created_at: int
     expires_at: int
     binary_sha256: str | None = None
+    writes_enabled: bool = False
+    allow_structural: bool = False
 
 
 class SessionImportIn(_SessionScopedIn):
@@ -1187,3 +1197,149 @@ class ProgramSummary(_Out):
     ioc_counts: list[IocCategoryCount] = Field(default_factory=list)
     crypto_algorithms: list[str] = Field(default_factory=list)
     truncated: bool = False
+
+
+# =====================================================================================
+# Mutation (write) tools — first gated increment (ADR-012; TB7). ANNOTATION-ONLY.
+#
+# Asymmetry vs. read tools (ADR-012 §6): the ``new_name``/``text`` the client supplies is
+# attacker-INFLUENCED (an injection-steered client may propose a malicious value), so it is
+# validated server-side as untrusted input (``validate_write_name``/``validate_comment_text``)
+# BEFORE the worker writes it — and the value we *set* is therefore bare/SAFE in the result. The
+# prior Ghidra name we *echo* (``old_name``) is binary-derived → ``Untrusted[...]`` (ADR-005).
+# ``applied``/``address``/``kind``/``comment_type`` are server- or closed-vocabulary — bare.
+# Every write is default-denied unless the session holds write consent (``session_enable_writes``).
+# =====================================================================================
+class RenameFunctionIn(_SessionScopedIn):
+    """Arguments for ``rename_function`` — set a function's name (write; gated by session consent).
+
+    Attributes:
+        function: The existing function to rename, by entry address (hex) or current name.
+            Resolved by the worker; validated as a name argument server-side.
+        new_name: The new name to set. Attacker-influenced input — validated against the
+            conservative write-name allow-list (``validate_write_name``) before the worker writes
+            it (stored-injection / data-poisoning defense — ADR-012 §7).
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    new_name: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class RenameResult(_Out):
+    """Result of a rename write (ADR-012 §6).
+
+    Attributes:
+        address: Server-normalized entry/symbol address (hex) — safe.
+        old_name: The PRIOR Ghidra name before the write — binary-derived → untrusted (ADR-005).
+        new_name: The name we set — SAFE (server-validated before the write).
+        applied: Whether the write committed — server/worker-controlled, safe.
+    """
+
+    address: str
+    old_name: Untrusted[str]
+    new_name: str
+    applied: bool
+
+
+class RenameSymbolIn(_SessionScopedIn):
+    """Arguments for ``rename_symbol`` — set a data/label/global symbol's name (write).
+
+    Attributes:
+        identifier: The existing symbol to rename, by address (hex) or current name. Resolved by
+            the worker; validated as a name argument server-side.
+        new_name: The new name to set — validated against the write-name allow-list before write.
+    """
+
+    identifier: str = Field(min_length=1, max_length=_MAX_NAME)
+    new_name: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class RenameSymbolResult(RenameResult):
+    """Result of ``rename_symbol`` (adds the resolved symbol kind).
+
+    Attributes:
+        kind: Symbol kind (e.g. ``"FUNCTION"``, ``"LABEL"``) — closed-vocabulary, safe.
+    """
+
+    kind: str
+
+
+class SetCommentIn(_SessionScopedIn):
+    """Arguments for ``set_comment`` — set or clear one comment at an address (write).
+
+    Attributes:
+        address: The address (hex) the comment attaches to — validated via ``parse_address``.
+        comment_type: Which comment slot to write — a closed allow-list (no free-form type).
+        text: The comment text to set; ``None`` CLEARS the comment. Attacker-influenced input —
+            bounded by ``_MAX_COMMENT`` and normalized/annotated on the way in
+            (``validate_comment_text``) so the stored value is conservative (ADR-012 §7).
+    """
+
+    address: str = Field(min_length=1, max_length=_MAX_NAME)
+    comment_type: Literal["EOL", "PRE", "POST", "PLATE", "REPEATABLE"]
+    text: str | None = Field(default=None, max_length=_MAX_COMMENT)
+
+
+class SetCommentResult(_Out):
+    """Result of ``set_comment`` (ADR-012 §6).
+
+    Attributes:
+        address: Server-normalized address (hex) — safe.
+        comment_type: The comment slot written — closed-vocabulary, safe.
+        applied: Whether the write committed — safe.
+    """
+
+    address: str
+    comment_type: str
+    applied: bool
+
+
+# --- server-side write-lifecycle (no worker RPC), mirroring SessionCloseIn/Out (ADR-012 §3) ---
+class SessionEnableWritesIn(_SessionScopedIn):
+    """Grant this session WRITE CONSENT — the human-in-the-loop gate for mutation (LLM08).
+
+    Default-deny: a session is read-only until this is called. The grant is auditable, revocable
+    (``session_disable_writes`` / implicit on evict), per-session, and non-transferable.
+
+    Attributes:
+        allow_structural: Forward hook to additionally opt into the (deferred) structural write set
+            (locals/signatures/types). Defaults to ``False``; the annotation set does not require
+            it. Defined now so the consent shape is forward-compatible (ADR-012 §3).
+    """
+
+    allow_structural: bool = Field(default=False)
+
+
+class SessionWriteStateOut(_Out):
+    """Reports a session's write-consent state (ADR-012 §6).
+
+    Attributes:
+        session_id: The session's opaque id — safe.
+        writes_enabled: Whether annotation writes are permitted on this session — safe.
+        allow_structural: Whether the (deferred) structural write set is additionally permitted —
+            safe.
+    """
+
+    session_id: str
+    writes_enabled: bool
+    allow_structural: bool
+
+
+class SessionDisableWritesIn(_SessionScopedIn):
+    """Revoke write consent for this session (return it to read-only)."""
+
+
+class SessionUndoIn(_SessionScopedIn):
+    """Undo the last committed mutation transaction in this session (optional convenience)."""
+
+
+class SessionUndoOut(_Out):
+    """Result of ``session_undo`` (ADR-012 §4).
+
+    Attributes:
+        session_id: The session's opaque id — safe.
+        undone: Whether a transaction was undone (``False`` if there was nothing to undo) — safe.
+    """
+
+    session_id: str
+    undone: bool

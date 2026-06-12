@@ -94,6 +94,10 @@ class _Session:
         store_path: Per-session project-store path to verified-wipe on eviction, or ``None`` if no
             store was provisioned.
         worker_started: Whether a worker was spawned (so eviction only kills a real worker).
+        writes_enabled: Whether write consent was granted for this session (default-deny —
+            ADR-012 §3). Mutation tools fail closed unless this is ``True``.
+        allow_structural: Whether the (deferred) structural write set is additionally permitted.
+            Only meaningful while ``writes_enabled`` is ``True``; reset on revoke.
     """
 
     session_id: str
@@ -106,6 +110,8 @@ class _Session:
     binary_sha256: str | None = None
     store_path: str | None = None
     worker_started: bool = False
+    writes_enabled: bool = False
+    allow_structural: bool = False
     notes: list[str] = field(default_factory=list)
 
 
@@ -212,15 +218,116 @@ class SessionManager:
             GhidraMcpError: ``SESSION_INVALID`` for unknown/expired/evicted ids (BOLA-safe).
         """
         with self._lock:
-            sess = self._sessions.get(session_id)
-            if sess is None or sess.state == STATE_EVICTED:
-                raise _errors.session_invalid()
-            now = self._clock()
-            if self._is_expired(sess, now):
-                # Lazily evict an expired session, then fail closed with the same BOLA-safe error.
-                self._evict_locked(session_id, reason="expired-on-authorize")
-                raise _errors.session_invalid()
-            sess.last_used_mono = now
+            return self._to_info(self._get_live_locked(session_id))
+
+    def _get_live_locked(self, session_id: str) -> _Session:
+        """Look up a live session by id (caller holds ``_lock``); refresh its idle clock.
+
+        Shared BOLA chokepoint for :meth:`authorize` and the write-consent methods so the
+        unknown/expired/evicted handling is identical across them (all yield ``SESSION_INVALID``).
+
+        Args:
+            session_id: The opaque id supplied by the client.
+
+        Returns:
+            The live internal :class:`_Session`.
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` for unknown/expired/evicted ids (BOLA-safe).
+        """
+        sess = self._sessions.get(session_id)
+        if sess is None or sess.state == STATE_EVICTED:
+            raise _errors.session_invalid()
+        now = self._clock()
+        if self._is_expired(sess, now):
+            # Lazily evict an expired session, then fail closed with the same BOLA-safe error.
+            self._evict_locked(session_id, reason="expired-on-authorize")
+            raise _errors.session_invalid()
+        sess.last_used_mono = now
+        return sess
+
+    def enable_writes(self, session_id: str, *, allow_structural: bool = False) -> SessionInfo:
+        """Grant WRITE CONSENT to a session — the human-in-the-loop mutation gate (ADR-012 §3).
+
+        Default-deny: sessions are read-only until this is called. The grant is per-session,
+        revocable (:meth:`disable_writes` / implicit on evict), and audited.
+
+        Args:
+            session_id: The opaque session id.
+            allow_structural: Additionally opt into the (deferred) structural write set.
+
+        Returns:
+            The session's updated :class:`SessionInfo` (reporting the consent state).
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` for unknown/expired/evicted ids (BOLA-safe).
+        """
+        with self._lock:
+            sess = self._get_live_locked(session_id)
+            sess.writes_enabled = True
+            sess.allow_structural = allow_structural
+            _LOG.info(
+                "session.writes_enabled",
+                extra={
+                    "event": "session_writes_enabled",
+                    "session_id": session_id,
+                    "allow_structural": allow_structural,
+                },
+            )
+            return self._to_info(sess)
+
+    def disable_writes(self, session_id: str) -> SessionInfo:
+        """Revoke write consent for a session (return it to read-only).
+
+        Args:
+            session_id: The opaque session id.
+
+        Returns:
+            The session's updated :class:`SessionInfo`.
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` for unknown/expired/evicted ids (BOLA-safe).
+        """
+        with self._lock:
+            sess = self._get_live_locked(session_id)
+            sess.writes_enabled = False
+            sess.allow_structural = False
+            _LOG.info(
+                "session.writes_disabled",
+                extra={"event": "session_writes_disabled", "session_id": session_id},
+            )
+            return self._to_info(sess)
+
+    def require_write_consent(self, session_id: str, *, structural: bool = False) -> SessionInfo:
+        """Authorize the session AND require write consent; fail closed otherwise (ADR-012 §3).
+
+        The mutation-tool gate chokepoint: every write handler calls this before delegating to the
+        port. A session without consent (the default) is rejected with a ``VALIDATION`` envelope —
+        no destructive action runs without the explicit, prior :meth:`enable_writes` grant (LLM08).
+
+        Args:
+            session_id: The opaque session id.
+            structural: When ``True``, also require the (deferred) structural-write opt-in.
+
+        Returns:
+            The authorized :class:`SessionInfo`.
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` (BOLA-safe) for a bad id, or ``VALIDATION`` when the
+                session has not been granted (structural) write consent.
+        """
+        with self._lock:
+            sess = self._get_live_locked(session_id)
+            if not sess.writes_enabled:
+                raise _errors.make_error(
+                    ErrorType.VALIDATION,
+                    "session is read-only; write consent not granted",
+                )
+            if structural and not sess.allow_structural:
+                raise _errors.make_error(
+                    ErrorType.VALIDATION,
+                    "structural writes not permitted for this session",
+                )
             return self._to_info(sess)
 
     def ensure_worker(self, session_id: str) -> None:
@@ -431,4 +538,6 @@ class SessionManager:
             created_at=sess.created_at,
             expires_at=sess.created_at + sess.ttl_s,
             binary_sha256=sess.binary_sha256,
+            writes_enabled=sess.writes_enabled,
+            allow_structural=sess.allow_structural,
         )

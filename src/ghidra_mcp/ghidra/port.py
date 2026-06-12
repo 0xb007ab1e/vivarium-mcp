@@ -172,3 +172,23 @@ class GhidraPort(Protocol):
     def program_summary(self, sid: str, a: s.ProgramSummaryIn) -> s.ProgramSummary:
         """One-shot aggregate triage report (server-side aggregation of Tier-1 + Tier-2)."""
         ...
+
+    # --- mutation / write operations (v1.1 — ADR-012; gated by session write-consent) ---
+    # The server checks write consent + validates the (attacker-influenced) inputs BEFORE calling
+    # these; the worker performs each write inside one Ghidra transaction (rollback on failure). The
+    # adapter wraps the binary-derived prior ``old_name`` as ``Untrusted`` in the result.
+    def rename_function(self, sid: str, a: s.RenameFunctionIn) -> s.RenameResult:
+        """Rename one function (write; one transaction, rollback on failure — ADR-012 §4)."""
+        ...
+
+    def rename_symbol(self, sid: str, a: s.RenameSymbolIn) -> s.RenameSymbolResult:
+        """Rename one data/label/global symbol (write; transaction-wrapped)."""
+        ...
+
+    def set_comment(self, sid: str, a: s.SetCommentIn) -> s.SetCommentResult:
+        """Set or clear one comment at an address (write; transaction-wrapped)."""
+        ...
+
+    def undo(self, sid: str, a: s.SessionUndoIn) -> s.SessionUndoOut:
+        """Undo the last committed mutation transaction in the session (ADR-012 §4)."""
+        ...
