@@ -86,6 +86,13 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "crypto_constant_scan",
     "call_graph_metrics",
     "program_summary",
+    # mutation / write tools (v1.1 — ADR-012; GATED by per-session write-consent)
+    "session_enable_writes",
+    "session_disable_writes",
+    "session_undo",
+    "rename_function",
+    "rename_symbol",
+    "set_comment",
 )
 
 
@@ -524,6 +531,128 @@ def _require(detail: str) -> GhidraMcpError:
     )
 
 
+# =====================================================================================
+# Mutation / write handlers (v1.1 — ADR-012). GATED: a session is read-only by default;
+# `session_enable_writes` is the single human-in-the-loop consent gate (LLM08). Every write
+# handler: authorize + require_write_consent → validate the attacker-influenced inputs → delegate
+# to the port (the worker writes inside one transaction) → audit intent + outcome (sizes/flags
+# only, NEVER the value or binary content). No handler runs Ghidra in-process (ADR-001).
+# =====================================================================================
+def _handle_session_enable_writes(
+    ctx: ToolContext, args: s.SessionEnableWritesIn
+) -> s.SessionWriteStateOut:
+    """Grant write consent to a session — the human-in-the-loop mutation gate (ADR-012 §3)."""
+    info = ctx.sessions.enable_writes(args.session_id, allow_structural=args.allow_structural)
+    _log.info(
+        "tool.session_enable_writes",
+        extra={
+            "tool": "session_enable_writes",
+            "session": args.session_id,
+            "allow_structural": args.allow_structural,
+        },
+    )
+    return s.SessionWriteStateOut(
+        session_id=args.session_id,
+        writes_enabled=info.writes_enabled,
+        allow_structural=info.allow_structural,
+    )
+
+
+def _handle_session_disable_writes(
+    ctx: ToolContext, args: s.SessionDisableWritesIn
+) -> s.SessionWriteStateOut:
+    """Revoke write consent for a session (return it to read-only)."""
+    info = ctx.sessions.disable_writes(args.session_id)
+    _log.info(
+        "tool.session_disable_writes",
+        extra={"tool": "session_disable_writes", "session": args.session_id},
+    )
+    return s.SessionWriteStateOut(
+        session_id=args.session_id,
+        writes_enabled=info.writes_enabled,
+        allow_structural=info.allow_structural,
+    )
+
+
+def _handle_session_undo(ctx: ToolContext, args: s.SessionUndoIn) -> s.SessionUndoOut:
+    """Undo the last committed mutation transaction (requires write consent — ADR-012 §4)."""
+    ctx.sessions.require_write_consent(args.session_id)
+    result = ctx.port.undo(args.session_id, args)
+    _log.info(
+        "tool.session_undo",
+        extra={"tool": "session_undo", "session": args.session_id, "undone": result.undone},
+    )
+    return result
+
+
+def _handle_rename_function(ctx: ToolContext, args: s.RenameFunctionIn) -> s.RenameResult:
+    """Rename one function (write; gated by consent + write-name allow-list — ADR-012)."""
+    ctx.sessions.require_write_consent(args.session_id)
+    v.validate_write_name(args.new_name)  # reject attacker-influenced markup/path/etc.
+    _log.info(
+        "tool.rename_function.intent",
+        extra={
+            "tool": "rename_function",
+            "session": args.session_id,
+            "target_len": len(args.function),
+            "new_name_len": len(args.new_name),
+        },
+    )
+    result = ctx.port.rename_function(args.session_id, args)
+    _log.info(
+        "tool.rename_function.outcome",
+        extra={"tool": "rename_function", "session": args.session_id, "applied": result.applied},
+    )
+    return result
+
+
+def _handle_rename_symbol(ctx: ToolContext, args: s.RenameSymbolIn) -> s.RenameSymbolResult:
+    """Rename one data/label/global symbol (write; gated by consent + allow-list — ADR-012)."""
+    ctx.sessions.require_write_consent(args.session_id)
+    v.validate_write_name(args.new_name)
+    _log.info(
+        "tool.rename_symbol.intent",
+        extra={
+            "tool": "rename_symbol",
+            "session": args.session_id,
+            "target_len": len(args.identifier),
+            "new_name_len": len(args.new_name),
+        },
+    )
+    result = ctx.port.rename_symbol(args.session_id, args)
+    _log.info(
+        "tool.rename_symbol.outcome",
+        extra={"tool": "rename_symbol", "session": args.session_id, "applied": result.applied},
+    )
+    return result
+
+
+def _handle_set_comment(ctx: ToolContext, args: s.SetCommentIn) -> s.SetCommentResult:
+    """Set or clear one comment (write; gated; text normalized on the way in — ADR-012)."""
+    ctx.sessions.require_write_consent(args.session_id)
+    v.parse_address(args.address)  # validate/confine the target address (CWE-22/190)
+    if args.text is not None:
+        # Normalize the attacker-influenced comment on the way IN (stored-injection defense);
+        # write the normalized value, not the raw input (the frozen model is copied).
+        args = args.model_copy(update={"text": v.validate_comment_text(args.text)})
+    _log.info(
+        "tool.set_comment.intent",
+        extra={
+            "tool": "set_comment",
+            "session": args.session_id,
+            "comment_type": args.comment_type,
+            "text_len": 0 if args.text is None else len(args.text),
+            "clears": args.text is None,
+        },
+    )
+    result = ctx.port.set_comment(args.session_id, args)
+    _log.info(
+        "tool.set_comment.outcome",
+        extra={"tool": "set_comment", "session": args.session_id, "applied": result.applied},
+    )
+    return result
+
+
 # Map of tool name → (handler, input-schema). The input schema is the handler's single argument
 # type, from which FastMCP derives the tool's JSON schema. The output schema is the return type.
 _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
@@ -562,6 +691,13 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "crypto_constant_scan": (_handle_crypto_constant_scan, s.CryptoConstantScanIn),
     "call_graph_metrics": (_handle_call_graph_metrics, s.CallGraphMetricsIn),
     "program_summary": (_handle_program_summary, s.ProgramSummaryIn),
+    # mutation / write tools (v1.1 — ADR-012; gated by per-session write-consent)
+    "session_enable_writes": (_handle_session_enable_writes, s.SessionEnableWritesIn),
+    "session_disable_writes": (_handle_session_disable_writes, s.SessionDisableWritesIn),
+    "session_undo": (_handle_session_undo, s.SessionUndoIn),
+    "rename_function": (_handle_rename_function, s.RenameFunctionIn),
+    "rename_symbol": (_handle_rename_symbol, s.RenameSymbolIn),
+    "set_comment": (_handle_set_comment, s.SetCommentIn),
 }
 
 

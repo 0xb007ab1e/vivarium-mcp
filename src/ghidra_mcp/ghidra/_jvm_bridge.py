@@ -23,6 +23,7 @@ A separate worker entrypoint (``worker/`` — WS2/WS3) hosts this bridge and the
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from typing import Any
 
 # Bounds the bridge enforces itself (defense-in-depth; the server also caps before calling).
@@ -239,6 +240,66 @@ class PyGhidraBackend:
     def coverage(self, params: dict[str, Any]) -> dict[str, Any]:
         """Defined-code/data byte counts for program coverage — v1.1 (ADR-008)."""
         return self._gh_coverage()
+
+    # --- mutation operations (v1.1 — ADR-012; transaction-wrapped, fail-closed) --------------
+    # Each write resolves the target with an existing read-only resolver, then performs a single
+    # Ghidra write inside one transaction (commit on success, roll back + re-raise on any failure
+    # — ADR-012 §4, topic-error-handling fail-closed). The server has already validated the name/
+    # address/comment-type as hostile input (ADR-012 §7) and checked write consent (§3); the worker
+    # never interpolates a value into a script — it calls a typed Java setter (no runScript path).
+    def rename_function(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rename one function (write; gated by session write-consent at the server — ADR-012).
+
+        Args:
+            params: ``{"function": str, "new_name": str}`` (target + server-validated new name).
+
+        Returns:
+            ``{"address", "old_name", "new_name", "applied"}`` (plain; the server wraps
+            ``old_name`` as untrusted — it is the prior binary-derived name).
+        """
+        function = str(_require(params, "function"))
+        new_name = str(_require(params, "new_name"))
+        return self._gh_rename_function(function, new_name)
+
+    def rename_symbol(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rename one data/label/global symbol (write — ADR-012).
+
+        Args:
+            params: ``{"identifier": str, "new_name": str}``.
+
+        Returns:
+            ``{"address", "old_name", "new_name", "kind", "applied"}`` (plain; ``old_name``
+            wrapped by the server).
+        """
+        identifier = str(_require(params, "identifier"))
+        new_name = str(_require(params, "new_name"))
+        return self._gh_rename_symbol(identifier, new_name)
+
+    def set_comment(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Set or clear one comment at an address (write — ADR-012).
+
+        Args:
+            params: ``{"address": str, "comment_type": str, "text": str | None}`` (``text`` of
+                ``None`` clears the comment; ``comment_type`` is one of the five closed kinds).
+
+        Returns:
+            ``{"address", "comment_type", "applied"}`` (plain — no binary-derived field).
+        """
+        address = str(_require(params, "address"))
+        comment_type = str(_require(params, "comment_type"))
+        text = params.get("text")
+        return self._gh_set_comment(address, comment_type, None if text is None else str(text))
+
+    def undo(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Undo the last committed mutation transaction in this session (convenience — ADR-012).
+
+        Args:
+            params: ``{}`` (session-scoped; no parameters).
+
+        Returns:
+            ``{"undone": bool}`` (plain) — ``False`` when there was nothing to undo.
+        """
+        return self._gh_undo()
 
     # --- JVM edge (PyGhidra calls live ONLY here; imported lazily) ---------------------------
     # NOTE: these helpers are the worker-only JVM boundary. They are excluded from server unit
@@ -1220,6 +1281,175 @@ class PyGhidraBackend:
         }
 
     # --- private JVM helpers (lazy imports only; never at module scope) -----------------------
+    # --- mutation JVM edges (ADR-012; one transaction per write, roll back on failure) -------
+    def _gh_rename_function(
+        self, function: str, new_name: str
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Rename a function inside one transaction (commit on success; roll back on failure).
+
+        Args:
+            function: The target function (entry address hex or current name).
+            new_name: The server-validated new name to set.
+
+        Returns:
+            ``{"address", "old_name", "new_name", "applied"}`` (plain).
+
+        Raises:
+            WorkerError: ``not-found`` if the function does not resolve; ``analysis-failed`` if the
+                rename raised (the transaction is rolled back first — fail closed).
+        """
+        from ghidra.program.model.symbol import SourceType  # type: ignore[import-not-found]
+
+        func = self._resolve_function(function)
+        old_name = _to_text(func.getName())
+        address = str(func.getEntryPoint())
+
+        def _write() -> None:
+            func.setName(new_name, SourceType.USER_DEFINED)
+
+        self._in_transaction("rename_function", _write)
+        return {
+            "address": address,
+            "old_name": old_name,
+            "new_name": new_name,
+            "applied": True,
+        }
+
+    def _gh_rename_symbol(
+        self, identifier: str, new_name: str
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Rename a symbol inside one transaction (commit on success; roll back on failure).
+
+        Args:
+            identifier: The target symbol (address hex or current name).
+            new_name: The server-validated new name to set.
+
+        Returns:
+            ``{"address", "old_name", "new_name", "kind", "applied"}`` (plain).
+
+        Raises:
+            WorkerError: ``not-found`` if no symbol matches; ``analysis-failed`` on a rolled-back
+                write.
+        """
+        from ghidra.program.model.symbol import SourceType
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        program = self._require_program()
+        table = program.getSymbolTable()
+        symbol = None
+        addr = self._try_parse_address(identifier)
+        if addr is not None:
+            symbol = table.getPrimarySymbol(addr)
+        if symbol is None:
+            for candidate in table.getSymbols(identifier):
+                symbol = candidate
+                break
+        if symbol is None:
+            raise WorkerError(CODE_NOT_FOUND, "symbol not found")
+        old_name = _to_text(symbol.getName())
+        address = str(symbol.getAddress())
+        kind = str(symbol.getSymbolType())
+
+        def _write() -> None:
+            symbol.setName(new_name, SourceType.USER_DEFINED)
+
+        self._in_transaction("rename_symbol", _write)
+        return {
+            "address": address,
+            "old_name": old_name,
+            "new_name": new_name,
+            "kind": kind,
+            "applied": True,
+        }
+
+    def _gh_set_comment(
+        self, address: str, comment_type: str, text: str | None
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Set/clear one comment at an address inside one transaction (roll back on failure).
+
+        Args:
+            address: The target address (hex).
+            comment_type: One of ``EOL``/``PRE``/``POST``/``PLATE``/``REPEATABLE`` (closed kinds).
+            text: The comment text, or ``None`` to clear the comment.
+
+        Returns:
+            ``{"address", "comment_type", "applied"}`` (plain).
+
+        Raises:
+            WorkerError: ``invalid-params`` if the comment kind is unknown; ``analysis-failed`` on
+                a rolled-back write.
+        """
+        from ghidra.program.model.listing import CodeUnit
+        from worker.dispatch import CODE_INVALID_PARAMS, WorkerError
+
+        program = self._require_program()
+        kinds = {
+            "EOL": CodeUnit.EOL_COMMENT,
+            "PRE": CodeUnit.PRE_COMMENT,
+            "POST": CodeUnit.POST_COMMENT,
+            "PLATE": CodeUnit.PLATE_COMMENT,
+            "REPEATABLE": CodeUnit.REPEATABLE_COMMENT,
+        }
+        type_id = kinds.get(comment_type)
+        if type_id is None:  # defense in depth: the server schema already allow-lists the kind
+            raise WorkerError(CODE_INVALID_PARAMS, "unknown comment type")
+        addr = self._parse_address(address)
+        listing = program.getListing()
+
+        def _write() -> None:
+            listing.setComment(addr, type_id, text)
+
+        self._in_transaction("set_comment", _write)
+        return {"address": str(addr), "comment_type": comment_type, "applied": True}
+
+    def _gh_undo(self) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Undo the last committed transaction on the open program, if any.
+
+        Returns:
+            ``{"undone": bool}`` — ``False`` when there is nothing to undo.
+
+        Raises:
+            WorkerError: ``analysis-failed`` if no program is loaded or the undo raised.
+        """
+        from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+        program = self._require_program()
+        if not bool(program.canUndo()):
+            return {"undone": False}
+        try:
+            program.undo()
+        except Exception as exc:
+            raise WorkerError(CODE_ANALYSIS_FAILED, "undo failed") from exc
+        return {"undone": True}
+
+    def _in_transaction(
+        self, tool_name: str, write: Callable[[], None]
+    ) -> None:  # pragma: no cover - JVM edge
+        """Run ``write`` inside one Ghidra transaction; commit on success, roll back on failure.
+
+        One tool call == one transaction == one undoable unit (ADR-012 §4; no batching). On any
+        exception the transaction is ended with ``commit=False`` (the program is left unchanged —
+        fail closed, topic-error-handling) and a safe ``analysis-failed`` is raised; the original
+        exception is chained server-side only (never crosses the boundary).
+
+        Args:
+            tool_name: The transaction description (the calling tool's name).
+            write: The single Ghidra write to perform inside the transaction.
+
+        Raises:
+            WorkerError: ``analysis-failed`` if the write raised (after rolling back).
+        """
+        from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+        program = self._require_program()
+        txn = program.startTransaction(tool_name)
+        try:
+            write()
+        except Exception as exc:
+            program.endTransaction(txn, False)
+            raise WorkerError(CODE_ANALYSIS_FAILED, "write failed and was rolled back") from exc
+        program.endTransaction(txn, True)
+
     def _require_program(self) -> Any:  # pragma: no cover - JVM edge
         """Return the open program or raise a safe ``analysis-failed`` error.
 
