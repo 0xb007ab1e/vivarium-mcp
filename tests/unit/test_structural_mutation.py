@@ -320,3 +320,77 @@ def test_build_structural_rename_result_wraps_binary_fields() -> None:
     assert out.function.value == "FUN_00401000" and out.function.origin is DataOrigin.BINARY
     assert out.old_name.value == "local_28" and out.old_name.origin is DataOrigin.BINARY
     assert out.new_name == "len" and out.address == "0x401000" and out.applied is True
+
+
+# --- _in_transaction atomicity (the CWE-460 fix — ADR-013 §4; all three branches) ---------------
+# Pure control flow over the program's transaction API, exercised with a fake program (no JVM —
+# the ``_gh_*`` callers stay coverage-omitted). Asserts: commit on success, rollback on a write
+# failure, and rollback on a COMMIT failure (the CWE-460 case) — never a dangling txn or raw escape.
+class _FakeProgram:
+    """Records start/end-transaction events; can simulate a commit-time (``endTransaction(_,True)``)
+    failure to exercise the CWE-460 path."""
+
+    def __init__(self, *, commit_raises: bool = False) -> None:
+        self.events: list[tuple[Any, ...]] = []
+        self._commit_raises = commit_raises
+        self._txn = 0
+
+    def startTransaction(self, name: str) -> int:  # noqa: N802  # Ghidra Java API name
+        self._txn += 1
+        self.events.append(("start", name))
+        return self._txn
+
+    def endTransaction(self, txn: int, commit: bool) -> None:  # noqa: N802  # Ghidra Java API name
+        self.events.append(("end", txn, commit))
+        if commit and self._commit_raises:
+            raise RuntimeError("end-of-transaction fixup failed")
+
+
+def _backend_with(program: _FakeProgram) -> Any:
+    from ghidra_mcp.ghidra._jvm_bridge import PyGhidraBackend
+
+    backend = PyGhidraBackend()
+    backend._program = program
+    return backend
+
+
+@pytest.mark.critical
+def test_in_transaction_commits_on_success() -> None:
+    prog = _FakeProgram()
+    wrote: list[str] = []
+    _backend_with(prog)._in_transaction("rename_local_variable", lambda: wrote.append("w"))
+    assert wrote == ["w"]
+    assert prog.events == [("start", "rename_local_variable"), ("end", 1, True)]  # committed only
+
+
+@pytest.mark.critical
+def test_in_transaction_rolls_back_on_write_failure() -> None:
+    from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+    prog = _FakeProgram()
+
+    def _boom() -> None:
+        raise RuntimeError("write blew up")
+
+    with pytest.raises(WorkerError) as exc:
+        _backend_with(prog)._in_transaction("rename_local_variable", _boom)
+    assert exc.value.code == CODE_ANALYSIS_FAILED
+    assert prog.events == [("start", "rename_local_variable"), ("end", 1, False)]  # rolled back
+
+
+@pytest.mark.critical
+def test_in_transaction_rolls_back_on_commit_failure() -> None:
+    # CWE-460: the commit (endTransaction(_, True)) itself raises (end-of-txn fixups) → must roll
+    # back AND surface analysis-failed — never a dangling transaction, never a raw exception escape.
+    from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+    prog = _FakeProgram(commit_raises=True)
+    with pytest.raises(WorkerError) as exc:
+        _backend_with(prog)._in_transaction("rename_local_variable", lambda: None)
+    assert exc.value.code == CODE_ANALYSIS_FAILED
+    # commit attempted (True), then best-effort rollback (False): no double-commit, no escape.
+    assert prog.events == [
+        ("start", "rename_local_variable"),
+        ("end", 1, True),
+        ("end", 1, False),
+    ]

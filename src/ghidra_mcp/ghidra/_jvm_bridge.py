@@ -1492,7 +1492,11 @@ class PyGhidraBackend:
         try:
             decompiler.openProgram(program)
             results = decompiler.decompileFunction(func, 0, ConsoleTaskMonitor())
-            high = results.getHighFunction() if results is not None else None
+            # Require a COMPLETED decompile (mirrors the read path _gh_decompile) — a timed-out/
+            # partial result can return a non-None but incomplete HighFunction (review finding 2).
+            if results is None or not results.decompileCompleted():
+                raise WorkerError(CODE_ANALYSIS_FAILED, "decompilation did not complete")
+            high = results.getHighFunction()
             if high is None:
                 raise WorkerError(
                     CODE_ANALYSIS_FAILED, "decompilation did not produce a high function"
@@ -1526,22 +1530,29 @@ class PyGhidraBackend:
             "applied": True,
         }
 
-    def _in_transaction(
-        self, tool_name: str, write: Callable[[], None]
-    ) -> None:  # pragma: no cover - JVM edge
+    def _in_transaction(self, tool_name: str, write: Callable[[], None]) -> None:
         """Run ``write`` inside one Ghidra transaction; commit on success, roll back on failure.
 
-        One tool call == one transaction == one undoable unit (ADR-012 §4; no batching). On any
-        exception the transaction is ended with ``commit=False`` (the program is left unchanged —
-        fail closed, topic-error-handling) and a safe ``analysis-failed`` is raised; the original
-        exception is chained server-side only (never crosses the boundary).
+        One tool call == one transaction == one undoable unit (ADR-012 §4; no batching). The commit
+        runs **inside** the ``try`` because Ghidra performs end-of-transaction fixups there (the
+        decompiler/analysis manager re-flows dependent state — esp. for a structural write), so the
+        commit itself can raise. On **any** failure — in ``write`` or the commit — the transaction
+        is rolled back (``endTransaction(commit=False)``, best-effort/suppressed so a secondary
+        failure never masks the cause) and a safe ``analysis-failed`` is raised: never a dangling
+        transaction, never a raw exception across the boundary (CWE-460 — fail closed, ADR-013 §4,
+        topic-error-handling / topic-resource-management). The original exception is chained
+        server-side only.
+
+        Pure control flow over the program's transaction API (``startTransaction`` /
+        ``endTransaction``) — unit-tested with a fake program; the JVM-symbol edges that *call* this
+        (the ``_gh_*`` write helpers) stay coverage-omitted.
 
         Args:
             tool_name: The transaction description (the calling tool's name).
             write: The single Ghidra write to perform inside the transaction.
 
         Raises:
-            WorkerError: ``analysis-failed`` if the write raised (after rolling back).
+            WorkerError: ``analysis-failed`` if the write or the commit raised (after rolling back).
         """
         import contextlib
 
@@ -1549,24 +1560,13 @@ class PyGhidraBackend:
 
         program = self._require_program()
         txn = program.startTransaction(tool_name)
-        committed = False
         try:
             write()
-            # Commit INSIDE the try: Ghidra runs end-of-transaction fixups here (the decompiler/
-            # analysis manager re-flows dependent state — esp. for structural writes), so the commit
-            # itself can raise. A commit-time failure must also roll back + surface a typed error,
-            # not leave the txn dangling with a raw exception (CWE-460 — ADR-013 §4).
-            program.endTransaction(txn, True)
-            committed = True
+            program.endTransaction(txn, True)  # commit (end-of-txn fixups can raise — CWE-460)
         except Exception as exc:
-            if not committed:
-                # The write OR the commit failed; end the still-open transaction WITHOUT committing.
-                # Best-effort rollback, suppressed so a secondary failure never masks the original
-                # cause (topic-resource-management — clean-up must not throw).
-                with contextlib.suppress(Exception):
-                    program.endTransaction(txn, False)
-                raise WorkerError(CODE_ANALYSIS_FAILED, "write failed and was rolled back") from exc
-            raise  # commit ok but a later statement raised — explicit; unreachable in practice
+            with contextlib.suppress(Exception):
+                program.endTransaction(txn, False)  # best-effort rollback; cleanup must not throw
+            raise WorkerError(CODE_ANALYSIS_FAILED, "write failed and was rolled back") from exc
 
     def _require_program(self) -> Any:  # pragma: no cover - JVM edge
         """Return the open program or raise a safe ``analysis-failed`` error.
