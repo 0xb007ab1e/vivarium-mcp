@@ -513,3 +513,112 @@ attack (the control holds), deterministic + hermetic, synthetic fixtures only (m
     memory map (or where the type footprint would overrun a region) fails closed
     (`analysis-failed`/`not-found`) with no write — worker map-confinement before the transaction.
     (TB7-T)
+
+### TB7 (structural Phase C) — Composite-type creation (v1.1 — ADR-015, PROPOSED)
+
+ADR-015 **Phase C** extends TB7 (structural) from Phase A's name-only renames and Phase B's
+type-aware writes to the last structural-write rung — *creating* a NEW composite type:
+`define_struct` and `define_union` (a composite built field-by-field from a bounded `FieldSpec`
+list). It is **the same trust boundary** (TB7), **not a new one**: same TB1/TB6 (client
+args/network), TB2 (server→worker RPC — gains two new write methods, same channel), TB4 (untrusted
+worker output — note Phase C's result fields are all server/worker-controlled, so **none** are
+`Untrusted`). **ADR-001 still holds: the server never loads the JVM or mutates; the field
+resolution, the `StructureDataType`/`UnionDataType` assembly, and the `addDataType` write execute
+only in the hardened worker.** Hostile-binary containment (TB3) and worker isolation (ADR-004) are
+**unchanged**.
+
+What is **new vs Phase B** (ADR-015 §1/§3/§5/§6): Phase C is the only structural write that **mutates
+the program's type universe** (creates a type) rather than consuming existing types. The C-parser
+surface ADR-013 §2 named stays **eliminated by construction** — a `FieldSpec.type` is the merged
+Phase-B `TypeRef` (a flat reference, no nested define — ADR-015 §1), resolved by the existing
+`_gh_resolve_type_ref`; `CParser`/`DataTypeParser` are never instantiated on a client value. The two
+genuinely-new concerns are **(recursion)** a self-referential / cyclic definition (embed-self or
+A↔B) — designed out because the type is **not yet in the `DataTypeManager`** at field-resolution
+time (a self-*embed* fails-closed `not-found`; pointer-to-self is fixed-size and allowed, modeled as
+an opaque `void*` in v1), reinforced by a boundary self-embed check + a `_MAX_COMPOSITE_SIZE`
+total-size cap; and **(integrity)** a **name collision** that, under a replace/keep conflict handler,
+would silently overwrite or rename an in-use type — rejected fail-closed (no silent
+replace/poison/wide-re-render). The wide re-render of ADR-013 §2c is **decoupled**: a new type
+re-renders **nothing** until a *subsequent* Phase-B `apply_data_type` references it (already
+threat-modeled). Composite *creation* is therefore the smaller surface once separated from
+*application* — which is exactly why ADR-014 deferred it here.
+
+| STRIDE | Threat (structural Phase C) | L×I | Mitigation (control · module) |
+|--------|------------------------------|-----|-------------------------------|
+| **E** | **Type-universe mutation without intent / escalation beyond the apply set** — the LLM autonomously creates a new struct/union | **H×H=Critical** | **same two-level default-deny** as Phase A/B: `session_enable_writes{allow_structural:true}` + each handler calls `require_write_consent(structural=True)` (the existing chokepoint — `manager.py:301-331`, **no new gate**); fixed allow-list (only `define_struct`/`define_union` in Phase C; nested-define + multi-type batches deferred; `runScript` forbidden); `session_undo` reverts the created type in one step (ADR-015 §1/§4) |
+| **T** | **Recursive / self-referential definition** — a struct that embeds itself, or a cycle of structs (A embeds B embeds A), → infinite size / stack blow-up in assembly | M×M=**Med** | **fail-closed by construction**: the type being defined is **not yet in the `DataTypeManager`** at field-resolution → a self-*embed* `named` resolves `not-found` (`_jvm_bridge.py:1677-1682`; resolution is read-only, BEFORE `startTransaction` → no partial type); a cross-type embed-cycle is **unconstructable** under one-composite-per-call/B-first (ADR-015 §1/§3); reinforced by a **boundary self-embed check** (`validate_composite`) + the `_MAX_COMPOSITE_SIZE` total-size cap; **pointer-to-self is fixed-size and allowed** (opaque `void*` in v1). No nested define → no recursive descent to bomb (abuse-cases 41/42/43) |
+| **T** | **Name-collision integrity — silent redefine of an in-use type / data-poisoning** — a `define_*` whose `name` collides with an existing (recovered) type silently overwrites or renames it, corrupting every dependent decompilation | M×H=**High** | **fail-closed REJECT** conflict policy (ADR-015 §6): the worker checks for an existing type of that name (read-only `getDataType`) **before assembly + before `startTransaction`** and surfaces `analysis-failed` with **no write** if one exists; **never** `REPLACE_HANDLER`/silent-rename; Phase C is strictly **additive** (create genuinely-new types only) (abuse-case 44) |
+| **T** | **Re-render blast radius of a new type** — defining a type re-renders dependent data/decompilation | L×L=**Low** (creation) | **bounded by construction**: a *new* type is referenced by **nothing** at `addDataType`, so creation re-renders **nothing**; the wide re-render is **decoupled** to the *subsequent* Phase-B `apply_data_type` (already threat-modeled — ADR-014 §7); a *redefine* of an in-use type is prevented by the §6 REJECT (ADR-015 §5) |
+| **T** | **Structural stored-injection / data-poisoning via type / field names** — a malicious composite `name` or `FieldSpec.name` (markup/path/zero-width/RTL/control) persisted and re-served by `get_data_type`/`function_context`/`decompile_function` | M×M=**Med** | **reuse `validate_write_name`** (the identifier allow-list — `validation.py:362-396`) on the type name and **every** field name IN; the read path re-wraps `Untrusted[...]` + re-normalizes OUT (ADR-005) — same two-sided defense as ADR-012/013/014 §7 (abuse-case 47) |
+| **D** | **Construction-time / fan-out consumption** — an oversized field count or total composite size (unbounded fan-out), or a burst of `define_*` calls, exhausts the worker | M×M=**Med** | **bounded at the boundary BEFORE / at the worker**: `_MAX_FIELDS` (≈256) and the per-field Phase-B `TypeRef` bounds rejected as `VALIDATION`/`limit-exceeded`; the assembled composite's **total computed size ≤ `_MAX_COMPOSITE_SIZE`** (≈1 MiB) is checked before `addDataType` (size sum overflow-guarded — CWE-190); each create is one bounded transaction; the per-tool **timeout kills the worker** on a hung assembly; concurrency cap + (HTTP) rate limit (CWE-400, `topic-reliability`, ADR-015 §2.3/§9, abuse-cases 45/46) |
+| **R** | **Unattributable Phase-C mutation** | M×M=**Med** | **per-write audit: intent + outcome** (tool, session id (opaque), field count, applied/denied — **never** binary-derived content or the field names verbatim; redacted — `topic-logging-observability`); same posture as ADR-012/013/014 TB7-R |
+| **E** | A Phase-C write bypasses the server to reach the JVM directly | L×H=**Med** | **ADR-001 invariant unchanged** — no JVM/PyGhidra import server-side (the architecture-invariant CI test covers the new `define_struct`/`define_union` handlers); the field resolution, the assembly, **and** the `addDataType` write are a typed worker RPC, not in-process (abuse-case 53) |
+
+**Residual risk (added to §5).** Phase C raises LLM08 agency once more: within an `allow_structural`
+session the composite-creation writes are autonomous, so an injection during that window can create a
+junk type before the operator notices — bounded, not prevented, by the two-level opt-in, the §6
+collision REJECT (no redefine-in-use), per-create audit, `session_undo`, and ADR-002 ephemerality.
+**The two risks ADR-014 named for the deferral — recursive/self-referential definition and the wide
+re-render — are designed out by construction** (the type isn't in the DTM at field-resolution, so
+self-embed fails-closed; a new type re-renders nothing until a separately-threat-modeled Phase-B
+`apply_data_type` references it — ADR-015 §3/§5). The worst case is a **junk type in a disposable
+session**, wiped on evict — never host or durable-data compromise. **Still out of scope:** nested
+`define` (an inline child composite in a field) and multi-type batches (their own future increments);
+type deletion / redefinition of an existing type (the §6 REJECT keeps Phase C additive); enums/
+typedefs/function-pointer composites; cross-session persistence (ADR-012 §4); `runScript`/arbitrary
+script execution (permanently out of scope — PLAN §2).
+
+### Abuse cases for the structural Phase-C increment (append to §6; benign/synthetic fixtures only)
+
+These map 1:1 to new cases in `tests/security/test_abuse_cases.py` (ADR-015 §9). Each must FAIL the
+attack (the control holds; the positive case 43 must SUCCEED), deterministic + hermetic, synthetic
+fixtures only (master §5):
+
+41. **Self-embed rejected (the recursion crux)** — a `define_struct` with a `FieldSpec.type` of
+    `{named: "<this struct>"}` (no pointer/array — *embedding* self) is rejected at the boundary
+    (`validate_composite` self-embed check → `VALIDATION`) and, defensively, at the worker by
+    `not-found` (the type isn't in the DTM yet — ADR-015 §3.2). No type defined; program unchanged.
+    (TB7-D — the new recursive-definition surface, proven bounded)
+42. **Embed-cycle cannot be assembled** — the "B-first, then A referencing B" flow cannot produce a
+    true embed-cycle (A embeds B embeds A): defining B with an embedded not-yet-existing A fails
+    `not-found`; a cross-type embed-cycle is unconstructable across the one-composite-per-call
+    boundary (ADR-015 §1/§3.2). (TB7-D / integrity)
+43. **Pointer-to-self allowed, fixed size (POSITIVE case)** — a `define_struct` modeling a
+    linked-list `next` as `{base: "void", pointer_levels: 1}` (the v1 opaque-pointer idiom) **succeeds**,
+    size includes one pointer width, no blow-up. (Confirms the legitimate path works)
+44. **Name-collision REJECT (no silent replace)** — a `define_struct`/`define_union` whose `name`
+    already names a type in the `DataTypeManager` is rejected `analysis-failed` with **no write** (the
+    existing in-use type is **unchanged** — the fail-closed REJECT handler); checked before
+    `startTransaction`. (TB7-T — the redefine-in-use re-render / data-poisoning vector, proven absent)
+45. **Oversized field-count / size DoS** — `fields` > `_MAX_FIELDS`, or a composite whose total
+    computed size exceeds `_MAX_COMPOSITE_SIZE` (e.g. 256 × `char[65536]`), is rejected
+    (`VALIDATION`/`limit-exceeded`) with no `addDataType`; size sum overflow-guarded (CWE-190/CWE-400).
+    (TB7-D — extends Phase-B case 34)
+46. **Duplicate field name rejected** — a composite with two `FieldSpec.name == "x"` is rejected
+    `VALIDATION` (no write). (TB7-T / integrity)
+47. **Malicious field / type name rejected** — a `FieldSpec.name` or the composite `name` with
+    markup/`../path`/zero-width/RTL/control chars is rejected by `validate_write_name` (never written).
+    (TB7-T — extends Phase-B case 35)
+48. **Unresolvable field TypeRef fail-closed** — a `FieldSpec.type` with a well-formed but **unknown**
+    `named` surfaces `not-found` with the program unchanged (resolution before `startTransaction`; no
+    partial type). (TB7-T / atomicity — extends Phase-B case 32)
+49. **TypeRef injection in a field rejected** — a `FieldSpec.type.named` carrying C-declaration syntax /
+    a struct body (`"struct{int x;}"`, `"int*"`, `"a;b"`) is rejected by `validate_type_ref` (not a
+    valid identifier; never parsed) → `VALIDATION`; no type defined. (TB7-T — the design-eliminated
+    C-parser surface, proven absent; same class as Phase-B case 31, now in a field)
+50. **Structural-consent-required** — `define_struct`/`define_union` on a session with
+    `allow_structural=false` is denied "structural writes not permitted"; on a read-only session,
+    "session is read-only" (the `require_write_consent(structural=True)` chokepoint). (TB7-E / gating —
+    extends Phase-B case 37)
+51. **Cross-session structural isolation** — `allow_structural` + a `define_struct` on session A does
+    not enable or mutate session B. (TB7-T / store-I — extends Phase-B case 36)
+52. **BOLA on the structural grant** — unchanged: a grant/define against an unknown/foreign session id
+    yields the same `session-invalid` envelope (no oracle). (TB7-E / BOLA — same chokepoint as
+    Phase-B case 38)
+53. **ADR-001 invariant under Phase-C writes** — the architecture-invariant test still passes: no
+    JVM/PyGhidra import on any server-side module, including the new `define_struct`/`define_union`
+    handlers (the field resolution, the assembly, and the `addDataType` write all execute only in the
+    worker). (TB7-E — extends Phase-B case 39)
+54. **Commit-time atomicity** — a `define_struct` whose `addDataType` **or its commit** raises rolls
+    back and surfaces `analysis-failed`; no dangling transaction, no half-created type (the reused
+    `_in_transaction` — CWE-460). The program is unchanged. (TB7-T — extends Phase-B case 33)
