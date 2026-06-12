@@ -19,7 +19,7 @@ from ghidra_mcp.config import Config, load_config
 from ghidra_mcp.core.errors import GhidraMcpError
 from ghidra_mcp.ghidra.port import GhidraPort
 from ghidra_mcp.logging import configure_logging, get_logger
-from ghidra_mcp.server.app import build_app, run_stdio
+from ghidra_mcp.server.app import build_app, run_http, run_stdio
 from ghidra_mcp.sessions.manager import SessionManager
 
 _log = get_logger(__name__)
@@ -132,7 +132,9 @@ def main(
         _log.error("startup.failed", extra={"error_type": exc.envelope.type.value})
         return 2
 
-    _log.info("startup.serving")
+    _log.info("startup.serving", extra={"transport": config.transport})
+    if config.transport == "http":
+        return run_http(app, config, session_manager=session_manager)
     return run_stdio(app, session_manager=session_manager)
 
 

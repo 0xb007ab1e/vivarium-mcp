@@ -153,3 +153,35 @@ class AuthenticationMiddleware:
         state: dict[str, Any] = scope.setdefault("state", {})
         state[_SCOPE_PRINCIPAL_KEY] = principal
         await self.app(scope, receive, send)
+
+
+class SecurityHeadersMiddleware:
+    """Add baseline security headers to every HTTP response (TB6-T; topic-web-frontend)."""
+
+    def __init__(self, app: ASGIApp, *, hsts: bool) -> None:
+        """Wrap ``app``; add HSTS only when served over TLS (``hsts=True``)."""
+        self.app = app
+        self.hsts = hsts
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Inject nosniff / Referrer-Policy / X-Frame-Options (+ HSTS) headers on the response."""
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def _send(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers += [
+                    (b"x-content-type-options", b"nosniff"),
+                    (b"referrer-policy", b"no-referrer"),
+                    (b"x-frame-options", b"DENY"),
+                ]
+                if self.hsts:
+                    headers.append(
+                        (b"strict-transport-security", b"max-age=63072000; includeSubDomains")
+                    )
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, _send)

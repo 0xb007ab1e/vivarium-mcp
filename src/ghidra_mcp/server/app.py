@@ -16,16 +16,25 @@ from __future__ import annotations
 
 import secrets
 import signal
+import time
 from collections.abc import Callable
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError as PydanticValidationError
+from starlette.types import ASGIApp
 
-from ghidra_mcp.config import Config
+from ghidra_mcp.config import Config, HttpConfig
 from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from ghidra_mcp.ghidra.port import GhidraPort
 from ghidra_mcp.logging import get_logger
+from ghidra_mcp.server.auth import Authenticator, build_authenticator
+from ghidra_mcp.server.http_middleware import (
+    AuthenticationMiddleware,
+    RateLimitMiddleware,
+    RequestSizeLimitMiddleware,
+    SecurityHeadersMiddleware,
+)
 from ghidra_mcp.sessions.manager import SessionManager
 from ghidra_mcp.tools.registry import ToolContext, register_tools
 
@@ -233,3 +242,108 @@ def _install_shutdown_handlers() -> None:
             signal.signal(sig, _handle)
         except (ValueError, OSError):  # not in main thread / unsupported — rely on transport close.
             _log.warning("server.signal.unregistered", extra={"signal": int(sig)})
+
+
+def build_http_asgi_app(
+    inner: ASGIApp,
+    http: HttpConfig,
+    *,
+    authenticator: Authenticator,
+    clock: Callable[[], float] = time.monotonic,
+) -> ASGIApp:
+    """Compose the TB6 middleware stack around the inner MCP Streamable-HTTP app (ADR-011 §5).
+
+    Request flow (outer → inner): security-headers → CORS → request-size-limit → rate-limit →
+    authenticate → ``inner``. CORS preflight is handled by the CORS layer and exempt from auth;
+    rejected requests (413/429/401) never reach ``inner``. Pure composition (no I/O) — unit-testable
+    by injecting a fake ``inner`` + ``clock``.
+
+    Args:
+        inner: The MCP Streamable-HTTP ASGI app (``FastMCP.streamable_http_app()``).
+        http: Validated HTTP config (bind/auth/TLS/CORS/limits).
+        authenticator: The auth strategy (from :func:`ghidra_mcp.server.auth.build_authenticator`).
+        clock: Monotonic clock for the rate limiter (injected for deterministic tests).
+
+    Returns:
+        The wrapped ASGI application ready to serve.
+    """
+    guarded: ASGIApp = AuthenticationMiddleware(inner, authenticator=authenticator)
+    guarded = RateLimitMiddleware(
+        guarded, rate_per_second=http.rate_per_second, burst=http.rate_burst, clock=clock
+    )
+    guarded = RequestSizeLimitMiddleware(guarded, max_body_bytes=http.max_body_bytes)
+    if http.cors_origins:
+        from starlette.middleware.cors import CORSMiddleware
+
+        guarded = CORSMiddleware(
+            guarded,
+            allow_origins=list(http.cors_origins),
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+            allow_headers=["authorization", "content-type", "mcp-session-id"],
+            allow_credentials=True,
+        )
+    # HSTS when the endpoint is served over TLS (in-app cert, or a network bind whose TLS is
+    # proxy-terminated — a network bind always has TLS by the config fail-closed rule).
+    return SecurityHeadersMiddleware(guarded, hsts=http.tls_cert is not None or http.is_network)
+
+
+def run_http(
+    app: FastMCP, config: Config, *, session_manager: SessionManager
+) -> (
+    int
+):  # pragma: no cover - binds a real socket; exercised by the gated HTTP integration/DAST (slice 5)
+    """Serve the MCP server over Streamable HTTP per ``config.http`` (uvicorn); drains on exit.
+
+    Builds the authenticator + middleware stack (:func:`build_http_asgi_app`) around FastMCP's
+    Streamable-HTTP app and runs uvicorn bound to the configured loopback/UDS/network endpoint with
+    TLS when configured. The ``finally`` drain kills every worker + wipes every store (ADR-002),
+    exactly like :func:`run_stdio`.
+
+    Args:
+        app: The FastMCP application from :func:`build_app`.
+        config: Validated config with ``transport == "http"`` (so ``config.http`` is set).
+        session_manager: The session manager to drain on shutdown.
+
+    Returns:
+        Process exit code (``0`` on clean shutdown).
+    """
+    import uvicorn
+
+    http = config.http
+    if http is None:  # defensive: load_config guarantees this when transport=http
+        raise GhidraMcpError(
+            ErrorEnvelope(
+                type=ErrorType.INTERNAL,
+                title="Internal error",
+                detail="HTTP transport selected without HTTP configuration.",
+                status=500,
+                retryable=False,
+            )
+        )
+    authenticator = build_authenticator(http.auth_mode, bearer_token=http.bearer_token)
+    asgi = build_http_asgi_app(app.streamable_http_app(), http, authenticator=authenticator)
+    _install_shutdown_handlers()
+    log_level = config.log_level.lower()
+    try:
+        if http.is_unix_socket:
+            uvicorn.run(asgi, uds=http.bind[len("unix:") :], log_level=log_level)
+        else:
+            host, _, port = http.bind.rpartition(":")
+            uvicorn.run(
+                asgi,
+                host=host.strip("[]"),
+                port=int(port),
+                ssl_certfile=http.tls_cert,
+                ssl_keyfile=http.tls_key,
+                log_level=log_level,
+            )
+        return 0
+    except KeyboardInterrupt:
+        _log.info("server.interrupted")
+        return 0
+    finally:
+        try:
+            session_manager.shutdown()
+            _log.info("server.shutdown.complete")
+        except Exception:
+            _log.exception("server.shutdown.failed")
