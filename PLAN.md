@@ -15,11 +15,13 @@ is the central security control.
   functions, xrefs to/from, strings, symbols/labels, data types, comments (read), memory map/
   segments, bounded read-bytes, bounded search, program metadata. **Read-only in v1** (no mutation
   tools); `runScript` out of scope.
-- **v1.1 (deferred):** Tier 2 reporting/metrics (cyclomatic complexity, code/data coverage,
-  imports/exports, IOC/crypto scans, call-graph metrics, program-summary report); mutation tools
-  (gated); HTTP transport.
-- **Transport:** design **configurable (stdio + HTTP)**; **build/harden stdio in v1**, HTTP as a
-  gated, separately threat-modeled v1.1 increment.
+- **v1.1:** ✅ **DONE** — Tier 2 reporting/metrics (cyclomatic complexity, code/data coverage,
+  imports/exports, IOC/crypto scans, call-graph metrics, program-summary report); ✅ **DONE** —
+  HTTP transport (ADR-011 / TB6, merged 2026-06-12). **Still deferred:** mutation tools (gated);
+  behavioral-equivalence differential harness (ADR-010); multi-principal authZ.
+- **Transport:** design **configurable (stdio + HTTP)**; **build/harden stdio in v1**. ✅ **HTTP
+  DONE** — shipped as a gated, separately threat-modeled (TB6) v1.1 increment (ADR-011, slices 1–6,
+  merged 2026-06-12; stdio remains the default).
 - **Sessions:** **persistent per-binary sessions w/ TTL + idle eviction**; **one worker per
   session, killed on eviction** (no cross-binary worker reuse).
 
@@ -87,7 +89,12 @@ Contract changes route through the PM (batch-atomicity mandate).
    keep-id, single-shot connect (→ retry), and the **AF_UNIX `sun_path` overflow** from doubling the
    256-bit session id in the UDS path (a latent prod bug — fixed via a short per-session dir token).
    CI gates green; `sdlc-reviewer` security/quality pass still pending before release.
-5. Release prep (**`sdlc-release-manager`**) — tag/deploy gated.
+5. ✅ **v1.1 increments shipped to `main` (post-integration):** semantic-naming tools + reference
+   loop + sandboxed compile eval + `naming_accuracy` metric (PRs #26–29); Tier-2 reporting/metrics
+   (8 read-only tools; PR #30); **HTTP transport** (ADR-011 / TB6; slices 1–6 = PRs #32–#36; merged
+   2026-06-12). Still deferred: mutation tools (gated), behavioral-equivalence harness, multi-
+   principal authZ.
+6. Release prep (**`sdlc-release-manager`**) — tag/deploy gated.
 
 ## 8. ADR log (decisions to record in `docs/adr/`)
 - ADR-001 Out-of-process Ghidra worker mandatory (F1). ADR-002 One worker per session, killed on
@@ -97,10 +104,14 @@ Contract changes route through the PM (batch-atomicity mandate).
   ADR-007/008 v1.1 semantic-naming + Tier-2 extraction primitives. **ADR-009 Concrete worker
   launcher + import-root mount + per-session socket dir** (WS2/WS3 seam; the chain-wiring work —
   short per-session UDS dir token keeps the path under the AF_UNIX limit). ADR-010 semantic-naming
-  eval (sandboxed compile / TB5). **ADR-011 HTTP transport (v1.1; DESIGN started)** — secure-by-
-  default exposure (stdio→loopback→gated network), bearer auth (mTLS/OAuth-pluggable), TLS off-
-  loopback, fail-closed startup; network boundary threat-modeled as **TB6**; activates
-  `std-owasp-api`/`std-zero-trust`/`topic-authn-authz`; plan in `docs/design/http-transport.md`.
+  eval (sandboxed compile / TB5). **✅ ADR-011 HTTP transport (v1.1; DONE — merged 2026-06-12,
+  slices 1–6 = PRs #32–#36)** — MCP Streamable HTTP; secure-by-default exposure
+  (stdio→loopback→UDS→gated network), bearer auth (mTLS/OAuth port-ready stubs), TLS off-loopback,
+  fail-closed startup; `std-owasp-api` edge (size-cap/rate-limit/CORS/headers); network boundary
+  threat-modeled as **TB6** (BOLA closed-by-construction in single-principal v1.1 — per-principal
+  owner check deferred to multi-principal, ADR-011 §6); activates
+  `std-owasp-api`/`std-zero-trust`/`topic-authn-authz`; operator runbook
+  `docs/runbooks/http-exposure.md`; design `docs/design/http-transport.md`.
 
 ## 9. Open items
 - ✅ **RESOLVED (WS0):** worker RPC = **JSON-RPC 2.0 over per-session UDS** (ratified 2026-06-03;
