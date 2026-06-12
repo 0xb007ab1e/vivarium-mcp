@@ -1762,8 +1762,9 @@ class PyGhidraBackend:
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Apply a resolvable type at an address inside one transaction (ADR-014 §1).
 
-        Resolves the ``TypeRef`` and parses+confines the address (read-only, before the txn), then
-        lays the type down via ``DataUtilities.createData``. NO C string is parsed.
+        Resolves the ``TypeRef`` and validates the address *form* before the txn (read-only);
+        **map-confinement** is enforced inside the txn at ``DataUtilities.createData`` (an
+        out-of-map / footprint overrun raises → rolled back → ``analysis-failed``). No C is parsed.
 
         Args:
             address: The target address (hex).

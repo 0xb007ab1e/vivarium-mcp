@@ -10,6 +10,7 @@ the rejected value.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from ghidra_mcp.core import validation as v
 from ghidra_mcp.core.errors import ErrorType, GhidraMcpError
@@ -270,3 +271,17 @@ def test_signature_rejects_bad_calling_convention() -> None:
     with pytest.raises(GhidraMcpError) as exc:
         v.validate_signature(sig)
     assert exc.value.envelope.type is ErrorType.VALIDATION
+
+
+# --- TypeRef exactly-one-leaf is enforced at the pydantic layer too (defense in depth) ----------
+# The TypeRef model_validator is a duplicate barrier to validate_type_ref's exactly-one-leaf check;
+# construct via the NORMAL constructor (both-leaves / neither-leaf) and prove it fires, so the
+# redundant guard is a *proven* guard, not just asserted (topic-testing).
+def test_typeref_rejects_both_leaves_at_construction() -> None:
+    with pytest.raises(ValidationError):
+        s.TypeRef(base="int32", named="MyStruct")
+
+
+def test_typeref_rejects_neither_leaf_at_construction() -> None:
+    with pytest.raises(ValidationError):
+        s.TypeRef()
