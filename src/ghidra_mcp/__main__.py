@@ -85,6 +85,7 @@ def _default_session_manager_factory(config: Config, port: GhidraPort) -> Sessio
         ttl_s=config.session_ttl_s,
         idle_s=config.session_idle_s,
         max_sessions=config.limits.max_sessions,
+        max_sessions_per_owner=config.limits.max_sessions_per_owner,
     )
 
 

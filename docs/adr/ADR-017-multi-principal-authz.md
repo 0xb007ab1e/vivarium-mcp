@@ -95,7 +95,7 @@ so stdio stays single-principal and the ownership check is consistent (every ses
   (principal B presents A's session id → `SESSION_INVALID`; B cannot enable writes / analyze / close
   A's session).
 - Multiple operators can use one network endpoint with distinct tokens, each owning only their
-  sessions; a per-owner session cap bounds noisy-neighbor.
+  sessions; an operator-configurable per-owner session cap (`GHIDRA_MCP_MAX_SESSIONS_PER_OWNER`, default off — the global `max_sessions` backstops total exhaustion) bounds noisy-neighbor in multi-principal deployments.
 - mTLS/OAuth remain deferred identity sources (port stubs) — when built, they slot into the same
   ownership mechanism unchanged.
 - **Deferred / out of scope (recorded):** building mTLS/OAuth identity extraction; cross-principal

@@ -1180,3 +1180,170 @@ def test_exec_sandbox_isolation_parity() -> None:
     ``no-new-privileges``, resource caps) plus the exec-tmpfs/noexec-scratch split — a candidate
     cannot egress, write the host, or escalate. The argv-hardening assertions are hermetic in
     ``test_naming_compile.py``; the live containment is promoted to WS5 (real sandbox)."""
+
+
+# ==============================================================================================
+# TB6 (multi-principal) — cross-principal authorization abuse cases 61-66 (threat-model §10,
+# ADR-017). The per-principal owner check is the load-bearing BOLA control (API1) once a second
+# principal exists. These run against the REAL :class:`~ghidra_mcp.sessions.manager.SessionManager`
+# and the REAL :class:`~ghidra_mcp.server.auth.MultiTokenBearerAuthenticator` — hermetic (injected
+# clock, distinct synthetic principal ids, synthetic tokens; NO real secrets/worker). Each FAILS the
+# attack: principal B presenting A's session id is denied the SAME ``SESSION_INVALID`` as an unknown
+# id (D2 — no oracle), across read/write/close; the spoof attempts get a generic reject; the
+# per-owner cap bounds noisy-neighbor.
+# ==============================================================================================
+from ghidra_mcp.server.auth import (  # noqa: E402  # local to the TB6 multi-principal block
+    AuthContext,
+    MultiTokenBearerAuthenticator,
+    Principal,
+)
+from ghidra_mcp.sessions.manager import SessionManager  # noqa: E402
+
+_OWNER_A = "principal-A"
+_OWNER_B = "principal-B"
+
+
+class _AbuseClock:
+    """Deterministic monotonic clock for the cross-principal abuse tests (hermetic)."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def _abuse_mgr(**kw: object) -> SessionManager:
+    """A real SessionManager with an injected clock and no worker port (hermetic)."""
+    return SessionManager(clock=_AbuseClock(), max_sessions=8, **kw)  # type: ignore[arg-type]
+
+
+def _invalid_fields(fn: object, *args: object, **kw: object) -> dict[str, object]:
+    """Call ``fn`` expecting ``SESSION_INVALID`` and return its client-visible envelope fields."""
+    with pytest.raises(GhidraMcpError) as ei:
+        fn(*args, **kw)  # type: ignore[operator]
+    env = ei.value.envelope
+    return {"type": env.type, "title": env.title, "detail": env.detail, "status": env.status}
+
+
+# --- Case 61 — cross-principal READ (B presents A's session id) → SESSION_INVALID, no oracle ---
+@pytest.mark.critical
+def test_cross_principal_read_is_session_invalid_no_oracle() -> None:
+    """Principal B authorizing A's live session id is denied the SAME SESSION_INVALID as unknown."""
+    mgr = _abuse_mgr()
+    a = mgr.create(owner=_OWNER_A)
+
+    foreign = _invalid_fields(mgr.authorize, a.session_id, caller=_OWNER_B)
+    unknown = _invalid_fields(mgr.authorize, "totally-unknown-id", caller=_OWNER_B)
+    # Byte-identical envelope: "exists but A's" is indistinguishable from "does not exist" (D2).
+    assert foreign == unknown
+    assert foreign["type"] is ErrorType.SESSION_INVALID
+    assert "exists" not in str(foreign["detail"]).lower()
+    # The op did NOT execute: A's session is untouched and still authorizable by A.
+    assert mgr.authorize(a.session_id, caller=_OWNER_A).session_id == a.session_id
+
+
+# --- Case 62 — cross-principal WRITE (consent + enable_writes on A's session by B) ------------
+@pytest.mark.critical
+def test_cross_principal_write_paths_are_session_invalid() -> None:
+    """B cannot enable writes / require consent / spawn on A's session — same SESSION_INVALID.
+
+    Proves the underlying write/analyze op never runs: A's consent flag is unchanged and no worker
+    was spawned for B.
+    """
+    mgr = _abuse_mgr()
+    a = mgr.create(owner=_OWNER_A)
+    baseline = _invalid_fields(mgr.authorize, a.session_id, caller=_OWNER_B)
+
+    assert _invalid_fields(mgr.enable_writes, a.session_id, caller=_OWNER_B) == baseline
+    assert _invalid_fields(mgr.require_write_consent, a.session_id, caller=_OWNER_B) == baseline
+    assert _invalid_fields(mgr.ensure_worker, a.session_id, caller=_OWNER_B) == baseline
+    # The denied grant did not flip A's consent (the op did not execute).
+    assert mgr.authorize(a.session_id, caller=_OWNER_A).writes_enabled is False
+
+
+# --- Case 63 — cross-principal CLOSE (B evicts A's session) → SESSION_INVALID, A's session lives -
+@pytest.mark.critical
+def test_cross_principal_close_is_session_invalid_and_does_not_evict() -> None:
+    """B closing A's session is denied the SAME SESSION_INVALID; A's session is NOT evicted."""
+    mgr = _abuse_mgr()
+    a = mgr.create(owner=_OWNER_A)
+    baseline = _invalid_fields(mgr.authorize, a.session_id, caller=_OWNER_B)
+    assert _invalid_fields(mgr.evict, a.session_id, reason="close", caller=_OWNER_B) == baseline
+    # The session survived B's denied close — A can still authorize it.
+    assert mgr.authorize(a.session_id, caller=_OWNER_A).session_id == a.session_id
+
+
+# --- Case 64 — spoof: no token / wrong token → generic 401 (no credential oracle) ------------
+@pytest.mark.critical
+@pytest.mark.parametrize(
+    "header",
+    [
+        None,  # no Authorization header
+        "Bearer wrong-token-but-long-enough-xxxx",  # wrong token (no map entry)
+        f"Basic {'a' * 24}",  # wrong scheme
+        "Bearer ",  # empty token
+    ],
+)
+def test_principal_spoof_is_generically_rejected(header: str | None) -> None:
+    """Forging a principal requires its secret token: an absent/wrong credential is a generic None.
+
+    The authenticator never reveals whether/which token matched (no oracle), so an attacker cannot
+    enumerate principals or tokens. A valid token authenticates as exactly its mapped principal.
+    """
+    tok_a = "token-A-of-sufficient-length-aaaa"  # synthetic, not a real secret
+    auth = MultiTokenBearerAuthenticator(tokens={tok_a: _OWNER_A})
+    assert auth.authenticate(AuthContext(authorization=header)) is None
+    # The only way to become principal A is to present A's token (no spoof path).
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {tok_a}")) == Principal(id=_OWNER_A)
+
+
+# --- Case 65 — timing-oracle resistance: the scan visits every entry (structural) ------------
+@pytest.mark.critical
+def test_multi_token_scan_has_no_which_token_short_circuit() -> None:
+    """Structural guard against a which-token timing oracle: a LAST-position token still matches.
+
+    If the comparison loop early-returned on a hit (or broke on a miss), order would matter; here
+    the only matching token is last, so a correct match proves every entry is visited — the compare
+    work is independent of which token matches (ADR-017 STRIDE-S).
+    """
+    last_tok = "z" * 40  # synthetic, not a real secret
+    auth = MultiTokenBearerAuthenticator(
+        tokens={
+            "token-A-of-sufficient-length-aaaa": _OWNER_A,
+            "token-B-of-sufficient-length-bbbb": _OWNER_B,
+            last_tok: "principal-Z",
+        }
+    )
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {last_tok}")) == Principal(
+        id="principal-Z"
+    )
+
+
+# --- Case 66 — per-owner session cap bounds noisy-neighbor (TB6-D) --------------------------
+@pytest.mark.critical
+def test_per_owner_session_cap_isolates_noisy_neighbor() -> None:
+    """One principal at its per-owner cap cannot create more, yet another principal still can.
+
+    A noisy principal cannot exhaust the shared session table and starve others
+    (topic-multi-tenancy; ADR-017 STRIDE-D).
+    """
+    mgr = _abuse_mgr(max_sessions_per_owner=2)
+    mgr.create(owner=_OWNER_A)
+    mgr.create(owner=_OWNER_A)
+    with pytest.raises(GhidraMcpError) as ei:
+        mgr.create(owner=_OWNER_A)  # A is capped
+    assert ei.value.envelope.type is ErrorType.LIMIT_EXCEEDED
+    # B is unaffected — it can still create (no cross-principal starvation).
+    assert mgr.create(owner=_OWNER_B).session_id is not None
+
+
+# --- Live cross-principal cases (control needs the real server/worker) — WS5 ----------------
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_cross_principal_isolation_end_to_end_over_http() -> None:
+    """Case 61-63 (live): two principals with distinct bearer tokens over the real HTTP transport —
+    B presenting A's ``session_id`` to read/analyze/close gets ``SESSION_INVALID`` (no oracle), and
+    A's session/worker/store are untouched. The manager-level + authenticator-level controls are
+    proven hermetically above; the end-to-end wiring (per-request principal → ToolContext → manager)
+    is promoted to WS5 (needs the live ASGI stack + worker)."""

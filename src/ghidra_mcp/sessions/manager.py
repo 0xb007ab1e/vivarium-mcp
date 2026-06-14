@@ -7,13 +7,25 @@ Responsibilities (PLAN §2, ADR-002):
 - Track TTL (absolute) and idle timeouts; evict on expiry.
 - On eviction (TTL/idle/close/poison): **kill the session's worker** and **verified-wipe** the
   per-session project store; emit an audit log line. Eviction is idempotent.
-- Authorize every tool call against a live session; unknown/foreign ids fail closed with a
-  ``SESSION_INVALID`` envelope WITHOUT revealing whether another session exists.
+- Authorize every tool call against a live session AND against the **calling principal** (ADR-017):
+  a session is owned by the principal that created it; a caller that is not the owner is denied with
+  the SAME ``SESSION_INVALID`` envelope as unknown/expired/evicted — no oracle distinguishes "exists
+  but not yours" from "does not exist" (BOLA / ``std-owasp-api`` API1; ADR-017 D2).
+- Bound the number of concurrent sessions globally (``max_sessions``) AND per owner
+  (``max_sessions_per_owner``) so one principal cannot starve others (noisy-neighbor —
+  topic-multi-tenancy; ADR-017 STRIDE-D).
 
 The manager owns worker lifetimes (one worker per session); it depends on the Ghidra adapter
 ``port`` for spawning/killing workers and never touches the JVM itself (ADR-001). It is the single
 owner of the session table; all mutating operations are serialized under a re-entrant lock so a
 periodic reaper and request threads cannot corrupt the table (topic-concurrency).
+
+Ownership is the single, load-bearing per-principal authZ control (ADR-017): the owner check lives
+in the shared :meth:`SessionManager._get_live_locked` chokepoint so every session-scoped entry point
+(authorize, write-consent, ensure_worker, tool-initiated evict) enforces it uniformly and a new
+session-scoped path cannot forget it (complete mediation, ``std-zero-trust``). The owner id is set
+once at ``create`` from the **server-derived** principal and is immutable; the server never trusts a
+client-supplied owner/principal.
 """
 
 from __future__ import annotations
@@ -43,6 +55,16 @@ _SESSION_ID_BYTES = 32
 _DEFAULT_TTL_S = 3600
 _DEFAULT_IDLE_S = 900
 _DEFAULT_MAX_SESSIONS = 4
+#: Default per-owner session cap (ADR-017 STRIDE-D). Bounds one principal's share of the global
+#: table so a single noisy principal cannot starve others (topic-multi-tenancy). ``None`` disables
+#: the per-owner cap (the global ``max_sessions`` still applies). Defaults to the global cap so the
+#: single-principal (stdio/``local``) case is unaffected.
+_DEFAULT_MAX_SESSIONS_PER_OWNER: int | None = None
+
+#: The implicit local-operator principal id used when no network authentication is in play (stdio,
+#: ADR-006/ADR-017). Mirrors :class:`ghidra_mcp.server.auth.NullAuthenticator`'s principal id; kept
+#: here as a plain literal so the manager has no import dependency on the auth/server layer.
+_LOCAL_PRINCIPAL_ID = "local"
 
 #: Lifecycle states surfaced via :class:`SessionInfo` (tool-catalog.md / schemas.SessionInfo).
 STATE_OPEN = "open"
@@ -84,6 +106,9 @@ class _Session:
 
     Attributes:
         session_id: Opaque CSPRNG id.
+        owner: The creating principal's id (ADR-017). Immutable, set once at ``create`` from the
+            server-derived principal — never client-supplied. The single per-principal authZ key:
+            a caller whose id != ``owner`` is denied the SAME ``SESSION_INVALID`` as an unknown id.
         state: Lifecycle state string.
         created_at: Wall-clock epoch seconds at creation (for ``SessionInfo``; not used for TTL).
         created_mono: Monotonic timestamp at creation (TTL math — immune to clock jumps).
@@ -101,6 +126,7 @@ class _Session:
     """
 
     session_id: str
+    owner: str
     state: str
     created_at: int
     created_mono: float
@@ -131,6 +157,7 @@ class SessionManager:
         ttl_s: int = _DEFAULT_TTL_S,
         idle_s: int = _DEFAULT_IDLE_S,
         max_sessions: int = _DEFAULT_MAX_SESSIONS,
+        max_sessions_per_owner: int | None = _DEFAULT_MAX_SESSIONS_PER_OWNER,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], int] = lambda: int(time.time()),
     ) -> None:
@@ -143,7 +170,11 @@ class SessionManager:
                 no on-disk store is provisioned (wipe is vacuously verified).
             ttl_s: Absolute session lifetime before TTL eviction.
             idle_s: Idle timeout before idle eviction.
-            max_sessions: Concurrency cap; ``create`` applies backpressure above it.
+            max_sessions: Global concurrency cap; ``create`` applies backpressure above it.
+            max_sessions_per_owner: Per-principal session cap (ADR-017 STRIDE-D); ``create`` refuses
+                a principal already holding this many live sessions (noisy-neighbor isolation —
+                topic-multi-tenancy). ``None`` disables the per-owner cap (only the global cap
+                applies) — the single-principal default.
             clock: Monotonic clock injection (for deterministic tests — topic-numeric-correctness).
             wall_clock: Wall-clock epoch-seconds injection (for ``SessionInfo`` timestamps).
         """
@@ -152,22 +183,30 @@ class SessionManager:
         self._ttl_s = ttl_s
         self._idle_s = idle_s
         self._max_sessions = max_sessions
+        self._max_sessions_per_owner = max_sessions_per_owner
         self._clock = clock
         self._wall_clock = wall_clock
         self._sessions: dict[str, _Session] = {}
         self._lock = threading.RLock()
 
-    def create(self, *, label: str | None = None) -> SessionInfo:
-        """Open a new session with an opaque id; spawn nothing until import.
+    def create(self, *, owner: str = _LOCAL_PRINCIPAL_ID, label: str | None = None) -> SessionInfo:
+        """Open a new session with an opaque id, owned by ``owner``; spawn nothing until import.
 
         Args:
+            owner: The creating principal's id (ADR-017). **Server-derived** — the registry/shell
+                always passes the authenticated principal's id (``ctx.caller_id``), never a
+                client-supplied value. Recorded immutably as the session's owner; only this
+                principal may subsequently authorize the session. Defaults to the implicit local
+                operator for the single-principal stdio path (consistent with ``caller`` on the
+                authorize family).
             label: Optional audit label (untrusted; never used as a path or logged verbatim).
 
         Returns:
             The new session's :class:`SessionInfo`.
 
         Raises:
-            GhidraMcpError: ``LIMIT_EXCEEDED`` if the concurrency cap is reached (backpressure).
+            GhidraMcpError: ``LIMIT_EXCEEDED`` if the global concurrency cap OR the per-owner cap is
+                reached (backpressure / noisy-neighbor isolation).
         """
         with self._lock:
             if len(self._sessions) >= self._max_sessions:
@@ -180,11 +219,30 @@ class SessionManager:
                     ErrorType.LIMIT_EXCEEDED,
                     "session capacity reached; retry later",
                 )
+            # Per-owner cap (ADR-017 STRIDE-D): one principal cannot consume more than its share of
+            # the global table and starve others (noisy-neighbor — topic-multi-tenancy). The audit
+            # line records the owner id (an authenticated principal id, not a secret), not a token.
+            if self._max_sessions_per_owner is not None:
+                owned = sum(1 for s in self._sessions.values() if s.owner == owner)
+                if owned >= self._max_sessions_per_owner:
+                    _LOG.warning(
+                        "session.create.rejected",
+                        extra={
+                            "event": "owner_session_cap_reached",
+                            "principal_id": owner,
+                            "owned": owned,
+                        },
+                    )
+                    raise _errors.make_error(
+                        ErrorType.LIMIT_EXCEEDED,
+                        "per-principal session capacity reached; retry later",
+                    )
             session_id = secrets.token_urlsafe(_SESSION_ID_BYTES)
             now_mono = self._clock()
             now_wall = self._wall_clock()
             sess = _Session(
                 session_id=session_id,
+                owner=owner,
                 state=STATE_OPEN,
                 created_at=now_wall,
                 created_mono=now_mono,
@@ -196,47 +254,70 @@ class SessionManager:
             self._sessions[session_id] = sess
             _LOG.info(
                 "session.create",
-                extra={"event": "session_created", "session_id": session_id},
+                extra={
+                    "event": "session_created",
+                    "session_id": session_id,
+                    "principal_id": owner,
+                },
             )
             return self._to_info(sess)
 
-    def authorize(self, session_id: str) -> SessionInfo:
-        """Look up and authorize a live session by id, refreshing its idle clock.
+    def authorize(self, session_id: str, *, caller: str = _LOCAL_PRINCIPAL_ID) -> SessionInfo:
+        """Look up and authorize a live session by id for ``caller``, refreshing its idle clock.
 
-        BOLA chokepoint: an unknown, expired, or evicted id all yield the SAME ``SESSION_INVALID``
-        error — the response never reveals whether another session exists (error-envelope.md).
-        Constant-time-ish lookup is not required (the id space is 256-bit random), but the *error*
-        is identical across all failure modes.
+        BOLA chokepoint: an unknown, expired, evicted, **or foreign-owned** id all yield the SAME
+        ``SESSION_INVALID`` error — the response never reveals whether another session exists or
+        belongs to a different principal (error-envelope.md; ADR-017 D2). Constant-time-ish lookup
+        is not required (the id space is 256-bit random), but the *error* is identical across all
+        failure modes.
 
         Args:
             session_id: The opaque id supplied by the client.
+            caller: The authenticated, **server-derived** calling-principal id (ADR-017). Defaults
+                to the implicit local operator for the single-principal stdio path.
 
         Returns:
             The authorized :class:`SessionInfo`.
 
         Raises:
-            GhidraMcpError: ``SESSION_INVALID`` for unknown/expired/evicted ids (BOLA-safe).
+            GhidraMcpError: ``SESSION_INVALID`` for unknown/expired/evicted/foreign ids (BOLA-safe).
         """
         with self._lock:
-            return self._to_info(self._get_live_locked(session_id))
+            return self._to_info(self._get_live_locked(session_id, caller=caller))
 
-    def _get_live_locked(self, session_id: str) -> _Session:
-        """Look up a live session by id (caller holds ``_lock``); refresh its idle clock.
+    def _get_live_locked(self, session_id: str, *, caller: str) -> _Session:
+        """Look up a live, caller-owned session by id (caller holds ``_lock``); refresh idle clock.
 
-        Shared BOLA chokepoint for :meth:`authorize` and the write-consent methods so the
-        unknown/expired/evicted handling is identical across them (all yield ``SESSION_INVALID``).
+        Shared BOLA + **ownership** chokepoint for :meth:`authorize`, the write-consent methods,
+        :meth:`ensure_worker`, and tool-initiated :meth:`evict` so the unknown/expired/evicted/
+        foreign handling is identical and unbypassable across them (complete mediation; ADR-017). A
+        session whose ``owner`` is not ``caller`` is denied with the SAME ``SESSION_INVALID`` as a
+        nonexistent id — no oracle distinguishes "exists but not yours" from "does not exist" (D2).
 
         Args:
             session_id: The opaque id supplied by the client.
+            caller: The authenticated, server-derived calling-principal id.
 
         Returns:
-            The live internal :class:`_Session`.
+            The live, caller-owned internal :class:`_Session`.
 
         Raises:
-            GhidraMcpError: ``SESSION_INVALID`` for unknown/expired/evicted ids (BOLA-safe).
+            GhidraMcpError: ``SESSION_INVALID`` for unknown/expired/evicted/foreign ids (BOLA-safe).
         """
         sess = self._sessions.get(session_id)
         if sess is None or sess.state == STATE_EVICTED:
+            raise _errors.session_invalid()
+        if sess.owner != caller:
+            # Cross-principal access (BOLA / ADR-017 D2): deny with the SAME SESSION_INVALID as an
+            # unknown id — never confirm the session exists. Record the real cause server-side only.
+            _LOG.warning(
+                "session.authorize.denied",
+                extra={
+                    "event": "session_owner_mismatch",
+                    "session_id": session_id,
+                    "principal_id": caller,
+                },
+            )
             raise _errors.session_invalid()
         now = self._clock()
         if self._is_expired(sess, now):
@@ -246,24 +327,32 @@ class SessionManager:
         sess.last_used_mono = now
         return sess
 
-    def enable_writes(self, session_id: str, *, allow_structural: bool = False) -> SessionInfo:
-        """Grant WRITE CONSENT to a session — the human-in-the-loop mutation gate (ADR-012 §3).
+    def enable_writes(
+        self,
+        session_id: str,
+        *,
+        allow_structural: bool = False,
+        caller: str = _LOCAL_PRINCIPAL_ID,
+    ) -> SessionInfo:
+        """Grant WRITE CONSENT to a caller-owned session — the human-in-the-loop gate (ADR-012 §3).
 
         Default-deny: sessions are read-only until this is called. The grant is per-session,
-        revocable (:meth:`disable_writes` / implicit on evict), and audited.
+        revocable (:meth:`disable_writes` / implicit on evict), and audited. Owner-scoped (ADR-017):
+        only the session's owner may grant consent; a foreign id is BOLA-safe ``SESSION_INVALID``.
 
         Args:
             session_id: The opaque session id.
             allow_structural: Additionally opt into the (deferred) structural write set.
+            caller: The authenticated, server-derived calling-principal id.
 
         Returns:
             The session's updated :class:`SessionInfo` (reporting the consent state).
 
         Raises:
-            GhidraMcpError: ``SESSION_INVALID`` for unknown/expired/evicted ids (BOLA-safe).
+            GhidraMcpError: ``SESSION_INVALID`` for unknown/expired/evicted/foreign ids (BOLA-safe).
         """
         with self._lock:
-            sess = self._get_live_locked(session_id)
+            sess = self._get_live_locked(session_id, caller=caller)
             sess.writes_enabled = True
             sess.allow_structural = allow_structural
             _LOG.info(
@@ -271,34 +360,46 @@ class SessionManager:
                 extra={
                     "event": "session_writes_enabled",
                     "session_id": session_id,
+                    "principal_id": caller,
                     "allow_structural": allow_structural,
                 },
             )
             return self._to_info(sess)
 
-    def disable_writes(self, session_id: str) -> SessionInfo:
-        """Revoke write consent for a session (return it to read-only).
+    def disable_writes(self, session_id: str, *, caller: str = _LOCAL_PRINCIPAL_ID) -> SessionInfo:
+        """Revoke write consent for a caller-owned session (return it to read-only).
 
         Args:
             session_id: The opaque session id.
+            caller: The authenticated, server-derived calling-principal id (ADR-017).
 
         Returns:
             The session's updated :class:`SessionInfo`.
 
         Raises:
-            GhidraMcpError: ``SESSION_INVALID`` for unknown/expired/evicted ids (BOLA-safe).
+            GhidraMcpError: ``SESSION_INVALID`` for unknown/expired/evicted/foreign ids (BOLA-safe).
         """
         with self._lock:
-            sess = self._get_live_locked(session_id)
+            sess = self._get_live_locked(session_id, caller=caller)
             sess.writes_enabled = False
             sess.allow_structural = False
             _LOG.info(
                 "session.writes_disabled",
-                extra={"event": "session_writes_disabled", "session_id": session_id},
+                extra={
+                    "event": "session_writes_disabled",
+                    "session_id": session_id,
+                    "principal_id": caller,
+                },
             )
             return self._to_info(sess)
 
-    def require_write_consent(self, session_id: str, *, structural: bool = False) -> SessionInfo:
+    def require_write_consent(
+        self,
+        session_id: str,
+        *,
+        structural: bool = False,
+        caller: str = _LOCAL_PRINCIPAL_ID,
+    ) -> SessionInfo:
         """Authorize the session AND require write consent; fail closed otherwise (ADR-012 §3).
 
         The mutation-tool gate chokepoint: every write handler calls this before delegating to the
@@ -308,16 +409,19 @@ class SessionManager:
         Args:
             session_id: The opaque session id.
             structural: When ``True``, also require the (deferred) structural-write opt-in.
+            caller: The authenticated, server-derived calling-principal id (ADR-017). A foreign
+                caller is rejected at the owner check before any consent state is consulted (a write
+                on another principal's session is BOLA-safe ``SESSION_INVALID``, no oracle).
 
         Returns:
             The authorized :class:`SessionInfo`.
 
         Raises:
-            GhidraMcpError: ``SESSION_INVALID`` (BOLA-safe) for a bad id, or ``VALIDATION`` when the
-                session has not been granted (structural) write consent.
+            GhidraMcpError: ``SESSION_INVALID`` (BOLA-safe) for a bad/foreign id, or ``VALIDATION``
+                when the session has not been granted (structural) write consent.
         """
         with self._lock:
-            sess = self._get_live_locked(session_id)
+            sess = self._get_live_locked(session_id, caller=caller)
             if not sess.writes_enabled:
                 raise _errors.make_error(
                     ErrorType.VALIDATION,
@@ -330,8 +434,8 @@ class SessionManager:
                 )
             return self._to_info(sess)
 
-    def ensure_worker(self, session_id: str) -> None:
-        """Idempotently spawn the session's worker (manager owns worker lifetime — ADR-002).
+    def ensure_worker(self, session_id: str, *, caller: str = _LOCAL_PRINCIPAL_ID) -> None:
+        """Idempotently spawn a caller-owned session's worker (manager owns lifetime — ADR-002).
 
         Called on first import: the session exists (created with no worker — "spawn nothing until
         import") and now needs its one-per-session hardened worker. Spawning here (not at
@@ -345,14 +449,17 @@ class SessionManager:
 
         Args:
             session_id: The opaque id of a live session.
+            caller: The authenticated, server-derived calling-principal id (ADR-017). A foreign
+                caller cannot spawn another principal's worker — denied at the shared owner check
+                with the BOLA-safe ``SESSION_INVALID`` (no principal gains another's worker).
 
         Raises:
-            GhidraMcpError: ``SESSION_INVALID`` if the session is unknown/evicted (BOLA-safe).
+            GhidraMcpError: ``SESSION_INVALID`` if unknown/evicted/foreign (BOLA-safe).
         """
         with self._lock:
-            sess = self._sessions.get(session_id)
-            if sess is None or sess.state == STATE_EVICTED:
-                raise _errors.session_invalid()
+            # Owner-gate via the shared chokepoint before spawning (complete mediation — ADR-017): a
+            # foreign caller never reaches start_worker.
+            sess = self._get_live_locked(session_id, caller=caller)
             if sess.worker_started or self._port is None:
                 return
             # Spawn BEFORE flipping the flag: if the launcher raises, the session has no worker and
@@ -365,20 +472,33 @@ class SessionManager:
                 extra={"event": "worker_started", "session_id": session_id},
             )
 
-    def evict(self, session_id: str, *, reason: str) -> bool:
+    def evict(self, session_id: str, *, reason: str, caller: str | None = None) -> bool:
         """Evict a session: kill its worker and verified-wipe its store. Idempotent.
 
         Args:
             session_id: The session to evict.
             reason: Audit reason (e.g. ``"ttl"``, ``"idle"``, ``"close"``, ``"poison"``,
                 ``"timeout"``).
+            caller: When set, the authenticated calling-principal id for a **tool-initiated** evict
+                (``session_close``): the session is owner-checked via the shared chokepoint first,
+                so one principal cannot close another's session — a foreign id raises the BOLA-safe
+                ``SESSION_INVALID`` (ADR-017). ``None`` is the internal/system path (reaper,
+                shutdown, lazy expiry) which is not principal-scoped and skips the check.
 
         Returns:
             ``True`` if the per-session store was verified-wiped (or there was none); ``False``
             indicates a cleanup failure that MUST be alerted on (a wipe failure is a
             confidentiality incident).
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` when ``caller`` is set and is not the owner (or the
+                id is unknown/expired/evicted) — BOLA-safe, no oracle.
         """
         with self._lock:
+            if caller is not None:
+                # Tool-initiated close: prove ownership through the shared chokepoint BEFORE the
+                # eviction so a foreign caller cannot tear down another's session (ADR-017).
+                self._get_live_locked(session_id, caller=caller)
             return self._evict_locked(session_id, reason=reason)
 
     def reap_expired(self) -> int:

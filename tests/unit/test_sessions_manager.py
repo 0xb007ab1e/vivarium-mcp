@@ -378,3 +378,189 @@ def test_store_path_no_traversal() -> None:
     assert ".." not in info.session_id
     assert "/" not in info.session_id
     assert path.startswith("/var/lib/ghidra-mcp/stores/")
+
+
+# ==============================================================================================
+# Per-principal ownership (ADR-017) — the load-bearing BOLA control across EVERY session-scoped
+# entry point. The owner check lives in the shared ``_get_live_locked`` chokepoint, so a foreign
+# caller is denied the SAME ``SESSION_INVALID`` as an unknown id (D2, no oracle). All hermetic
+# (distinct synthetic principal ids; injected clock). Marked ``critical`` — authZ-critical path.
+# ==============================================================================================
+_A = "principal-A"
+_B = "principal-B"
+
+
+def _invalid_envelope_fields(
+    mgr: SessionManager, fn: object, *args: object, **kw: object
+) -> dict[str, object]:
+    """Call ``fn`` expecting ``SESSION_INVALID`` and return its client-visible envelope fields."""
+    with pytest.raises(GhidraMcpError) as ei:
+        fn(*args, **kw)  # type: ignore[operator]
+    env = ei.value.envelope
+    return {"type": env.type, "title": env.title, "detail": env.detail, "status": env.status}
+
+
+@pytest.mark.critical
+def test_create_records_owner_and_owner_can_authorize() -> None:
+    mgr, _ = _mgr(max_sessions=8)
+    info = mgr.create(owner=_A)
+    # The owner authorizes successfully; the SessionInfo never leaks the owner (server-internal).
+    assert mgr.authorize(info.session_id, caller=_A).session_id == info.session_id
+    assert not hasattr(info, "owner")
+
+
+@pytest.mark.critical
+def test_foreign_caller_authorize_is_session_invalid_no_oracle() -> None:
+    """Principal B presenting A's live session id is denied the SAME SESSION_INVALID as unknown."""
+    mgr, _ = _mgr(max_sessions=8)
+    a = mgr.create(owner=_A)
+
+    foreign = _invalid_envelope_fields(mgr, mgr.authorize, a.session_id, caller=_B)
+    unknown = _invalid_envelope_fields(mgr, mgr.authorize, "totally-unknown-id", caller=_B)
+    # Byte-identical: B cannot tell "exists but A's" from "does not exist" (D2 / no oracle).
+    assert foreign == unknown
+    assert foreign["type"] is ErrorType.SESSION_INVALID
+    assert "exists" not in str(foreign["detail"]).lower()
+    assert "owned" not in str(foreign["detail"]).lower()
+    # The session is untouched: A can still use it (the denied authorize did not evict it).
+    assert mgr.authorize(a.session_id, caller=_A).session_id == a.session_id
+
+
+@pytest.mark.critical
+def test_foreign_caller_denied_across_every_session_scoped_entry_point() -> None:
+    """B cannot read, enable/disable writes, require consent, spawn, OR close A's session.
+
+    Every entry point routes through the one owner-checked chokepoint, so all yield the IDENTICAL
+    BOLA-safe ``SESSION_INVALID`` — complete mediation (ADR-017).
+    """
+    port = _FakePort()
+    mgr, _ = _mgr(port=port, max_sessions=8)
+    a = mgr.create(owner=_A)
+    sid = a.session_id
+
+    baseline = _invalid_envelope_fields(mgr, mgr.authorize, sid, caller=_B)
+    # read / status
+    assert _invalid_envelope_fields(mgr, mgr.authorize, sid, caller=_B) == baseline
+    # enable writes
+    assert _invalid_envelope_fields(mgr, mgr.enable_writes, sid, caller=_B) == baseline
+    # disable writes
+    assert _invalid_envelope_fields(mgr, mgr.disable_writes, sid, caller=_B) == baseline
+    # require write consent (write op)
+    assert _invalid_envelope_fields(mgr, mgr.require_write_consent, sid, caller=_B) == baseline
+    # ensure_worker (spawn) — and prove no worker was spawned for the foreign caller
+    assert _invalid_envelope_fields(mgr, mgr.ensure_worker, sid, caller=_B) == baseline
+    assert port.started == []
+    # tool-initiated close (evict with caller)
+    assert _invalid_envelope_fields(mgr, mgr.evict, sid, reason="close", caller=_B) == baseline
+    # The underlying op never ran: A's session is still live and was not evicted/killed.
+    assert mgr.authorize(sid, caller=_A).session_id == sid
+    assert port.killed == []
+
+
+@pytest.mark.critical
+def test_foreign_caller_cannot_enable_writes_on_owned_session() -> None:
+    """B granting consent on A's session must NOT enable writes on it (deny before state change)."""
+    mgr, _ = _mgr(max_sessions=8)
+    a = mgr.create(owner=_A)
+    with pytest.raises(GhidraMcpError) as ei:
+        mgr.enable_writes(a.session_id, caller=_B)
+    assert ei.value.envelope.type is ErrorType.SESSION_INVALID
+    # A's session is still read-only — B's denied grant did not flip the consent flag.
+    assert mgr.authorize(a.session_id, caller=_A).writes_enabled is False
+
+
+@pytest.mark.critical
+def test_owner_can_close_but_foreign_cannot() -> None:
+    port = _FakePort()
+    mgr, _ = _mgr(port=port, max_sessions=8)
+    a = mgr.create(owner=_A)
+    mgr.ensure_worker(a.session_id, caller=_A)
+    # B's close is denied (no kill); A's close succeeds (kills the worker).
+    with pytest.raises(GhidraMcpError):
+        mgr.evict(a.session_id, reason="close", caller=_B)
+    assert port.killed == []
+    assert mgr.evict(a.session_id, reason="close", caller=_A) is True
+    assert port.killed == [a.session_id]
+
+
+@pytest.mark.critical
+def test_internal_evict_without_caller_skips_owner_check() -> None:
+    """The reaper/shutdown path (``caller=None``) is not principal-scoped — it evicts regardless."""
+    port = _FakePort()
+    mgr, _ = _mgr(port=port, max_sessions=8)
+    a = mgr.create(owner=_A)
+    mgr.ensure_worker(a.session_id, caller=_A)
+    # No caller → system path, no owner check (used by reap/shutdown/lazy-expiry).
+    assert mgr.evict(a.session_id, reason="ttl") is True
+    assert port.killed == [a.session_id]
+
+
+@pytest.mark.critical
+def test_two_principals_each_own_only_their_sessions() -> None:
+    mgr, _ = _mgr(max_sessions=8)
+    a = mgr.create(owner=_A)
+    b = mgr.create(owner=_B)
+    # Each can use its own; neither can use the other's (cross checks both directions).
+    assert mgr.authorize(a.session_id, caller=_A).session_id == a.session_id
+    assert mgr.authorize(b.session_id, caller=_B).session_id == b.session_id
+    with pytest.raises(GhidraMcpError):
+        mgr.authorize(b.session_id, caller=_A)
+    with pytest.raises(GhidraMcpError):
+        mgr.authorize(a.session_id, caller=_B)
+
+
+# --- per-owner session cap (ADR-017 STRIDE-D / noisy-neighbor) --------------------------------
+@pytest.mark.critical
+def test_per_owner_cap_limits_one_principal_without_blocking_others() -> None:
+    """One principal cannot exceed its per-owner cap, yet another principal can still create."""
+    mgr, _ = _mgr(max_sessions=8, max_sessions_per_owner=2)
+    mgr.create(owner=_A)
+    mgr.create(owner=_A)
+    with pytest.raises(GhidraMcpError) as ei:
+        mgr.create(owner=_A)  # A is at its per-owner cap
+    assert ei.value.envelope.type is ErrorType.LIMIT_EXCEEDED
+    assert ei.value.envelope.retryable is True
+    # B is unaffected (no noisy-neighbor starvation) — the global cap (8) is not yet reached.
+    assert mgr.create(owner=_B).session_id is not None
+
+
+@pytest.mark.critical
+def test_per_owner_cap_frees_a_slot_after_eviction() -> None:
+    mgr, _ = _mgr(max_sessions=8, max_sessions_per_owner=1)
+    a = mgr.create(owner=_A)
+    with pytest.raises(GhidraMcpError):
+        mgr.create(owner=_A)
+    mgr.evict(a.session_id, reason="close", caller=_A)
+    # Slot freed → A can create again.
+    assert mgr.create(owner=_A).session_id != a.session_id
+
+
+@pytest.mark.critical
+def test_per_owner_cap_none_disables_per_owner_limit() -> None:
+    """``max_sessions_per_owner=None`` (default) applies only the global cap (single-principal)."""
+    mgr, _ = _mgr(max_sessions=3, max_sessions_per_owner=None)
+    for _ in range(3):
+        mgr.create(owner=_A)  # all three under one owner are fine (no per-owner cap)
+    with pytest.raises(GhidraMcpError) as ei:
+        mgr.create(owner=_A)  # only the GLOBAL cap stops the 4th
+    assert ei.value.envelope.type is ErrorType.LIMIT_EXCEEDED
+
+
+@pytest.mark.critical
+def test_global_cap_takes_precedence_over_per_owner_cap() -> None:
+    """The global cap is checked first: it fires even when the per-owner cap would allow more."""
+    mgr, _ = _mgr(max_sessions=1, max_sessions_per_owner=5)
+    mgr.create(owner=_A)
+    with pytest.raises(GhidraMcpError) as ei:
+        mgr.create(owner=_B)  # global cap (1) reached even though B owns nothing yet
+    assert ei.value.envelope.type is ErrorType.LIMIT_EXCEEDED
+
+
+def test_default_owner_is_local_operator() -> None:
+    """``create()`` without an explicit owner records the implicit local operator (stdio path)."""
+    mgr, _ = _mgr()
+    info = mgr.create()  # no owner → "local"
+    # The local operator can authorize it; a different principal cannot.
+    assert mgr.authorize(info.session_id, caller="local").session_id == info.session_id
+    with pytest.raises(GhidraMcpError):
+        mgr.authorize(info.session_id, caller="someone-else")

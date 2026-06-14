@@ -25,6 +25,7 @@ _ENV_LOG_FORMAT = "GHIDRA_MCP_LOG_FORMAT"
 _ENV_SESSION_TTL = "GHIDRA_MCP_SESSION_TTL_SECONDS"
 _ENV_SESSION_IDLE = "GHIDRA_MCP_SESSION_IDLE_SECONDS"
 _ENV_MAX_SESSIONS = "GHIDRA_MCP_MAX_SESSIONS"
+_ENV_MAX_SESSIONS_PER_OWNER = "GHIDRA_MCP_MAX_SESSIONS_PER_OWNER"
 _ENV_MAX_BINARY_BYTES = "GHIDRA_MCP_MAX_BINARY_BYTES"
 _ENV_ANALYSIS_TIMEOUT = "GHIDRA_MCP_ANALYSIS_TIMEOUT_SECONDS"
 _ENV_TOOL_TIMEOUT = "GHIDRA_MCP_TOOL_TIMEOUT_SECONDS"
@@ -44,6 +45,11 @@ _ENV_HTTP_TLS_CERT = "GHIDRA_MCP_HTTP_TLS_CERT"
 _ENV_HTTP_TLS_KEY = "GHIDRA_MCP_HTTP_TLS_KEY"
 _ENV_HTTP_AUTH = "GHIDRA_MCP_HTTP_AUTH"
 _ENV_HTTP_BEARER_TOKEN = "GHIDRA_MCP_HTTP_BEARER_TOKEN"  # noqa: S105  # nosec B105 - env var name
+# Multi-principal bearer (ADR-017): a newline/comma-separated list of ``principal-id:token`` pairs,
+# each mapping a distinct secret token to the principal id that owns the sessions it creates. The
+# single-token var above stays valid (back-compat → the ``bearer`` principal). Env-var NAME, not a
+# secret; the VALUES it points at are secrets (kept out of repr/logs — workflow-secrets).
+_ENV_HTTP_BEARER_TOKENS = "GHIDRA_MCP_HTTP_BEARER_TOKENS"  # nosec B105 - env var name, not a secret
 _ENV_HTTP_CORS_ORIGINS = "GHIDRA_MCP_HTTP_CORS_ORIGINS"
 _ENV_HTTP_RATE_PER_S = "GHIDRA_MCP_HTTP_RATE_PER_SECOND"
 _ENV_HTTP_RATE_BURST = "GHIDRA_MCP_HTTP_RATE_BURST"
@@ -79,6 +85,17 @@ _MIN_BEARER_TOKEN_LEN = 16
 # Hosts that need no TLS/auth guard (no network hop). Bracketed IPv6 is stripped before lookup.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
+# The principal id a single (back-compat) bearer token maps to (ADR-011 / ADR-017). Mirrors
+# ``ghidra_mcp.server.auth.BearerAuthenticator``'s historical principal id.
+_DEFAULT_BEARER_PRINCIPAL_ID = "bearer"
+# Bound + charset for a configured principal id (an owner key threaded into session ownership and
+# logged in the audit trail — must be safe, control-free, and non-colliding). Allow-list only.
+_MAX_PRINCIPAL_ID_LEN = 64
+_PRINCIPAL_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+# Overall length bound on the multi-token list value (a handful of id:token pairs; bounds startup
+# input — CWE-400 — without the 512 single-value cap, since this holds several secrets).
+_MAX_BEARER_TOKENS_LEN = 8192
+
 
 @dataclass(frozen=True, slots=True)
 class HttpConfig:
@@ -95,7 +112,13 @@ class HttpConfig:
         tls_cert / tls_key: PEM paths for in-app TLS, or ``None`` (e.g. plaintext loopback or
             reverse-proxy-terminated TLS). Both-or-neither.
         auth_mode: ``"none"`` (loopback/UDS only) / ``"bearer"`` (built) / ``"mtls"`` / ``"oauth"``.
-        bearer_token: The bearer secret when ``auth_mode == "bearer"`` (else ``None``) — NOT logged.
+        bearer_token: The first bearer secret when ``auth_mode == "bearer"`` (else ``None``) — NOT
+            logged. Retained for back-compat / single-token construction; the authoritative source
+            is ``bearer_tokens``.
+        bearer_tokens: Multi-principal bearer map (ADR-017): ``{token: principal-id}``. Each KEY is
+            a secret (kept out of ``repr``/logs — workflow-secrets); the VALUE is the (loggable)
+            owner principal id. Empty unless ``auth_mode == "bearer"``. A single configured token
+            yields a one-entry map → the ``bearer`` principal (back-compat).
         cors_origins: Explicit allowed origins (never ``*``); empty = no cross-origin.
         rate_per_second / rate_burst: Per-client token-bucket rate limit (DoS — API4).
         max_body_bytes: Request body size cap.
@@ -112,6 +135,8 @@ class HttpConfig:
     rate_per_second: int
     rate_burst: int
     max_body_bytes: int
+    # Last (defaulted) so existing keyword constructions stay valid; secret KEYS kept out of repr.
+    bearer_tokens: dict[str, str] = field(default_factory=dict, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +316,95 @@ def _parse_bind(bind: str) -> tuple[bool, bool]:
     return False, host not in _LOOPBACK_HOSTS
 
 
+def _validate_principal_id(principal_id: str) -> str:
+    """Validate a configured bearer principal id (ADR-017): bounded, control-free allow-list.
+
+    The id becomes a session ``owner`` key and appears in the audit trail, so it must be a safe,
+    non-colliding token (no whitespace/control/separator chars that could spoof another principal).
+
+    Args:
+        principal_id: The candidate principal id (already stripped).
+
+    Returns:
+        The validated id.
+
+    Raises:
+        GhidraMcpError: ``VALIDATION`` if empty, too long, or containing disallowed characters.
+    """
+    if not principal_id:
+        raise _startup_error(f"environment variable {_ENV_HTTP_BEARER_TOKENS} has an empty id")
+    if len(principal_id) > _MAX_PRINCIPAL_ID_LEN:
+        raise _startup_error(f"environment variable {_ENV_HTTP_BEARER_TOKENS} has too long an id")
+    if any(ch not in _PRINCIPAL_ID_CHARS for ch in principal_id):
+        raise _startup_error(
+            f"environment variable {_ENV_HTTP_BEARER_TOKENS} id has disallowed characters"
+        )
+    return principal_id
+
+
+def _load_bearer_tokens(src: dict[str, str], *, single_token: str | None) -> dict[str, str]:
+    """Build the multi-principal bearer ``{token: principal-id}`` map (ADR-017), fail-closed.
+
+    Sources (both optional; combined):
+
+    - ``GHIDRA_MCP_HTTP_BEARER_TOKENS`` — newline/comma-separated ``principal-id:token`` pairs.
+    - ``GHIDRA_MCP_HTTP_BEARER_TOKEN`` (``single_token``) — back-compat single secret → the
+      ``bearer`` principal.
+
+    Each token must meet the ``_MIN_BEARER_TOKEN_LEN`` floor; ids are validated; duplicate tokens or
+    a token mapping to two ids is a fatal misconfiguration (an ambiguous identity must not boot —
+    fail closed). The raw env value is NOT echoed in any error (it is a secret).
+
+    Args:
+        src: The environment mapping.
+        single_token: The back-compat single bearer token, or ``None``.
+
+    Returns:
+        The ``{token: principal-id}`` map (possibly empty when neither source is set).
+
+    Raises:
+        GhidraMcpError: ``VALIDATION`` on a malformed pair, a too-short token, a bad id, or a
+            duplicate/ambiguous token.
+    """
+    tokens: dict[str, str] = {}
+
+    def _add(token: str, principal_id: str) -> None:
+        if len(token) < _MIN_BEARER_TOKEN_LEN:
+            raise _startup_error(
+                f"environment variable {_ENV_HTTP_BEARER_TOKENS} token is too short "
+                f"(min {_MIN_BEARER_TOKEN_LEN} characters)"
+            )
+        if token in tokens and tokens[token] != principal_id:
+            # An ambiguous token (two ids) would make ownership non-deterministic — refuse to boot.
+            raise _startup_error(
+                f"environment variable {_ENV_HTTP_BEARER_TOKENS} maps one token to two principals"
+            )
+        tokens[token] = principal_id
+
+    # Read the raw value directly (NOT via _read_str): the list separators are newline/comma and the
+    # token values are secrets, so the generic control-char rejection / 512 cap do not apply here.
+    raw = src.get(_ENV_HTTP_BEARER_TOKENS, "")
+    if len(raw) > _MAX_BEARER_TOKENS_LEN:
+        raise _startup_error(f"environment variable {_ENV_HTTP_BEARER_TOKENS} is too long")
+    if raw.strip():
+        # Split on newlines and commas; each item is ``principal-id:token`` (token may contain ':',
+        # so split once from the left). The raw value is a secret — never echo an offending item.
+        for item in (part.strip() for chunk in raw.split("\n") for part in chunk.split(",")):
+            if not item:
+                continue
+            pid, sep, token = item.partition(":")
+            if sep == "":
+                raise _startup_error(
+                    f"environment variable {_ENV_HTTP_BEARER_TOKENS} entries must be id:token"
+                )
+            _add(token.strip(), _validate_principal_id(pid.strip()))
+
+    if single_token is not None:
+        _add(single_token, _DEFAULT_BEARER_PRINCIPAL_ID)
+
+    return tokens
+
+
 def _load_http_config(src: dict[str, str]) -> HttpConfig:
     """Build + validate the HTTP config (fail-closed, secure-by-default — ADR-011 §2/§4/§5).
 
@@ -302,8 +416,8 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
 
     Raises:
         GhidraMcpError: ``VALIDATION`` if a non-loopback bind lacks TLS or an authenticator, if
-            bearer auth lacks a sufficiently long token, if TLS cert/key are not both-or-neither, or
-            if CORS contains ``*``. The process must refuse to boot.
+            bearer auth lacks at least one sufficiently long token, if TLS cert/key are not
+            both-or-neither, or if CORS contains ``*``. The process must refuse to boot.
     """
     bind = _read_str(src, _ENV_HTTP_BIND, _DEFAULT_HTTP_BIND, required=False)
     is_unix_socket, is_network = _parse_bind(bind)
@@ -317,7 +431,11 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
     auth_mode = _read_choice(
         src, _ENV_HTTP_AUTH, "bearer" if is_network else "none", _VALID_HTTP_AUTH
     )
-    bearer_token = _read_str(src, _ENV_HTTP_BEARER_TOKEN, "", required=False) or None
+    single_token = _read_str(src, _ENV_HTTP_BEARER_TOKEN, "", required=False) or None
+    # Multi-principal bearer map (ADR-017): per-token validation (length floor) + id allow-listing +
+    # ambiguity rejection happen inside the loader (fail closed). The single-token var is folded in
+    # for back-compat (→ the ``bearer`` principal).
+    bearer_tokens = _load_bearer_tokens(src, single_token=single_token)
 
     cors_raw = _read_str(src, _ENV_HTTP_CORS_ORIGINS, "", required=False)
     cors_origins = tuple(o for o in (part.strip() for part in cors_raw.split(",")) if o)
@@ -326,17 +444,15 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
     rate_burst = _read_positive_int(src, _ENV_HTTP_RATE_BURST, _DEFAULT_HTTP_RATE_BURST)
     max_body_bytes = _read_positive_int(src, _ENV_HTTP_MAX_BODY_BYTES, _DEFAULT_HTTP_MAX_BODY_BYTES)
 
-    # Fail-closed rules — the safe config is the only one that boots (master §2, ADR-011).
+    # Fail-closed rules — the safe config is the only one that boots (master §2, ADR-011/ADR-017).
     if is_network and tls_cert is None:
         raise _startup_error("a non-loopback HTTP bind requires TLS (set cert and key)")
     if is_network and auth_mode == "none":
         raise _startup_error(
             "a non-loopback HTTP bind requires an authenticator (auth must not be none)"
         )
-    if auth_mode == "bearer" and (
-        bearer_token is None or len(bearer_token) < _MIN_BEARER_TOKEN_LEN
-    ):
-        raise _startup_error("bearer auth requires a token of at least 16 characters")
+    if auth_mode == "bearer" and not bearer_tokens:
+        raise _startup_error("bearer auth requires at least one token of at least 16 characters")
     if "*" in cors_origins:
         raise _startup_error("HTTP CORS origins must be explicit; '*' is not allowed")
 
@@ -347,7 +463,8 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
         tls_cert=tls_cert,
         tls_key=tls_key,
         auth_mode=auth_mode,
-        bearer_token=bearer_token,
+        bearer_token=single_token,
+        bearer_tokens=bearer_tokens,
         cors_origins=cors_origins,
         rate_per_second=rate_per_second,
         rate_burst=rate_burst,
@@ -403,6 +520,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     overrides: dict[str, int] = {}
     for env_name, limit_key in (
         (_ENV_MAX_SESSIONS, "max_sessions"),
+        (_ENV_MAX_SESSIONS_PER_OWNER, "max_sessions_per_owner"),
         (_ENV_MAX_BINARY_BYTES, "max_binary_bytes"),
         (_ENV_ANALYSIS_TIMEOUT, "analysis_timeout_s"),
         (_ENV_TOOL_TIMEOUT, "tool_timeout_s"),

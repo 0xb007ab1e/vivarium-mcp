@@ -63,7 +63,7 @@ flowchart LR
 | **TB3** | binary → analyzer | **HOSTILE**; primary containment | isolate, no egress, bounded, kill-on-timeout |
 | **TB4** | worker → server → LLM | untrusted output (prompt injection) | untrusted-data envelope, never auto-execute |
 | **TB5** | naming eval → compiler | **attacker-derived C compiled** (v1.1 eval; ADR-010) | sandbox like TB3: rootless container, no egress, ro-rootfs, caps dropped, resource caps, kill-on-timeout, compile-only (no link/run) |
-| **TB6** | network client → server (HTTP) | **first network attack surface** (v1.1; ADR-011) | secure-by-default: stdio default, else loopback; network bind needs TLS+auth (fail closed); bearer auth (mTLS/OAuth-pluggable); rate-limit + size caps + strict CORS; per-request authZ; BOLA closed by construction (CSPRNG session-id capability + single principal; per-principal owner deferred to multi-principal); same read-only catalog |
+| **TB6** | network client → server (HTTP) | **first network attack surface** (v1.1; ADR-011/ADR-017) | secure-by-default: stdio default, else loopback; network bind needs TLS+auth (fail closed); **multi-token bearer** auth → distinct principals (mTLS/OAuth-pluggable); rate-limit + size caps + strict CORS; per-request authZ; **BOLA closed by an enforced per-principal owner check** (session owned by its creating principal; foreign id → same `SESSION_INVALID`, no oracle — ADR-017) on top of the CSPRNG session-id capability; operator-configurable per-owner session cap (noisy-neighbor; default off, global cap backstops); same read-only catalog |
 | **TB7** | client write-request → program mutation | **first write/agency boundary** — an LLM-exposed tool now *mutates* the per-session analysis (rename/comment) (v1.1 PROPOSED; ADR-012, §10) | **default-deny write consent** per session (human-in-the-loop gate — LLM08); annotation-only minimal set (rename function/symbol, set comment); allow-list write-name validation + comment normalization on the way IN (stored-injection defense); **one Ghidra transaction per write → rollback on failure**; per-write audit (intent+outcome); **session-scoped + ephemeral** (no persistence — wiped on evict, ADR-002); server NEVER mutates (ADR-001 — write executes only in the worker) |
 
 ## 3. STRIDE per element / flow
@@ -129,20 +129,23 @@ the output — compile-only (`-c`) into a throwaway tmpfs.
 | **D** | Compiler bomb (macro/template/`#include` blowup) exhausts CPU/mem/time | M×M=**Med** | memory/cpu/pids caps + **kill-on-timeout** (engine `--timeout`); fail closed → `ok=False` |
 | **E** | Compiler/sandbox escape to host | L×H=**Med** | gVisor runtime in prod (ADR-004); `no-new-privileges` + seccomp; caps dropped; pinned + verified compiler image (supply chain) |
 
-### TB6 — Network client → Server over HTTP (v1.1 — ADR-011)
+### TB6 — Network client → Server over HTTP (v1.1 — ADR-011; multi-principal ADR-017)
 HTTP is the first **network** boundary. Default stays stdio; HTTP defaults to loopback; a network
 bind is opt-in + gated and **fails closed at startup without TLS + an authenticator**. Mitigations
-live in the `server/` shell (the tool/session/worker layers are unchanged and already bounded);
-applies `std-owasp-api` + `std-zero-trust` + `topic-authn-authz`.
+live in the `server/` shell + the `SessionManager` owner check (the tool/worker layers are unchanged
+and already bounded); applies `std-owasp-api` + `std-zero-trust` + `topic-authn-authz` +
+`topic-multi-tenancy`. **ADR-017 makes this boundary truly multi-principal:** the single shared bearer
+token is replaced by a **token → principal-id map**, and per-principal **session ownership** is
+enforced — closing the BOLA gap that ADR-011 §6 deferred (TB6-I).
 
 | STRIDE | Threat | L×I | Mitigation |
 |--------|--------|-----|------------|
-| **S** | Unauthenticated/forged caller invokes the tool surface | M×H=**High** | **default-deny auth** on every TCP bind: required bearer token (constant-time, secret-managed), mTLS/OAuth-pluggable; generic `401` (no user/credential oracle); network bind without auth refuses to start |
-| **T** | Request tampering / MITM on the wire | M×H=**High** | **TLS required off-loopback** (1.2+, prefer 1.3); plaintext only on loopback/UDS; HSTS + security headers; proxy-terminated TLS supported |
-| **R** | Caller denies issuing a request | L×M=**Low** | structured audit log per request (principal, tool, sizes, outcome — redacted, `topic-logging-observability`); append-only stream |
-| **I** | Cross-principal/session data disclosure (BOLA) or verbose errors leak internals | M×H=**High** | BOLA closed by construction (API1): 256-bit CSPRNG session-id capability + single principal + uniform `SESSION_INVALID` (per-principal owner check deferred to multi-principal — ADR-011 §6); per-request authZ server-side (complete mediation); consistent error envelope, no stack traces/internals (`topic-error-handling`); strict CORS (no `*`+creds; default no origins) |
-| **D** | Request flood / huge payloads exhaust the worker pool or server | M×H=**High** | per-client **rate limit + quota**, **request size caps**, timeouts + backpressure (`topic-reliability`); bounded by ADR-002 one-worker-per-session + eviction; loopback default limits reach |
-| **E** | Remote caller escalates via the network edge to actions beyond the read-only catalog | L×H=**Med** | **same frozen read-only catalog** (no new/mutation tools); the network edge does not bypass per-call validation/allow-listing (defense in depth); least privilege; the hostile-binary containment (TB3) is unchanged and unaffected by transport |
+| **S** | Unauthenticated/forged caller (or forged *principal*) invokes the tool surface | M×H=**High** | **default-deny auth** on every TCP bind: **multi-token bearer** (each token a secret-managed credential mapping to a distinct principal id), constant-time compare with **no which-token timing oracle**, mTLS/OAuth-pluggable; generic `401` (no user/credential oracle). Forging another principal requires their secret token; identity is **server-derived** from the authenticated request only, never client-supplied. Network bind without auth refuses to start |
+| **T** | Request tampering / MITM on the wire | M×H=**High** | **TLS required off-loopback** (1.2+, prefer 1.3); plaintext only on loopback/UDS; HSTS + security headers; proxy-terminated TLS supported. Session `owner` is set once at create from the server-derived principal and is **immutable** (no tool rewrites it) |
+| **R** | Caller denies issuing a request | L×M=**Low** | structured audit log per request and per **principal+session** event (create / authorize-deny / write-consent — principal id + session id + outcome, redacted; `topic-logging-observability`); append-only stream |
+| **I** | Cross-principal/session data disclosure (BOLA) or verbose errors leak internals | M×H=**High** | **TB6-I — ENFORCED (ADR-017), no longer deferred:** every session-scoped entry point goes through the shared `_get_live_locked` owner check (complete mediation); a session whose `owner ≠ caller` is denied the **same `SESSION_INVALID`** as unknown/expired/evicted — **no oracle** distinguishes "exists but not yours" from "does not exist" (D2). Defense in depth on top of the 256-bit CSPRNG session-id capability; per-request authZ server-side; consistent error envelope, no stack traces/internals (`topic-error-handling`); strict CORS (no `*`+creds; default no origins) |
+| **D** | Request flood / huge payloads, **or one principal starving others** | M×H=**High** | per-client **rate limit + quota**, **request size caps**, timeouts + backpressure (`topic-reliability`); bounded by ADR-002 one-worker-per-session + eviction; an **operator-configurable per-owner session cap** (`GHIDRA_MCP_MAX_SESSIONS_PER_OWNER`; **default off** — the global `max_sessions` bounds total exhaustion) so a multi-principal deployment can stop one principal monopolizing the pool (noisy-neighbor — `topic-multi-tenancy`); loopback default limits reach |
+| **E** | Remote caller escalates via the network edge to actions beyond the read-only catalog, **or acts on another principal's session/worker** | L×H=**Med** | **same frozen read-only catalog** (no new/mutation tools); the network edge does not bypass per-call validation/allow-listing (defense in depth); least privilege. A principal **cannot read or write another's session** (owner-checked read+write) and **cannot gain another's worker** (`ensure_worker` is owner-gated before spawn); write-consent is bound to principal+session (ADR-012) on top of the owner-scoped session. The hostile-binary containment (TB3) is unchanged and unaffected by transport |
 
 ## 4. Supply chain (build-time)
 | Threat | L×I | Mitigation |
@@ -169,6 +172,13 @@ applies `std-owasp-api` + `std-zero-trust` + `topic-authn-authz`.
 - **Out of scope (v1):** remote/network attackers (no HTTP), authn/multi-tenant authz, mutation.
 - **v1.1 HTTP (TB6, ADR-011):** the network attacker is now in scope, mitigated by secure-by-default
   exposure (stdio→loopback→gated network) + fail-closed TLS/auth.
+- **v1.1 multi-principal authZ (TB6 strengthened, ADR-017):** multiple distinct principals are now in
+  scope (multi-token bearer). BOLA is closed by an **enforced per-principal session-owner check**
+  (TB6-I no longer deferred): a cross-principal session reference yields the same `SESSION_INVALID`
+  (no oracle), and an operator-configurable per-owner session cap (default off; global cap backstops) bounds noisy-neighbor. **Still out of scope:**
+  cross-principal session *sharing*/delegation (sessions are single-owner); per-principal rate limits
+  beyond the session cap; mTLS/OAuth identity extraction (port stubs until built — same ownership
+  mechanism). See §11.
 - **v1.1 mutation (TB7, ADR-012):** the annotation write/agency boundary is in scope (see §10),
   mitigated by default-deny write consent + atomic+reversible+audited annotation writes + session
   ephemerality.
@@ -206,12 +216,13 @@ attack (the control holds) and be a deterministic, hermetic test.
 5. **Indirect prompt injection via strings/symbols/comments** — payloads in binary-derived content
    are returned **wrapped in the untrusted-data envelope**, normalized/annotated, never as bare
    instruction text. (TB4-S/E)
-6. **Session-ID guessing / BOLA (TB6-I)** — closed by construction in single-principal v1.1: a
-   `session_id` is a 256-bit CSPRNG capability and `authorize()` returns the *same* `SESSION_INVALID`
-   for unknown/expired/evicted ids (never revealing whether other sessions exist), while there is
-   exactly one authenticated principal — so no cross-principal addressing surface exists. A
-   per-principal `owner` check is **deferred to the multi-principal increment** (it would be vacuous
-   against one constant identity); see ADR-011 §6. (TB1/TB4-I/TB6-I)
+6. **Session-ID guessing / BOLA (TB6-I)** — a `session_id` is a 256-bit CSPRNG capability and
+   `authorize()` returns the *same* `SESSION_INVALID` for unknown/expired/evicted ids (never
+   revealing whether other sessions exist). **As of ADR-017 (multi-principal) the per-principal
+   `owner` check is ENFORCED, not deferred:** a session is owned by its creating principal, and any
+   session-scoped call by a different principal is denied the *same* `SESSION_INVALID` (no oracle —
+   D2), across read/write/close. Exercised by cross-principal abuse cases **61-66** below.
+   (TB1/TB4-I/TB6-I)
 7. **Worker-pool starvation / resource exhaustion** — exceeding the concurrency cap yields
    **backpressure** (`LIMIT_EXCEEDED`), not exhaustion; timeouts reclaim stuck workers. (TB1-D/TB3-D)
 8. **Cross-session project-store leakage** — one session cannot read another's store; eviction
@@ -698,3 +709,45 @@ holds), deterministic + hermetic where marked:
     `no-new-privileges`, resource caps) plus the exec-tmpfs/noexec-scratch split; a candidate cannot
     egress, write the host, or escalate. The argv-hardening half is asserted hermetically in
     `tests/unit/test_naming_compile.py`; the live containment is promoted to integration. (TB5-T/I/E)
+
+## 11. Addendum — v1.1 multi-principal authorization (TB6 strengthened — ADR-017)
+
+ADR-017 makes the HTTP boundary (TB6) truly multi-principal and **closes the TB6-I per-principal
+BOLA gap that ADR-011 §6 deferred**. Two mechanisms: (1) a **multi-token bearer** identity source
+(`{token: principal-id}`, constant-time, no which-token timing oracle, generic reject); (2)
+**per-principal session ownership** enforced in the single `SessionManager._get_live_locked`
+chokepoint, so every session-scoped entry point (authorize, enable/disable writes, require-consent,
+`ensure_worker`, tool-initiated close) denies a foreign caller the **same `SESSION_INVALID`** as an
+unknown id (D2 — no oracle). Owner is server-derived at create and immutable. An operator-configurable **per-owner session
+cap** (`GHIDRA_MCP_MAX_SESSIONS_PER_OWNER`; default off, global cap backstops) bounds noisy-neighbor. No tool/RPC/error-envelope contract change (reuses `SESSION_INVALID`);
+ADR-001 preserved (authZ is server-only; worker untouched). See the strengthened **TB6** STRIDE rows
+above.
+
+### Cross-principal abuse cases (append to §6; benign/synthetic fixtures only)
+
+These map 1:1 to `tests/security/test_abuse_cases.py` (TB6 multi-principal block) and run against the
+**real** `SessionManager` + `MultiTokenBearerAuthenticator` (hermetic — injected clock, distinct
+synthetic principal ids, synthetic tokens; NO real secrets/worker). Each FAILS the attack.
+
+61. **Cross-principal READ** — principal B presenting A's live `session_id` to `authorize` is denied
+    the **same `SESSION_INVALID`** as an unknown id (byte-identical envelope; no "exists"/"owned"
+    leak). A's session is untouched and still authorizable by A. (TB6-I / BOLA / API1)
+62. **Cross-principal WRITE** — B cannot `enable_writes` / `require_write_consent` /
+    `ensure_worker`-spawn on A's session — all yield the same `SESSION_INVALID`; the op never runs
+    (A's consent flag unchanged, no worker spawned for B). (TB6-E / TB7)
+63. **Cross-principal CLOSE** — B closing A's session (`evict` with caller=B) is denied the same
+    `SESSION_INVALID`; A's session is **not** evicted. (TB6-I/E)
+64. **Principal spoof** — no token / wrong token / wrong scheme / empty token → generic `401`/`None`
+    (no credential or which-token oracle); the only way to become a principal is to present its
+    secret token. (TB6-S)
+65. **Timing-oracle resistance (structural)** — the multi-token compare scans **every** entry with
+    no early return; a last-position token still matches, proving the work is independent of which
+    token matches. (TB6-S)
+66. **Per-owner cap (noisy-neighbor)** — one principal at its per-owner session cap cannot create
+    more (`LIMIT_EXCEEDED`), yet another principal can still create — no cross-principal starvation.
+    (TB6-D / `topic-multi-tenancy`)
+67. **Cross-principal isolation end-to-end (LIVE)** — two principals with distinct bearer tokens over
+    the real HTTP transport: B presenting A's `session_id` gets `SESSION_INVALID` and A's
+    session/worker/store are untouched. The manager + authenticator controls are proven hermetically
+    (61-66); the per-request-principal → `ToolContext` → manager wiring is promoted to integration
+    (WS5). (TB6-I)

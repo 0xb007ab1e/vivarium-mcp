@@ -19,11 +19,29 @@ from ghidra_mcp.core.envelope import DataOrigin, Untrusted
 from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from ghidra_mcp.ghidra.port import GhidraPort
 from ghidra_mcp.security.limits import Limits
+from ghidra_mcp.server.auth import Principal
 from ghidra_mcp.sessions.manager import SessionManager
 from ghidra_mcp.tools import registry as reg
 from ghidra_mcp.tools import schemas as s
 
 _VALID_SID = "sid1"
+
+
+def _config() -> Config:
+    """A minimal valid stdio config for building tool contexts in tests."""
+    return Config(
+        log_level="INFO",
+        log_format="json",
+        session_ttl_s=3600,
+        session_idle_s=900,
+        limits=Limits(),
+        worker_image="x",
+        worker_runtime="runsc",
+        worker_uid=65532,
+        worker_gid=65532,
+        rpc_socket_dir="/run/x",
+        import_root="/work/imports",
+    )
 
 
 class FakeSessionManager:
@@ -36,20 +54,23 @@ class FakeSessionManager:
     def __init__(self) -> None:
         """Initialize with empty audit trails."""
         self.authorized: list[str] = []
+        self.callers: list[str] = []  # ADR-017: caller principal threaded into authorize
+        self.created_owners: list[str] = []  # ADR-017: owner principal threaded into create
         self.evicted: list[tuple[str, str]] = []
         self.ensured: list[str] = []
         self.created = 0
 
-    def ensure_worker(self, session_id: str) -> None:
+    def ensure_worker(self, session_id: str, *, caller: str = "local") -> None:
         """Record an idempotent worker-spawn request (the import handler calls this)."""
         self.ensured.append(session_id)
 
-    def create(self, *, label: str | None = None) -> s.SessionInfo:
-        """Create a session, returning a fixed valid id."""
+    def create(self, *, owner: str = "local", label: str | None = None) -> s.SessionInfo:
+        """Create a session, returning a fixed valid id (records the owner principal — ADR-017)."""
         self.created += 1
+        self.created_owners.append(owner)
         return s.SessionInfo(session_id=_VALID_SID, state="open", created_at=0, expires_at=10)
 
-    def authorize(self, session_id: str) -> s.SessionInfo:
+    def authorize(self, session_id: str, *, caller: str = "local") -> s.SessionInfo:
         """Authorize ``_VALID_SID`` only; otherwise raise the BOLA-safe error."""
         if session_id != _VALID_SID:
             raise GhidraMcpError(
@@ -58,10 +79,11 @@ class FakeSessionManager:
                 )
             )
         self.authorized.append(session_id)
+        self.callers.append(caller)
         return s.SessionInfo(session_id=session_id, state="ready", created_at=0, expires_at=10)
 
-    def evict(self, session_id: str, *, reason: str) -> bool:
-        """Record the eviction and report a verified wipe."""
+    def evict(self, session_id: str, *, reason: str, caller: str | None = None) -> bool:
+        """Record the eviction and report a verified wipe (caller for owner-scoped close)."""
         self.evicted.append((session_id, reason))
         return True
 
@@ -386,6 +408,60 @@ def test_session_create_does_not_require_a_session(ctx: reg.ToolContext) -> None
     info = handlers["session_create"](label="job-1")
     assert info.session_id == _VALID_SID
     assert ctx.sessions.created == 1  # type: ignore[attr-defined]
+
+
+# --- ADR-017: the principal is threaded server-side into the manager (owner on create, caller on
+# authorize); handlers read ``ctx.caller_id`` (static principal for stdio, resolver for HTTP).
+def test_create_threads_static_principal_as_owner(ctx: reg.ToolContext) -> None:
+    handlers = reg.build_handlers(ctx)
+    handlers["session_create"](label="job-1")
+    # The default static principal is the local operator (stdio path).
+    assert ctx.sessions.created_owners == ["local"]  # type: ignore[attr-defined]
+
+
+def test_authorize_threads_static_principal_as_caller(ctx: reg.ToolContext) -> None:
+    handlers = reg.build_handlers(ctx)
+    handlers["decompile_function"](session_id=_VALID_SID, function="main")
+    assert ctx.sessions.callers == ["local"]  # type: ignore[attr-defined]
+
+
+def test_caller_id_uses_static_principal_by_default() -> None:
+    c = reg.ToolContext(
+        config=_config(),
+        sessions=cast(SessionManager, FakeSessionManager()),
+        port=cast(GhidraPort, FakePort()),
+        principal=Principal(id="static-p"),
+    )
+    assert c.caller_id == "static-p"
+
+
+def test_caller_id_uses_resolver_when_wired() -> None:
+    """When a per-request resolver is set (HTTP), ``caller_id`` returns the resolved principal."""
+    c = reg.ToolContext(
+        config=_config(),
+        sessions=cast(SessionManager, FakeSessionManager()),
+        port=cast(GhidraPort, FakePort()),
+        principal=Principal(id="ignored-static"),
+        resolve_principal=lambda: Principal(id="alice"),
+    )
+    assert c.caller_id == "alice"
+
+
+def test_handler_threads_resolved_principal_per_request() -> None:
+    """A handler owns/authorizes under the RESOLVED principal, not the static fallback (HTTP)."""
+    sessions = FakeSessionManager()
+    c = reg.ToolContext(
+        config=_config(),
+        sessions=cast(SessionManager, sessions),
+        port=cast(GhidraPort, FakePort()),
+        principal=Principal(id="ignored-static"),
+        resolve_principal=lambda: Principal(id="bob"),
+    )
+    handlers = reg.build_handlers(c)
+    handlers["session_create"](label="j")
+    handlers["decompile_function"](session_id=_VALID_SID, function="main")
+    assert sessions.created_owners == ["bob"]
+    assert sessions.callers == ["bob"]
 
 
 def test_decompile_authorizes_then_calls_port(ctx: reg.ToolContext) -> None:
