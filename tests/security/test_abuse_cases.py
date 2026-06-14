@@ -1051,3 +1051,132 @@ def test_define_struct_commit_failure_rolls_back() -> None:
     transaction, no half-created type (the reused ``_in_transaction``, CWE-460). The unit-level
     three-branch proof of ``_in_transaction`` lives in ``test_structural_mutation``; this is the
     live composite-specific assertion. Promoted to WS5 (needs the real DataTypeManager)."""
+
+
+# ==============================================================================================
+# TB5 (delta) — Behavioral-equivalence differential-run abuse cases 55-60 (threat-model §10,
+# ADR-016). The differential harness compares two BUILDS on synthetic inputs and NEVER runs the
+# hostile sample (D1). The controls under test that live in WS-owned modules (the output-size cap
+# in ContainerExecRunner, the pure behavioral_equivalence None/zero comparison core) are HERMETIC
+# here — a fake bytes-runner + direct calls, synthetic data only (master §5). The cases that need
+# a real sandbox (a live hanging/fork-bombing/over-allocating candidate contained by the engine)
+# keep the ``skip``-marked integration convention used above.
+# ==============================================================================================
+import subprocess  # noqa: E402  # local to the TB5 differential-run block (fake bytes-runner)
+
+from ghidra_mcp.naming.compile import ContainerExecRunner  # noqa: E402
+from ghidra_mcp.naming.metrics import RunResult, behavioral_equivalence  # noqa: E402
+
+_EXEC_IMG = "ghcr.io/o/cc@sha256:" + "c" * 64
+
+
+class _FloodRunner:
+    """A fake bytes-runner simulating a candidate that floods stdout (no real engine)."""
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def __call__(self, argv: list[str], stdin: bytes) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(argv, 0, self._payload, b"")
+
+
+# --- Case 55 — output-flood contained (TB5-D / CWE-400) ------------------------------------
+@pytest.mark.critical
+def test_exec_output_flood_is_capped() -> None:
+    """A candidate that emits unbounded stdout is captured only up to ``max_stdout_bytes`` (D3).
+
+    Hermetic: the ContainerExecRunner output-size cap is asserted with a fake runner returning a
+    huge payload — the captured ``RunResult.stdout`` is truncated to the cap, so the
+    retained/compared output is bounded. (Residual: the cap is read-all-then-slice, so peak host
+    buffering during capture is bounded by the engine timeout + memory/OOM cap, not this cap — a
+    bounded-streaming read is a tracked follow-up.) The live engine-enforced containment (real
+    hang/fork-bomb) is case 59 below.
+    """
+    runner = _FloodRunner(b"X" * 1_000_000)
+    (run,) = ContainerExecRunner(compiler_image=_EXEC_IMG, runner=runner, max_stdout_bytes=256)(
+        "int main(void){for(;;)putchar('X');}", [b""]
+    )
+    assert len(run.stdout) == 256
+    assert run.stdout == b"X" * 256
+
+
+# --- Case 56 — hostile/failed run fails closed → honest non-match (TB5-D) ------------------
+@pytest.mark.critical
+def test_failed_build_scores_honest_nonmatch_never_fabricates() -> None:
+    """A build/spawn failure or non-recompiling candidate is a non-match, never a fabricated score.
+
+    A spawn ``OSError`` maps to ``RunResult(ok=False)``; the pure oracle scores ``ok=False`` as a
+    non-match for every vector (a low/zero metric is honest — D2), and a degenerate/empty run pair
+    yields ``None`` (unavailable), never a guess.
+    """
+
+    def boom(_argv: list[str], _stdin: bytes) -> subprocess.CompletedProcess[bytes]:
+        raise OSError("engine not found")
+
+    (run,) = ContainerExecRunner(compiler_image=_EXEC_IMG, runner=boom)("int main(void){}", [b""])
+    assert run.ok is False  # fail closed — no fabricated success
+
+    # A non-recompiling candidate (ok=False) matches a clean reference on NO vector → 0.0.
+    reference = [RunResult(ok=True, exit_code=0, stdout=b"out")]
+    candidate = [RunResult(ok=False)]
+    assert behavioral_equivalence(reference, candidate) == 0.0
+    # Degenerate pairs are unavailable, not a fabricated number.
+    assert behavioral_equivalence([], []) is None
+    assert behavioral_equivalence(reference, []) is None
+
+
+# --- Case 57 — captured output is data, never executed (TB5-S/E) ----------------------------
+@pytest.mark.critical
+def test_captured_stdout_is_inert_data_not_executed() -> None:
+    """The differential core only COMPARES inert ``(exit_code, stdout)`` — it never evals stdout.
+
+    Regression guard (ADR-005): a captured stdout that *would* be dangerous if eval'd round-trips
+    as inert bytes through ``behavioral_equivalence`` with no side effects. The metric is a pure
+    byte/int comparison — identical dangerous bytes on both sides are simply a match.
+    """
+    dangerous = b"__import__('os').system('echo pwned')"
+    a = [RunResult(ok=True, exit_code=0, stdout=dangerous)]
+    b = [RunResult(ok=True, exit_code=0, stdout=dangerous)]
+    # No execution; identical inert bytes compare equal — and nothing ran.
+    assert behavioral_equivalence(a, b) == 1.0
+    # A trailing-byte difference is a non-match (byte-exact, no normalization — D2).
+    b2 = [RunResult(ok=True, exit_code=0, stdout=dangerous + b"\n")]
+    assert behavioral_equivalence(a, b2) == 0.0
+
+
+# --- Case 58 — the hostile original is never executed (TB5-E / D1) -------------------------
+@pytest.mark.critical
+def test_behavioral_equivalence_none_without_trusted_reference() -> None:
+    """The metric is computed over two C BUILDS, never the analyzed binary; ``None`` without a ref.
+
+    ADR-016 D1 / ADR-001: there is no path that feeds the hostile sample to the runner or the
+    metric. ``behavioral_equivalence`` against an absent trusted reference (build A) is ``None``
+    (honest unavailability) — it cannot be fabricated against the original. (The harness only ever
+    receives C-source builds A/B — proven by the e2e composing A from trusted source, B from
+    recompiled C; here we assert the metric's honest-None contract.)
+    """
+    candidate_only = [RunResult(ok=True, exit_code=0, stdout=b"x")]
+    assert behavioral_equivalence(None, candidate_only) is None
+    assert behavioral_equivalence(candidate_only, None) is None
+
+
+# --- Case 59 — hang / fork-bomb / over-allocate contained (LIVE) ---------------------------
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_exec_hang_forkbomb_overalloc_contained() -> None:
+    """Case 59 (live): a candidate TU that infinite-loops, fork-bombs, or over-allocates is
+    reclaimed by the engine ``--timeout`` / ``--pids-limit`` / ``--memory`` cap (mapped to
+    ``RunResult(ok=False)``), not an escape or a stuck harness. The argv-hardening half (the caps
+    are present) is asserted hermetically in ``tests/unit/test_naming_compile.py``; this is the live
+    containment. Promoted to WS5 (needs the real sandbox)."""
+
+
+# --- Case 60 — sandbox isolation parity with the compile runner (LIVE) ---------------------
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_exec_sandbox_isolation_parity() -> None:
+    """Case 60 (live): ``ContainerExecRunner`` build+run enforces the SAME hardening as
+    ``ContainerCompileRunner`` (``--network none``, read-only rootfs, dropped caps,
+    ``no-new-privileges``, resource caps) plus the exec-tmpfs/noexec-scratch split — a candidate
+    cannot egress, write the host, or escalate. The argv-hardening assertions are hermetic in
+    ``test_naming_compile.py``; the live containment is promoted to WS5 (real sandbox)."""

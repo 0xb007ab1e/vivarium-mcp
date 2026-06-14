@@ -629,3 +629,72 @@ fixtures only (master §5):
 54. **Commit-time atomicity** — a `define_struct` whose `addDataType` **or its commit** raises rolls
     back and surfaces `analysis-failed`; no dangling transaction, no half-created type (the reused
     `_in_transaction` — CWE-460). The program is unchanged. (TB7-T — extends Phase-B case 33)
+
+### TB5 (delta) — Behavioral-equivalence differential run (v1.1 — ADR-016, ACCEPTED)
+
+ADR-016 completes ADR-010's deferred `behavioral_equivalence` field. It measures whether the rebuilt
+artifact behaves like the original **without ever running the hostile sample** (ADR-001 / D1): it
+compares two **builds** on shared **synthetic** inputs — **(A)** a build from the fixture's
+**trusted known source** (cJSON) and **(B)** the **recompiled renamed-decompiled-C** — and reports
+the fraction of input vectors whose `(exit_code, stdout)` match byte-exactly (D2). It is computable
+**only** for ground-truth fixtures carrying trusted source + inputs; otherwise it stays `None`
+(honest unavailability — never a fabricated number). Diffing against the *real hostile original* is
+**rejected** for v1.1 (would breach ADR-001).
+
+This is the **same TB5 boundary** — attacker-derived C compiled — **not a new one**. ADR-016 only
+**extends** it from compile-only to compile→**run**→capture (`ContainerExecRunner`), inside the
+identical isolation `ContainerCompileRunner` already enforces (rootless, `--network none`, read-only
+rootfs, all caps dropped, `no-new-privileges` + seccomp, CPU/memory/**pids** caps, killed on
+timeout, non-root). The new surface is: (a) **executing** the candidate build (and, uniformly, the
+trusted reference build — lower risk, still sandboxed); (b) feeding **author-controlled synthetic**
+stdin vectors (NOT attacker-controlled); (c) **capturing bounded output**. The built artifact runs
+from a dedicated `exec`-allowed tmpfs (`/run/x`) while the rootfs stays read-only and the compiler
+scratch (`/tmp`) stays `noexec`. The differential **core executes nothing** — it only compares the
+inert captured `(exit_code, stdout)` run-results (ADR-005); captured stdout is **data** (compared,
+never executed/rendered). The pure metric is `None`/zero on any failure, so a stub/non-recompiling
+candidate scores low **honestly**, never a harness crash.
+
+| STRIDE | Threat | L×I | Mitigation |
+|--------|--------|-----|------------|
+| **T** | A malicious candidate build corrupts host/toolchain state | L×H=**Med** | build+run in a rootless container; read-only rootfs; source mounted **ro**; writable surfaces are ephemeral tmpfs only (`/tmp` noexec scratch + a small `/run/x` exec tmpfs for the artifact); non-root, all caps dropped |
+| **I** | A candidate program (or `#include`/pragma) reads host files or exfiltrates | M×M=**Med** | `--network none` (no egress); no host paths mounted but the ro source; captured stdout is size-capped + carried as inert data; the sandbox holds no secrets |
+| **D** | A candidate that **hangs, fork-bombs, over-allocates, or floods stdout** exhausts CPU/mem/pids/disk/the host | M×M=**Med** | engine **kill-on-timeout** (hang/loop); **pids** cap (fork-bomb); **memory** cap + OOM-kill (over-allocate); **output-size cap** on the *retained/compared* output, with peak host transfer bounded by kill-on-timeout + the memory/OOM cap (stdout flood — D3; host-pipe buffering during capture is bounded by timeout+mem, not the cap — tracked follow-up: bounded-streaming read); each maps to `RunResult(ok=False)` → an honest non-match, not an escape or crash |
+| **E** | Candidate-program / sandbox escape to host | L×H=**Med** | gVisor runtime in prod (ADR-004); `no-new-privileges` + seccomp; caps dropped; pinned + verified compiler image (supply chain); the hostile **binary** is never executed (D1) so no new "run the sample" boundary opens |
+
+### Abuse cases for the behavioral-equivalence increment (append to §6; benign/synthetic fixtures only)
+
+These map 1:1 to new cases in `tests/security/test_abuse_cases.py` (ADR-016 §Security). The
+**boundary/pure** assertions (the output-cap logic, the metric's `None`/zero paths) are **hermetic**
+(no real sandbox — a fake bytes-runner / direct calls, synthetic data only — master §5); the
+**live-sandbox** ones (a real hanging / fork-bombing / over-allocating candidate contained by the
+engine) keep the `skip`-marked integration convention. Each must FAIL the attack (the control
+holds), deterministic + hermetic where marked:
+
+55. **Output-flood contained (HERMETIC)** — a candidate whose run emits unbounded stdout is captured
+    only up to `max_stdout_bytes`; `ContainerExecRunner` truncates the `RunResult.stdout` to the cap
+    (anti output-flood DoS — D3). The byte-exact compare is over the capped prefix. **Residual:**
+    `max_stdout_bytes` caps the *retained/compared/logged* output, **not** peak host buffering during
+    capture (read-all-then-slice) — that is bounded by kill-on-timeout + the container memory/OOM
+    cap; a bounded-streaming read is a tracked follow-up. (TB5-D)
+56. **Hostile run fails closed → honest non-match (HERMETIC)** — a build/spawn failure (engine
+    `OSError`) or a non-recompiling candidate maps to `RunResult(ok=False)`, which
+    `behavioral_equivalence` scores as a **non-match for every vector** → a low/zero metric, never a
+    crash or a fabricated match (D2). A degenerate run pair (empty / mismatched-length) yields `None`
+    (unavailable), not a guess. (TB5-D — measured-not-guaranteed)
+57. **Captured output is data, never executed (HERMETIC)** — the differential core only *compares*
+    the inert `(exit_code, stdout)` run-results; it never executes/evals/renders captured stdout
+    (ADR-005). A `RunResult.stdout` that *would* be dangerous if eval'd round-trips as inert bytes
+    through `behavioral_equivalence` with no side effects. (TB5-S/E — same posture as abuse-case 5)
+58. **Hostile original is never executed (HERMETIC)** — the harness compares two C *builds* (trusted
+    source A, recompiled candidate B); neither the `ExecRunner` port nor the metric ever receives or
+    runs the analyzed binary. `behavioral_equivalence` is `None` when no trusted reference is supplied
+    — it cannot be computed against the hostile sample (D1 / ADR-001, recorded out of scope). (TB5-E)
+59. **Hang / fork-bomb / over-allocate contained (LIVE)** — a candidate TU that infinite-loops,
+    fork-bombs, or over-allocates is reclaimed by the engine **timeout** / **pids** cap / **memory**
+    cap (mapped to `ok=False`), not an escape or a stuck harness. Promoted to live integration (needs
+    the real sandbox). (TB5-D)
+60. **Sandbox isolation parity (LIVE)** — the `ContainerExecRunner` build+run enforces the SAME
+    hardening as `ContainerCompileRunner` (`--network none`, read-only rootfs, dropped caps,
+    `no-new-privileges`, resource caps) plus the exec-tmpfs/noexec-scratch split; a candidate cannot
+    egress, write the host, or escalate. The argv-hardening half is asserted hermetically in
+    `tests/unit/test_naming_compile.py`; the live containment is promoted to integration. (TB5-T/I/E)

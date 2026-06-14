@@ -9,8 +9,14 @@ Scores a :class:`~ghidra_mcp.naming.loop.RenamedProgram` on quality signals:
   from a hostile binary's decompilation), so a real runner MUST compile it **sandboxed** — that
   step is a separate gated increment (ADR-010 §Security); here it is a port with fakes in tests.
 - **behavioral_equivalence** — does the rebuilt artifact behave like the original on test inputs?
-  Research-hard / generally unachievable from decompiler output; **explicitly best-effort** and
-  deferred (field present, ``None`` until the sandboxed differential-run harness lands).
+  Realized by the ADR-016 differential harness: it compares two **builds** on shared **synthetic**
+  inputs — (A) a build from the fixture's **trusted known source** (e.g. cJSON) and (B) the
+  **recompiled renamed-decompiled-C** — and NEVER runs the hostile sample (ADR-001 / D1). The metric
+  is the fraction of input vectors whose ``(exit_code, stdout)`` match **byte-exactly** (D2,
+  measured-not-guaranteed). It is computable **only** for ground-truth fixtures carrying trusted
+  source + inputs; otherwise it stays ``None`` (honest unavailability). This module's core only
+  *compares* inert captured run-results (:class:`RunResult`) — it executes nothing; the sandboxed
+  build+run+capture lives in the ``ExecRunner`` adapter (ADR-016 §Architecture / TB5).
 - **naming_accuracy** — how close are the proposed names to a known *ground truth* (e.g. the DWARF
   symbol names from an unstripped build)? Pure, given an injected ``ground_truth`` address→name map.
   Reports a strict ``exact_match_rate`` (normalized identifier equality) and a fairer
@@ -22,6 +28,8 @@ Scores a :class:`~ghidra_mcp.naming.loop.RenamedProgram` on quality signals:
 Compilability and behavioral equivalence are honest *metrics to track*, never guarantees: turning
 decompiler pseudo-C into a recompilable, equivalent program is not solvable in general (decision 3).
 This module is pure given its ports — the compiler/runner are injected, so scoring is hermetic.
+The behavioral-equivalence *core* never executes anything; it only compares the inert
+``(exit_code, stdout)`` run-results an injected (sandboxed) ``ExecRunner`` already captured.
 """
 
 from __future__ import annotations
@@ -57,6 +65,78 @@ CompileRunner = Callable[[str], CompileResult]
 
 
 @dataclass(frozen=True, slots=True)
+class RunResult:
+    """One captured outcome of building + running a translation unit on a single input vector.
+
+    The (bounded) observable behavior the differential oracle compares (ADR-016 D2): the process
+    **exit code** and its **captured stdout bytes** (size-capped at the sandbox edge — anti
+    output-flood DoS). ``stdout`` is **inert, untrusted-derived data** (it came, via the candidate
+    build, from a hostile binary's decompilation, ADR-005) — it is **compared, never executed or
+    rendered**. ``ok=False`` means the build itself failed to produce a runnable artifact (a stub
+    or a non-recompiling TU) — an honest non-match, never a guess.
+
+    Attributes:
+        ok: Whether the TU built AND ran (vs. a build/spawn failure). A failed build scores as a
+            non-match for every input vector (keeps low/zero scores honest).
+        exit_code: The process exit status for this input vector (``None`` if it never ran).
+        stdout: The captured, size-capped stdout bytes for this input vector (``b""`` if none).
+    """
+
+    ok: bool
+    exit_code: int | None = None
+    stdout: bytes = b""
+
+
+#: An exec runner builds a translation unit and runs it on each synthetic input vector under
+#: worker-style isolation, returning one :class:`RunResult` per vector. THE TU IS UNTRUSTED
+#: (binary-derived); the real adapter MUST sandbox build+run+capture (no network, read-only, dropped
+#: caps, resource caps, kill-on-timeout, output-size cap — ADR-004/ADR-016 TB5). Tests inject a
+#: deterministic fake. ``inputs`` are author-controlled synthetic vectors (stdin bytes), not
+#: attacker-controlled (ADR-016 D3).
+ExecRunner = Callable[[str, "list[bytes]"], "list[RunResult]"]
+
+
+def behavioral_equivalence(
+    runs_a: list[RunResult] | None, runs_b: list[RunResult] | None
+) -> float | None:
+    """Fraction of input vectors whose ``(exit_code, stdout)`` match byte-exactly across two builds.
+
+    The pure differential oracle (ADR-016 D2). ``runs_a`` is the **trusted reference** build's
+    captured run-results (build A — from the fixture's known source), ``runs_b`` the **candidate**
+    build's (build B — the recompiled renamed-decompiled-C), one :class:`RunResult` per shared
+    synthetic input vector, in the same order. This function **executes nothing** — it compares the
+    already-captured, inert results (ADR-005); the sandboxed build+run lives in the
+    :data:`ExecRunner` adapter.
+
+    A vector matches iff **both** sides ran (``ok`` true), exited with the same ``exit_code``, AND
+    produced byte-identical ``stdout`` (no normalization — D2). A failed/stub build therefore
+    matches nothing, so a low/zero score is honest signal (D2), never a crash.
+
+    Args:
+        runs_a: The reference build's per-vector run-results, or ``None`` when no trusted reference
+            is available (e.g. an arbitrary hostile binary with no known source — D1).
+        runs_b: The candidate build's per-vector run-results, or ``None``.
+
+    Returns:
+        The matching fraction in ``[0, 1]``, or ``None`` (honest *unavailable*) when either side is
+        absent/empty or the two run-lists differ in length (no shared vector set to compare over).
+    """
+    if not runs_a or not runs_b or len(runs_a) != len(runs_b):
+        # No trusted reference, no inputs, or a misaligned vector set → unavailable, not fabricated.
+        return None
+    matches = sum(1 for a, b in zip(runs_a, runs_b, strict=True) if _runs_match(a, b))
+    return matches / len(runs_a)
+
+
+def _runs_match(a: RunResult, b: RunResult) -> bool:
+    """Whether two run-results agree on the byte-exact (exit_code, stdout) oracle (D2).
+
+    Both must have actually run; a build/spawn failure on either side is a non-match (honest).
+    """
+    return a.ok and b.ok and a.exit_code == b.exit_code and a.stdout == b.stdout
+
+
+@dataclass(frozen=True, slots=True)
 class NamingMetrics:
     """Measured quality of a naming pass (best-effort signals; see module docstring).
 
@@ -68,7 +148,9 @@ class NamingMetrics:
         name_coverage: ``named_functions / inferred_functions`` (``0.0`` when none inferred).
         compiles: Whether the translation unit compiled, or ``None`` if no compiler was run.
         compile_diagnostics: Compiler diagnostics when a runner ran, else ``None``.
-        behavioral_equivalence: Measured equivalence rate, or ``None`` (deferred — research-hard).
+        behavioral_equivalence: Measured (exit_code, stdout) match-rate between the trusted
+            reference build (A) and the candidate build (B) over shared synthetic inputs (ADR-016),
+            or ``None`` when no trusted reference + inputs were supplied (honest unavailability).
         naming_accuracy: Proposed-vs-ground-truth name accuracy, or ``None`` if no ground truth
             was supplied.
     """
@@ -223,6 +305,7 @@ def score(
     *,
     compile_runner: CompileRunner | None = None,
     ground_truth: Mapping[str, str] | None = None,
+    behavioral_runs: tuple[list[RunResult], list[RunResult]] | None = None,
 ) -> NamingMetrics:
     """Compute :class:`NamingMetrics` for a naming pass.
 
@@ -232,6 +315,12 @@ def score(
             hermetic), compilability is not measured (``compiles=None``) — name coverage still is.
         ground_truth: Optional address→name map (e.g. DWARF symbols). When supplied, naming accuracy
             is measured; when ``None`` (default), ``naming_accuracy`` is ``None``.
+        behavioral_runs: Optional ``(reference_runs, candidate_runs)`` — the per-input-vector
+            :class:`RunResult` lists for build A (trusted reference source) and build B (the
+            candidate recompiled C), already captured by a SANDBOXED :data:`ExecRunner` (ADR-016).
+            When supplied, ``behavioral_equivalence`` is the byte-exact match-rate; when ``None``
+            (default — no trusted reference + inputs), it stays ``None`` (honest unavailability,
+            D1). This core *compares* inert results only — it never executes anything.
 
     Returns:
         The measured (best-effort) metrics.
@@ -248,6 +337,11 @@ def score(
 
     accuracy = naming_accuracy(program, ground_truth) if ground_truth is not None else None
 
+    behavioral: float | None = None
+    if behavioral_runs is not None:
+        runs_a, runs_b = behavioral_runs
+        behavioral = behavioral_equivalence(runs_a, runs_b)
+
     return NamingMetrics(
         total_functions=len(program.functions),
         inferred_functions=len(inferred),
@@ -256,6 +350,6 @@ def score(
         name_coverage=(named / len(inferred)) if inferred else 0.0,
         compiles=compiles,
         compile_diagnostics=diagnostics,
-        behavioral_equivalence=None,
+        behavioral_equivalence=behavioral,
         naming_accuracy=accuracy,
     )

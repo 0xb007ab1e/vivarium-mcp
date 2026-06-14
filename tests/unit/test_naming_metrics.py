@@ -1,8 +1,9 @@
-"""Unit tests for the naming-quality eval metrics (ADR-010).
+"""Unit tests for the naming-quality eval metrics (ADR-010, ADR-016).
 
 Hermetic: the compile runner is a deterministic fake (a real one must sandbox the untrusted C —
-ADR-010 §Security). Cover name coverage (incl. placeholder detection), and scoring with/without a
-compiler.
+ADR-010 §Security). Cover name coverage (incl. placeholder detection), scoring with/without a
+compiler, and the pure ADR-016 ``behavioral_equivalence`` differential oracle (100% line+branch on
+the critical comparison core — it executes NOTHING, only compares inert captured run-results).
 """
 
 from __future__ import annotations
@@ -10,6 +11,8 @@ from __future__ import annotations
 from ghidra_mcp.naming.loop import FunctionNaming, RenamedProgram
 from ghidra_mcp.naming.metrics import (
     CompileResult,
+    RunResult,
+    behavioral_equivalence,
     name_coverage,
     naming_accuracy,
     score,
@@ -139,9 +142,98 @@ def test_naming_accuracy_ignores_unparseable_addresses() -> None:
     assert acc.scored == 0 and acc.unscored == 1
 
 
+def test_naming_accuracy_handles_empty_token_identifiers() -> None:
+    # An all-punctuation proposed name tokenizes to an empty set; token-F1's empty-set branch
+    # must score 0.0 against a real-token truth (not crash) and a non-zero exact rate is impossible.
+    prog = _program(_inferred("0x401000", "__"))
+    acc = naming_accuracy(prog, {"0x401000": "parse_value"})
+    assert acc.scored == 1 and acc.mean_token_f1 == 0.0
+    # Two empty-token identifiers are token-equal → F1 1.0 (the ``pt == tt`` side of the branch).
+    same = _program(_inferred("0x401000", "__"))
+    assert naming_accuracy(same, {"0x401000": "++"}).mean_token_f1 == 1.0
+
+
 def test_score_wires_ground_truth() -> None:
     prog = _program(_inferred("0x401000", "decode"))
     assert score(prog).naming_accuracy is None  # not measured without truth
     m = score(prog, ground_truth={"0x401000": "decode"})
     assert m.naming_accuracy is not None
     assert m.naming_accuracy.exact_match_rate == 1.0
+
+
+# --- behavioral_equivalence (ADR-016 differential oracle — pure, executes nothing) ---------------
+
+
+def _run(exit_code: int, stdout: bytes, *, ok: bool = True) -> RunResult:
+    return RunResult(ok=ok, exit_code=exit_code, stdout=stdout)
+
+
+def test_behavioral_equivalence_all_match_is_one() -> None:
+    # Both builds agree on (exit_code, stdout) for every vector → perfect equivalence.
+    a = [_run(0, b"hello\n"), _run(0, b"42\n")]
+    b = [_run(0, b"hello\n"), _run(0, b"42\n")]
+    assert behavioral_equivalence(a, b) == 1.0
+
+
+def test_behavioral_equivalence_partial_match_is_fraction() -> None:
+    # Vector 1 matches; vector 2 differs in stdout; vector 3 differs in exit code → 1/3.
+    a = [_run(0, b"x"), _run(0, b"y"), _run(0, b"z")]
+    b = [_run(0, b"x"), _run(0, b"DIFFERENT"), _run(7, b"z")]
+    assert behavioral_equivalence(a, b) == 1 / 3
+
+
+def test_behavioral_equivalence_byte_exact_no_normalization() -> None:
+    # A single trailing-whitespace difference is a NON-match (byte-exact, no normalization — D2).
+    a = [_run(0, b"result\n")]
+    b = [_run(0, b"result \n")]
+    assert behavioral_equivalence(a, b) == 0.0
+
+
+def test_behavioral_equivalence_failed_build_scores_zero() -> None:
+    # A stub / non-recompiling candidate (ok=False) matches NOTHING — low score is honest (D2).
+    a = [_run(0, b"out"), _run(0, b"out2")]
+    b = [RunResult(ok=False), RunResult(ok=False)]
+    assert behavioral_equivalence(a, b) == 0.0
+
+
+def test_behavioral_equivalence_one_side_failed_is_nonmatch() -> None:
+    # Even if exit/stdout would line up, ok=False on EITHER side is a non-match.
+    a = [_run(0, b"same")]
+    b = [RunResult(ok=False, exit_code=0, stdout=b"same")]
+    assert behavioral_equivalence(a, b) == 0.0
+
+
+def test_behavioral_equivalence_none_when_no_reference() -> None:
+    # No trusted reference (build A) → unavailable, never a fabricated number (D1).
+    assert behavioral_equivalence(None, [_run(0, b"x")]) is None
+    assert behavioral_equivalence([_run(0, b"x")], None) is None
+    assert behavioral_equivalence(None, None) is None
+
+
+def test_behavioral_equivalence_none_when_empty() -> None:
+    # No input vectors → nothing to compare → unavailable.
+    assert behavioral_equivalence([], []) is None
+    assert behavioral_equivalence([], [_run(0, b"x")]) is None
+
+
+def test_behavioral_equivalence_none_when_lengths_differ() -> None:
+    # A misaligned vector set has no shared basis → unavailable, not a partial guess.
+    assert behavioral_equivalence([_run(0, b"x")], [_run(0, b"x"), _run(0, b"y")]) is None
+
+
+def test_score_wires_behavioral_runs_when_supplied() -> None:
+    prog = _program(_inferred("0x401000", "decode"))
+    # No runs supplied → behavioral_equivalence stays None (honest unavailability — D1).
+    assert score(prog).behavioral_equivalence is None
+    # Reference (A) and candidate (B) runs supplied → measured match-rate is populated.
+    ref = [_run(0, b"ok"), _run(0, b"two")]
+    cand = [_run(0, b"ok"), _run(0, b"NOPE")]
+    m = score(prog, behavioral_runs=(ref, cand))
+    assert m.behavioral_equivalence == 0.5
+
+
+def test_score_behavioral_runs_none_propagates_when_unavailable() -> None:
+    # A supplied-but-degenerate run pair (mismatched lengths) → the metric is None, not a crash.
+    prog = _program(_inferred("0x401000", "decode"))
+    m = score(prog, behavioral_runs=([_run(0, b"x")], []))
+    assert m.behavioral_equivalence is None
