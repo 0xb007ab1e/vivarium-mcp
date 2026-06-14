@@ -28,9 +28,12 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ghidra_mcp.server.auth import AuthContext, Authenticator
 
-_SCOPE_PRINCIPAL_KEY = (
-    "ghidra_mcp.principal"  # where AuthenticationMiddleware stashes the principal
-)
+#: ASGI ``scope["state"]`` key under which :class:`AuthenticationMiddleware` stashes the
+#: authenticated :class:`~ghidra_mcp.server.auth.Principal` for the per-request, server-side
+#: ownership check (ADR-017). Public so the composition root's per-request principal resolver
+#: (:func:`ghidra_mcp.server.app._http_principal_resolver`) reads the same key.
+SCOPE_PRINCIPAL_KEY = "ghidra_mcp.principal"
+_SCOPE_PRINCIPAL_KEY = SCOPE_PRINCIPAL_KEY  # backward-compatible private alias
 
 # Cap on distinct per-client rate-limit buckets so the limiter (itself the TB6-D DoS control)
 # cannot become an unbounded memory-growth vector under many-source traffic (CWE-400). The LRU

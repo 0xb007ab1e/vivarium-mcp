@@ -28,8 +28,9 @@ from ghidra_mcp.config import Config, HttpConfig
 from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from ghidra_mcp.ghidra.port import GhidraPort
 from ghidra_mcp.logging import get_logger
-from ghidra_mcp.server.auth import Authenticator, build_authenticator
+from ghidra_mcp.server.auth import Authenticator, Principal, build_authenticator
 from ghidra_mcp.server.http_middleware import (
+    SCOPE_PRINCIPAL_KEY,
     AuthenticationMiddleware,
     RateLimitMiddleware,
     RequestSizeLimitMiddleware,
@@ -167,6 +168,11 @@ def build_app(config: Config, *, session_manager: SessionManager, port: GhidraPo
     registers the full, allow-listed Tier-1 catalog (each handler wrapped in the error boundary),
     and returns the ready-to-serve app. No JVM and no binary parsing occur here (ADR-001).
 
+    For HTTP transport the context is given a **per-request principal resolver** bound to this app
+    (ADR-017): each session-scoped tool call is owned by the authenticated request's server-derived
+    principal. For stdio there is no resolver and every session is owned by the implicit local
+    operator (single-principal). Identity is always server-derived — never client-supplied.
+
     Note:
         The ``port`` keyword is required (the tool handlers cannot reach Ghidra without it). This
         extends the WS0 stub signature ``build_app(config, *, session_manager)`` additively — see
@@ -178,13 +184,62 @@ def build_app(config: Config, *, session_manager: SessionManager, port: GhidraPo
         port: The Ghidra adapter implementing :class:`ghidra_mcp.ghidra.port.GhidraPort`.
 
     Returns:
-        A FastMCP application instance ready to serve over stdio.
+        A FastMCP application instance ready to serve.
     """
     app = FastMCP(name=_SERVER_NAME, instructions=_SERVER_INSTRUCTIONS)
-    ctx = ToolContext(config=config, sessions=session_manager, port=port)
+    # HTTP is multi-principal: resolve the owner/caller per request from the authenticated scope
+    # principal (ADR-017). stdio is single-principal (the implicit local operator) — no resolver.
+    resolve_principal = _http_principal_resolver(app) if config.transport == "http" else None
+    ctx = ToolContext(
+        config=config,
+        sessions=session_manager,
+        port=port,
+        resolve_principal=resolve_principal,
+    )
     register_tools(app, ctx, wrap=_with_error_boundary)
     _log.info("server.built", extra={"server": _SERVER_NAME})
     return app
+
+
+def _http_principal_resolver(app: FastMCP) -> Callable[[], Principal]:
+    """Build a per-request principal resolver reading the scope-stashed principal (ADR-017).
+
+    The :class:`~ghidra_mcp.server.http_middleware.AuthenticationMiddleware` authenticates each HTTP
+    request server-side and stashes the resulting :class:`Principal` on the ASGI request ``scope``
+    state. This resolver fetches it from the live FastMCP request context at tool-call time, so the
+    session ``owner``/``caller`` is the **authenticated request's** principal — not client-supplied.
+
+    Fails closed: if no principal is present on the scope (a path that bypassed the middleware), the
+    resolver raises rather than defaulting to the local operator, so no session-scoped call runs
+    unauthenticated under HTTP (master §2). In practice the middleware always populates it; a
+    missing principal indicates a wiring fault.
+
+    Args:
+        app: The FastMCP application (exposes the current request context).
+
+    Returns:
+        A zero-arg callable returning the current request's :class:`Principal`.
+    """
+
+    def _resolve() -> Principal:
+        request = app.get_context().request_context.request
+        state = getattr(request, "scope", {}).get("state", {}) if request is not None else {}
+        principal = state.get(SCOPE_PRINCIPAL_KEY)
+        if not isinstance(principal, Principal):
+            # Fail closed (ADR-017 / master §2): never run a session-scoped tool without a
+            # server-derived principal on an HTTP request.
+            raise GhidraMcpError(
+                ErrorEnvelope(
+                    type=ErrorType.INTERNAL,
+                    title="Internal error",
+                    detail="Authenticated principal missing from the request context.",
+                    status=500,
+                    retryable=False,
+                )
+            )
+        return principal
+
+    return _resolve
 
 
 def run_stdio(app: FastMCP, *, session_manager: SessionManager) -> int:
@@ -320,7 +375,11 @@ def run_http(
                 retryable=False,
             )
         )
-    authenticator = build_authenticator(http.auth_mode, bearer_token=http.bearer_token)
+    authenticator = build_authenticator(
+        http.auth_mode,
+        bearer_token=http.bearer_token,
+        bearer_tokens=http.bearer_tokens,
+    )
     asgi = build_http_asgi_app(app.streamable_http_app(), http, authenticator=authenticator)
     _install_shutdown_handlers()
     log_level = config.log_level.lower()

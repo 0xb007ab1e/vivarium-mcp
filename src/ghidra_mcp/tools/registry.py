@@ -35,10 +35,15 @@ from ghidra_mcp.core import validation as v
 from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from ghidra_mcp.ghidra.port import GhidraPort
 from ghidra_mcp.logging import get_logger
+from ghidra_mcp.server.auth import Principal
 from ghidra_mcp.sessions.manager import SessionManager
 from ghidra_mcp.tools import schemas as s
 
 _log = get_logger(__name__)
+
+#: The implicit local-operator principal (stdio / single-principal default — ADR-006/ADR-017).
+#: A module-level constant (frozen, immutable) so it can be a dataclass default without RUF009.
+_LOCAL_PRINCIPAL = Principal(id="local")
 
 # The canonical, frozen list of Tier-1 tool names (matches docs/contracts/tool-catalog.md).
 # Kept as data so the catalog can be asserted in tests and registered uniformly.
@@ -133,11 +138,37 @@ class ToolContext:
         config: Validated server configuration (limits, session policy).
         sessions: The session manager that authorizes session-scoped calls (BOLA chokepoint).
         port: The Ghidra adapter the handlers delegate analysis to (ADR-001 boundary).
+        principal: The static **server-derived** identity for this context (ADR-017). Used for
+            stdio (the implicit local operator) and as the fallback when no per-request resolver is
+            wired. Never client-supplied. Defaults to the local operator (single-principal stdio).
+        resolve_principal: Optional per-request resolver (HTTP). When set, :attr:`caller_id` calls
+            it to obtain the **current request's** authenticated principal (built by the auth
+            middleware from the request, then stashed on the ASGI scope) — so one shared context
+            serves many principals, each owning only its own sessions. ``None`` ⇒ static principal.
+
+    Note:
+        Handlers MUST read :attr:`caller_id` (never ``principal.id`` directly) so the per-request
+        resolver is honored — that is the single seam that keeps HTTP multi-principal while stdio
+        stays the local operator.
     """
 
     config: Config
     sessions: SessionManager
     port: GhidraPort
+    principal: Principal = _LOCAL_PRINCIPAL
+    resolve_principal: Callable[[], Principal] | None = None
+
+    @property
+    def caller_id(self) -> str:
+        """The current call's server-derived principal id (the session ``owner``/``caller`` key).
+
+        Returns the per-request resolver's principal id when wired (HTTP), else the static
+        :attr:`principal` id (stdio / tests). Identity is always server-derived — never from client
+        input (BOLA / ``std-owasp-api`` API1).
+        """
+        if self.resolve_principal is not None:
+            return self.resolve_principal().id
+        return self.principal.id
 
 
 # =====================================================================================
@@ -153,8 +184,15 @@ def _handle_session_create(ctx: ToolContext, args: s.SessionCreateIn) -> s.Sessi
     Returns:
         The new session's :class:`~ghidra_mcp.tools.schemas.SessionInfo`.
     """
-    info = ctx.sessions.create(label=args.label)
-    _log.info("tool.session_create", extra={"tool": "session_create", "session": info.session_id})
+    info = ctx.sessions.create(owner=ctx.caller_id, label=args.label)
+    _log.info(
+        "tool.session_create",
+        extra={
+            "tool": "session_create",
+            "session": info.session_id,
+            "principal_id": ctx.caller_id,
+        },
+    )
     return info
 
 
@@ -177,11 +215,12 @@ def _handle_session_import(ctx: ToolContext, args: s.SessionImportIn) -> s.Sessi
     Returns:
         Updated :class:`SessionInfo` after import, with authoritative lifecycle fields.
     """
-    authoritative = ctx.sessions.authorize(args.session_id)
+    authoritative = ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     # Spawn the session's hardened worker on first import (idempotent; the manager owns worker
     # lifetime — ADR-002). Without this the adapter has no worker socket for the session and the
-    # import fails closed as worker-unavailable.
-    ctx.sessions.ensure_worker(args.session_id)
+    # import fails closed as worker-unavailable. Owner-scoped (ADR-017): only the owning principal
+    # can spawn this session's worker.
+    ctx.sessions.ensure_worker(args.session_id, caller=ctx.caller_id)
     imported = ctx.port.import_binary(args.session_id, args)
     return _merge_session_info(authoritative, imported)
 
@@ -201,7 +240,7 @@ def _handle_session_analyze(ctx: ToolContext, args: s.SessionAnalyzeIn) -> s.Ses
     Returns:
         Updated :class:`SessionInfo` after analysis, with authoritative lifecycle fields.
     """
-    authoritative = ctx.sessions.authorize(args.session_id)
+    authoritative = ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     analyzed = ctx.port.analyze(args.session_id, args)
     return _merge_session_info(authoritative, analyzed)
 
@@ -236,7 +275,7 @@ def _handle_session_status(ctx: ToolContext, args: s._SessionScopedIn) -> s.Sess
     Returns:
         The authorized session's :class:`SessionInfo`.
     """
-    return ctx.sessions.authorize(args.session_id)
+    return ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
 
 
 def _handle_session_close(ctx: ToolContext, args: s.SessionCloseIn) -> s.SessionCloseOut:
@@ -252,11 +291,17 @@ def _handle_session_close(ctx: ToolContext, args: s.SessionCloseIn) -> s.Session
     Returns:
         :class:`SessionCloseOut` reporting whether the store was verified-wiped.
     """
-    ctx.sessions.authorize(args.session_id)
-    wiped = ctx.sessions.evict(args.session_id, reason="close")
+    # Owner-scoped close (ADR-017): pass the caller so the evict is gated by the same ownership
+    # chokepoint — a foreign caller cannot tear down another principal's session (BOLA-safe).
+    wiped = ctx.sessions.evict(args.session_id, reason="close", caller=ctx.caller_id)
     _log.info(
         "tool.session_close",
-        extra={"tool": "session_close", "session": args.session_id, "store_wiped": wiped},
+        extra={
+            "tool": "session_close",
+            "session": args.session_id,
+            "principal_id": ctx.caller_id,
+            "store_wiped": wiped,
+        },
     )
     return s.SessionCloseOut(session_id=args.session_id, store_wiped=wiped)
 
@@ -268,14 +313,14 @@ def _handle_decompile_function(
     ctx: ToolContext, args: s.DecompileFunctionIn
 ) -> s.DecompiledFunction:
     """Decompile one function (output is untrusted; wrapped by the adapter)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.function)
     return ctx.port.decompile_function(args.session_id, args)
 
 
 def _handle_disassemble(ctx: ToolContext, args: s.DisassembleIn) -> s.DisassembleOut:
     """Disassemble a bounded range or function."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     if args.start is not None:
         v.parse_address(args.start)
     if args.function is not None:
@@ -287,7 +332,7 @@ def _handle_disassemble(ctx: ToolContext, args: s.DisassembleIn) -> s.Disassembl
 
 def _handle_list_functions(ctx: ToolContext, args: s.ListFunctionsIn) -> s.FunctionListOut:
     """List functions (paginated/bounded)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     if args.name_contains is not None:
         v.validate_name(args.name_contains)
     return ctx.port.list_functions(args.session_id, args)
@@ -295,7 +340,7 @@ def _handle_list_functions(ctx: ToolContext, args: s.ListFunctionsIn) -> s.Funct
 
 def _handle_get_function(ctx: ToolContext, args: s.GetFunctionIn) -> s.FunctionDetail:
     """Get one function's detail."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.function)
     return ctx.port.get_function(args.session_id, args)
 
@@ -305,14 +350,14 @@ def _handle_get_function(ctx: ToolContext, args: s.GetFunctionIn) -> s.FunctionD
 # =====================================================================================
 def _handle_xrefs_to(ctx: ToolContext, args: s.XrefsIn) -> s.XrefsOut:
     """References TO a target."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.target)
     return ctx.port.xrefs_to(args.session_id, args)
 
 
 def _handle_xrefs_from(ctx: ToolContext, args: s.XrefsIn) -> s.XrefsOut:
     """References FROM a target."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.target)
     return ctx.port.xrefs_from(args.session_id, args)
 
@@ -322,13 +367,13 @@ def _handle_xrefs_from(ctx: ToolContext, args: s.XrefsIn) -> s.XrefsOut:
 # =====================================================================================
 def _handle_list_strings(ctx: ToolContext, args: s.ListStringsIn) -> s.StringListOut:
     """List defined strings (paginated/bounded)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     return ctx.port.list_strings(args.session_id, args)
 
 
 def _handle_list_symbols(ctx: ToolContext, args: s.ListSymbolsIn) -> s.SymbolListOut:
     """List symbols (paginated/bounded)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     if args.name_contains is not None:
         v.validate_name(args.name_contains)
     return ctx.port.list_symbols(args.session_id, args)
@@ -336,20 +381,20 @@ def _handle_list_symbols(ctx: ToolContext, args: s.ListSymbolsIn) -> s.SymbolLis
 
 def _handle_get_symbol(ctx: ToolContext, args: s.GetSymbolIn) -> s.Symbol:
     """Resolve one symbol by name or address."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.identifier)
     return ctx.port.get_symbol(args.session_id, args)
 
 
 def _handle_list_data(ctx: ToolContext, args: s.ListDataIn) -> s.DataListOut:
     """List defined data (paginated/bounded)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     return ctx.port.list_data(args.session_id, args)
 
 
 def _handle_get_data_type(ctx: ToolContext, args: s.GetDataTypeIn) -> s.DataType:
     """Resolve one data type by name."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.name)
     return ctx.port.get_data_type(args.session_id, args)
 
@@ -359,7 +404,7 @@ def _handle_get_data_type(ctx: ToolContext, args: s.GetDataTypeIn) -> s.DataType
 # =====================================================================================
 def _handle_get_comments(ctx: ToolContext, args: s.GetCommentsIn) -> s.CommentListOut:
     """Read comments (paginated/bounded)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     if args.address is not None:
         v.parse_address(args.address)
     return ctx.port.get_comments(args.session_id, args)
@@ -370,13 +415,13 @@ def _handle_get_comments(ctx: ToolContext, args: s.GetCommentsIn) -> s.CommentLi
 # =====================================================================================
 def _handle_memory_map(ctx: ToolContext, args: s.MemoryMapIn) -> s.MemoryMapOut:
     """List memory blocks/segments."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     return ctx.port.memory_map(args.session_id, args)
 
 
 def _handle_read_bytes(ctx: ToolContext, args: s.ReadBytesIn) -> s.ReadBytesOut:
     """Bounded raw byte read (offset/length overflow-guarded before the worker)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     offset = v.parse_address(args.address)
     v.validate_byte_range(offset, args.length)
     return ctx.port.read_bytes(args.session_id, args)
@@ -384,14 +429,14 @@ def _handle_read_bytes(ctx: ToolContext, args: s.ReadBytesIn) -> s.ReadBytesOut:
 
 def _handle_search_bytes(ctx: ToolContext, args: s.SearchBytesIn) -> s.SearchBytesOut:
     """Bounded byte-pattern search (pattern validated as hex with optional ``??`` wildcards)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_byte_pattern(args.pattern_hex)
     return ctx.port.search_bytes(args.session_id, args)
 
 
 def _handle_search_strings(ctx: ToolContext, args: s.SearchStringsIn) -> s.SearchStringsOut:
     """Bounded defined-string search."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_query(args.query)
     return ctx.port.search_strings(args.session_id, args)
 
@@ -401,7 +446,7 @@ def _handle_search_strings(ctx: ToolContext, args: s.SearchStringsIn) -> s.Searc
 # =====================================================================================
 def _handle_program_metadata(ctx: ToolContext, args: s.ProgramMetadataIn) -> s.ProgramMetadata:
     """High-level program metadata (no binary content beyond format-reported, wrapped fields)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     return ctx.port.program_metadata(args.session_id, args)
 
 
@@ -415,7 +460,7 @@ def _handle_program_metadata(ctx: ToolContext, args: s.ProgramMetadataIn) -> s.P
 # the adapter — no JVM on the server. None of these mutate the Ghidra DB (output-only).
 def _handle_call_graph(ctx: ToolContext, args: s.CallGraphIn) -> s.CallGraphOut:
     """Extract the bounded function call adjacency (resolved edges + unresolved callers)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     if args.root is not None:
         v.validate_name(args.root)
     return ctx.port.call_graph(args.session_id, args)
@@ -423,14 +468,14 @@ def _handle_call_graph(ctx: ToolContext, args: s.CallGraphIn) -> s.CallGraphOut:
 
 def _handle_callees(ctx: ToolContext, args: s.CalleesIn) -> s.CallNeighborsOut:
     """List the functions a given function directly calls (one hop, paginated/bounded)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.function)
     return ctx.port.callees(args.session_id, args)
 
 
 def _handle_callers(ctx: ToolContext, args: s.CallersIn) -> s.CallNeighborsOut:
     """List the functions that directly call a given function (one hop, paginated/bounded)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.function)
     return ctx.port.callers(args.session_id, args)
 
@@ -441,7 +486,7 @@ def _handle_analysis_order(ctx: ToolContext, args: s.AnalysisOrderIn) -> s.Analy
     The adjacency is extracted by the worker; the ordering is computed by the pure server-side core
     (:mod:`ghidra_mcp.core.callgraph`) within the adapter — no JVM on the server (ADR-001).
     """
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     if args.root is not None:
         v.validate_name(args.root)
     return ctx.port.analysis_order(args.session_id, args)
@@ -449,7 +494,7 @@ def _handle_analysis_order(ctx: ToolContext, args: s.AnalysisOrderIn) -> s.Analy
 
 def _handle_function_context(ctx: ToolContext, args: s.FunctionContextIn) -> s.FunctionContext:
     """Assemble the per-function naming/synthesis context bundle (server-side aggregation)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.function)
     return ctx.port.function_context(args.session_id, args)
 
@@ -462,32 +507,32 @@ def _handle_cyclomatic_complexity(
     ctx: ToolContext, args: s.CyclomaticComplexityIn
 ) -> s.CyclomaticComplexity:
     """McCabe cyclomatic complexity of one function."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.function)
     return ctx.port.cyclomatic_complexity(args.session_id, args)
 
 
 def _handle_list_imports(ctx: ToolContext, args: s.ListImportsIn) -> s.ImportListOut:
     """List imported symbols/functions (paginated/bounded)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     return ctx.port.list_imports(args.session_id, args)
 
 
 def _handle_list_exports(ctx: ToolContext, args: s.ListExportsIn) -> s.ExportListOut:
     """List exported symbols/entry points (paginated/bounded)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     return ctx.port.list_exports(args.session_id, args)
 
 
 def _handle_coverage(ctx: ToolContext, args: s.CoverageIn) -> s.CoverageOut:
     """Defined-code/data byte coverage of the program."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     return ctx.port.coverage(args.session_id, args)
 
 
 def _handle_ioc_scan(ctx: ToolContext, args: s.IocScanIn) -> s.IocScanOut:
     """Heuristic IOC scan over defined strings (pure core over list_strings)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     return ctx.port.ioc_scan(args.session_id, args)
 
 
@@ -495,7 +540,7 @@ def _handle_crypto_constant_scan(
     ctx: ToolContext, args: s.CryptoConstantScanIn
 ) -> s.CryptoConstantScanOut:
     """Heuristic crypto-constant search (signature table over search_bytes)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     return ctx.port.crypto_constant_scan(args.session_id, args)
 
 
@@ -503,7 +548,7 @@ def _handle_call_graph_metrics(
     ctx: ToolContext, args: s.CallGraphMetricsIn
 ) -> s.CallGraphMetricsOut:
     """Structural call-graph metrics (pure core over call_graph)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     if args.root is not None:
         v.validate_name(args.root)
     return ctx.port.call_graph_metrics(args.session_id, args)
@@ -511,7 +556,7 @@ def _handle_call_graph_metrics(
 
 def _handle_program_summary(ctx: ToolContext, args: s.ProgramSummaryIn) -> s.ProgramSummary:
     """One-shot aggregate triage report (server-side aggregation)."""
-    ctx.sessions.authorize(args.session_id)
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     return ctx.port.program_summary(args.session_id, args)
 
 
@@ -552,7 +597,9 @@ def _handle_session_enable_writes(
     ctx: ToolContext, args: s.SessionEnableWritesIn
 ) -> s.SessionWriteStateOut:
     """Grant write consent to a session — the human-in-the-loop mutation gate (ADR-012 §3)."""
-    info = ctx.sessions.enable_writes(args.session_id, allow_structural=args.allow_structural)
+    info = ctx.sessions.enable_writes(
+        args.session_id, allow_structural=args.allow_structural, caller=ctx.caller_id
+    )
     _log.info(
         "tool.session_enable_writes",
         extra={
@@ -572,7 +619,7 @@ def _handle_session_disable_writes(
     ctx: ToolContext, args: s.SessionDisableWritesIn
 ) -> s.SessionWriteStateOut:
     """Revoke write consent for a session (return it to read-only)."""
-    info = ctx.sessions.disable_writes(args.session_id)
+    info = ctx.sessions.disable_writes(args.session_id, caller=ctx.caller_id)
     _log.info(
         "tool.session_disable_writes",
         extra={"tool": "session_disable_writes", "session": args.session_id},
@@ -586,7 +633,7 @@ def _handle_session_disable_writes(
 
 def _handle_session_undo(ctx: ToolContext, args: s.SessionUndoIn) -> s.SessionUndoOut:
     """Undo the last committed mutation transaction (requires write consent — ADR-012 §4)."""
-    ctx.sessions.require_write_consent(args.session_id)
+    ctx.sessions.require_write_consent(args.session_id, caller=ctx.caller_id)
     result = ctx.port.undo(args.session_id, args)
     _log.info(
         "tool.session_undo",
@@ -597,7 +644,7 @@ def _handle_session_undo(ctx: ToolContext, args: s.SessionUndoIn) -> s.SessionUn
 
 def _handle_rename_function(ctx: ToolContext, args: s.RenameFunctionIn) -> s.RenameResult:
     """Rename one function (write; gated by consent + write-name allow-list — ADR-012)."""
-    ctx.sessions.require_write_consent(args.session_id)
+    ctx.sessions.require_write_consent(args.session_id, caller=ctx.caller_id)
     v.validate_write_name(args.new_name)  # reject attacker-influenced markup/path/etc.
     _log.info(
         "tool.rename_function.intent",
@@ -618,7 +665,7 @@ def _handle_rename_function(ctx: ToolContext, args: s.RenameFunctionIn) -> s.Ren
 
 def _handle_rename_symbol(ctx: ToolContext, args: s.RenameSymbolIn) -> s.RenameSymbolResult:
     """Rename one data/label/global symbol (write; gated by consent + allow-list — ADR-012)."""
-    ctx.sessions.require_write_consent(args.session_id)
+    ctx.sessions.require_write_consent(args.session_id, caller=ctx.caller_id)
     v.validate_write_name(args.new_name)
     _log.info(
         "tool.rename_symbol.intent",
@@ -639,7 +686,7 @@ def _handle_rename_symbol(ctx: ToolContext, args: s.RenameSymbolIn) -> s.RenameS
 
 def _handle_set_comment(ctx: ToolContext, args: s.SetCommentIn) -> s.SetCommentResult:
     """Set or clear one comment (write; gated; text normalized on the way in — ADR-012)."""
-    ctx.sessions.require_write_consent(args.session_id)
+    ctx.sessions.require_write_consent(args.session_id, caller=ctx.caller_id)
     v.parse_address(args.address)  # validate/confine the target address (CWE-22/190)
     if args.text is not None:
         # Normalize the attacker-influenced comment on the way IN (stored-injection defense);
@@ -669,7 +716,7 @@ def _handle_rename_local_variable(
     ctx: ToolContext, args: s.RenameLocalVariableIn
 ) -> s.StructuralRenameResult:
     """Rename a function-local variable (structural; gated by allow_structural — ADR-013)."""
-    ctx.sessions.require_write_consent(args.session_id, structural=True)
+    ctx.sessions.require_write_consent(args.session_id, structural=True, caller=ctx.caller_id)
     v.validate_name(args.function)  # function selector (read-path baseline)
     v.validate_target_ref(args.variable)  # local selector (bounded, control-free)
     v.validate_write_name(args.new_name)  # persisted name → strict allow-list
@@ -699,7 +746,7 @@ def _handle_rename_parameter(
     ctx: ToolContext, args: s.RenameParameterIn
 ) -> s.StructuralRenameResult:
     """Rename a function parameter (structural; gated by allow_structural — ADR-013)."""
-    ctx.sessions.require_write_consent(args.session_id, structural=True)
+    ctx.sessions.require_write_consent(args.session_id, structural=True, caller=ctx.caller_id)
     v.validate_name(args.function)
     v.validate_target_ref(args.parameter)
     v.validate_write_name(args.new_name)
@@ -729,7 +776,7 @@ def _handle_set_function_signature(
     ctx: ToolContext, args: s.SetFunctionSignatureIn
 ) -> s.SetFunctionSignatureResult:
     """Set a function's structured signature (structural; gated by allow_structural — ADR-014)."""
-    ctx.sessions.require_write_consent(args.session_id, structural=True)
+    ctx.sessions.require_write_consent(args.session_id, structural=True, caller=ctx.caller_id)
     v.validate_signature(args)  # function selector + bounded params + resolved TypeRefs + cc
     _log.info(
         "tool.set_function_signature.intent",
@@ -755,7 +802,7 @@ def _handle_set_function_signature(
 
 def _handle_apply_data_type(ctx: ToolContext, args: s.ApplyDataTypeIn) -> s.ApplyDataTypeResult:
     """Apply a resolvable type at an address (structural; gated by allow_structural — ADR-014)."""
-    ctx.sessions.require_write_consent(args.session_id, structural=True)
+    ctx.sessions.require_write_consent(args.session_id, structural=True, caller=ctx.caller_id)
     v.parse_address(args.address)  # validate/confine the target address (CWE-22/190)
     v.validate_type_ref(args.type)  # resolved TypeRef shape/bounds (worker not-founds an unknown)
     _log.info(
@@ -782,7 +829,7 @@ def _handle_apply_data_type(ctx: ToolContext, args: s.ApplyDataTypeIn) -> s.Appl
 # type inside one transaction, name-collision-REJECTs, size-checks, and rolls back any failure.
 def _handle_define_struct(ctx: ToolContext, args: s.DefineStructIn) -> s.DefineStructResult:
     """Create a new struct from a structured field list (structural; gated — ADR-015)."""
-    ctx.sessions.require_write_consent(args.session_id, structural=True)
+    ctx.sessions.require_write_consent(args.session_id, structural=True, caller=ctx.caller_id)
     v.validate_composite(args, kind="struct")  # name + bounded fields + resolved TypeRefs + no self
     _log.info(
         "tool.define_struct.intent",
@@ -804,7 +851,7 @@ def _handle_define_struct(ctx: ToolContext, args: s.DefineStructIn) -> s.DefineS
 
 def _handle_define_union(ctx: ToolContext, args: s.DefineUnionIn) -> s.DefineUnionResult:
     """Create a new union from a structured field list (structural; gated — ADR-015)."""
-    ctx.sessions.require_write_consent(args.session_id, structural=True)
+    ctx.sessions.require_write_consent(args.session_id, structural=True, caller=ctx.caller_id)
     v.validate_composite(args, kind="union")  # name + bounded fields + resolved TypeRefs + no self
     _log.info(
         "tool.define_union.intent",

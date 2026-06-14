@@ -81,7 +81,9 @@ class _FakeSessions:
                 )
             )
 
-    def enable_writes(self, session_id: str, *, allow_structural: bool = False) -> s.SessionInfo:
+    def enable_writes(
+        self, session_id: str, *, allow_structural: bool = False, caller: str = "local"
+    ) -> s.SessionInfo:
         self._live(session_id)
         self._writes[session_id] = True
         self._structural[session_id] = allow_structural
@@ -94,7 +96,9 @@ class _FakeSessions:
             allow_structural=allow_structural,
         )
 
-    def require_write_consent(self, session_id: str, *, structural: bool = False) -> s.SessionInfo:
+    def require_write_consent(
+        self, session_id: str, *, structural: bool = False, caller: str = "local"
+    ) -> s.SessionInfo:
         self._live(session_id)
         self.consent_checks.append((session_id, structural))
         if not self._writes[session_id]:

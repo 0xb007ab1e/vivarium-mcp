@@ -72,21 +72,25 @@ class FakeSessionManager:
                 )
             )
 
-    def enable_writes(self, session_id: str, *, allow_structural: bool = False) -> s.SessionInfo:
+    def enable_writes(
+        self, session_id: str, *, allow_structural: bool = False, caller: str = "local"
+    ) -> s.SessionInfo:
         """Grant write consent (BOLA-safe on a bad id)."""
         self._require_live(session_id)
         self._writes[session_id] = True
         self._structural[session_id] = allow_structural
         return self._info(session_id)
 
-    def disable_writes(self, session_id: str) -> s.SessionInfo:
+    def disable_writes(self, session_id: str, *, caller: str = "local") -> s.SessionInfo:
         """Revoke write consent."""
         self._require_live(session_id)
         self._writes[session_id] = False
         self._structural[session_id] = False
         return self._info(session_id)
 
-    def require_write_consent(self, session_id: str, *, structural: bool = False) -> s.SessionInfo:
+    def require_write_consent(
+        self, session_id: str, *, structural: bool = False, caller: str = "local"
+    ) -> s.SessionInfo:
         """Authorize + require consent; fail closed with ``VALIDATION`` when not granted."""
         self._require_live(session_id)
         self.consent_checks.append(session_id)

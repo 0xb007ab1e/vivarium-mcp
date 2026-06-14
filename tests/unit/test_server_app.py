@@ -112,13 +112,16 @@ def test_boundary_preserves_handler_signature() -> None:
 
 # --- build_app -----------------------------------------------------------------------
 class _FakeSessions:
-    def authorize(self, sid: str) -> s.SessionInfo:
+    def authorize(self, sid: str, *, caller: str = "local") -> s.SessionInfo:
         return s.SessionInfo(session_id=sid, state="ready", created_at=0, expires_at=10)
 
-    def create(self, *, label: str | None = None) -> s.SessionInfo:
+    def create(self, *, owner: str = "local", label: str | None = None) -> s.SessionInfo:
         return s.SessionInfo(session_id="sid1", state="open", created_at=0, expires_at=10)
 
-    def evict(self, sid: str, *, reason: str) -> bool:
+    def ensure_worker(self, sid: str, *, caller: str = "local") -> None:
+        return None
+
+    def evict(self, sid: str, *, reason: str, caller: str | None = None) -> bool:
         return True
 
     def shutdown(self) -> None:
@@ -293,3 +296,71 @@ def test_main_returns_nonzero_on_collaborator_construction_failure(
         )
 
     assert entry.main(port_factory=bad_port) == 2
+
+
+# ==============================================================================================
+# ADR-017: HTTP per-request principal resolver — reads the authenticated principal stashed on the
+# ASGI scope by the auth middleware (server-derived), and fails closed if it is missing.
+# ==============================================================================================
+import dataclasses  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from ghidra_mcp.server.auth import Principal  # noqa: E402
+from ghidra_mcp.server.http_middleware import SCOPE_PRINCIPAL_KEY  # noqa: E402
+
+
+class _FakeAppWithScope:
+    """Stand-in exposing ``get_context().request_context.request.scope`` for the resolver."""
+
+    def __init__(self, scope: dict[str, Any] | None) -> None:
+        request = None if scope is None else SimpleNamespace(scope=scope)
+        self._ctx = SimpleNamespace(request_context=SimpleNamespace(request=request))
+
+    def get_context(self) -> Any:
+        return self._ctx
+
+
+def test_http_principal_resolver_returns_scope_principal() -> None:
+    scope = {"state": {SCOPE_PRINCIPAL_KEY: Principal(id="alice")}}
+    resolver = srv._http_principal_resolver(cast(Any, _FakeAppWithScope(scope)))
+    assert resolver() == Principal(id="alice")
+
+
+def test_http_principal_resolver_fails_closed_when_principal_missing() -> None:
+    """No stashed principal (a path that bypassed auth) → fail closed, never default to local."""
+    resolver = srv._http_principal_resolver(cast(Any, _FakeAppWithScope({"state": {}})))
+    with pytest.raises(GhidraMcpError) as ei:
+        resolver()
+    assert ei.value.envelope.type is ErrorType.INTERNAL
+
+
+def test_http_principal_resolver_fails_closed_when_no_request() -> None:
+    resolver = srv._http_principal_resolver(cast(Any, _FakeAppWithScope(None)))
+    with pytest.raises(GhidraMcpError):
+        resolver()
+
+
+def test_build_app_wires_resolver_for_http_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``build_app`` attaches the per-request resolver only when transport == 'http'."""
+    captured: dict[str, Any] = {}
+
+    def _capture_register(registrar: Any, ctx: Any, *, wrap: Any = None) -> None:
+        captured["ctx"] = ctx
+
+    monkeypatch.setattr(srv, "register_tools", _capture_register)
+
+    http_cfg = dataclasses.replace(_config(), transport="http")
+    srv.build_app(
+        http_cfg,
+        session_manager=cast(SessionManager, _FakeSessions()),
+        port=cast(GhidraPort, object()),
+    )
+    assert captured["ctx"].resolve_principal is not None  # HTTP → resolver wired
+
+    captured.clear()
+    srv.build_app(
+        _config(),  # stdio (default)
+        session_manager=cast(SessionManager, _FakeSessions()),
+        port=cast(GhidraPort, object()),
+    )
+    assert captured["ctx"].resolve_principal is None  # stdio → static local principal
