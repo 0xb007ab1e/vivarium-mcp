@@ -29,11 +29,13 @@ never interpolated into any command), so the host never runs a shell.
 
 from __future__ import annotations
 
+import contextlib
 import subprocess  # nosec B404 - argv lists only, never shell=True (see _default_runner)
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import IO
 
 from ghidra_mcp.logging import get_logger
 from ghidra_mcp.naming.metrics import CompileResult, RunResult
@@ -55,7 +57,7 @@ Runner = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
 
 #: A subprocess runner for the exec path: takes an argv list + stdin bytes, returns the completed
 #: process with BYTES streams (byte-exact stdout for the differential oracle). Injected for tests.
-BytesRunner = Callable[[list[str], bytes], "subprocess.CompletedProcess[bytes]"]
+BytesRunner = Callable[[list[str], bytes, int], "subprocess.CompletedProcess[bytes]"]
 
 
 def _default_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:  # pragma: no cover
@@ -67,18 +69,43 @@ def _default_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:  # pra
     return subprocess.run(argv, capture_output=True, text=True, check=False)  # noqa: S603  # nosec B603
 
 
-def _default_bytes_runner(  # pragma: no cover
-    argv: list[str], stdin: bytes
-) -> subprocess.CompletedProcess[bytes]:
-    """Run ``argv`` feeding ``stdin`` bytes, capturing BYTES streams (never raising on non-zero).
+def _read_capped(stream: IO[bytes], limit: int) -> bytes:
+    """Read at most ``limit`` bytes from ``stream`` — bounded by construction.
 
-    Real-subprocess default for the ADR-016 exec path; tests inject a fake, so this thin shim is
-    excluded from coverage (exercised only by the gated differential e2e). ``argv`` is a fixed list
-    — no host shell; the engine-level ``--timeout`` is the hard wall-clock kill.
+    Unlike ``capture_output``/``communicate`` (which buffer the WHOLE stream), a single bounded
+    ``read(limit)`` means a flooding child cannot force the host to buffer more than ``limit`` bytes
+    during capture (ADR-016 F1 — CWE-400). Pure over an injected stream, so it is unit-tested.
     """
-    return subprocess.run(  # noqa: S603  # nosec B603
-        argv, input=stdin, capture_output=True, check=False
+    return stream.read(limit) or b""
+
+
+def _default_bytes_runner(  # pragma: no cover - real subprocess; tests inject a fake
+    argv: list[str], stdin: bytes, max_stdout_bytes: int
+) -> subprocess.CompletedProcess[bytes]:
+    """Run ``argv`` feeding ``stdin``, capturing stdout with a BOUNDED read (peak host mem <= cap).
+
+    Streams at most ``max_stdout_bytes`` from the child's stdout via :func:`_read_capped`, then
+    kills it — so a candidate that floods stdout cannot blow up host memory DURING capture (ADR-016
+    F1; ``capture_output`` would buffer the whole stream first). The engine-level ``--timeout`` is
+    the hard wall-clock backstop. ``argv`` is a fixed list — no host shell. stdin vectors are small
+    + synthetic; written best-effort then closed (a flooding child is bounded by the timeout).
+    """
+    proc = subprocess.Popen(  # noqa: S603  # nosec B603
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
     )
+    try:
+        if proc.stdin is not None:
+            with contextlib.suppress(OSError):
+                proc.stdin.write(stdin)
+                proc.stdin.close()
+        out = _read_capped(proc.stdout, max_stdout_bytes) if proc.stdout is not None else b""
+    finally:
+        proc.kill()  # stop any further output (flood) / runaway; no-op if already exited
+        proc.wait()  # reap — no leaked process/pipe (topic-resource-management)
+    return subprocess.CompletedProcess(argv, proc.returncode, stdout=out, stderr=b"")
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,7 +308,7 @@ class ContainerExecRunner:
             src.chmod(0o644)
             argv = self._build_argv(workdir)
             try:
-                result = self.runner(argv, stdin)
+                result = self.runner(argv, stdin, self.max_stdout_bytes)
             except OSError as exc:
                 # Engine/spawn failure → fail closed (no run, no fabricated match). Detail
                 # server-side only (no untrusted content in the log — topic-logging-observability).
