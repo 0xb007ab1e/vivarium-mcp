@@ -1076,7 +1076,9 @@ class _FloodRunner:
     def __init__(self, payload: bytes) -> None:
         self._payload = payload
 
-    def __call__(self, argv: list[str], stdin: bytes) -> subprocess.CompletedProcess[bytes]:
+    def __call__(
+        self, argv: list[str], stdin: bytes, _max: int = 0
+    ) -> subprocess.CompletedProcess[bytes]:
         return subprocess.CompletedProcess(argv, 0, self._payload, b"")
 
 
@@ -1086,11 +1088,10 @@ def test_exec_output_flood_is_capped() -> None:
     """A candidate that emits unbounded stdout is captured only up to ``max_stdout_bytes`` (D3).
 
     Hermetic: the ContainerExecRunner output-size cap is asserted with a fake runner returning a
-    huge payload — the captured ``RunResult.stdout`` is truncated to the cap, so the
-    retained/compared output is bounded. (Residual: the cap is read-all-then-slice, so peak host
-    buffering during capture is bounded by the engine timeout + memory/OOM cap, not this cap — a
-    bounded-streaming read is a tracked follow-up.) The live engine-enforced containment (real
-    hang/fork-bomb) is case 59 below.
+    huge payload — the captured ``RunResult.stdout`` is truncated to the cap. The real runner reads
+    a BOUNDED ``read(cap)`` at the subprocess boundary (``_read_capped`` — covered by its own test),
+    so peak host memory during capture is bounded by the cap, not just the retained output (ADR-016
+    F1 closed). The live engine-enforced containment (real hang/fork-bomb) is case 59 below.
     """
     runner = _FloodRunner(b"X" * 1_000_000)
     (run,) = ContainerExecRunner(compiler_image=_EXEC_IMG, runner=runner, max_stdout_bytes=256)(
@@ -1110,7 +1111,7 @@ def test_failed_build_scores_honest_nonmatch_never_fabricates() -> None:
     yields ``None`` (unavailable), never a guess.
     """
 
-    def boom(_argv: list[str], _stdin: bytes) -> subprocess.CompletedProcess[bytes]:
+    def boom(_argv: list[str], _stdin: bytes, _max: int = 0) -> subprocess.CompletedProcess[bytes]:
         raise OSError("engine not found")
 
     (run,) = ContainerExecRunner(compiler_image=_EXEC_IMG, runner=boom)("int main(void){}", [b""])

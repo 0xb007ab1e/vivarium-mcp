@@ -7,9 +7,14 @@ gated naming-eval / differential e2e.
 
 from __future__ import annotations
 
+import io
 import subprocess
 
-from ghidra_mcp.naming.compile import ContainerCompileRunner, ContainerExecRunner
+from ghidra_mcp.naming.compile import (
+    ContainerCompileRunner,
+    ContainerExecRunner,
+    _read_capped,
+)
 from ghidra_mcp.naming.metrics import RunResult
 
 _IMG = "ghcr.io/o/cc@sha256:" + "a" * 64
@@ -99,7 +104,9 @@ class _BytesRecorder:
         self._results = list(results) or [(0, b"")]
         self.calls: list[tuple[list[str], bytes]] = []
 
-    def __call__(self, argv: list[str], stdin: bytes) -> subprocess.CompletedProcess[bytes]:
+    def __call__(
+        self, argv: list[str], stdin: bytes, _max: int = 0
+    ) -> subprocess.CompletedProcess[bytes]:
         self.calls.append((argv, stdin))
         rc, stdout = self._results[min(len(self.calls) - 1, len(self._results) - 1)]
         return subprocess.CompletedProcess(argv, rc, stdout, b"")
@@ -164,7 +171,7 @@ def test_exec_output_is_size_capped_against_flood() -> None:
 
 
 def test_exec_engine_failure_fails_closed() -> None:
-    def boom(_argv: list[str], _stdin: bytes) -> subprocess.CompletedProcess[bytes]:
+    def boom(_argv: list[str], _stdin: bytes, _max: int = 0) -> subprocess.CompletedProcess[bytes]:
         raise OSError("podman: not found")
 
     (run,) = ContainerExecRunner(compiler_image=_IMG, runner=boom)("int main(void){}", [b""])
@@ -195,3 +202,22 @@ def test_exec_runner_satisfies_runresult_contract() -> None:
     rec = _BytesRecorder((0, b"ok"))
     runs = ContainerExecRunner(compiler_image=_IMG, runner=rec)("int main(void){}", [b""])
     assert all(isinstance(r, RunResult) for r in runs)
+
+
+def test_read_capped_bounds_a_flooding_stream() -> None:
+    # The ADR-016 F1 guarantee: a stream holding far more than the cap yields at most ``limit``
+    # bytes — the host never buffers the whole (flooded) stream during capture (CWE-400).
+    flooded = io.BytesIO(b"X" * 1_000_000)
+    out = _read_capped(flooded, 256)
+    assert out == b"X" * 256
+    assert len(out) == 256
+
+
+def test_read_capped_returns_short_stream_whole() -> None:
+    # A well-behaved stream under the cap is returned in full (no truncation of legit output).
+    assert _read_capped(io.BytesIO(b"hello"), 256) == b"hello"
+
+
+def test_read_capped_empty_stream_is_bytes() -> None:
+    # ``read`` may return ``b""`` (or None on some streams) → always normalized to bytes.
+    assert _read_capped(io.BytesIO(b""), 256) == b""
