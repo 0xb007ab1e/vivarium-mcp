@@ -2037,8 +2037,14 @@ class PyGhidraBackend:
             if index in resolved:
                 yield field, resolved[index]
                 continue
-            # A self-``named`` member: wrap pointer/array modifiers around the registered handle.
+            # A self-``named`` member: pointer-to-self is allowed; a by-value self-embed
+            # (incl. array-of-self, ``pointer_levels == 0``) is rejected at the boundary — re-assert
+            # here so the worker is self-protecting (defense in depth, ADR-015 §3 / Phase-C F3).
             type_ref = _require(field, "type")
+            if int(type_ref.get("pointer_levels") or 0) == 0:
+                from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+                raise WorkerError(CODE_ANALYSIS_FAILED, "by-value self-embedding type is rejected")
             leaf = registered
             for _ in range(int(type_ref.get("pointer_levels") or 0)):
                 leaf = PointerDataType(leaf)

@@ -276,6 +276,13 @@ class _ConsentManager:
     Models the frozen contract: a session is read-only until ``enable_writes``;
     ``require_write_consent`` raises ``VALIDATION`` otherwise; an unknown id raises the BOLA-safe
     ``SESSION_INVALID`` from every method. Consent is per-session (no cross-session bleed).
+
+    This is a deliberate WS4-owned hermetic double (the abuse suite asserts the *control contract*,
+    not the WS2 wiring). The SAME contract is verified end-to-end against the **real**
+    :class:`~ghidra_mcp.sessions.manager.SessionManager` in ``tests/unit/test_mutation_consent.py``
+    (default-deny, enable/disable, ``allow_structural`` opt-in, BOLA ``SESSION_INVALID``) and
+    through ``build_handlers`` in ``test_mutation_registry.py`` — proven against real code, not
+    only this double.
     """
 
     def __init__(self, *session_ids: str) -> None:

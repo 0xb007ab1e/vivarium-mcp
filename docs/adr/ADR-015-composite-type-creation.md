@@ -318,14 +318,16 @@ tool schema minus `session_id`; worker returns plain values; the server wraps bi
 
 | New RPC method | params | result | errors (`rpc-protocol.md` §5) |
 |----------------|--------|--------|-------------------------------|
-| `define_struct` | `{name: str, fields: [FieldSpec], packed: bool}` | `{name: str, kind: "struct", size: int, field_count: int, applied: bool}` | `-32602 invalid-params` (bad name/field/shape/dup-name/self-embed), `-32004 not-found` (an unresolvable `FieldSpec.type.named`), `-32008 limit-exceeded` (>`_MAX_FIELDS` / >`_MAX_COMPOSITE_SIZE`), `-32010 analysis-failed` (name collision / addDataType / txn / commit failed → rolled back) |
+| `define_struct` | `{name: str, fields: [FieldSpec], packed: bool}` | `{name: str, kind: "struct", size: int, field_count: int, applied: bool}` | `-32602 invalid-params` (bad name/field/shape/dup-name/self-embed), `-32004 not-found` (an unresolvable `FieldSpec.type.named`), `-32008 limit-exceeded` (>`_MAX_FIELDS` / boundary-computable oversize), `-32010 analysis-failed` (name collision / post-resolution size > `_MAX_COMPOSITE_SIZE` / addDataType / txn / commit failed → rolled back) |
 | `define_union` | `{name: str, fields: [FieldSpec]}` | `{name: str, kind: "union", size: int, field_count: int, applied: bool}` | same set as `define_struct` (no `offset`/`packed`) |
 
-- **Unresolvable `FieldSpec.type`** (unknown `named`, incl. a self-`named` since the type isn't in the
-  DTM yet) → `not-found` (the field type does not exist — same slug as a missing function in Phase B).
-  A malformed field/shape/dup-name/self-embed → `invalid-params` at the server boundary. Over-bound
-  field-count/size → `limit-exceeded`. A **name collision** or an `addDataType`/commit failure →
-  `analysis-failed` (rolled back). **No new error *codes*** — the existing slug→`ErrorType` map
+- **Unresolvable `FieldSpec.type`** (unknown `named`) → `not-found` (the field type does not exist —
+  same slug as a missing function in Phase B). A self-`named` *pointer* now **resolves** against the
+  pre-registered type (§3); only a by-value self-embed is rejected, and that is a boundary
+  `invalid-params`, not `not-found`. A malformed field/shape/dup-name/self-embed → `invalid-params` at
+  the server boundary. Over-bound **field-count** (or a boundary-computable oversize) → `limit-exceeded`.
+  A **name collision**, a **post-resolution size overflow** (caught during worker assembly), or an
+  `addDataType`/commit failure → `analysis-failed` (rolled back). **No new error *codes*** — the existing slug→`ErrorType` map
   (`rpc-protocol.md:99-104`) covers `invalid-params`/`not-found`/`limit-exceeded`/`analysis-failed`.
   **No new `ErrorType` member.** (If a distinct `already-exists` slug is preferred over reusing
   `analysis-failed` for the collision, that is a one-row contract addition for the PM to weigh —
@@ -463,10 +465,12 @@ numbering continues from the Phase-B case **40**):
     (the existing in-use type is **unchanged** — the fail-closed REJECT handler, §6); checked before
     `startTransaction`, no partial type. (TB7-T — the redefine-in-use re-render / data-poisoning
     vector, proven absent.)
-45. **Oversized field-count / size DoS** — `fields` longer than `_MAX_FIELDS`, or a composite whose
-    total computed size exceeds `_MAX_COMPOSITE_SIZE` (e.g. 256 × `char[65536]`), is **rejected**
-    (`VALIDATION`/`limit-exceeded`) before/at the worker with no `addDataType`; the size sum is
-    overflow-guarded (CWE-190/CWE-400). (TB7-D — extends Phase-B case 34.)
+45. **Oversized field-count / size DoS** — `fields` longer than `_MAX_FIELDS` (or a
+    boundary-computable oversize) is **rejected** (`VALIDATION`/`limit-exceeded`) before the worker;
+    a composite whose **post-resolution** total computed size exceeds `_MAX_COMPOSITE_SIZE`
+    (e.g. 256 × `char[65536]`) is caught during worker assembly and **rolls back to `analysis-failed`**
+    (the pre-registered type removed); the size sum is overflow-guarded (CWE-190/CWE-400).
+    (TB7-D — extends Phase-B case 34.)
 46. **Duplicate field name rejected** — a composite with two `FieldSpec.name == "x"` is rejected
     `VALIDATION` (no write). (TB7-T / integrity)
 47. **Malicious field / type name rejected** — a `FieldSpec.name` or the composite `name` with
@@ -525,9 +529,9 @@ ADR-014 §7).
   bounded by the gate, `session_undo`, per-create audit, and ADR-002 ephemerality — a junk type in a
   **disposable** session, wiped on evict, never host/durable compromise). The `addDataType`/assembly
   JVM edges and the collision/size checks are Ghidra-version-sensitive (mitigated by the integration
-  suite + bounded timeouts + fail-closed `not-found`/`analysis-failed`). The v1 opaque-pointer idiom
-  for self-reference (§3.1) is less ergonomic than a true self-`named` pointer — a documented
-  trade-off, revisitable.
+  suite + bounded timeouts + fail-closed `not-found`/`analysis-failed`). Self-reference uses a true
+  self-`named` pointer resolved against the pre-registered type (§3); the opaque `void*` idiom also
+  remains available for a pointer to a *different* not-yet-defined type (nested-define deferred — §1).
 - **Negative:** four new schemas (`FieldSpec`, two `*In` + two results) + two new validators
   (`validate_field_spec`/`validate_composite`) + two RPC methods + two worker bridge edges
   (`_gh_define_struct`/`_gh_define_union`); clients must learn that a new composite is built from

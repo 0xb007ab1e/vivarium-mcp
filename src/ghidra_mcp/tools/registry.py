@@ -1,7 +1,8 @@
 """Tier-1 tool registry — the explicit allow-list of exposed tools (WS1).
 
 There is no dynamic tool discovery: the catalog is a fixed, reviewed allow-list (PLAN §2). This
-module binds each of the 27 catalog tools to a handler and registers them with the FastMCP server.
+module binds each catalog tool in :data:`TIER1_TOOL_NAMES` to a handler and registers them with the
+FastMCP server (the count is asserted in the schema/registry tests, so it stays the single source).
 
 Each handler is a thin **imperative shell** step (topic-architecture-patterns) that:
 
