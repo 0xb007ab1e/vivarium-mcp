@@ -204,6 +204,8 @@ class ContainerCompileRunner:
 #: the host maps to ``RunResult(ok=False)`` (a stub/non-recompiling TU scores as a non-match — D2).
 #: ``noexec`` would block running the built binary, so the run uses a dedicated ``exec``-allowed
 #: tmpfs (``/run/x``) distinct from the ``noexec`` scratch ``/tmp``; the rootfs stays read-only.
+#: INVARIANT: ``cc``/``engine``/``runtime``/``compiler_image`` are TRUSTED operator config — NEVER
+#: bind them to request/binary-derived values (the only substitution below is the trusted ``cc``).
 _BUILD_RUN_SCRIPT = "{cc} -O0 -w -o /run/x/a.out /work/src.c && exec /run/x/a.out"
 
 

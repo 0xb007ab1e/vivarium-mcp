@@ -658,7 +658,7 @@ candidate scores low **honestly**, never a harness crash.
 |--------|--------|-----|------------|
 | **T** | A malicious candidate build corrupts host/toolchain state | L×H=**Med** | build+run in a rootless container; read-only rootfs; source mounted **ro**; writable surfaces are ephemeral tmpfs only (`/tmp` noexec scratch + a small `/run/x` exec tmpfs for the artifact); non-root, all caps dropped |
 | **I** | A candidate program (or `#include`/pragma) reads host files or exfiltrates | M×M=**Med** | `--network none` (no egress); no host paths mounted but the ro source; captured stdout is size-capped + carried as inert data; the sandbox holds no secrets |
-| **D** | A candidate that **hangs, fork-bombs, over-allocates, or floods stdout** exhausts CPU/mem/pids/disk/the host | M×M=**Med** | engine **kill-on-timeout** (hang/loop); **pids** cap (fork-bomb); **memory** cap + OOM-kill (over-allocate); **output-size cap** (stdout flood — D3); each maps to `RunResult(ok=False)` → an honest non-match, not an escape or crash |
+| **D** | A candidate that **hangs, fork-bombs, over-allocates, or floods stdout** exhausts CPU/mem/pids/disk/the host | M×M=**Med** | engine **kill-on-timeout** (hang/loop); **pids** cap (fork-bomb); **memory** cap + OOM-kill (over-allocate); **output-size cap** on the *retained/compared* output, with peak host transfer bounded by kill-on-timeout + the memory/OOM cap (stdout flood — D3; host-pipe buffering during capture is bounded by timeout+mem, not the cap — tracked follow-up: bounded-streaming read); each maps to `RunResult(ok=False)` → an honest non-match, not an escape or crash |
 | **E** | Candidate-program / sandbox escape to host | L×H=**Med** | gVisor runtime in prod (ADR-004); `no-new-privileges` + seccomp; caps dropped; pinned + verified compiler image (supply chain); the hostile **binary** is never executed (D1) so no new "run the sample" boundary opens |
 
 ### Abuse cases for the behavioral-equivalence increment (append to §6; benign/synthetic fixtures only)
@@ -672,8 +672,10 @@ holds), deterministic + hermetic where marked:
 
 55. **Output-flood contained (HERMETIC)** — a candidate whose run emits unbounded stdout is captured
     only up to `max_stdout_bytes`; `ContainerExecRunner` truncates the `RunResult.stdout` to the cap
-    (anti output-flood DoS — D3). The byte-exact compare is over the capped prefix; no host memory
-    blow-up. (TB5-D)
+    (anti output-flood DoS — D3). The byte-exact compare is over the capped prefix. **Residual:**
+    `max_stdout_bytes` caps the *retained/compared/logged* output, **not** peak host buffering during
+    capture (read-all-then-slice) — that is bounded by kill-on-timeout + the container memory/OOM
+    cap; a bounded-streaming read is a tracked follow-up. (TB5-D)
 56. **Hostile run fails closed → honest non-match (HERMETIC)** — a build/spawn failure (engine
     `OSError`) or a non-recompiling candidate maps to `RunResult(ok=False)`, which
     `behavioral_equivalence` scores as a **non-match for every vector** → a low/zero metric, never a

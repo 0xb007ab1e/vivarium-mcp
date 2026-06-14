@@ -1086,8 +1086,10 @@ def test_exec_output_flood_is_capped() -> None:
     """A candidate that emits unbounded stdout is captured only up to ``max_stdout_bytes`` (D3).
 
     Hermetic: the ContainerExecRunner output-size cap is asserted with a fake runner returning a
-    huge payload — the captured ``RunResult.stdout`` is truncated to the cap, so a malicious
-    candidate cannot flood/DoS the host via stdout. The live engine-enforced containment (real
+    huge payload — the captured ``RunResult.stdout`` is truncated to the cap, so the
+    retained/compared output is bounded. (Residual: the cap is read-all-then-slice, so peak host
+    buffering during capture is bounded by the engine timeout + memory/OOM cap, not this cap — a
+    bounded-streaming read is a tracked follow-up.) The live engine-enforced containment (real
     hang/fork-bomb) is case 59 below.
     """
     runner = _FloodRunner(b"X" * 1_000_000)
