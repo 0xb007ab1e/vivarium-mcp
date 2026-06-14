@@ -887,6 +887,18 @@ class RpcGhidraAdapter:
             )
         )
 
+    # --- cross-session annotation persistence (v1.2 — ADR-018; export read-out) ----------------
+    # The worker enumerates ONLY USER_DEFINED annotations (not auto-analysis), dependency-ordered,
+    # bounded (over the cap → limit-exceeded — no silent truncation). This adapter turns the plain
+    # worker result into the typed ExportedAnnotationDocument, wrapping every binary-derived string
+    # at the ADR-005 chokepoint. The server overlays the authoritative binary.sha256. IMPORT is NOT
+    # here — it is server-side orchestration (registry) replaying the existing write methods above.
+    def export_annotations(
+        self, sid: str, a: s.SessionExportAnnotationsIn
+    ) -> s.SessionExportAnnotationsOut:
+        """Read out the session's USER_DEFINED annotations (read-only — ADR-018)."""
+        return _build_exported_annotation_document(self._tool_call(sid, "export_annotations", {}))
+
     # --- internal: call orchestration -------------------------------------------------------
     def _tool_call(self, sid: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Issue a read-only tool RPC bounded by the per-tool timeout.
@@ -1829,4 +1841,150 @@ def _build_define_union_result(r: dict[str, Any]) -> s.DefineUnionResult:
         size=int(r["size"]),
         field_count=int(r["field_count"]),
         applied=bool(r["applied"]),
+    )
+
+
+# --- cross-session annotation persistence (ADR-018; export read-out) ---------------------------
+# The worker returns a PLAIN document of USER_DEFINED annotations (entries are plain dicts). These
+# builders turn it into the typed ``ExportedAnnotationDocument``, wrapping every binary-derived
+# value (read-out names/comments/recovered signatures) as ``Untrusted`` (ADR-005). The TypeRef /
+# FieldSpec structures are allow-listed structured references (base/named identifier + bounded
+# modifiers) — safe scalars, round-tripped bare so the client can re-import. The server overlays
+# the authoritative ``binary.sha256``; ``schema_version`` is the worker-reported document version.
+
+
+def _type_ref_from_plain(r: dict[str, Any]) -> s.TypeRef:
+    """Rebuild a :class:`TypeRef` from a plain worker dict (structured reference — safe).
+
+    Args:
+        r: ``{"base", "named", "pointer_levels", "array_len"}`` from the worker.
+
+    Returns:
+        The reconstructed :class:`TypeRef` (pydantic re-asserts the exactly-one-leaf invariant).
+    """
+    return s.TypeRef(
+        base=r.get("base"),
+        named=r.get("named"),
+        pointer_levels=int(r.get("pointer_levels", 0)),
+        array_len=r.get("array_len"),
+    )
+
+
+def _field_spec_from_plain(r: dict[str, Any]) -> s.FieldSpec:
+    """Rebuild a :class:`FieldSpec` from a plain worker dict (structured reference — safe)."""
+    return s.FieldSpec(
+        name=str(r["name"]), type=_type_ref_from_plain(r["type"]), offset=r.get("offset")
+    )
+
+
+def _build_exported_entry(r: dict[str, Any]) -> s.ExportedEntry:
+    """Build one exported annotation entry from a plain worker dict (binary strings → Untrusted).
+
+    Dispatches on the worker-reported ``kind``; binary-derived read-out values (current names,
+    comment text, selectors) are wrapped at the ADR-005 chokepoint, while structured references
+    (``TypeRef``/``FieldSpec``) and addresses/closed-vocab fields stay bare/safe.
+
+    Args:
+        r: The plain entry dict from the worker.
+
+    Returns:
+        The typed exported entry (the union variant for ``kind``).
+
+    Raises:
+        KeyError/ValueError: On a malformed entry (the ``_fail_closed`` wrapper on the caller maps
+            it to ``worker-unavailable``).
+    """
+    kind = str(r["kind"])
+    if kind == "rename_function":
+        return s.ExportedRenameFunctionEntry(
+            kind="rename_function",
+            function=str(r["function"]),
+            new_name=_w(r["new_name"], DataOrigin.BINARY),
+        )
+    if kind == "rename_symbol":
+        return s.ExportedRenameSymbolEntry(
+            kind="rename_symbol",
+            identifier=str(r["identifier"]),
+            new_name=_w(r["new_name"], DataOrigin.BINARY),
+        )
+    if kind == "rename_local_variable":
+        return s.ExportedRenameLocalVariableEntry(
+            kind="rename_local_variable",
+            function=str(r["function"]),
+            variable=_w(r["variable"], DataOrigin.BINARY),
+            new_name=_w(r["new_name"], DataOrigin.BINARY),
+        )
+    if kind == "rename_parameter":
+        return s.ExportedRenameParameterEntry(
+            kind="rename_parameter",
+            function=str(r["function"]),
+            parameter=_w(r["parameter"], DataOrigin.BINARY),
+            new_name=_w(r["new_name"], DataOrigin.BINARY),
+        )
+    if kind == "set_comment":
+        return s.ExportedSetCommentEntry(
+            kind="set_comment",
+            address=str(r["address"]),
+            comment_type=str(r["comment_type"]),
+            text=_w(r["text"], DataOrigin.BINARY),
+        )
+    if kind == "set_function_signature":
+        return s.ExportedSetFunctionSignatureEntry(
+            kind="set_function_signature",
+            function=str(r["function"]),
+            return_type=_type_ref_from_plain(r["return_type"]),
+            parameters=[
+                s.ParamSpec(name=str(p["name"]), type=_type_ref_from_plain(p["type"]))
+                for p in r.get("parameters", [])
+            ],
+            calling_convention=r.get("calling_convention"),
+        )
+    if kind == "apply_data_type":
+        return s.ExportedApplyDataTypeEntry(
+            kind="apply_data_type",
+            address=str(r["address"]),
+            type=_type_ref_from_plain(r["type"]),
+            clear_existing=bool(r.get("clear_existing", False)),
+        )
+    if kind == "define_struct":
+        return s.ExportedDefineStructEntry(
+            kind="define_struct",
+            name=str(r["name"]),
+            fields=[_field_spec_from_plain(f) for f in r["fields"]],
+            packed=bool(r.get("packed", False)),
+        )
+    if kind == "define_union":
+        return s.ExportedDefineUnionEntry(
+            kind="define_union",
+            name=str(r["name"]),
+            fields=[_field_spec_from_plain(f) for f in r["fields"]],
+        )
+    raise ValueError("unknown exported annotation entry kind")
+
+
+@_fail_closed
+def _build_exported_annotation_document(r: dict[str, Any]) -> s.SessionExportAnnotationsOut:
+    """Build the typed ``SessionExportAnnotationsOut`` from the plain worker export result.
+
+    Wraps the advisory ``binary.name`` as ``Untrusted`` (binary-derived); the ``sha256`` is the
+    server-relevant digest of input (safe). Each entry is built by :func:`_build_exported_entry`
+    (binary-derived strings wrapped). A malformed result fails closed via the decorator.
+
+    Args:
+        r: ``{"schema_version", "binary": {"sha256", "name"?, "size"?}, "entries": [...]}``.
+
+    Returns:
+        The typed export result (untrusted-wrapped document).
+    """
+    binary = r["binary"]
+    return s.SessionExportAnnotationsOut(
+        document=s.ExportedAnnotationDocument(
+            schema_version=int(r["schema_version"]),
+            binary=s.ExportedBinaryRef(
+                sha256=str(binary["sha256"]),
+                name=_w_opt(binary.get("name"), DataOrigin.BINARY),
+                size=binary.get("size"),
+            ),
+            entries=[_build_exported_entry(e) for e in r.get("entries", [])],
+        )
     )

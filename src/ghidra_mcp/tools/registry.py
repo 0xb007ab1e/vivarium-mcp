@@ -108,6 +108,10 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     # composite-type creation (v1.1 — ADR-015 Phase C; additionally GATED by allow_structural)
     "define_struct",
     "define_union",
+    # cross-session annotation persistence (v1.2 — ADR-018; export=read-only, import=GATED by
+    # write-consent + allow_structural for structural entries)
+    "session_export_annotations",
+    "session_import_annotations",
 )
 
 
@@ -222,6 +226,13 @@ def _handle_session_import(ctx: ToolContext, args: s.SessionImportIn) -> s.Sessi
     # can spawn this session's worker.
     ctx.sessions.ensure_worker(args.session_id, caller=ctx.caller_id)
     imported = ctx.port.import_binary(args.session_id, args)
+    # Persist the worker-computed program hash on the session (ADR-001: the server never parses the
+    # binary — it overlays the worker's digest). This is the session's authoritative program
+    # identity that the annotation-import path binds against (ADR-018 TB8). Owner-scoped.
+    if imported.binary_sha256 is not None:
+        ctx.sessions.record_binary_hash(
+            args.session_id, imported.binary_sha256, caller=ctx.caller_id
+        )
     return _merge_session_info(authoritative, imported)
 
 
@@ -870,6 +881,229 @@ def _handle_define_union(ctx: ToolContext, args: s.DefineUnionIn) -> s.DefineUni
     return result
 
 
+# =====================================================================================
+# Cross-session annotation persistence (v1.2 — ADR-018; TB8). Export is READ-ONLY + owner-scoped;
+# import is the NEW trust boundary: a client-supplied, offline-tamperable document REPLAYED as
+# writes. Import adds NO new write primitive — it schema-validates → hash-verifies → consent-gates →
+# (per entry) re-validates via the live validators → replays via the EXISTING write handlers (each
+# its own Ghidra transaction). The server persists nothing (stateless — ADR-002 preserved).
+# =====================================================================================
+def _handle_session_export_annotations(
+    ctx: ToolContext, args: s.SessionExportAnnotationsIn
+) -> s.SessionExportAnnotationsOut:
+    """Read out the session's USER_DEFINED annotations (read-only, owner-scoped — ADR-018).
+
+    No write consent (it is a read). Owner-scoped via ``authorize`` (a foreign id is BOLA-safe
+    ``SESSION_INVALID``). The adapter wraps binary-derived strings as ``Untrusted`` and the worker
+    bounds the entry count; here the server overlays the session's authoritative program hash as the
+    document's ``binary.sha256`` binding (never trusting the worker for the binding key).
+    """
+    info = ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    result = ctx.port.export_annotations(args.session_id, args)
+    # Overlay the server-authoritative binary hash (the session's recorded program identity) onto
+    # the document binding — the worker contributes the annotations, never the binding key.
+    document = result.document
+    if info.binary_sha256 is not None:
+        document = document.model_copy(
+            update={"binary": document.binary.model_copy(update={"sha256": info.binary_sha256})}
+        )
+    _log.info(
+        "tool.session_export_annotations",
+        extra={
+            "tool": "session_export_annotations",
+            "session": args.session_id,
+            "principal_id": ctx.caller_id,
+            "entry_count": len(document.entries),
+        },
+    )
+    return s.SessionExportAnnotationsOut(document=document)
+
+
+def _import_outcome_reason(exc: GhidraMcpError) -> str:
+    """Map a per-entry replay error to a short, safe outcome reason (never echoes a value).
+
+    Args:
+        exc: The :class:`GhidraMcpError` raised by re-validation or the replay handler.
+
+    Returns:
+        A short, safe reason slug (the envelope's error-type value — closed vocabulary).
+    """
+    return exc.envelope.type.value
+
+
+# Per-``kind`` replay: each lambda re-validates the entry via the SAME live validator the write tool
+# uses, then delegates to the EXISTING write handler — proving import adds NO new write primitive.
+# (The handlers themselves re-check consent + re-validate; the explicit validate call here is the
+# fail-fast per-entry boundary pass that the outcome report needs to classify a rejection.)
+def _replay_entry(ctx: ToolContext, sid: str, entry: s.Entry) -> None:
+    """Re-validate ONE document entry then replay it via the existing gated write handler (ADR-018).
+
+    Re-validates through :func:`ghidra_mcp.core.validation.validate_entry` (the live validators),
+    then reconstructs the entry's matching ``*In`` model and calls the EXISTING write handler — no
+    new write primitive, no new worker RPC. Each handler opens its own Ghidra transaction (rollback
+    on failure). The document supplies only proposed writes; nothing in it is trusted.
+
+    Args:
+        ctx: Injected collaborators.
+        sid: The (already-authorized, hash-bound, consent-checked) target session id.
+        entry: One typed :class:`Entry` from the validated document.
+
+    Raises:
+        GhidraMcpError: ``VALIDATION``/``NOT_FOUND``/``ANALYSIS_FAILED``/... from re-validation or
+            the replayed write (mapped to a per-entry outcome by the caller).
+    """
+    v.validate_entry(entry)  # live re-validation (the same validators the write tools use)
+    if isinstance(entry, s.RenameFunctionEntry):
+        _handle_rename_function(
+            ctx,
+            s.RenameFunctionIn(session_id=sid, function=entry.function, new_name=entry.new_name),
+        )
+    elif isinstance(entry, s.RenameSymbolEntry):
+        _handle_rename_symbol(
+            ctx,
+            s.RenameSymbolIn(session_id=sid, identifier=entry.identifier, new_name=entry.new_name),
+        )
+    elif isinstance(entry, s.RenameLocalVariableEntry):
+        _handle_rename_local_variable(
+            ctx,
+            s.RenameLocalVariableIn(
+                session_id=sid,
+                function=entry.function,
+                variable=entry.variable,
+                new_name=entry.new_name,
+            ),
+        )
+    elif isinstance(entry, s.RenameParameterEntry):
+        _handle_rename_parameter(
+            ctx,
+            s.RenameParameterIn(
+                session_id=sid,
+                function=entry.function,
+                parameter=entry.parameter,
+                new_name=entry.new_name,
+            ),
+        )
+    elif isinstance(entry, s.SetCommentEntry):
+        _handle_set_comment(
+            ctx,
+            s.SetCommentIn(
+                session_id=sid,
+                address=entry.address,
+                comment_type=entry.comment_type,
+                text=entry.text,
+            ),
+        )
+    elif isinstance(entry, s.SetFunctionSignatureEntry):
+        _handle_set_function_signature(
+            ctx,
+            s.SetFunctionSignatureIn(
+                session_id=sid,
+                function=entry.function,
+                return_type=entry.return_type,
+                parameters=entry.parameters,
+                calling_convention=entry.calling_convention,
+            ),
+        )
+    elif isinstance(entry, s.ApplyDataTypeEntry):
+        _handle_apply_data_type(
+            ctx,
+            s.ApplyDataTypeIn(
+                session_id=sid,
+                address=entry.address,
+                type=entry.type,
+                clear_existing=entry.clear_existing,
+            ),
+        )
+    elif isinstance(entry, s.DefineStructEntry):
+        _handle_define_struct(
+            ctx,
+            s.DefineStructIn(
+                session_id=sid, name=entry.name, fields=entry.fields, packed=entry.packed
+            ),
+        )
+    else:  # DefineUnionEntry — the union is exhaustive (the discriminated union admits no other)
+        _handle_define_union(
+            ctx, s.DefineUnionIn(session_id=sid, name=entry.name, fields=entry.fields)
+        )
+
+
+def _handle_session_import_annotations(
+    ctx: ToolContext, args: s.SessionImportAnnotationsIn
+) -> s.SessionImportAnnotationsOut:
+    """Replay an untrusted annotation document into a same-binary session (the TB8 path — ADR-018).
+
+    The new trust boundary. In order, fail-closed: (a) **schema-validate** the document (version,
+    bounds, hash presence, every entry re-validated); (b) **verify the hash binding** —
+    ``document.binary.sha256`` must equal the session's recorded program hash, else fail closed; (c)
+    **gate on write consent** (and, if any entry is structural, ``allow_structural``) exactly like a
+    live write; (d) **per entry**: re-validate + replay via the existing gated write handler (its
+    own Ghidra transaction); (e) return a per-entry outcome report; **audit** count + principal +
+    session + per-entry outcome (sizes/flags only — never the imported values).
+    """
+    sid = args.session_id
+    document = args.document
+    # (a) Schema-validate the FULLY-untrusted document (version, bounds, hash presence, per-entry
+    #     re-validation via the live validators) — fail closed on anything unexpected.
+    v.validate_annotation_document(document)
+    # (b) Authorize (owner-scoped, BOLA-safe) + verify the binary-hash binding. A document minted
+    #     for a different/forged binary is meaningless and dangerous → fail closed.
+    info = ctx.sessions.authorize(sid, caller=ctx.caller_id)
+    if info.binary_sha256 is None or info.binary_sha256.lower() != document.binary.sha256.lower():
+        raise GhidraMcpError(
+            ErrorEnvelope(
+                type=ErrorType.VALIDATION,
+                title="Invalid arguments",
+                detail="annotation document does not match this session's binary",
+                status=400,
+                retryable=False,
+            )
+        )
+    # (c) Consent gate — exactly like live writes (LLM08): write consent always; allow_structural
+    #     additionally when ANY entry is structural (importing does not bypass the human gate).
+    has_structural = any(e.kind in s.STRUCTURAL_ENTRY_KINDS for e in document.entries)
+    ctx.sessions.require_write_consent(sid, caller=ctx.caller_id)
+    if has_structural:
+        ctx.sessions.require_write_consent(sid, structural=True, caller=ctx.caller_id)
+    # (d) Per-entry re-validate + replay via the EXISTING gated write handlers (best-effort; each
+    #     its own transaction). A per-entry failure is recorded, not fatal (matches the per-write
+    #     transaction model). A non-GhidraMcpError is unexpected and propagates (fail closed).
+    outcomes: list[s.ImportedEntryOutcome] = []
+    applied_count = 0
+    for index, entry in enumerate(document.entries):
+        try:
+            _replay_entry(ctx, sid, entry)
+        except GhidraMcpError as exc:
+            outcomes.append(
+                s.ImportedEntryOutcome(
+                    index=index, kind=entry.kind, applied=False, reason=_import_outcome_reason(exc)
+                )
+            )
+            continue
+        applied_count += 1
+        outcomes.append(s.ImportedEntryOutcome(index=index, kind=entry.kind, applied=True))
+    total = len(document.entries)
+    # (e) Audit: count + principal + session + per-entry outcome — sizes/flags only, never values.
+    _log.info(
+        "tool.session_import_annotations",
+        extra={
+            "tool": "session_import_annotations",
+            "session": sid,
+            "principal_id": ctx.caller_id,
+            "total": total,
+            "applied": applied_count,
+            "rejected": total - applied_count,
+            "had_structural": has_structural,
+        },
+    )
+    return s.SessionImportAnnotationsOut(
+        session_id=sid,
+        total=total,
+        applied=applied_count,
+        rejected=total - applied_count,
+        outcomes=outcomes,
+    )
+
+
 # Map of tool name → (handler, input-schema). The input schema is the handler's single argument
 # type, from which FastMCP derives the tool's JSON schema. The output schema is the return type.
 _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
@@ -924,6 +1158,15 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     # composite-type creation (v1.1 — ADR-015 Phase C; gated additionally by allow_structural)
     "define_struct": (_handle_define_struct, s.DefineStructIn),
     "define_union": (_handle_define_union, s.DefineUnionIn),
+    # cross-session annotation persistence (v1.2 — ADR-018; export=read-only, import=gated)
+    "session_export_annotations": (
+        _handle_session_export_annotations,
+        s.SessionExportAnnotationsIn,
+    ),
+    "session_import_annotations": (
+        _handle_session_import_annotations,
+        s.SessionImportAnnotationsIn,
+    ),
 }
 
 

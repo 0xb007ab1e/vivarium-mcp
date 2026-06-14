@@ -92,6 +92,9 @@ RPC_METHODS = frozenset(
         # composite-type creation (v1.1 — ADR-015 Phase C; resolved FieldSpec list, NO C parser)
         "define_struct",
         "define_union",
+        # annotation persistence (v1.2 — ADR-018; export read-out ONLY — import is server-side
+        # orchestration that replays the EXISTING write methods above, NO new import RPC).
+        "export_annotations",
         "ping",
         "shutdown",
     }
@@ -269,6 +272,16 @@ class GhidraBackend(Protocol):
 
     def define_union(self, params: dict[str, Any]) -> dict[str, Any]:
         """Create a new union from a resolved field list inside a transaction — v1.1."""
+        ...
+
+    # --- annotation persistence (v1.2 — ADR-018; export read-out ONLY) ---
+    def export_annotations(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Enumerate the program's USER_DEFINED annotations, dependency-ordered, bounded — v1.2.
+
+        Read-only. Returns a plain ``{"schema_version", "binary": {...}, "entries": [...]}`` of the
+        program's user-defined annotations only (never auto-analysis output); over the entry cap →
+        ``limit-exceeded``. Import adds NO worker method — it replays the existing write RPCs.
+        """
         ...
 
 

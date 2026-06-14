@@ -40,6 +40,9 @@ _DEFAULT_MAX_FRAME_BYTES = 4 * 1024 * 1024  # 4 MiB (mirrors security.limits def
 # total computed size of an assembled struct/union is bounded INSIDE the txn after each member's
 # DataType.getLength() is known (the running-sum backstop against the recursion/fan-out DoS).
 _MAX_COMPOSITE_SIZE = 1_048_576  # 1 MiB
+# Annotation-document schema version the worker emits on export (v1.2 — ADR-018; mirrors
+# schemas.ANNOTATION_SCHEMA_VERSION). The server overlays the authoritative binary hash.
+_ANNOTATION_SCHEMA_VERSION = 1
 
 
 def _require(params: dict[str, Any], key: str) -> Any:
@@ -407,6 +410,21 @@ class PyGhidraBackend:
         name = str(_require(params, "name"))
         fields = _require(params, "fields")
         return self._gh_define_union(name, fields)
+
+    # --- annotation persistence (v1.2 — ADR-018; export read-out ONLY) -----------------------
+    def export_annotations(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Enumerate the program's USER_DEFINED annotations as a plain document (read-only — v1.2).
+
+        Args:
+            params: ``{}`` (session-scoped; no parameters).
+
+        Returns:
+            ``{"schema_version", "binary": {"sha256", "size"}, "entries": [...]}`` — the program's
+            USER_DEFINED annotations only, dependency-ordered, bounded (over the cap →
+            ``limit-exceeded``). The server wraps binary-derived strings as untrusted + overlays the
+            authoritative binary hash.
+        """
+        return self._gh_export_annotations()
 
     # --- JVM edge (PyGhidra calls live ONLY here; imported lazily) ---------------------------
     # NOTE: these helpers are the worker-only JVM boundary. They are excluded from server unit
@@ -1964,6 +1982,121 @@ class PyGhidraBackend:
             "applied": True,
         }
 
+    # --- annotation-persistence JVM edge (ADR-018; export read-out, read-only) ----------------
+    def _gh_export_annotations(self) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Enumerate ONLY ``USER_DEFINED`` annotations, dependency-ordered + bounded (ADR-018).
+
+        Reads (read-only, no transaction) the program's user-defined annotations — never Ghidra's
+        auto-analysis output — and emits them as plain entries in a **dependency-safe order**:
+        composites/types first (``define_struct``/``define_union``), then the signatures/applies
+        that may reference them, then the renames, then comments (mirrors the document shape so
+        import can replay in order). Bounded by ``_MAX_RESULT_COUNT`` — over the cap →
+        ``limit-exceeded`` (no silent truncation that would yield an incomplete-but-plausible
+        artifact). The values are plain; the server wraps each binary-derived string as untrusted
+        and overlays the authoritative ``binary.sha256``.
+
+        ``USER_DEFINED`` discrimination: symbols via ``Symbol.getSource()`` equalling
+        ``SourceType.USER_DEFINED``;
+        comments are user content by construction (Ghidra does not auto-author EOL/PRE/etc. for the
+        plate slots we read); user-applied data types / signatures and user-defined composites via
+        the DataTypeManager's source archive / a function's ``getSignatureSource()``. The exact
+        PyGhidra bindings are confirmed at the WS3 image build (ADR-003 open item), like the other
+        ``_gh_*`` helpers.
+
+        Returns:
+            ``{"schema_version", "binary": {"sha256", "size"}, "entries": [...]}`` (plain).
+
+        Raises:
+            WorkerError: ``limit-exceeded`` if the user-defined annotation count exceeds the cap.
+        """
+        from ghidra.program.model.listing import CodeUnit
+        from ghidra.program.model.symbol import SourceType, SymbolType
+        from worker.dispatch import CODE_LIMIT_EXCEEDED, WorkerError
+
+        program = self._require_program()
+        entries: list[dict[str, Any]] = []
+
+        def _emit(entry: dict[str, Any]) -> None:
+            if len(entries) >= _MAX_RESULT_COUNT:
+                raise WorkerError(
+                    CODE_LIMIT_EXCEEDED, "user-defined annotation count exceeds the maximum"
+                )
+            entries.append(entry)
+
+        # 1) USER_DEFINED composite types FIRST (define_struct/define_union) — dependency-safe so a
+        #    later signature/apply that references the composite has it available on replay.
+        manager = program.getDataTypeManager()
+        for data_type in manager.getAllDataTypes():
+            kind = _composite_export_kind(data_type)
+            if kind is None:
+                continue
+            fields = _composite_fields_export(data_type)
+            if fields is None:
+                continue  # not field-reconstructable (e.g. derived/aliased) — skip, never guess
+            _emit({"kind": kind, "name": _to_text(data_type.getName()), "fields": fields})
+
+        # 2) USER_DEFINED function signatures (set_function_signature) — after the types they use.
+        listing = program.getListing()
+        for func in listing.getFunctions(True):
+            if str(func.getSignatureSource()) != str(SourceType.USER_DEFINED):
+                continue
+            _emit(_function_signature_export(func))
+
+        # 3) USER_DEFINED function renames (rename_function) — name-only renames of functions.
+        for func in listing.getFunctions(True):
+            symbol = func.getSymbol()
+            if symbol is None or str(symbol.getSource()) != str(SourceType.USER_DEFINED):
+                continue
+            _emit(
+                {
+                    "kind": "rename_function",
+                    "function": str(func.getEntryPoint()),
+                    "new_name": _to_text(func.getName()),
+                }
+            )
+
+        # 4) USER_DEFINED non-function symbol renames (rename_symbol).
+        for symbol in program.getSymbolTable().getAllSymbols(False):
+            if str(symbol.getSource()) != str(SourceType.USER_DEFINED):
+                continue
+            if symbol.getSymbolType() == SymbolType.FUNCTION:
+                continue  # function renames already emitted in step 3
+            _emit(
+                {
+                    "kind": "rename_symbol",
+                    "identifier": str(symbol.getAddress()),
+                    "new_name": _to_text(symbol.getName()),
+                }
+            )
+
+        # 5) Comments (set_comment) — the five user comment slots (plain text; user-authored).
+        comment_slots = (
+            (CodeUnit.EOL_COMMENT, "EOL"),
+            (CodeUnit.PRE_COMMENT, "PRE"),
+            (CodeUnit.POST_COMMENT, "POST"),
+            (CodeUnit.PLATE_COMMENT, "PLATE"),
+            (CodeUnit.REPEATABLE_COMMENT, "REPEATABLE"),
+        )
+        for comment_addr in listing.getCommentAddressIterator(program.getMemory(), True):
+            for type_id, label in comment_slots:
+                text = listing.getComment(type_id, comment_addr)
+                if text is None:
+                    continue
+                _emit(
+                    {
+                        "kind": "set_comment",
+                        "address": str(comment_addr),
+                        "comment_type": label,
+                        "text": _to_text(text),
+                    }
+                )
+
+        return {
+            "schema_version": _ANNOTATION_SCHEMA_VERSION,
+            "binary": {"sha256": self._sha256 or "", "size": None},
+            "entries": entries,
+        }
+
     def _reject_type_collision(  # pragma: no cover - JVM edge
         self, manager: Any, name: str
     ) -> None:
@@ -2375,6 +2508,132 @@ def _data_type_definition(data_type: Any) -> str:  # pragma: no cover - JVM edge
     # integration-validate: confirm DataType.toString() renders the layout on 12.1.2; if a richer
     # renderer is preferred, swap to it here (single chokepoint, JVM-free fallback to the name).
     return _to_text(data_type)
+
+
+def _type_ref_export(data_type: Any) -> dict[str, Any] | None:  # pragma: no cover - JVM edge
+    """Render a Ghidra ``DataType`` back into a structured ``TypeRef`` dict, or ``None`` (ADR-018).
+
+    Only the round-trippable shapes the write tools accept are emitted: a closed ``base`` built-in
+    or a ``named`` reference, wrapped in bounded pointer/array modifiers. Anything we cannot model
+    as a structured ``TypeRef`` (so import could not re-resolve it) returns ``None`` — the entry is
+    then skipped, never guessed (export honesty; no incomplete-but-plausible artifact).
+
+    Args:
+        data_type: A Ghidra ``DataType``.
+
+    Returns:
+        ``{"base"|"named", "pointer_levels", "array_len"}`` or ``None`` if not representable.
+    """
+    from ghidra.program.model.data import Array, Pointer
+
+    pointer_levels = 0
+    array_len: int | None = None
+    current = data_type
+    # Peel one array level (the write-tool TypeRef supports a single fixed-length array dimension).
+    if isinstance(current, Array):
+        array_len = int(current.getNumElements())
+        current = current.getDataType()
+    while isinstance(current, Pointer):
+        pointer_levels += 1
+        current = current.getDataType()
+        if pointer_levels > 8:  # mirror _MAX_POINTER_DEPTH — not round-trippable beyond it
+            return None
+    leaf_name = _to_text(current.getName())
+    base = leaf_name if leaf_name in PyGhidraBackend._BASE_TYPE_VOCAB else None
+    ref: dict[str, Any] = {
+        "base": base,
+        "named": None if base is not None else leaf_name,
+        "pointer_levels": pointer_levels,
+        "array_len": array_len,
+    }
+    return ref
+
+
+def _composite_export_kind(data_type: Any) -> str | None:  # pragma: no cover - JVM edge
+    """Classify a USER_DEFINED composite for export, or ``None`` if it is not one (ADR-018).
+
+    Returns ``"define_struct"`` / ``"define_union"`` only for a user-defined ``Structure``/``Union``
+    in the program (root) category; ``None`` otherwise (built-ins, auto-applied library types, and
+    non-composites are NOT exported — only user-authored annotations cross the boundary).
+
+    Args:
+        data_type: A Ghidra ``DataType``.
+
+    Returns:
+        The composite ``kind`` or ``None``.
+    """
+    from ghidra.program.model.data import Structure, Union
+
+    source = data_type.getSourceArchive()
+    # Only program-local (no external source archive) user composites are user-authored annotations.
+    if source is not None and not bool(source.getArchiveType().isProgramArchive()):
+        return None
+    if isinstance(data_type, Union):
+        return "define_union"
+    if isinstance(data_type, Structure):
+        return "define_struct"
+    return None
+
+
+def _composite_fields_export(data_type: Any) -> list[dict[str, Any]] | None:  # pragma: no cover
+    """Render a composite's members as exportable ``FieldSpec`` dicts, or ``None`` (ADR-018).
+
+    Each member's type is rendered via :func:`_type_ref_export`; if any member is not representable
+    as a structured ``TypeRef``, the whole composite is skipped (``None``) rather than emitting a
+    partial/unfaithful definition.
+
+    Args:
+        data_type: A Ghidra ``Structure``/``Union``.
+
+    Returns:
+        A list of ``{"name", "type", "offset"}`` dicts, or ``None`` if any member is unrenderable.
+    """
+    from ghidra.program.model.data import Structure
+
+    fields: list[dict[str, Any]] = []
+    is_struct = isinstance(data_type, Structure)
+    for component in data_type.getDefinedComponents():
+        ref = _type_ref_export(component.getDataType())
+        if ref is None:
+            return None
+        fields.append(
+            {
+                "name": _to_text(component.getFieldName()),
+                "type": ref,
+                "offset": int(component.getOffset()) if is_struct else None,
+            }
+        )
+    return fields or None
+
+
+def _function_signature_export(func: Any) -> dict[str, Any]:  # pragma: no cover - JVM edge
+    """Render a USER_DEFINED function signature as a ``set_function_signature`` export entry.
+
+    Args:
+        func: A Ghidra ``Function`` whose signature source is ``USER_DEFINED``.
+
+    Returns:
+        A plain ``set_function_signature`` entry dict (types rendered as structured TypeRefs;
+        an unrenderable type falls back to the opaque ``void`` base so the entry stays valid).
+    """
+    void_ref = {"base": "void", "named": None, "pointer_levels": 0, "array_len": None}
+    return_ref = _type_ref_export(func.getReturnType()) or void_ref
+    parameters: list[dict[str, Any]] = []
+    for param in func.getParameters():
+        parameters.append(
+            {
+                "name": _to_text(param.getName()),
+                "type": _type_ref_export(param.getDataType()) or void_ref,
+            }
+        )
+    convention = func.getCallingConventionName()
+    return {
+        "kind": "set_function_signature",
+        "function": str(func.getEntryPoint()),
+        "return_type": return_ref,
+        "parameters": parameters,
+        "calling_convention": None if convention is None else str(convention),
+    }
 
 
 def _block_permissions(block: Any) -> str:  # pragma: no cover - JVM edge

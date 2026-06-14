@@ -1730,3 +1730,559 @@ class DefineUnionResult(_Out):
     size: int
     field_count: int
     applied: bool
+
+
+# =====================================================================================
+# Cross-session annotation persistence (v1.2 — ADR-018; TB8). EXPORT + IMPORT round-trip.
+#
+# A versioned, binary-hash-bound, structured (INERT) document of a session's USER_DEFINED
+# annotations. Export reads it out (read-only, owner-scoped, untrusted-wrapped strings). Import
+# REPLAYS each entry through the EXISTING gated write handlers/validators (ADR-018 D3) — it adds NO
+# new write primitive. The document is FULLY UNTRUSTED (it may be tampered offline): import schema-
+# validates it, verifies the binary-hash binding, gates on write consent (+ allow_structural for
+# structural entries), re-validates EVERY entry via the live validators, and replays each in its own
+# Ghidra transaction. The server persists nothing (stateless — ADR-002 preserved).
+# =====================================================================================
+#: Supported annotation-document schema version. An unknown version fails closed (forward-compat is
+#: opt-in, never silent) — :func:`ghidra_mcp.core.validation.validate_annotation_document`.
+ANNOTATION_SCHEMA_VERSION = 1
+
+#: Hard cap on entries in one imported/exported document (DoS — CWE-400; mirrored in
+#: ``core.validation``). A document over this is ``limit-exceeded`` (never a silent truncation).
+_MAX_ENTRIES = 50_000
+
+
+class AnnotationBinaryRef(_In):
+    """Applicability binding for an annotation document — identifies the source program (ADR-018).
+
+    The ``sha256`` is the load-bearing field: import verifies it equals the target session's program
+    hash, so a document minted for a different/forged binary is rejected (TB8-S). ``name``/``size``
+    are advisory provenance only (never trusted for application). It is an ``_In``
+    (``extra=forbid``, frozen) — it is part of the fully-untrusted imported document.
+
+    Attributes:
+        sha256: Hex SHA-256 of the program the annotations were exported from — the binding key.
+        name: Optional advisory original name/label (untrusted; not used for application).
+        size: Optional advisory original byte size (untrusted; not used for application).
+    """
+
+    sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    name: str | None = Field(default=None, max_length=_MAX_NAME)
+    size: int | None = Field(default=None, ge=0)
+
+
+# --- typed, discriminated Entry variants (one per existing write tool; ADR-018 D3) -------------
+# Each variant carries the SAME payload fields as the write tool it replays (selector/target +
+# value) PLUS a closed ``kind`` discriminator. On EXPORT the binary-derived value fields (a prior
+# name we read out, a comment text, a recovered signature) are untrusted-wrapped (ADR-005). On
+# IMPORT each variant is re-validated through the matching live validator and replayed via the
+# existing handler — the document supplies only PROPOSED writes, never trusted claims.
+class _Entry(_In):
+    """Base for an annotation entry: immutable, reject unknown fields (fully-untrusted document)."""
+
+
+class RenameFunctionEntry(_Entry):
+    """A ``rename_function`` replay entry (mirrors :class:`RenameFunctionIn`).
+
+    Attributes:
+        kind: Discriminator — always ``"rename_function"``.
+        function: The target function selector (entry address hex or current name).
+        new_name: The name to set — re-validated via ``validate_write_name`` on import.
+    """
+
+    kind: Literal["rename_function"]
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    new_name: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class RenameSymbolEntry(_Entry):
+    """A ``rename_symbol`` replay entry (mirrors :class:`RenameSymbolIn`).
+
+    Attributes:
+        kind: Discriminator — always ``"rename_symbol"``.
+        identifier: The target symbol selector (address hex or current name).
+        new_name: The name to set — re-validated via ``validate_write_name`` on import.
+    """
+
+    kind: Literal["rename_symbol"]
+    identifier: str = Field(min_length=1, max_length=_MAX_NAME)
+    new_name: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class RenameLocalVariableEntry(_Entry):
+    """A ``rename_local_variable`` replay entry (mirrors :class:`RenameLocalVariableIn`).
+
+    Attributes:
+        kind: Discriminator — always ``"rename_local_variable"``.
+        function: The owning function selector.
+        variable: The local's stable selector (decompiler-assigned name).
+        new_name: The name to set — re-validated via ``validate_write_name`` on import.
+    """
+
+    kind: Literal["rename_local_variable"]
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    variable: str = Field(min_length=1, max_length=_MAX_NAME)
+    new_name: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class RenameParameterEntry(_Entry):
+    """A ``rename_parameter`` replay entry (mirrors :class:`RenameParameterIn`).
+
+    Attributes:
+        kind: Discriminator — always ``"rename_parameter"``.
+        function: The owning function selector.
+        parameter: The parameter's stable selector.
+        new_name: The name to set — re-validated via ``validate_write_name`` on import.
+    """
+
+    kind: Literal["rename_parameter"]
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    parameter: str = Field(min_length=1, max_length=_MAX_NAME)
+    new_name: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class SetCommentEntry(_Entry):
+    """A ``set_comment`` replay entry (mirrors :class:`SetCommentIn`).
+
+    Attributes:
+        kind: Discriminator — always ``"set_comment"``.
+        address: The address (hex) the comment attaches to.
+        comment_type: The closed comment slot.
+        text: The comment text to set; ``None`` clears it. Re-normalized via
+            ``validate_comment_text`` on import.
+    """
+
+    kind: Literal["set_comment"]
+    address: str = Field(min_length=1, max_length=_MAX_NAME)
+    comment_type: Literal["EOL", "PRE", "POST", "PLATE", "REPEATABLE"]
+    text: str | None = Field(default=None, max_length=_MAX_COMMENT)
+
+
+class SetFunctionSignatureEntry(_Entry):
+    """A ``set_function_signature`` replay entry (mirrors :class:`SetFunctionSignatureIn`).
+
+    Structural entry (requires ``allow_structural`` on import). Re-validated via
+    ``validate_signature`` (bounded params + resolved TypeRefs + closed-vocab cc).
+
+    Attributes:
+        kind: Discriminator — always ``"set_function_signature"``.
+        function: The target function selector.
+        return_type: The return type as a resolved :class:`TypeRef`.
+        parameters: The ordered parameter list — bounded by ``_MAX_PARAMS``.
+        calling_convention: A closed-allow-list convention, or ``None`` to leave unchanged.
+    """
+
+    kind: Literal["set_function_signature"]
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    return_type: TypeRef
+    parameters: list[ParamSpec] = Field(default_factory=list, max_length=_MAX_PARAMS)
+    calling_convention: str | None = Field(default=None, max_length=_MAX_NAME)
+
+
+class ApplyDataTypeEntry(_Entry):
+    """An ``apply_data_type`` replay entry (mirrors :class:`ApplyDataTypeIn`).
+
+    Structural entry. Re-validated via ``parse_address`` + ``validate_type_ref`` on import.
+
+    Attributes:
+        kind: Discriminator — always ``"apply_data_type"``.
+        address: The address (hex) to apply the type at.
+        type: The type to apply as a resolved :class:`TypeRef`.
+        clear_existing: Whether to clear conflicting defined data first.
+    """
+
+    kind: Literal["apply_data_type"]
+    address: str = Field(min_length=1, max_length=_MAX_NAME)
+    type: TypeRef
+    clear_existing: bool = Field(default=False)
+
+
+class DefineStructEntry(_Entry):
+    """A ``define_struct`` replay entry (mirrors :class:`DefineStructIn`).
+
+    Structural entry. Re-validated via ``validate_composite(kind="struct")`` on import (bounded
+    fields, resolved TypeRefs, no duplicate/by-value self-embed).
+
+    Attributes:
+        kind: Discriminator — always ``"define_struct"``.
+        name: The new struct's name.
+        fields: The ordered member list — non-empty, bounded by ``_MAX_FIELDS``.
+        packed: Whether to pack the struct.
+    """
+
+    kind: Literal["define_struct"]
+    name: str = Field(min_length=1, max_length=_MAX_NAME)
+    fields: list[FieldSpec] = Field(min_length=1, max_length=_MAX_FIELDS)
+    packed: bool = Field(default=False)
+
+    @model_validator(mode="after")
+    def _no_self_embed(self) -> DefineStructEntry:
+        """Reject a by-value embed of this struct's own name (ADR-015 §3.2; ADR-018 re-validate).
+
+        Returns:
+            ``self`` when no member embeds the struct by value.
+
+        Raises:
+            ValueError: When a member embeds the struct by value (mapped to ``VALIDATION``).
+        """
+        _reject_self_embed(self.name, self.fields)
+        return self
+
+
+class DefineUnionEntry(_Entry):
+    """A ``define_union`` replay entry (mirrors :class:`DefineUnionIn`).
+
+    Structural entry. Re-validated via ``validate_composite(kind="union")`` on import.
+
+    Attributes:
+        kind: Discriminator — always ``"define_union"``.
+        name: The new union's name.
+        fields: The member list — non-empty, bounded by ``_MAX_FIELDS``; each ``offset`` MUST be
+            ``None`` (union members overlay at offset 0).
+    """
+
+    kind: Literal["define_union"]
+    name: str = Field(min_length=1, max_length=_MAX_NAME)
+    fields: list[FieldSpec] = Field(min_length=1, max_length=_MAX_FIELDS)
+
+    @model_validator(mode="after")
+    def _no_self_embed_no_offset(self) -> DefineUnionEntry:
+        """Reject a by-value self-embed and any per-member ``offset`` (ADR-015 §3.2/§2.2).
+
+        Returns:
+            ``self`` when the union shape is valid.
+
+        Raises:
+            ValueError: When a member embeds the union by value or carries a non-``None`` ``offset``
+                (mapped to ``VALIDATION`` at the server boundary).
+        """
+        _reject_self_embed(self.name, self.fields)
+        for field in self.fields:
+            if field.offset is not None:
+                raise ValueError("a union member may not carry an offset")
+        return self
+
+
+#: The discriminated union of replay entries — pydantic selects the variant by the ``kind`` literal.
+#: An unknown/missing ``kind`` fails closed at construction (ADR-018 fail-closed). The order matches
+#: the document's dependency-safe emission order (types first, then refs, then renames, comments).
+Entry = (
+    DefineStructEntry
+    | DefineUnionEntry
+    | SetFunctionSignatureEntry
+    | ApplyDataTypeEntry
+    | RenameFunctionEntry
+    | RenameSymbolEntry
+    | RenameLocalVariableEntry
+    | RenameParameterEntry
+    | SetCommentEntry
+)
+
+#: The set of structural ``kind`` values — these entries additionally require ``allow_structural``
+#: consent on import (LLM08 — the human-in-the-loop gate is not bypassed by importing). Kept as data
+#: so the import handler and tests share one source of truth.
+STRUCTURAL_ENTRY_KINDS: frozenset[str] = frozenset(
+    {
+        "set_function_signature",
+        "apply_data_type",
+        "define_struct",
+        "define_union",
+    }
+)
+
+
+class AnnotationDocument(_In):
+    """A versioned, binary-hash-bound, structured document of a session's USER_DEFINED annotations.
+
+    The round-trip artifact (ADR-018 D3): produced by ``session_export_annotations`` and consumed by
+    ``session_import_annotations``. It is INERT structured data (never Ghidra-native), and on import
+    it is treated as **fully untrusted** — schema-validated, hash-bound, consent-gated, and each
+    entry re-validated + replayed via the existing gated write path. ``entries`` is bounded
+    (``_MAX_ENTRIES``) and emitted dependency-ordered (composites/types before the refs that use
+    them).
+
+    Attributes:
+        schema_version: Document format version — must equal :data:`ANNOTATION_SCHEMA_VERSION`
+            (an unknown version fails closed on import).
+        binary: The applicability binding (the source program's hash + advisory provenance).
+        entries: The ordered, bounded list of typed replay entries.
+    """
+
+    schema_version: int = Field(ge=1)
+    binary: AnnotationBinaryRef
+    entries: list[Entry] = Field(default_factory=list, max_length=_MAX_ENTRIES)
+
+
+# --- EXPORTED document view (ADR-005): the read-OUT document wraps binary-derived strings -------
+# The IMPORT document (above) carries BARE strings (it is the untrusted input the validators
+# re-check). The EXPORT view mirrors it field-for-field but wraps the binary-derived value fields
+# (current names/comments/recovered signatures the worker read out of the hostile program) in the
+# untrusted envelope — they are GHIDRA/BINARY-origin content (ADR-005, std-owasp-llm LLM01). The
+# client extracts ``.value`` from each wrapper to rebuild a bare import document for round-trip.
+class _ExportEntry(_Out):
+    """Base for an exported-annotation entry (immutable output model)."""
+
+
+class ExportedRenameFunctionEntry(_ExportEntry):
+    """Exported ``rename_function`` entry — ``new_name`` is the read-out (binary-derived) name.
+
+    Attributes:
+        kind: Discriminator — always ``"rename_function"``.
+        function: The function selector (address hex — server-safe).
+        new_name: The current USER_DEFINED name read out — binary-derived → untrusted.
+    """
+
+    kind: Literal["rename_function"]
+    function: str
+    new_name: Untrusted[str]
+
+
+class ExportedRenameSymbolEntry(_ExportEntry):
+    """Exported ``rename_symbol`` entry.
+
+    Attributes:
+        kind: Discriminator — always ``"rename_symbol"``.
+        identifier: The symbol selector (address hex — server-safe).
+        new_name: The current USER_DEFINED name read out — binary-derived → untrusted.
+    """
+
+    kind: Literal["rename_symbol"]
+    identifier: str
+    new_name: Untrusted[str]
+
+
+class ExportedRenameLocalVariableEntry(_ExportEntry):
+    """Exported ``rename_local_variable`` entry.
+
+    Attributes:
+        kind: Discriminator — always ``"rename_local_variable"``.
+        function: The owning function selector (address hex — server-safe).
+        variable: The local selector — binary-derived → untrusted (decompiler-assigned name).
+        new_name: The current USER_DEFINED name read out — binary-derived → untrusted.
+    """
+
+    kind: Literal["rename_local_variable"]
+    function: str
+    variable: Untrusted[str]
+    new_name: Untrusted[str]
+
+
+class ExportedRenameParameterEntry(_ExportEntry):
+    """Exported ``rename_parameter`` entry.
+
+    Attributes:
+        kind: Discriminator — always ``"rename_parameter"``.
+        function: The owning function selector (address hex — server-safe).
+        parameter: The parameter selector — binary-derived → untrusted.
+        new_name: The current USER_DEFINED name read out — binary-derived → untrusted.
+    """
+
+    kind: Literal["rename_parameter"]
+    function: str
+    parameter: Untrusted[str]
+    new_name: Untrusted[str]
+
+
+class ExportedSetCommentEntry(_ExportEntry):
+    """Exported ``set_comment`` entry.
+
+    Attributes:
+        kind: Discriminator — always ``"set_comment"``.
+        address: The comment address (hex — server-safe).
+        comment_type: The closed comment slot — safe.
+        text: The current comment text read out — binary-derived → untrusted.
+    """
+
+    kind: Literal["set_comment"]
+    address: str
+    comment_type: str
+    text: Untrusted[str]
+
+
+class ExportedSetFunctionSignatureEntry(_ExportEntry):
+    """Exported ``set_function_signature`` entry — the structured prototype (resolved TypeRefs).
+
+    Attributes:
+        kind: Discriminator — always ``"set_function_signature"``.
+        function: The function selector (address hex — server-safe).
+        return_type: The return type as a :class:`TypeRef` (type names are an allow-listed
+            structured reference — safe to round-trip bare).
+        parameters: The ordered parameter list.
+        calling_convention: The closed-vocab convention, or ``None`` — safe.
+    """
+
+    kind: Literal["set_function_signature"]
+    function: str
+    return_type: TypeRef
+    parameters: list[ParamSpec] = Field(default_factory=list)
+    calling_convention: str | None = None
+
+
+class ExportedApplyDataTypeEntry(_ExportEntry):
+    """Exported ``apply_data_type`` entry.
+
+    Attributes:
+        kind: Discriminator — always ``"apply_data_type"``.
+        address: The address (hex — server-safe).
+        type: The applied type as a :class:`TypeRef` — safe structured reference.
+        clear_existing: Whether conflicting data is cleared first — safe.
+    """
+
+    kind: Literal["apply_data_type"]
+    address: str
+    type: TypeRef
+    clear_existing: bool = False
+
+
+class ExportedDefineStructEntry(_ExportEntry):
+    """Exported ``define_struct`` entry (the user-defined composite name + fields are structured).
+
+    Attributes:
+        kind: Discriminator — always ``"define_struct"``.
+        name: The composite's name — a USER_DEFINED identifier (allow-listed) → safe to round-trip.
+        fields: The member list.
+        packed: Whether the struct is packed — safe.
+    """
+
+    kind: Literal["define_struct"]
+    name: str
+    fields: list[FieldSpec]
+    packed: bool = False
+
+
+class ExportedDefineUnionEntry(_ExportEntry):
+    """Exported ``define_union`` entry.
+
+    Attributes:
+        kind: Discriminator — always ``"define_union"``.
+        name: The composite's name — a USER_DEFINED identifier (allow-listed) → safe.
+        fields: The member list.
+    """
+
+    kind: Literal["define_union"]
+    name: str
+    fields: list[FieldSpec]
+
+
+#: The discriminated union of EXPORTED entries (output view). Same dependency order as ``Entry``.
+ExportedEntry = (
+    ExportedDefineStructEntry
+    | ExportedDefineUnionEntry
+    | ExportedSetFunctionSignatureEntry
+    | ExportedApplyDataTypeEntry
+    | ExportedRenameFunctionEntry
+    | ExportedRenameSymbolEntry
+    | ExportedRenameLocalVariableEntry
+    | ExportedRenameParameterEntry
+    | ExportedSetCommentEntry
+)
+
+
+class ExportedBinaryRef(_Out):
+    """The applicability binding on an exported document (server-authoritative — safe scalars).
+
+    Attributes:
+        sha256: The session's program hash — a server-computed digest of input, safe.
+        name: Optional advisory original name — binary-derived → untrusted (``None`` if unknown).
+        size: Optional advisory original byte size — server scalar, safe.
+    """
+
+    sha256: str
+    name: Untrusted[str] | None = None
+    size: int | None = None
+
+
+class ExportedAnnotationDocument(_Out):
+    """The exported (read-out) annotation document — binary-derived strings untrusted-wrapped.
+
+    The output counterpart of :class:`AnnotationDocument`: same versioned, hash-bound, dependency-
+    ordered shape, but the binary-derived value fields are ``Untrusted``-wrapped (ADR-005). The
+    client persists this inert artifact and extracts ``.value`` from each wrapper to rebuild a bare
+    import document for round-trip. The server persists nothing (D2).
+
+    Attributes:
+        schema_version: Document format version (always :data:`ANNOTATION_SCHEMA_VERSION`) — safe.
+        binary: The applicability binding (server-authoritative hash + advisory provenance).
+        entries: The ordered exported entries.
+    """
+
+    schema_version: int
+    binary: ExportedBinaryRef
+    entries: list[ExportedEntry]
+
+
+class SessionExportAnnotationsIn(_SessionScopedIn):
+    """Arguments for ``session_export_annotations`` — read out the session's annotation document.
+
+    Read-only + owner-scoped (ADR-018): no write consent; only the caller's own session. Bounded:
+    over ``_MAX_ENTRIES`` USER_DEFINED annotations → ``limit-exceeded`` (no silent truncation).
+    """
+
+
+class SessionExportAnnotationsOut(_Out):
+    """Result of ``session_export_annotations`` (ADR-018) — the document for the client to persist.
+
+    The binary-derived strings inside ``document`` (entry value fields the worker read out) are
+    untrusted-wrapped at the ADR-005 chokepoint as the document is assembled; ``document`` itself is
+    the inert, client-owned artifact (the server persists nothing — D2).
+
+    Attributes:
+        document: The versioned, hash-bound exported annotation document (untrusted-wrapped).
+    """
+
+    document: ExportedAnnotationDocument
+
+
+class SessionImportAnnotationsIn(_SessionScopedIn):
+    """Arguments for ``session_import_annotations`` — replay a document into a same-binary session.
+
+    The new trust boundary, TB8 (ADR-018): ``document`` is FULLY UNTRUSTED (it may have been
+    tampered offline). The handler schema-validates it, verifies ``document.binary.sha256`` against
+    the session's program hash, gates on write consent (+ ``allow_structural`` for structural
+    entries), and re-validates + replays each entry via the existing gated write path.
+
+    Attributes:
+        document: The client-supplied annotation document to replay (untrusted).
+    """
+
+    document: AnnotationDocument
+
+
+class ImportedEntryOutcome(_Out):
+    """The per-entry outcome of an import replay — applied or rejected, never echoing the value.
+
+    Attributes:
+        index: Zero-based position of the entry in the document — safe.
+        kind: The entry's ``kind`` discriminator (closed vocabulary) — safe.
+        applied: Whether the entry's write committed — safe.
+        reason: A short, safe, value-free reason when ``applied`` is ``False`` (e.g.
+            ``"validation"``, ``"not-found"``, ``"analysis-failed"``) — never the rejected value
+            (it could carry an injection payload — std-owasp-llm LLM01). ``None`` on success.
+    """
+
+    index: int
+    kind: str
+    applied: bool
+    reason: str | None = None
+
+
+class SessionImportAnnotationsOut(_Out):
+    """Result of ``session_import_annotations`` (ADR-018) — a per-entry outcome report.
+
+    Best-effort per entry (partial application is acceptable — it matches the per-write transaction
+    model); the report tells the client exactly what applied. Counts + per-entry outcomes only —
+    never the imported values (master §5 redaction).
+
+    Attributes:
+        session_id: The target session's opaque id — safe.
+        total: Number of entries in the document — safe.
+        applied: Number of entries whose write committed — safe.
+        rejected: Number of entries rejected (``total - applied``) — safe.
+        outcomes: The ordered per-entry outcome list (applied/rejected + safe reason).
+    """
+
+    session_id: str
+    total: int
+    applied: int
+    rejected: int
+    outcomes: list[ImportedEntryOutcome]

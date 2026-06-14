@@ -86,14 +86,21 @@ string**; an unresolvable ref fails closed; same gate + transaction semantics), 
 **composite-creation primitives** `define_struct` and `define_union` (ADR-015 Phase C — the empty
 composite is pre-registered in the DTM at the start of the transaction so self-`named` pointers
 resolve; a by-value self-embed is rejected, a name collision is fail-closed rejected, and the
-1 MiB size cap + transactional rollback bound the rest; structured `FieldSpec`s, no C parsed), plus a
-`ping`/`shutdown` control pair.
+1 MiB size cap + transactional rollback bound the rest; structured `FieldSpec`s, no C parsed), the
+v1.2 **annotation-export read-out primitive** `export_annotations` (ADR-018 — read-only; enumerates
+the program's `USER_DEFINED` annotations only, dependency-ordered + bounded, returns an inert plain
+document; over the entry cap → `limit-exceeded`), plus a `ping`/`shutdown` control pair.
 (Session create/status/close **and the write-consent grant/revoke** `session_enable_writes`/
 `session_disable_writes` are **server-side** lifecycle, not worker RPC methods. The derived
 tools compute server-side with **no dedicated worker method**: `callees`/`callers`/`analysis_order`/
 `function_context` from `call_graph`+`referenced_strings`; the Tier-2 `cyclomatic_complexity` from
 `function_cfg`, `ioc_scan` from `list_strings`, `crypto_constant_scan` from `search_bytes`,
-`call_graph_metrics` from `call_graph`, and `program_summary` by aggregation — all per ADR-001.)
+`call_graph_metrics` from `call_graph`, and `program_summary` by aggregation — all per ADR-001.
+**Annotation import (`session_import_annotations`, ADR-018 TB8) adds NO worker method** — it is
+**server-side orchestration** (the registry) that schema-validates + hash-binds + consent-gates the
+client document, then **replays each entry through the existing write RPCs above** (each its own
+transaction). No `import_annotations` RPC exists; import's blast radius equals the existing gated
+writes', no more.)
 
 ## 5. Error model (worker → server)
 

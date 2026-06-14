@@ -564,6 +564,39 @@ class FakeGhidraPort:
         """Reserved composite-creation stub (ADR-015)."""
         raise NotImplementedError("RESERVED (v1.1 ADR-015): define_union")
 
+    def export_annotations(
+        self, sid: str, a: s.SessionExportAnnotationsIn
+    ) -> s.SessionExportAnnotationsOut:
+        """Return a deterministic exported annotation document (untrusted-wrapped — ADR-018).
+
+        A small, dependency-ordered document (one struct, one signature referencing it, one
+        function rename, one comment) with binary-derived strings wrapped, mirroring the real
+        adapter contract. The server overlays the authoritative ``binary.sha256``.
+        """
+        self._maybe_fail()
+        return s.SessionExportAnnotationsOut(
+            document=s.ExportedAnnotationDocument(
+                schema_version=s.ANNOTATION_SCHEMA_VERSION,
+                binary=s.ExportedBinaryRef(sha256="a" * 64, name=_u("sample.bin"), size=4096),
+                entries=[
+                    s.ExportedDefineStructEntry(
+                        kind="define_struct",
+                        name="cfg_t",
+                        fields=[s.FieldSpec(name="flags", type=s.TypeRef(base="int"))],
+                    ),
+                    s.ExportedRenameFunctionEntry(
+                        kind="rename_function", function="0x00401000", new_name=_u("parse_config")
+                    ),
+                    s.ExportedSetCommentEntry(
+                        kind="set_comment",
+                        address="0x00401000",
+                        comment_type="PLATE",
+                        text=_u("entry point"),
+                    ),
+                ],
+            )
+        )
+
 
 @pytest.fixture
 def fake_port() -> FakeGhidraPort:

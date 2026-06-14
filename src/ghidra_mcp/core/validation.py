@@ -22,8 +22,10 @@ from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 
 if TYPE_CHECKING:  # avoid an import cycle at runtime (schemas imports nothing from this module).
     from ghidra_mcp.tools.schemas import (
+        AnnotationDocument,
         DefineStructIn,
         DefineUnionIn,
+        Entry,
         FieldSpec,
         SetFunctionSignatureIn,
         TypeRef,
@@ -42,6 +44,15 @@ MAX_READ_BYTES = 1_048_576
 
 MAX_RESULT_COUNT = 10_000
 """Maximum number of items any list/search tool may return in one call."""
+
+# --- annotation-persistence bounds (ADR-018 §schema; mirror schemas.ANNOTATION_SCHEMA_VERSION /
+# schemas._MAX_ENTRIES). The imported document is fully untrusted: only this version is supported
+# (unknown → fail closed) and the entry count is bounded (DoS — CWE-400). ---
+ANNOTATION_SCHEMA_VERSION = 1
+"""The single supported annotation-document schema version (an unknown version fails closed)."""
+
+MAX_ANNOTATION_ENTRIES = 50_000
+"""Maximum entries accepted in one imported annotation document (DoS guard — CWE-400)."""
 
 # Absolute ceiling for any address we accept (64-bit address space). Guards CWE-190 on offsets and
 # keeps parsed addresses representable. Inclusive upper bound.
@@ -645,3 +656,124 @@ def validate_composite(payload: DefineStructIn | DefineUnionIn, *, kind: str) ->
         # A union overlays all members at offset 0 — an offset is a struct-only field (foot-gun).
         if kind == "union" and field.offset is not None:
             raise _validation_error("a union member may not carry an offset")
+
+
+def validate_entry(entry: Entry) -> None:
+    """Re-validate ONE annotation-document entry through the EXISTING live validators (ADR-018 §4).
+
+    The imported document is fully untrusted (it may have been tampered offline), so every entry is
+    re-validated exactly as the live write tool validates its arguments — this dispatch adds **no
+    new write-validation logic**, it routes each entry's payload to the same
+    :func:`validate_write_name` / :func:`validate_comment_text` / :func:`validate_target_ref` /
+    :func:`validate_type_ref` / :func:`validate_signature` / :func:`validate_composite`. A
+    structurally-impossible ``kind`` is unreachable (the discriminated union rejects it at
+    construction) but is fail-closed here too (defense in depth).
+
+    The signature/composite entries are projected into the existing ``*In`` models so the SAME
+    end-to-end validator runs (no re-implementation): the entry mirrors that tool's payload, so the
+    projection is a field-for-field copy (the schema model validators — exactly-one-leaf, no
+    self-embed, union-no-offset — already ran when the document was constructed).
+
+    Args:
+        entry: One typed :class:`Entry` variant from a validated document.
+
+    Raises:
+        GhidraMcpError: ``VALIDATION``/``LIMIT_EXCEEDED`` on any name/text/type/shape/bounds
+            violation (the same envelopes the live write tools raise). The detail names the
+            condition, never the (untrusted) value.
+    """
+    from ghidra_mcp.tools.schemas import (
+        ApplyDataTypeEntry,
+        DefineStructEntry,
+        DefineStructIn,
+        DefineUnionEntry,
+        DefineUnionIn,
+        RenameFunctionEntry,
+        RenameLocalVariableEntry,
+        RenameParameterEntry,
+        RenameSymbolEntry,
+        SetCommentEntry,
+        SetFunctionSignatureEntry,
+        SetFunctionSignatureIn,
+    )
+
+    if isinstance(entry, RenameFunctionEntry):
+        validate_name(entry.function)  # selector (read-path baseline)
+        validate_write_name(entry.new_name)  # persisted name → strict allow-list
+    elif isinstance(entry, RenameSymbolEntry):
+        validate_name(entry.identifier)
+        validate_write_name(entry.new_name)
+    elif isinstance(entry, RenameLocalVariableEntry):
+        validate_name(entry.function)
+        validate_target_ref(entry.variable)  # selector (bounded, control-free)
+        validate_write_name(entry.new_name)
+    elif isinstance(entry, RenameParameterEntry):
+        validate_name(entry.function)
+        validate_target_ref(entry.parameter)
+        validate_write_name(entry.new_name)
+    elif isinstance(entry, SetCommentEntry):
+        parse_address(entry.address)
+        if entry.text is not None:  # a None-clear needs no text normalization (matches set_comment)
+            validate_comment_text(entry.text)
+    elif isinstance(entry, SetFunctionSignatureEntry):
+        validate_signature(
+            SetFunctionSignatureIn(
+                session_id="x",
+                function=entry.function,
+                return_type=entry.return_type,
+                parameters=entry.parameters,
+                calling_convention=entry.calling_convention,
+            )
+        )
+    elif isinstance(entry, ApplyDataTypeEntry):
+        parse_address(entry.address)
+        validate_type_ref(entry.type)
+    elif isinstance(entry, DefineStructEntry):
+        validate_composite(
+            DefineStructIn(
+                session_id="x", name=entry.name, fields=entry.fields, packed=entry.packed
+            ),
+            kind="struct",
+        )
+    elif isinstance(entry, DefineUnionEntry):
+        validate_composite(
+            DefineUnionIn(session_id="x", name=entry.name, fields=entry.fields),
+            kind="union",
+        )
+    else:  # pragma: no cover - unreachable: the discriminated union admits no other kind
+        raise _validation_error("unknown annotation entry kind")
+
+
+def validate_annotation_document(document: AnnotationDocument) -> None:
+    """Validate an imported annotation document end-to-end (ADR-018 §import 1) — fail closed.
+
+    The first and load-bearing gate of the TB8 import path: the document is **fully untrusted**.
+    Enforces, fail-closed and value-free: the ``schema_version`` is the single supported version
+    (an unknown version is rejected — forward-compat is opt-in, never silent); the entry count is
+    bounded by :data:`MAX_ANNOTATION_ENTRIES` (DoS — CWE-400); the ``binary.sha256`` binding is a
+    well-formed hex digest (the hash-binding *comparison* against the session's program hash is the
+    handler's separate step — this only asserts the binding is present + well-formed); and **every
+    entry** is re-validated through :func:`validate_entry` (the existing live validators — no new
+    write-validation logic). Pydantic has already applied the per-field bounds + discriminated-union
+    selection + per-variant model validators on construction; this re-asserts the document-level
+    invariants and runs the per-entry allow-lists pydantic cannot express.
+
+    Args:
+        document: The :class:`AnnotationDocument` to validate (already pydantic-constructed).
+
+    Raises:
+        GhidraMcpError: ``VALIDATION`` on an unsupported version / malformed hash / bad entry;
+            ``LIMIT_EXCEEDED`` when the entry count exceeds the maximum. The detail names the
+            condition, never an (untrusted) value.
+    """
+    if document.schema_version != ANNOTATION_SCHEMA_VERSION:
+        raise _validation_error("unsupported annotation document schema version")
+    # Defense in depth: the schema pattern already constrains the hash, but re-assert presence +
+    # well-formedness here (the binding is security-critical and must never be trusted blindly).
+    sha = document.binary.sha256
+    if len(sha) != 64 or any(ch not in _HEX_DIGITS for ch in sha):
+        raise _validation_error("binary hash binding is missing or malformed")
+    if len(document.entries) > MAX_ANNOTATION_ENTRIES:
+        raise _limit_error("annotation entry count exceeds the maximum")
+    for entry in document.entries:
+        validate_entry(entry)

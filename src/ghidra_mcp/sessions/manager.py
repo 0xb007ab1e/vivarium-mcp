@@ -472,6 +472,33 @@ class SessionManager:
                 extra={"event": "worker_started", "session_id": session_id},
             )
 
+    def record_binary_hash(
+        self, session_id: str, sha256: str, *, caller: str = _LOCAL_PRINCIPAL_ID
+    ) -> None:
+        """Persist the worker-computed program hash on a caller-owned session (ADR-018 binding).
+
+        Called from the import handler after the worker reports the digest of the bytes it actually
+        opened (ADR-001: the SERVER never parses the binary — the hash is the worker's computed
+        digest, overlaid here). It is the session's authoritative program identity, used to verify
+        an imported annotation document's ``binary.sha256`` binding (TB8): a document minted for a
+        different binary is rejected because its hash will not match this. Owner-scoped via the
+        shared chokepoint (a foreign caller cannot stamp another principal's session — ADR-017).
+
+        Idempotent for a stable binary (re-import of the same bytes records the same hash). Set once
+        per imported binary; never client-supplied.
+
+        Args:
+            session_id: The opaque id of a live, caller-owned session.
+            sha256: The worker-computed hex SHA-256 of the imported binary.
+            caller: The authenticated, server-derived calling-principal id (ADR-017).
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` if unknown/expired/evicted/foreign (BOLA-safe).
+        """
+        with self._lock:
+            sess = self._get_live_locked(session_id, caller=caller)
+            sess.binary_sha256 = sha256
+
     def evict(self, session_id: str, *, reason: str, caller: str | None = None) -> bool:
         """Evict a session: kill its worker and verified-wipe its store. Idempotent.
 
