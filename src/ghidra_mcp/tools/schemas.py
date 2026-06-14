@@ -1567,3 +1567,166 @@ class ApplyDataTypeResult(_Out):
     type_name: Untrusted[str]
     size: int
     applied: bool
+
+
+# --- composite-type creation (v1.1 — ADR-015 Phase C; GATED by allow_structural) ---------------
+#
+# Reuses the merged Phase-B TypeRef (above) — a FieldSpec.type is a flat TypeRef (NO nested define —
+# ADR-015 §1). NO free-form C: the worker assembles StructureDataType/UnionDataType from already-
+# resolved DataType handles via the existing _gh_resolve_type_ref. The asymmetry (ADR-005/ADR-012
+# §6) is unusual for a write: EVERY result field is SAFE — name/kind/size/field_count/applied are
+# all server- or worker-controlled (the name is the one WE set + validated; size a worker scalar);
+# there is NO echoed binary-derived field (we do not return a Ghidra-rendered declaration). A future
+# field echoing Ghidra's rendered layout MUST be Untrusted[...] (ADR-015 §7).
+_MAX_FIELDS = 256  # a composite with >256 members is pathological (CWE-400)
+_MAX_COMPOSITE_SIZE = 1_048_576  # 1 MiB cap on the assembled composite's total computed size
+
+
+class FieldSpec(_In):
+    """One member of a new composite type (ADR-015 §2.1).
+
+    ``name`` is PERSISTED into the program DB and re-served by the read tools, so it is held to the
+    strict ``validate_write_name`` identifier allow-list server-side (stored-injection defense —
+    identical profile to a Phase-B ``ParamSpec.name``). ``type`` is the EXISTING Phase-B
+    :class:`TypeRef` (resolved by ``_gh_resolve_type_ref``, never parsed). ``offset`` is struct-only
+    (a union overlays all members at offset 0 — the union schema model-validates it is ``None``).
+
+    Attributes:
+        name: The member name — validated as a persisted write-name server-side.
+        type: The member's type as a resolved :class:`TypeRef`.
+        offset: Struct only — an explicit byte offset (``0..=_MAX_COMPOSITE_SIZE - 1``), or ``None``
+            to append the member sequentially. Meaningless (and rejected) for a union.
+    """
+
+    name: str = Field(min_length=1, max_length=_MAX_NAME)
+    type: TypeRef
+    offset: int | None = Field(default=None, ge=0, lt=_MAX_COMPOSITE_SIZE)
+
+
+def _reject_self_embed(name: str, fields: list[FieldSpec]) -> None:
+    """Reject a by-value embed of the composite's own ``name`` (the recursion crux — ADR-015 §3.2).
+
+    Because the empty composite is pre-registered in the ``DataTypeManager`` at the start of the
+    transaction (so a self-``named`` *pointer* resolves and true self-referential types work), a
+    by-value self-embed (``named == name`` with NO pointer and NO array) would also resolve into an
+    infinite-size type — so it must be ACTIVELY rejected at the boundary, not left to fail
+    ``not-found`` (ADR-015 §3). A pointer-to-self (``pointer_levels >= 1``) is fixed-size and
+    ALLOWED; an array-of-self is a by-value embed and is rejected.
+
+    Args:
+        name: The composite's own type name.
+        fields: The member list to scan.
+
+    Raises:
+        ValueError: When a member embeds the composite by value (the server boundary maps the
+            pydantic ``ValidationError`` to a ``VALIDATION`` envelope — fail closed). The pure
+            :func:`ghidra_mcp.core.validation.validate_composite` re-asserts this defensively too.
+    """
+    for field in fields:
+        if field.type.named == name and field.type.pointer_levels == 0:
+            raise ValueError("a composite member may not embed the composite by value")
+
+
+class DefineStructIn(_SessionScopedIn):
+    """Arguments for ``define_struct`` — create a NEW struct from a field list (ADR-015 §2.2).
+
+    Gated by ``session_enable_writes{allow_structural: true}`` + ``require_write_consent(
+    structural=True)``. The empty struct is pre-registered in the ``DataTypeManager`` at the start
+    of the one transaction, fields are resolved + added (size-checked), then the type is finalized —
+    ANY failure rolls back and removes the pre-registered type (no partial/orphan — ADR-015 §3). A
+    name collision is a fail-closed REJECT (no silent replace — §6). NO free-form C is parsed.
+
+    Attributes:
+        name: The new type's name — validated as a persisted write-name; collision-checked at the
+            worker before assembly (fail-closed REJECT).
+        fields: The ordered member list — non-empty, bounded by ``_MAX_FIELDS`` (DoS — CWE-400); no
+            duplicate member names; no by-value self-embed.
+        packed: ``True`` packs the struct (no alignment padding); ``False`` uses default alignment.
+    """
+
+    name: str = Field(min_length=1, max_length=_MAX_NAME)
+    fields: list[FieldSpec] = Field(min_length=1, max_length=_MAX_FIELDS)
+    packed: bool = Field(default=False)
+
+    @model_validator(mode="after")
+    def _no_self_embed(self) -> DefineStructIn:
+        """Reject a by-value embed of this struct's own name (ADR-015 §3.2).
+
+        Returns:
+            ``self`` when no member embeds the struct by value.
+
+        Raises:
+            ValueError: When a member embeds the struct by value (mapped to ``VALIDATION``).
+        """
+        _reject_self_embed(self.name, self.fields)
+        return self
+
+
+class DefineStructResult(_Out):
+    """Result of ``define_struct`` (ADR-015 §7) — all fields server/worker-controlled, SAFE.
+
+    Attributes:
+        name: The struct's name — the one WE set + server-validated — SAFE.
+        kind: Always ``"struct"`` — SAFE.
+        size: The assembled total size in bytes — worker-computed scalar, SAFE.
+        field_count: Number of members added — SAFE.
+        applied: Whether the type was created — server/worker-controlled, SAFE.
+    """
+
+    name: str
+    kind: str
+    size: int
+    field_count: int
+    applied: bool
+
+
+class DefineUnionIn(_SessionScopedIn):
+    """Arguments for ``define_union`` — create a NEW union from a field list (ADR-015 §2.2).
+
+    Same gate + recursion model + name-collision REJECT as :class:`DefineStructIn`. A union overlays
+    all members at offset 0, so ``offset``/``packed`` are N/A — each member's ``offset`` MUST be
+    ``None`` (model-validated). NO free-form C is parsed.
+
+    Attributes:
+        name: The new type's name — validated as a persisted write-name; collision-checked.
+        fields: The member list — non-empty, bounded by ``_MAX_FIELDS``; no duplicate names; no
+            by-value self-embed; each member's ``offset`` MUST be ``None``.
+    """
+
+    name: str = Field(min_length=1, max_length=_MAX_NAME)
+    fields: list[FieldSpec] = Field(min_length=1, max_length=_MAX_FIELDS)
+
+    @model_validator(mode="after")
+    def _no_self_embed_no_offset(self) -> DefineUnionIn:
+        """Reject a by-value self-embed and any per-member ``offset`` (ADR-015 §3.2/§2.2).
+
+        Returns:
+            ``self`` when the union shape is valid.
+
+        Raises:
+            ValueError: When a member embeds the union by value or carries a non-``None`` ``offset``
+                (a struct-only field — mapped to ``VALIDATION`` at the server boundary).
+        """
+        _reject_self_embed(self.name, self.fields)
+        for field in self.fields:
+            if field.offset is not None:
+                raise ValueError("a union member may not carry an offset")
+        return self
+
+
+class DefineUnionResult(_Out):
+    """Result of ``define_union`` (ADR-015 §7) — all fields SAFE (no binary-derived echo).
+
+    Attributes:
+        name: The union's name — the one WE set + server-validated — SAFE.
+        kind: Always ``"union"`` — SAFE.
+        size: The assembled size in bytes (max member size) — worker scalar, SAFE.
+        field_count: Number of members added — SAFE.
+        applied: Whether the type was created — SAFE.
+    """
+
+    name: str
+    kind: str
+    size: int
+    field_count: int
+    applied: bool

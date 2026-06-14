@@ -1,7 +1,8 @@
 """Tier-1 tool registry — the explicit allow-list of exposed tools (WS1).
 
 There is no dynamic tool discovery: the catalog is a fixed, reviewed allow-list (PLAN §2). This
-module binds each of the 27 catalog tools to a handler and registers them with the FastMCP server.
+module binds each catalog tool in :data:`TIER1_TOOL_NAMES` to a handler and registers them with the
+FastMCP server (the count is asserted in the schema/registry tests, so it stays the single source).
 
 Each handler is a thin **imperative shell** step (topic-architecture-patterns) that:
 
@@ -99,6 +100,9 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     # structural type-aware writes (v1.1 — ADR-014 Phase B; additionally GATED by allow_structural)
     "set_function_signature",
     "apply_data_type",
+    # composite-type creation (v1.1 — ADR-015 Phase C; additionally GATED by allow_structural)
+    "define_struct",
+    "define_union",
 )
 
 
@@ -771,6 +775,54 @@ def _handle_apply_data_type(ctx: ToolContext, args: s.ApplyDataTypeIn) -> s.Appl
     return result
 
 
+# --- composite-type creation (v1.1 — ADR-015 Phase C). Same gate as Phase B (the allow_structural
+# opt-in) PLUS structured-input validation: a composite is validated as a bounded FieldSpec list of
+# resolved TypeRefs BEFORE the worker — NO C string is parsed (validate_composite; ADR-015 §2/§4).
+# The recursion crux (self-embed) is rejected at the boundary; the worker pre-registers the empty
+# type inside one transaction, name-collision-REJECTs, size-checks, and rolls back any failure.
+def _handle_define_struct(ctx: ToolContext, args: s.DefineStructIn) -> s.DefineStructResult:
+    """Create a new struct from a structured field list (structural; gated — ADR-015)."""
+    ctx.sessions.require_write_consent(args.session_id, structural=True)
+    v.validate_composite(args, kind="struct")  # name + bounded fields + resolved TypeRefs + no self
+    _log.info(
+        "tool.define_struct.intent",
+        extra={
+            "tool": "define_struct",
+            "session": args.session_id,
+            "name_len": len(args.name),
+            "field_count": len(args.fields),
+            "packed": args.packed,
+        },
+    )
+    result = ctx.port.define_struct(args.session_id, args)
+    _log.info(
+        "tool.define_struct.outcome",
+        extra={"tool": "define_struct", "session": args.session_id, "applied": result.applied},
+    )
+    return result
+
+
+def _handle_define_union(ctx: ToolContext, args: s.DefineUnionIn) -> s.DefineUnionResult:
+    """Create a new union from a structured field list (structural; gated — ADR-015)."""
+    ctx.sessions.require_write_consent(args.session_id, structural=True)
+    v.validate_composite(args, kind="union")  # name + bounded fields + resolved TypeRefs + no self
+    _log.info(
+        "tool.define_union.intent",
+        extra={
+            "tool": "define_union",
+            "session": args.session_id,
+            "name_len": len(args.name),
+            "field_count": len(args.fields),
+        },
+    )
+    result = ctx.port.define_union(args.session_id, args)
+    _log.info(
+        "tool.define_union.outcome",
+        extra={"tool": "define_union", "session": args.session_id, "applied": result.applied},
+    )
+    return result
+
+
 # Map of tool name → (handler, input-schema). The input schema is the handler's single argument
 # type, from which FastMCP derives the tool's JSON schema. The output schema is the return type.
 _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
@@ -822,6 +874,9 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     # structural type-aware writes (v1.1 — ADR-014 Phase B; gated additionally by allow_structural)
     "set_function_signature": (_handle_set_function_signature, s.SetFunctionSignatureIn),
     "apply_data_type": (_handle_apply_data_type, s.ApplyDataTypeIn),
+    # composite-type creation (v1.1 — ADR-015 Phase C; gated additionally by allow_structural)
+    "define_struct": (_handle_define_struct, s.DefineStructIn),
+    "define_union": (_handle_define_union, s.DefineUnionIn),
 }
 
 

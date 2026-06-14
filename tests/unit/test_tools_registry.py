@@ -334,13 +334,14 @@ def ctx() -> reg.ToolContext:
     )
 
 
-def test_catalog_is_exactly_45_unique_tools() -> None:
+def test_catalog_is_exactly_47_unique_tools() -> None:
     # 22 Tier-1 + 5 v1.1 semantic-naming (ADR-007) + 8 v1.1 Tier-2 metrics (ADR-008; READ-ONLY)
     # + 6 v1.1 mutation/write (ADR-012) + 2 v1.1 structural mutation (ADR-013 Phase A) + 2 v1.1
-    # structural type-aware mutation (ADR-014 Phase B) — the last 10 GATED by per-session
-    # write-consent (the structural 4 additionally by allow_structural).
-    assert len(reg.TIER1_TOOL_NAMES) == 45
-    assert len(set(reg.TIER1_TOOL_NAMES)) == 45
+    # structural type-aware mutation (ADR-014 Phase B) + 2 v1.1 composite-type creation (ADR-015
+    # Phase C) — the last 12 GATED by per-session write-consent (the structural 6 additionally by
+    # allow_structural).
+    assert len(reg.TIER1_TOOL_NAMES) == 47
+    assert len(set(reg.TIER1_TOOL_NAMES)) == 47
 
 
 def test_handler_table_matches_frozen_allow_list() -> None:

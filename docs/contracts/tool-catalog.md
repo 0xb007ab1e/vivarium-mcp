@@ -6,10 +6,10 @@
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **45** tools (asserted in tests) —
+- **Allow-list only:** the catalog is fixed; there are exactly **47** tools (asserted in tests) —
   22 Tier-1 read-only (v1) + 5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
-  reporting/metrics tools (ADR-008; all read-only) + **6 v1.1 mutation/write tools (ADR-012) + 4
-  v1.1 structural-write tools (ADR-013 Phase A + ADR-014 Phase B)** — the last 10 GATED by per-session write-consent
+  reporting/metrics tools (ADR-008; all read-only) + **6 v1.1 mutation/write tools (ADR-012) + 6
+  v1.1 structural-write tools (ADR-013 Phase A + ADR-014 Phase B + ADR-015 Phase C)** — the last 12 GATED by per-session write-consent
   (structural additionally by `allow_structural`).
 - **Session-scoped:** every tool except `session_create` takes an opaque `session_id`, authorized
   server-side (BOLA defense). Inputs are `frozen` and reject unknown fields (`extra="forbid"`).
@@ -136,28 +136,36 @@ identifier allow-list / `validate_comment_text` normalization — stored-injecti
 | `rename_parameter` | `RenameParameterIn{function, parameter, new_name}` | `StructuralRenameResult{address, function*, old_name*, new_name, applied}` | **structural**; name-only; gated by `allow_structural` |
 | `set_function_signature` | `SetFunctionSignatureIn{function, return_type: TypeRef, parameters: [ParamSpec], calling_convention?}` | `SetFunctionSignatureResult{address, function*, old_signature*, new_signature*, applied}` | **structural** (ADR-014 Phase B); structured input; gated by `allow_structural` |
 | `apply_data_type` | `ApplyDataTypeIn{address, type: TypeRef, clear_existing=false}` | `ApplyDataTypeResult{address, type_name*, size, applied}` | **structural** (ADR-014 Phase B); applies an EXISTING/resolvable type; gated by `allow_structural` |
+| `define_struct` | `DefineStructIn{name, fields: [FieldSpec], packed=false}` | `DefineStructResult{name, kind, size, field_count, applied}` | **structural** (ADR-015 Phase C); creates a NEW struct; gated by `allow_structural` |
+| `define_union` | `DefineUnionIn{name, fields: [FieldSpec]}` | `DefineUnionResult{name, kind, size, field_count, applied}` | **structural** (ADR-015 Phase C); creates a NEW union; gated by `allow_structural` |
 
 > `TypeRef` = `{base: BaseType|null, named: str|null, pointer_levels: 0..8, array_len: 1..65536|null}`
-> (exactly one of `base`/`named`); `ParamSpec` = `{name, type: TypeRef}`. A `TypeRef` is **resolved**
-> against the program's `DataTypeManager` (or the closed `base` vocab) — **never parsed from a C
-> string** (ADR-014 §2; the C-parser injection surface is eliminated by construction). Unresolvable /
-> out-of-vocab / out-of-bounds → fail closed.
+> (exactly one of `base`/`named`); `ParamSpec` = `{name, type: TypeRef}`; `FieldSpec` =
+> `{name, type: TypeRef, offset?}` (struct only; union members are all at offset 0). A `TypeRef` is
+> **resolved** against the program's `DataTypeManager` (or the closed `base` vocab) — **never parsed
+> from a C string** (ADR-014 §2; the C-parser injection surface is eliminated by construction).
+> Unresolvable / out-of-vocab / out-of-bounds → fail closed.
 >
 > **Structural writes** (`rename_local_variable`/`rename_parameter` — name-only, ADR-013 Phase A;
-> `set_function_signature`/`apply_data_type` — structured, ADR-014 Phase B) require, in addition to
-> write consent, the `allow_structural` opt-in (`session_enable_writes{allow_structural: true}` →
+> `set_function_signature`/`apply_data_type` — structured, ADR-014 Phase B; `define_struct`/
+> `define_union` — composite *creation*, ADR-015 Phase C) require, in addition to write consent, the
+> `allow_structural` opt-in (`session_enable_writes{allow_structural: true}` →
 > `require_write_consent(structural=True)`). Echoed `function`/`old_*`/`type_name` are `Untrusted`
-> (binary-derived); the names/types we set are bare (server-validated). See
-> `docs/adr/ADR-012-mutation-tools.md`, `docs/adr/ADR-013-structural-mutation.md`,
-> `docs/adr/ADR-014-structural-mutation-phase-b.md`.
+> (binary-derived); the names/types we set + `define_*` results are bare (server/worker-controlled).
+> For `define_struct`/`define_union` the empty composite is **pre-registered** so self-`named`
+> pointers resolve (true self-referential types); a **by-value self-embed (incl. array-of-self) is
+> rejected**, name collisions are fail-closed REJECTED, and a 1 MiB size cap + transactional rollback
+> bound the rest (ADR-015 §3). See `docs/adr/ADR-012-mutation-tools.md`,
+> `docs/adr/ADR-013-structural-mutation.md`, `docs/adr/ADR-014-structural-mutation-phase-b.md`,
+> `docs/adr/ADR-015-composite-type-creation.md`.
 
 > `*` marks an `Untrusted[...]`-wrapped (binary-derived) field.
 
 ## Deferred (NOT yet built — gated, reviewed catalog additions)
-**Phase C structural mutation** — `define_data_type`/`create_struct` (creating NEW composite types
-from field specs, the widest re-render surface; ADR-014 defers it) — and `runScript`/arbitrary script
-execution remain deferred, each a separate, separately-threat-modeled increment (`runScript` is
-permanently out of scope, PLAN §2). Adding any deferred tool is a reviewed, gated change to this
-allow-list (ADR-006 extensibility seam). Phase A renames + Phase B signature/type-apply
-(`set_function_signature`/`apply_data_type`, over resolvable types) shipped — see the Mutation
-section above.
+**Nested-define / multi-type batches** (defining several interdependent composites in one call — which
+would require a real by-value cycle detector, ADR-015 §3) and `runScript`/arbitrary script execution
+remain deferred, each a separate, separately-threat-modeled increment (`runScript` is permanently out
+of scope, PLAN §2). Adding any deferred tool is a reviewed, gated change to this allow-list (ADR-006
+extensibility seam). The full structural mutation arc — Phase A renames, Phase B signature/type-apply,
+Phase C composite *creation* (`define_struct`/`define_union`) — has shipped; see the Mutation section
+above.

@@ -533,10 +533,12 @@ surface ADR-013 §2 named stays **eliminated by construction** — a `FieldSpec.
 Phase-B `TypeRef` (a flat reference, no nested define — ADR-015 §1), resolved by the existing
 `_gh_resolve_type_ref`; `CParser`/`DataTypeParser` are never instantiated on a client value. The two
 genuinely-new concerns are **(recursion)** a self-referential / cyclic definition (embed-self or
-A↔B) — designed out because the type is **not yet in the `DataTypeManager`** at field-resolution
-time (a self-*embed* fails-closed `not-found`; pointer-to-self is fixed-size and allowed, modeled as
-an opaque `void*` in v1), reinforced by a boundary self-embed check + a `_MAX_COMPOSITE_SIZE`
-total-size cap; and **(integrity)** a **name collision** that, under a replace/keep conflict handler,
+A↔B) — bounded by the ratified pre-registration model: the empty composite is **pre-registered in
+the `DataTypeManager`** so a self-`named` *pointer* resolves (true self-referential structs work). A
+by-value self-embed (incl. an array-of-self) is therefore an **explicit control** — rejected by the
+boundary self-embed check (`validate_composite` → `VALIDATION`) and re-asserted defensively at the
+worker (`_iter_composite_members`) — with the `_MAX_COMPOSITE_SIZE` total-size cap + transactional
+rollback as backstops (any failure removes the pre-registered type, so no partial/orphan type survives); and **(integrity)** a **name collision** that, under a replace/keep conflict handler,
 would silently overwrite or rename an in-use type — rejected fail-closed (no silent
 replace/poison/wide-re-render). The wide re-render of ADR-013 §2c is **decoupled**: a new type
 re-renders **nothing** until a *subsequent* Phase-B `apply_data_type` references it (already
@@ -546,11 +548,11 @@ threat-modeled). Composite *creation* is therefore the smaller surface once sepa
 | STRIDE | Threat (structural Phase C) | L×I | Mitigation (control · module) |
 |--------|------------------------------|-----|-------------------------------|
 | **E** | **Type-universe mutation without intent / escalation beyond the apply set** — the LLM autonomously creates a new struct/union | **H×H=Critical** | **same two-level default-deny** as Phase A/B: `session_enable_writes{allow_structural:true}` + each handler calls `require_write_consent(structural=True)` (the existing chokepoint — `manager.py:301-331`, **no new gate**); fixed allow-list (only `define_struct`/`define_union` in Phase C; nested-define + multi-type batches deferred; `runScript` forbidden); `session_undo` reverts the created type in one step (ADR-015 §1/§4) |
-| **T** | **Recursive / self-referential definition** — a struct that embeds itself, or a cycle of structs (A embeds B embeds A), → infinite size / stack blow-up in assembly | M×M=**Med** | **fail-closed by construction**: the type being defined is **not yet in the `DataTypeManager`** at field-resolution → a self-*embed* `named` resolves `not-found` (`_jvm_bridge.py:1677-1682`; resolution is read-only, BEFORE `startTransaction` → no partial type); a cross-type embed-cycle is **unconstructable** under one-composite-per-call/B-first (ADR-015 §1/§3); reinforced by a **boundary self-embed check** (`validate_composite`) + the `_MAX_COMPOSITE_SIZE` total-size cap; **pointer-to-self is fixed-size and allowed** (opaque `void*` in v1). No nested define → no recursive descent to bomb (abuse-cases 41/42/43) |
+| **T** | **Recursive / self-referential definition** — a struct that embeds itself, or a cycle of structs (A embeds B embeds A), → infinite size / stack blow-up in assembly | M×M=**Med** | **fail-closed by construction** (pre-registration model, ADR-015 §3): the empty composite IS pre-registered before field resolution so a self-`named` *pointer* resolves (true self-referential structs work) — therefore a by-value self-embed is an **explicit control**: rejected by the **boundary self-embed check** (`validate_composite` → `VALIDATION`, incl. array-of-self) and **re-asserted at the worker** (`_iter_composite_members` rejects a `pointer_levels == 0` self-`named` member → rolled-back `analysis-failed`); a cross-type embed-cycle is **unconstructable** under one-composite-per-call/B-first (ADR-015 §1/§3); the `_MAX_COMPOSITE_SIZE` total-size cap + transactional rollback are the backstops (a failure removes the pre-registered type → no partial/orphan type). **Pointer-to-self is allowed and fixed-size.** No nested define → no recursive descent to bomb (abuse-cases 41/42/43) |
 | **T** | **Name-collision integrity — silent redefine of an in-use type / data-poisoning** — a `define_*` whose `name` collides with an existing (recovered) type silently overwrites or renames it, corrupting every dependent decompilation | M×H=**High** | **fail-closed REJECT** conflict policy (ADR-015 §6): the worker checks for an existing type of that name (read-only `getDataType`) **before assembly + before `startTransaction`** and surfaces `analysis-failed` with **no write** if one exists; **never** `REPLACE_HANDLER`/silent-rename; Phase C is strictly **additive** (create genuinely-new types only) (abuse-case 44) |
 | **T** | **Re-render blast radius of a new type** — defining a type re-renders dependent data/decompilation | L×L=**Low** (creation) | **bounded by construction**: a *new* type is referenced by **nothing** at `addDataType`, so creation re-renders **nothing**; the wide re-render is **decoupled** to the *subsequent* Phase-B `apply_data_type` (already threat-modeled — ADR-014 §7); a *redefine* of an in-use type is prevented by the §6 REJECT (ADR-015 §5) |
 | **T** | **Structural stored-injection / data-poisoning via type / field names** — a malicious composite `name` or `FieldSpec.name` (markup/path/zero-width/RTL/control) persisted and re-served by `get_data_type`/`function_context`/`decompile_function` | M×M=**Med** | **reuse `validate_write_name`** (the identifier allow-list — `validation.py:362-396`) on the type name and **every** field name IN; the read path re-wraps `Untrusted[...]` + re-normalizes OUT (ADR-005) — same two-sided defense as ADR-012/013/014 §7 (abuse-case 47) |
-| **D** | **Construction-time / fan-out consumption** — an oversized field count or total composite size (unbounded fan-out), or a burst of `define_*` calls, exhausts the worker | M×M=**Med** | **bounded at the boundary BEFORE / at the worker**: `_MAX_FIELDS` (≈256) and the per-field Phase-B `TypeRef` bounds rejected as `VALIDATION`/`limit-exceeded`; the assembled composite's **total computed size ≤ `_MAX_COMPOSITE_SIZE`** (≈1 MiB) is checked before `addDataType` (size sum overflow-guarded — CWE-190); each create is one bounded transaction; the per-tool **timeout kills the worker** on a hung assembly; concurrency cap + (HTTP) rate limit (CWE-400, `topic-reliability`, ADR-015 §2.3/§9, abuse-cases 45/46) |
+| **D** | **Construction-time / fan-out consumption** — an oversized field count or total composite size (unbounded fan-out), or a burst of `define_*` calls, exhausts the worker | M×M=**Med** | **bounded at the boundary BEFORE / at the worker**: `_MAX_FIELDS` (≈256) and the per-field Phase-B `TypeRef` bounds rejected as `VALIDATION`/`limit-exceeded`; the assembled composite's **total computed size ≤ `_MAX_COMPOSITE_SIZE`** (≈1 MiB) is checked during worker assembly inside the one transaction — a post-resolution overflow **rolls back to `analysis-failed`**, while the boundary rejects the cases it can compute pre-resolution as `VALIDATION`/`limit-exceeded` (size sum overflow-guarded — CWE-190); each create is one bounded transaction; the per-tool **timeout kills the worker** on a hung assembly; concurrency cap + (HTTP) rate limit (CWE-400, `topic-reliability`, ADR-015 §2.3/§9, abuse-cases 45/46) |
 | **R** | **Unattributable Phase-C mutation** | M×M=**Med** | **per-write audit: intent + outcome** (tool, session id (opaque), field count, applied/denied — **never** binary-derived content or the field names verbatim; redacted — `topic-logging-observability`); same posture as ADR-012/013/014 TB7-R |
 | **E** | A Phase-C write bypasses the server to reach the JVM directly | L×H=**Med** | **ADR-001 invariant unchanged** — no JVM/PyGhidra import server-side (the architecture-invariant CI test covers the new `define_struct`/`define_union` handlers); the field resolution, the assembly, **and** the `addDataType` write are a typed worker RPC, not in-process (abuse-case 53) |
 
@@ -575,25 +577,30 @@ attack (the control holds; the positive case 43 must SUCCEED), deterministic + h
 fixtures only (master §5):
 
 41. **Self-embed rejected (the recursion crux)** — a `define_struct` with a `FieldSpec.type` of
-    `{named: "<this struct>"}` (no pointer/array — *embedding* self) is rejected at the boundary
-    (`validate_composite` self-embed check → `VALIDATION`) and, defensively, at the worker by
-    `not-found` (the type isn't in the DTM yet — ADR-015 §3.2). No type defined; program unchanged.
+    `{named: "<this struct>"}` (no pointer — *embedding* self, incl. an array-of-self) is rejected at
+    the boundary (`validate_composite` self-embed check → `VALIDATION`) and, defensively, **re-asserted
+    at the worker** (`_iter_composite_members` rejects a `pointer_levels == 0` self-`named` member →
+    rolled-back `analysis-failed`; the type IS pre-registered now, so this is an explicit guard, not a
+    `not-found` — ADR-015 §3). No type defined; program unchanged.
     (TB7-D — the new recursive-definition surface, proven bounded)
 42. **Embed-cycle cannot be assembled** — the "B-first, then A referencing B" flow cannot produce a
     true embed-cycle (A embeds B embeds A): defining B with an embedded not-yet-existing A fails
     `not-found`; a cross-type embed-cycle is unconstructable across the one-composite-per-call
     boundary (ADR-015 §1/§3.2). (TB7-D / integrity)
 43. **Pointer-to-self allowed, fixed size (POSITIVE case)** — a `define_struct` modeling a
-    linked-list `next` as `{base: "void", pointer_levels: 1}` (the v1 opaque-pointer idiom) **succeeds**,
-    size includes one pointer width, no blow-up. (Confirms the legitimate path works)
+    linked-list `next` as `{named: "<this struct>", pointer_levels: 1}` (a true self-referential
+    pointer, resolved against the pre-registered type; the opaque `{base: "void", pointer_levels: 1}`
+    idiom also works) **succeeds**, size includes one pointer width, no blow-up. (Confirms the
+    legitimate path works)
 44. **Name-collision REJECT (no silent replace)** — a `define_struct`/`define_union` whose `name`
     already names a type in the `DataTypeManager` is rejected `analysis-failed` with **no write** (the
     existing in-use type is **unchanged** — the fail-closed REJECT handler); checked before
     `startTransaction`. (TB7-T — the redefine-in-use re-render / data-poisoning vector, proven absent)
-45. **Oversized field-count / size DoS** — `fields` > `_MAX_FIELDS`, or a composite whose total
-    computed size exceeds `_MAX_COMPOSITE_SIZE` (e.g. 256 × `char[65536]`), is rejected
-    (`VALIDATION`/`limit-exceeded`) with no `addDataType`; size sum overflow-guarded (CWE-190/CWE-400).
-    (TB7-D — extends Phase-B case 34)
+45. **Oversized field-count / size DoS** — `fields` > `_MAX_FIELDS` (or a boundary-computable
+    oversize) is rejected `VALIDATION`/`limit-exceeded` with no `addDataType`; a composite whose
+    **post-resolution** total computed size exceeds `_MAX_COMPOSITE_SIZE` (e.g. 256 × `char[65536]`)
+    is caught during worker assembly and **rolls back to `analysis-failed`** (the pre-registered type
+    removed); size sum overflow-guarded (CWE-190/CWE-400). (TB7-D — extends Phase-B case 34)
 46. **Duplicate field name rejected** — a composite with two `FieldSpec.name == "x"` is rejected
     `VALIDATION` (no write). (TB7-T / integrity)
 47. **Malicious field / type name rejected** — a `FieldSpec.name` or the composite `name` with

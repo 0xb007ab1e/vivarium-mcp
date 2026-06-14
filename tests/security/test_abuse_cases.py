@@ -276,6 +276,13 @@ class _ConsentManager:
     Models the frozen contract: a session is read-only until ``enable_writes``;
     ``require_write_consent`` raises ``VALIDATION`` otherwise; an unknown id raises the BOLA-safe
     ``SESSION_INVALID`` from every method. Consent is per-session (no cross-session bleed).
+
+    This is a deliberate WS4-owned hermetic double (the abuse suite asserts the *control contract*,
+    not the WS2 wiring). The SAME contract is verified end-to-end against the **real**
+    :class:`~ghidra_mcp.sessions.manager.SessionManager` in ``tests/unit/test_mutation_consent.py``
+    (default-deny, enable/disable, ``allow_structural`` opt-in, BOLA ``SESSION_INVALID``) and
+    through ``build_handlers`` in ``test_mutation_registry.py`` — proven against real code, not
+    only this double.
     """
 
     def __init__(self, *session_ids: str) -> None:
@@ -734,3 +741,313 @@ def test_apply_data_type_out_of_map_fails_closed() -> None:
     the type footprint would overrun a region) fails closed (``analysis-failed``/``not-found``) with
     no write — worker map-confinement before the transaction. Promoted to WS5 (needs the real map).
     """
+
+
+# ==============================================================================================
+# TB7 STRUCTURAL PHASE C (ADR-015) — composite-type creation abuse cases 41-54 (threat-model §10).
+# The structured FieldSpec input ELIMINATES the C-parser surface by construction (ADR-015 §2): no
+# client string reaches CParser/DataTypeParser. The recursion crux — a by-value self-embed — is
+# rejected at the boundary (validate_composite); pointer-to-self is allowed (fixed size). Cases
+# control lives in WS4-owned modules (the composite validators) are HERMETIC here; cases that need
+# the real worker (pre-register/rollback, name-collision lookup, post-resolution size cap,
+# unresolvable TypeRef, cross-session/store) keep the ``skip``-marked integration convention.
+# ==============================================================================================
+def _struct(name: str, fields: list[_s.FieldSpec], **kw: object) -> _s.DefineStructIn:
+    """Build a ``DefineStructIn`` via model_construct (bypass the schema validator to reach the
+    pure ``validate_composite`` reject branches with a known-bad shape)."""
+    return _s.DefineStructIn.model_construct(
+        session_id="sid", name=name, fields=fields, packed=bool(kw.get("packed", False))
+    )
+
+
+def _field(name: str, named: str | None = None, **kw: object) -> _s.FieldSpec:
+    """Build a ``FieldSpec`` (model_construct) — a base ``int`` by default, or a ``named`` leaf."""
+    if named is not None:
+        ref = _s.TypeRef.model_construct(
+            base=None,
+            named=named,
+            pointer_levels=kw.get("pointer_levels", 0),
+            array_len=kw.get("array_len"),
+        )
+    else:
+        ref = _s.TypeRef.model_construct(base="int", named=None, pointer_levels=0, array_len=None)
+    return _s.FieldSpec.model_construct(name=name, type=ref, offset=kw.get("offset"))
+
+
+# --- Case 41 — by-value self-embed rejected (the recursion crux) ---------------------------
+@pytest.mark.critical
+def test_by_value_self_embed_rejected_at_boundary() -> None:
+    """A ``define_struct`` member of type ``Node`` (no pointer/array) embeds self by value → REJECT.
+
+    Boundary control (``validate_composite`` self-embed check, ADR-015 §3.2) — VALIDATION, no type
+    defined. Because the worker pre-registers the empty type, this MUST be rejected here, not left
+    to fail ``not-found`` (the worker's defensive ``not-found``/``analysis-failed`` is the
+    integration half below).
+    """
+    payload = _struct("Node", [_field("self", named="Node")])
+    with pytest.raises(GhidraMcpError) as ei:
+        _v.validate_composite(payload, kind="struct")
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+
+
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_by_value_self_embed_worker_rolls_back() -> None:
+    """Case 41 (live): even if a by-value self-embed slipped past the boundary, the worker assembly
+    aborts and ``_in_transaction`` rolls back the pre-registered empty type — no partial/orphan type
+    survives. Promoted to WS5 (needs the real DataTypeManager pre-register/rollback)."""
+
+
+# --- Case 42 — cross-type embed-cycle is unconstructable (TB7-D / integrity) ---------------
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_cross_type_embed_cycle_cannot_be_assembled() -> None:
+    """Case 42 (live): the B-first-then-A flow cannot build a true embed-cycle (A embeds B embeds A)
+    — defining B with an embedded not-yet-existing A fails ``not-found``; one-composite-per-call
+    makes a cross-type by-value cycle unconstructable (ADR-015 §1/§3.2). Promoted to WS5 (needs the
+    resolver). The boundary half (self-embed rejected) is case 41."""
+
+
+# --- Case 43 — pointer-to-self allowed, fixed size (positive control) ----------------------
+@pytest.mark.critical
+def test_pointer_to_self_is_allowed_fixed_size() -> None:
+    """A linked-list ``next`` modeled as a pointer-to-self (or the opaque ``void*`` idiom) is
+    fixed-size and ALLOWED — it must NOT trip the by-value self-embed reject (ADR-015 §3.1)."""
+    # Pointer-to-self via the self ``named`` (resolves against the pre-registered type, worker).
+    _v.validate_composite(
+        _struct("Node", [_field("next", named="Node", pointer_levels=1)]), kind="struct"
+    )  # no raise
+    # The opaque void* idiom is equally valid (and the only option for a different not-yet-defined
+    # type, since nested-define is deferred).
+    void_ptr = _s.FieldSpec.model_construct(
+        name="next",
+        type=_s.TypeRef.model_construct(base="void", named=None, pointer_levels=1, array_len=None),
+        offset=None,
+    )
+    _v.validate_composite(_struct("Node", [void_ptr]), kind="struct")  # no raise
+
+
+# --- Case 44 — name-collision REJECT (no silent replace) (TB7-T) ---------------------------
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_name_collision_rejected_no_silent_replace() -> None:
+    """Case 44 (live): a ``define_struct``/``define_union`` whose ``name`` already names a type is
+    REJECTED ``analysis-failed`` with NO write (the existing in-use type is unchanged — the
+    fail-closed REJECT handler, ADR-015 §6); checked before ``startTransaction``, no partial type.
+    The redefine-in-use re-render / data-poisoning vector, proven absent. Promoted to WS5 (needs the
+    worker DataTypeManager lookup)."""
+
+
+# --- Case 45 — oversized field-count / size DoS (TB7-D / CWE-400/190) ----------------------
+@pytest.mark.critical
+def test_oversized_field_count_rejected_at_boundary() -> None:
+    """A ``fields`` list longer than ``MAX_FIELDS`` is rejected before any worker call.
+
+    The bound is enforced by both pydantic ``max_length`` (schema) and ``validate_composite``
+    (defense in depth). Here a model_construct'd over-long list exercises the validator's own LIMIT
+    branch (no worker round-trip — CWE-400)."""
+    over = [_field(f"f{i}") for i in range(_v.MAX_FIELDS + 1)]
+    with pytest.raises(GhidraMcpError) as ei:
+        _v.validate_composite(_struct("Big", over), kind="struct")
+    assert ei.value.envelope.type is ErrorType.LIMIT_EXCEEDED
+
+
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_oversized_total_size_rejected_at_worker() -> None:
+    """Case 45 (live): a composite whose total computed size exceeds ``_MAX_COMPOSITE_SIZE`` (e.g.
+    256 x ``char[65536]``) is rejected ``limit-exceeded`` during worker assembly with no finalized
+    type; the running size sum is overflow-guarded (ADR-015 §3 backstop). Promoted to WS5 (the cap
+    needs each resolved ``DataType.getLength()`` — a worker concern)."""
+
+
+# --- Case 46 — duplicate member name rejected (TB7-T / integrity) --------------------------
+@pytest.mark.critical
+def test_duplicate_member_name_rejected() -> None:
+    """A composite with two members named ``x`` is rejected ``VALIDATION`` (no write)."""
+    payload = _struct("Dup", [_field("x"), _field("x")])
+    with pytest.raises(GhidraMcpError) as ei:
+        _v.validate_composite(payload, kind="struct")
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+
+
+# --- Case 47 — malicious field / type name rejected (TB7-T / stored-injection) -------------
+@pytest.mark.critical
+@pytest.mark.parametrize(
+    "malicious",
+    [
+        "<script>x</script>",  # markup
+        "../path",  # path traversal
+        "zero​width",  # U+200B zero-width
+        "rtl‮name",  # U+202E right-to-left override
+        "ctrl\x01char",  # C0 control
+    ],
+)
+def test_malicious_field_name_is_rejected(malicious: str) -> None:
+    """A ``FieldSpec.name`` with markup/path/zero-width/RTL/control chars never reaches the DB.
+
+    A member name is PERSISTED and re-served — identical stored-injection profile as a Phase-B
+    ``ParamSpec.name`` — so ``validate_composite`` holds it to the strict ``validate_write_name``
+    allow-list (rejected at the boundary, VALIDATION)."""
+    payload = _struct("S", [_field(malicious)])
+    with pytest.raises(GhidraMcpError) as ei:
+        _v.validate_composite(payload, kind="struct")
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+    assert malicious.strip() not in ei.value.envelope.detail
+
+
+@pytest.mark.critical
+def test_malicious_composite_name_is_rejected() -> None:
+    """The composite ``name`` itself is held to the strict write-name allow-list (VALIDATION)."""
+    payload = _struct("../evil", [_field("ok")])
+    with pytest.raises(GhidraMcpError) as ei:
+        _v.validate_composite(payload, kind="struct")
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+
+
+# --- Case 48 — unresolvable field TypeRef fail-closed (TB7-T / atomicity) ------------------
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_unresolvable_field_typeref_fails_closed_with_no_write() -> None:
+    """Case 48 (live): a member ``FieldSpec.type`` with a well-formed but UNKNOWN ``named`` surfaces
+    ``not-found`` with the program unchanged — non-self field types resolve before the txn (ADR-015
+    §4); no partial/orphan type. Promoted to WS5 (needs the worker DataTypeManager lookup)."""
+
+
+# --- Case 49 — TypeRef injection in a field rejected (TB7-T / design-eliminated C-parser) --
+@pytest.mark.critical
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "struct{int x;}",  # a struct body — never parsed
+        "int*",  # pointer syntax in the name token
+        "a;b",  # statement separator
+        "../../etc/passwd",  # path traversal
+        "rtl‮name",  # U+202E right-to-left override
+    ],
+)
+def test_field_type_ref_injection_payload_is_rejected(payload: str) -> None:
+    """A ``FieldSpec.type.named`` carrying C-declaration syntax / markup is rejected — never parsed.
+
+    The structured model admits only a single identifier token that is LOOKED UP (not parsed); a
+    payload that is not a valid identifier fails closed at ``validate_field_spec`` via
+    ``validate_type_ref`` (VALIDATION), so no type is defined. Proves the design-eliminated C-parser
+    surface absent (same as Phase-B case 31, now in a field)."""
+    field = _s.FieldSpec.model_construct(
+        name="f",
+        type=_s.TypeRef.model_construct(base=None, named=payload, pointer_levels=0, array_len=None),
+        offset=None,
+    )
+    with pytest.raises(GhidraMcpError) as ei:
+        _v.validate_field_spec(field)
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+    assert payload.strip() not in ei.value.envelope.detail
+
+
+# --- Case 50 — structural-consent-required (TB7-E / gating) --------------------------------
+@pytest.mark.critical
+@pytest.mark.parametrize("structural_granted", [False, True])
+def test_composite_create_requires_structural_consent(structural_granted: bool) -> None:
+    """``define_struct``/``define_union`` need the ``allow_structural`` opt-in (not plain write
+    consent) — the ``require_write_consent(structural=True)`` chokepoint; else fail closed
+    (VALIDATION). The handler-level proof (with ``build_handlers`` + the real gate) is in
+    ``test_composite_mutation``; this asserts the gate contract directly."""
+    granted: dict[str, bool] = {"writes": True, "structural": structural_granted}
+
+    def _require_write_consent(*, structural: bool) -> None:
+        if not granted["writes"]:
+            raise GhidraMcpError(
+                ErrorEnvelope(
+                    type=ErrorType.VALIDATION,
+                    title="Invalid arguments",
+                    detail="session is read-only",
+                    status=400,
+                )
+            )
+        if structural and not granted["structural"]:
+            raise GhidraMcpError(
+                ErrorEnvelope(
+                    type=ErrorType.VALIDATION,
+                    title="Invalid arguments",
+                    detail="structural writes not permitted",
+                    status=400,
+                )
+            )
+
+    if structural_granted:
+        _require_write_consent(structural=True)  # no raise once the tier is granted
+    else:
+        with pytest.raises(GhidraMcpError) as ei:
+            _require_write_consent(structural=True)
+        assert ei.value.envelope.type is ErrorType.VALIDATION
+        assert "structural" in ei.value.envelope.detail
+
+
+# --- Case 51 — cross-session structural isolation (TB7-T / store-I) ------------------------
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_cross_session_composite_isolation() -> None:
+    """Case 51 (live): ``allow_structural`` + a ``define_struct`` on session A does NOT enable or
+    mutate session B; B stays read-only with an independent store. The consent-isolation unit proof
+    is in ``test_composite_mutation`` (gate fakes); the store-isolation half needs two live
+    workers — promoted to WS5."""
+
+
+# --- Case 52 — BOLA on the structural grant (TB7-E / BOLA) ---------------------------------
+@pytest.mark.critical
+def test_bola_on_composite_grant_is_indistinguishable() -> None:
+    """A grant/composite-create against an unknown/foreign session id yields the SAME
+    SESSION_INVALID envelope (no oracle) — the same chokepoint as case 20/29/38, unchanged here."""
+    mgr = _ConsentManager(_VALID_SID)
+
+    def _env(sid: str) -> dict[str, object]:
+        with pytest.raises(GhidraMcpError) as ei:
+            mgr.require_write_consent(sid)
+        env = ei.value.envelope
+        return {"type": env.type, "title": env.title, "detail": env.detail, "status": env.status}
+
+    assert _env("guessed-id") == _env("another-users-id")
+    assert _env("guessed-id")["type"] is ErrorType.SESSION_INVALID
+
+
+# --- Case 53 — ADR-001 invariant under Phase-C writes (TB7-E) ------------------------------
+@pytest.mark.critical
+def test_phase_c_write_path_does_not_import_jvm_or_pyghidra() -> None:
+    """No server-side Phase-C path imports the JVM/PyGhidra — the field resolution, the assembly,
+    and the ``addDataType`` write run only in the worker. Scopes the AST scan to the modules gaining
+    the composite-creation surface (the registry handlers, the composite validators, the consent
+    gate, the adapter); the architecture test's package-wide scan covers them too (ADR-015 §53)."""
+    src = Path(__file__).resolve().parents[2] / "src" / "ghidra_mcp"
+    write_path_modules = [
+        src / "tools" / "registry.py",
+        src / "core" / "validation.py",
+        src / "sessions" / "manager.py",
+        src / "ghidra" / "rpc_client.py",
+    ]
+    forbidden = ("pyghidra", "jpype", "ghidra_mcp.ghidra._jvm_bridge")
+    offenders: list[str] = []
+    for path in write_path_modules:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            offenders += [
+                f"{path.name}: imports {n}"
+                for n in names
+                if any(bad in n.lower() for bad in forbidden)
+            ]
+    assert not offenders, "ADR-001 violation on a Phase-C write path: " + "; ".join(offenders)
+
+
+# --- Case 54 — commit-time atomicity (TB7-T / CWE-460) -------------------------------------
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_define_struct_commit_failure_rolls_back() -> None:
+    """Case 54 (live): a ``define_struct`` whose ``addDataType`` OR its commit raises rolls back
+    (removing the pre-registered empty type) and surfaces ``analysis-failed`` — no dangling
+    transaction, no half-created type (the reused ``_in_transaction``, CWE-460). The unit-level
+    three-branch proof of ``_in_transaction`` lives in ``test_structural_mutation``; this is the
+    live composite-specific assertion. Promoted to WS5 (needs the real DataTypeManager)."""
