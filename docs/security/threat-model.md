@@ -753,6 +753,7 @@ synthetic principal ids, synthetic tokens; NO real secrets/worker). Each FAILS t
     (61-66); the per-request-principal → `ToolContext` → manager wiring is promoted to integration
     (WS5). (TB6-I)
 
+
 ## 12. TB8 — Annotation-import document → Server (v1.2 — ADR-018, ACCEPTED design)
 
 The first **v1.2** increment adds cross-session annotation **persistence**: `session_export_annotations`
@@ -833,3 +834,27 @@ positive cases (68 export round-trip; 70 happy import) must SUCCEED:
     including the new export/import handlers and the schema/validation code: export enumeration runs in
     the worker (`_gh_export_annotations`); import re-validation + replay-orchestration are JVM-free
     server code over the existing write RPCs. (TB8-E — extends the prior ADR-001 invariant cases)
+
+## 13. TB6 (delta) — mTLS + OAuth identity sources (v1.2 — ADR-019, ACCEPTED design)
+
+Builds out the two `Authenticator` stubs ADR-011 left port-ready, **hardening TB6 — no new boundary**.
+Both map a request to a `Principal(id)` that feeds the **ADR-017 ownership mechanism unchanged**
+(distinct identity = distinct owner-scoped sessions). Delivered as two increments: **mTLS first**
+(server-terminated, in-app uvicorn TLS + the `peer_certificate` seam — no new dep), **OAuth second**
+(JWT validated locally via JWKS — adds a pinned, vetted PyJWT+cryptography dep, `std-supplychain`).
+
+| STRIDE | Threat | Mitigation |
+|--------|--------|------------|
+| **S** | Forged / shared-secret identity | identity is **cryptographically proven** — CA-signed client cert (chain verified at the TLS layer to a configured CA) or a JWKS-verified JWT signature; generic `401`, no which-identity oracle |
+| **T** | Tampered cert / token | mTLS chain verified to the configured CA; JWT verified with a **pinned alg** (no `alg:none`/RS-HS confusion) + `iss`/`aud`/`exp`/`nbf` |
+| **R** | Repudiation | auth events logged (principal id, mechanism, outcome) — never the token/cert material |
+| **I** | Credential disclosure | uniform `401`; token/cert never logged or echoed |
+| **D** | Auth-path DoS | JWKS cached + bounded (no per-request IdP round-trip); mTLS handshake bounded; existing rate-limit/size caps |
+| **E** | Mechanism grants extra capability | a valid identity gets only the read-only catalog + its **own** owner-scoped sessions (ADR-017); sub→principal only — per-scope/role authZ is out of scope |
+
+**mTLS = server-terminated, in-app** (reverse-proxy-header trust is a deferred footgun). **OAuth =
+JWT/JWKS local** (introspection deferred). The formal abuse-case lists land with each implementation
+PR: **mTLS** — no client cert / untrusted-CA cert / empty mapped field / two distinct certs → two
+distinct owner-scoped principals; **OAuth** — `alg:none`, wrong `iss`/`aud`, expired/not-yet-valid, bad
+signature, unknown `kid`, missing `sub`. No real secrets in tests (synthetic certs / a test keypair;
+JWKS mocked).
