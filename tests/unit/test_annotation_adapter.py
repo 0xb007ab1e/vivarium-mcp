@@ -156,6 +156,7 @@ _FULL_RESULT: dict[str, object] = {
 
 
 def test_export_round_trips_every_kind_with_untrusted_wrapping() -> None:
+    # abuse case 70 (export analog) — every entry kind round-trips through the typed exported view.
     out, worker = _run_export(_FULL_RESULT)
     doc = out.document
     assert doc.schema_version == 1
@@ -190,8 +191,69 @@ def test_export_round_trips_every_kind_with_untrusted_wrapping() -> None:
     assert worker.killed == 0
 
 
+def test_export_wraps_composite_and_member_and_typeref_names() -> None:
+    # abuse case 71 (export analog) — a composite name, a member/param name, and a TypeRef.named
+    # are all read OUT of the hostile program (USER_DEFINED identifiers an injection-steered prior
+    # write may control), so they MUST come back Untrusted-wrapped (ADR-005 / CWE-200), not bare.
+    out, _ = _run_export(_FULL_RESULT)
+    doc = out.document
+
+    struct = doc.entries[0]
+    assert isinstance(struct, s.ExportedDefineStructEntry)
+    # composite name: Untrusted-wrapped, not a bare str.
+    assert isinstance(struct.name, Untrusted)
+    assert struct.name.origin is DataOrigin.BINARY
+    # member name: Untrusted-wrapped.
+    assert isinstance(struct.fields[0].name, Untrusted)
+    assert struct.fields[0].name.origin is DataOrigin.BINARY
+
+    union = doc.entries[1]
+    assert isinstance(union, s.ExportedDefineUnionEntry)
+    assert isinstance(union.name, Untrusted)
+    assert isinstance(union.fields[0].name, Untrusted)
+
+    sig = doc.entries[2]
+    assert isinstance(sig, s.ExportedSetFunctionSignatureEntry)
+    # parameter name: Untrusted-wrapped (binary-derived on export).
+    assert isinstance(sig.parameters[0].name, Untrusted)
+    assert sig.parameters[0].name.origin is DataOrigin.BINARY
+
+
+def test_export_wraps_typeref_named_leaf() -> None:
+    # abuse case 71 (export analog) — a TypeRef.named (an existing program type name read out) is
+    # binary-derived and must be Untrusted-wrapped; the closed-vocab `base` and bounded modifiers
+    # stay bare/safe. A planted/injection-steered type name cannot ride out unwrapped.
+    result = {
+        "schema_version": 1,
+        "binary": {"sha256": "a" * 64},
+        "entries": [
+            {
+                "kind": "apply_data_type",
+                "address": "0x401000",
+                "type": {
+                    "base": None,
+                    "named": "evil_t",
+                    "pointer_levels": 1,
+                    "array_len": None,
+                },
+                "clear_existing": False,
+            }
+        ],
+    }
+    out, _ = _run_export(result)
+    entry = out.document.entries[0]
+    assert isinstance(entry, s.ExportedApplyDataTypeEntry)
+    assert isinstance(entry.type, s.ExportedTypeRef)
+    assert isinstance(entry.type.named, Untrusted)
+    assert entry.type.named.origin is DataOrigin.BINARY
+    assert entry.type.named.value == "evil_t"
+    assert entry.type.base is None  # closed vocab — bare
+    assert entry.type.pointer_levels == 1  # server-safe scalar — bare
+
+
 def test_export_neutralizes_injection_in_read_out_name() -> None:
-    # A hostile read-out name (bidi camouflage) is neutralized when wrapped out (ADR-005).
+    # abuse case 71 (export analog) — a hostile read-out name (bidi camouflage) is neutralized
+    # when wrapped out (ADR-005).
     result = {
         "schema_version": 1,
         "binary": {"sha256": "a" * 64},

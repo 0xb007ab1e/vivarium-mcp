@@ -809,12 +809,15 @@ positive cases (68 export round-trip; 70 happy import) must SUCCEED:
 72. **Oversized count / field → bounded** — a document with > `_MAX_ENTRIES` entries is
     `LIMIT_EXCEEDED`; an over-length comment is `LIMIT_EXCEEDED`; field/param/composite bounds reuse
     the existing write caps (DoS — CWE-400). (TB8-D)
-73. **Structural entry without `allow_structural` → denied** — an import containing a
-    `set_function_signature`/`apply_data_type`/`define_struct`/`define_union` entry on a session with
-    write consent but **not** `allow_structural` is denied "structural writes not permitted"; on a
-    read-only session, "session is read-only" (the same `require_write_consent` chokepoint as live
-    writes — the human-in-the-loop gate is not bypassed by importing). No structural write committed.
-    (TB8-E / LLM08)
+73. **Structural entry without `allow_structural` → denied** — an import containing **any** structural
+    entry — the Phase-A name-only renames `rename_local_variable`/`rename_parameter` (ADR-013) **or**
+    the type-aware `set_function_signature`/`apply_data_type`/`define_struct`/`define_union`
+    (ADR-014/015) — on a session with write consent but **not** `allow_structural` is denied up front
+    "structural writes not permitted"; on a read-only session, "session is read-only" (the same
+    `require_write_consent(structural=True)` chokepoint as live writes — the human-in-the-loop gate is
+    not bypassed by importing). The up-front import gate (`STRUCTURAL_ENTRY_KINDS`) is single-sourced
+    with the per-entry handlers, so it lists **every** kind whose handler requires structural consent.
+    No structural write committed. (TB8-E / LLM08)
 74. **Cross-owner import → `SESSION_INVALID`** — principal B importing into A's session is denied the
     same BOLA-safe `SESSION_INVALID` as an unknown id; A's session is untouched and no write runs
     (owner-scoped — ADR-017). (TB8-E / BOLA)

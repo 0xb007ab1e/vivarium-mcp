@@ -320,6 +320,8 @@ def test_export_cross_owner_is_session_invalid(ctx: reg.ToolContext) -> None:
 # =============================================================================================
 @pytest.mark.critical
 def test_import_happy_path_replays_existing_writes(ctx: reg.ToolContext) -> None:
+    # abuse case 70 — a well-formed, hash-matching, consented document replays via the
+    # EXISTING gated write handlers (no new write primitive).
     handlers = reg.build_handlers(ctx)
     handlers["session_enable_writes"](session_id=_SID)  # write consent (no structural)
     out = handlers["session_import_annotations"](
@@ -339,6 +341,8 @@ def test_import_happy_path_replays_existing_writes(ctx: reg.ToolContext) -> None
 
 @pytest.mark.critical
 def test_import_wrong_binary_hash_fails_closed(ctx: reg.ToolContext) -> None:
+    # abuse case 71-adjacent / TB8-S — a doc minted for a different binary is rejected by the
+    # hash binding; fail closed before any write.
     handlers = reg.build_handlers(ctx)
     handlers["session_enable_writes"](session_id=_SID)
     with pytest.raises(GhidraMcpError) as exc:
@@ -352,6 +356,7 @@ def test_import_wrong_binary_hash_fails_closed(ctx: reg.ToolContext) -> None:
 
 @pytest.mark.critical
 def test_import_without_consent_denied_no_write(ctx: reg.ToolContext) -> None:
+    # abuse case 73 (read-only variant) — without write consent the import is denied up front.
     handlers = reg.build_handlers(ctx)  # no enable_writes → read-only
     with pytest.raises(GhidraMcpError) as exc:
         handlers["session_import_annotations"](session_id=_SID, document=_doc(_RENAME).model_dump())
@@ -361,12 +366,45 @@ def test_import_without_consent_denied_no_write(ctx: reg.ToolContext) -> None:
 
 @pytest.mark.critical
 def test_import_structural_entry_without_allow_structural_denied(ctx: reg.ToolContext) -> None:
+    # abuse case 73 — a type-aware structural entry (define_struct) on a write-enabled-but-NOT-
+    # allow_structural session is denied up front (structural consent required). No write committed.
     handlers = reg.build_handlers(ctx)
     handlers["session_enable_writes"](session_id=_SID)  # write consent, but NOT structural
     with pytest.raises(GhidraMcpError) as exc:
         handlers["session_import_annotations"](session_id=_SID, document=_doc(_STRUCT).model_dump())
     assert exc.value.envelope.type is ErrorType.VALIDATION
     # No structural write committed (the structural-consent gate ran before any replay).
+    assert _port(ctx).calls == []
+
+
+@pytest.mark.critical
+@pytest.mark.parametrize(
+    "entry",
+    [
+        s.RenameLocalVariableEntry(
+            kind="rename_local_variable", function="0x401000", variable="local_8", new_name="ctx"
+        ),
+        s.RenameParameterEntry(
+            kind="rename_parameter", function="0x401000", parameter="param_1", new_name="arg"
+        ),
+    ],
+    ids=["rename_local_variable", "rename_parameter"],
+)
+def test_import_phase_a_structural_rename_without_allow_structural_denied(
+    ctx: reg.ToolContext, entry: s.Entry
+) -> None:
+    # abuse case 73 — the Phase-A name-only structural renames (rename_local_variable /
+    # rename_parameter) ARE structural kinds (their live handlers call require_write_consent(
+    # structural=True)). A local/param-only document imported into a write-enabled-but-NOT-
+    # allow_structural session must be denied UP FRONT (structural consent required) — the up-front
+    # import gate (STRUCTURAL_ENTRY_KINDS) is single-sourced with the handlers. NO write occurs.
+    assert entry.kind in s.STRUCTURAL_ENTRY_KINDS  # single source of truth includes Phase-A renames
+    handlers = reg.build_handlers(ctx)
+    handlers["session_enable_writes"](session_id=_SID)  # write consent, but NOT structural
+    with pytest.raises(GhidraMcpError) as exc:
+        handlers["session_import_annotations"](session_id=_SID, document=_doc(entry).model_dump())
+    assert exc.value.envelope.type is ErrorType.VALIDATION
+    # Denied up front by the structural-consent gate — no local/param write reached the port.
     assert _port(ctx).calls == []
 
 
@@ -386,6 +424,7 @@ def test_import_structural_entry_with_allow_structural_applies(ctx: reg.ToolCont
 
 @pytest.mark.critical
 def test_import_cross_owner_is_session_invalid(ctx: reg.ToolContext) -> None:
+    # abuse case 74 — principal B importing into A's session is BOLA-safe SESSION_INVALID.
     ctx2 = reg.ToolContext(
         config=ctx.config, sessions=ctx.sessions, port=ctx.port, principal=Principal(id="B")
     )
@@ -400,6 +439,7 @@ def test_import_cross_owner_is_session_invalid(ctx: reg.ToolContext) -> None:
 
 @pytest.mark.critical
 def test_import_tampered_entry_rejected_before_any_write(ctx: reg.ToolContext) -> None:
+    # abuse case 71 — an injection-bearing new_name is rejected by the live validators; no write.
     handlers = reg.build_handlers(ctx)
     handlers["session_enable_writes"](session_id=_SID)
     # A tampered entry (injection-bearing new_name) makes the WHOLE-document schema validation fail
@@ -415,6 +455,7 @@ def test_import_tampered_entry_rejected_before_any_write(ctx: reg.ToolContext) -
 
 @pytest.mark.critical
 def test_import_unknown_kind_rejected(ctx: reg.ToolContext) -> None:
+    # abuse case 75 — an unknown kind is rejected at document construction (closed union); no write.
     handlers = reg.build_handlers(ctx)
     handlers["session_enable_writes"](session_id=_SID)
     # An unknown discriminator is rejected at document construction (the discriminated union admits
@@ -431,6 +472,7 @@ def test_import_unknown_kind_rejected(ctx: reg.ToolContext) -> None:
 
 @pytest.mark.critical
 def test_import_unknown_schema_version_rejected(ctx: reg.ToolContext) -> None:
+    # abuse case 75 — an unsupported schema_version is rejected VALIDATION (opt-in forward-compat).
     handlers = reg.build_handlers(ctx)
     handlers["session_enable_writes"](session_id=_SID)
     doc = _doc(_RENAME).model_dump()
@@ -524,6 +566,8 @@ class _PartialFailPort(FakePort):
 
 @pytest.mark.critical
 def test_import_partial_application_reports_per_entry_outcomes() -> None:
+    # abuse case 76 — a validation-clean entry whose write cannot apply is recorded rejected;
+    # the other clean entries still apply (best-effort, per-entry transaction).
     # A validation-clean entry whose WRITE cannot apply (worker not-found) is recorded as rejected
     # with a safe reason; the other clean entries still apply (best-effort per the txn model).
     ctx = reg.ToolContext(

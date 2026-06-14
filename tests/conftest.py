@@ -581,8 +581,12 @@ class FakeGhidraPort:
                 entries=[
                     s.ExportedDefineStructEntry(
                         kind="define_struct",
-                        name="cfg_t",
-                        fields=[s.FieldSpec(name="flags", type=s.TypeRef(base="int"))],
+                        name=_u("cfg_t"),
+                        fields=[
+                            s.ExportedFieldSpec(
+                                name=_u("flags"), type=s.ExportedTypeRef(base="int")
+                            )
+                        ],
                     ),
                     s.ExportedRenameFunctionEntry(
                         kind="rename_function", function="0x00401000", new_name=_u("parse_config")

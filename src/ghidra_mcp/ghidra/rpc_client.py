@@ -1853,27 +1853,33 @@ def _build_define_union_result(r: dict[str, Any]) -> s.DefineUnionResult:
 # the authoritative ``binary.sha256``; ``schema_version`` is the worker-reported document version.
 
 
-def _type_ref_from_plain(r: dict[str, Any]) -> s.TypeRef:
-    """Rebuild a :class:`TypeRef` from a plain worker dict (structured reference — safe).
+def _exported_type_ref_from_plain(r: dict[str, Any]) -> s.ExportedTypeRef:
+    """Build an :class:`ExportedTypeRef` from a plain worker dict — ``named`` wrapped (ADR-005).
+
+    The ``named`` reference is a type name read out of the hostile program (binary-derived → an
+    injection vector), so it is ``Untrusted``-wrapped at this chokepoint; ``base`` is closed-vocab
+    and the modifiers are server-safe scalars (CWE-200 — no hostile name leaves bare).
 
     Args:
         r: ``{"base", "named", "pointer_levels", "array_len"}`` from the worker.
 
     Returns:
-        The reconstructed :class:`TypeRef` (pydantic re-asserts the exactly-one-leaf invariant).
+        The reconstructed :class:`ExportedTypeRef` (binary-derived ``named`` wrapped).
     """
-    return s.TypeRef(
+    return s.ExportedTypeRef(
         base=r.get("base"),
-        named=r.get("named"),
+        named=_w_opt(r.get("named"), DataOrigin.BINARY),
         pointer_levels=int(r.get("pointer_levels", 0)),
         array_len=r.get("array_len"),
     )
 
 
-def _field_spec_from_plain(r: dict[str, Any]) -> s.FieldSpec:
-    """Rebuild a :class:`FieldSpec` from a plain worker dict (structured reference — safe)."""
-    return s.FieldSpec(
-        name=str(r["name"]), type=_type_ref_from_plain(r["type"]), offset=r.get("offset")
+def _exported_field_spec_from_plain(r: dict[str, Any]) -> s.ExportedFieldSpec:
+    """Build an :class:`ExportedFieldSpec` — member ``name`` Untrusted-wrapped (ADR-005)."""
+    return s.ExportedFieldSpec(
+        name=_w(r["name"], DataOrigin.BINARY),
+        type=_exported_type_ref_from_plain(r["type"]),
+        offset=r.get("offset"),
     )
 
 
@@ -1932,9 +1938,12 @@ def _build_exported_entry(r: dict[str, Any]) -> s.ExportedEntry:
         return s.ExportedSetFunctionSignatureEntry(
             kind="set_function_signature",
             function=str(r["function"]),
-            return_type=_type_ref_from_plain(r["return_type"]),
+            return_type=_exported_type_ref_from_plain(r["return_type"]),
             parameters=[
-                s.ParamSpec(name=str(p["name"]), type=_type_ref_from_plain(p["type"]))
+                s.ExportedParamSpec(
+                    name=_w(p["name"], DataOrigin.BINARY),
+                    type=_exported_type_ref_from_plain(p["type"]),
+                )
                 for p in r.get("parameters", [])
             ],
             calling_convention=r.get("calling_convention"),
@@ -1943,21 +1952,21 @@ def _build_exported_entry(r: dict[str, Any]) -> s.ExportedEntry:
         return s.ExportedApplyDataTypeEntry(
             kind="apply_data_type",
             address=str(r["address"]),
-            type=_type_ref_from_plain(r["type"]),
+            type=_exported_type_ref_from_plain(r["type"]),
             clear_existing=bool(r.get("clear_existing", False)),
         )
     if kind == "define_struct":
         return s.ExportedDefineStructEntry(
             kind="define_struct",
-            name=str(r["name"]),
-            fields=[_field_spec_from_plain(f) for f in r["fields"]],
+            name=_w(r["name"], DataOrigin.BINARY),
+            fields=[_exported_field_spec_from_plain(f) for f in r["fields"]],
             packed=bool(r.get("packed", False)),
         )
     if kind == "define_union":
         return s.ExportedDefineUnionEntry(
             kind="define_union",
-            name=str(r["name"]),
-            fields=[_field_spec_from_plain(f) for f in r["fields"]],
+            name=_w(r["name"], DataOrigin.BINARY),
+            fields=[_exported_field_spec_from_plain(f) for f in r["fields"]],
         )
     raise ValueError("unknown exported annotation entry kind")
 

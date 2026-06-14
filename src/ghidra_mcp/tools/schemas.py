@@ -1980,9 +1980,16 @@ Entry = (
 
 #: The set of structural ``kind`` values — these entries additionally require ``allow_structural``
 #: consent on import (LLM08 — the human-in-the-loop gate is not bypassed by importing). Kept as data
-#: so the import handler and tests share one source of truth.
+#: so the import handler and tests share one source of truth. Must list EVERY kind whose live
+#: handler calls ``require_write_consent(structural=True)``: the Phase-A name-only renames
+#: (``rename_local_variable``/``rename_parameter`` — ADR-013) as well as the Phase-B/C type-aware
+#: writes (``set_function_signature``/``apply_data_type``/``define_struct``/``define_union``).
+#: Omitting the Phase-A renames would diverge the up-front import gate from the per-entry handlers
+#: (which still deny) — keep this in lockstep with the handlers so the gate is single-sourced.
 STRUCTURAL_ENTRY_KINDS: frozenset[str] = frozenset(
     {
+        "rename_local_variable",
+        "rename_parameter",
         "set_function_signature",
         "apply_data_type",
         "define_struct",
@@ -2021,6 +2028,64 @@ class AnnotationDocument(_In):
 # client extracts ``.value`` from each wrapper to rebuild a bare import document for round-trip.
 class _ExportEntry(_Out):
     """Base for an exported-annotation entry (immutable output model)."""
+
+
+# --- exported-view type models (ADR-005 / CWE-200): the read-OUT counterparts of the bare import
+# specs, with the hostile-origin name LEAF Untrusted-wrapped --------------------------------------
+# The bare ``TypeRef``/``ParamSpec``/``FieldSpec`` are IMPORT inputs (untrusted text the validators
+# re-check), so their ``named``/``name`` are bare ``str``. On EXPORT, though, those same name leaves
+# carry the program's CURRENT USER_DEFINED names read straight out of the HOSTILE binary — a
+# struct/union/parameter name an injection-steered prior write or a planted symbol may control.
+# Like every sibling export field (``new_name``, ``text``, ``type_name``, ``get_data_type.name``)
+# they are binary-derived and MUST be ``Untrusted``-wrapped on the way out (ADR-005,
+# std-owasp-llm LLM01). The wrapping happens at the ``rpc_client`` chokepoint; these models are the
+# typed output view the four composite/signature exported entries embed (vs. the bare import specs).
+class ExportedTypeRef(_Out):
+    """The exported (read-out) view of a :class:`TypeRef` — ``named`` leaf Untrusted-wrapped.
+
+    Mirrors :class:`TypeRef` field-for-field, but the ``named`` reference is binary-derived on
+    export (a type name the worker read out of the hostile program) and so is ``Untrusted``-wrapped
+    (ADR-005). ``base`` is a closed-vocabulary built-in (safe), and the modifiers are server-safe
+    scalars. The client extracts ``named.value`` to rebuild a bare :class:`TypeRef` for round-trip.
+
+    Attributes:
+        base: One of the closed :data:`BaseType` vocabulary, or ``None`` — safe.
+        named: The read-out name of an existing program type, or ``None`` — binary-derived →
+            untrusted.
+        pointer_levels: Number of ``*`` modifiers — server-safe scalar.
+        array_len: Fixed array length, or ``None`` — server-safe scalar.
+    """
+
+    base: BaseType | None = None
+    named: Untrusted[str] | None = None
+    pointer_levels: int = 0
+    array_len: int | None = None
+
+
+class ExportedParamSpec(_Out):
+    """The exported view of a :class:`ParamSpec` — ``name`` leaf Untrusted-wrapped.
+
+    Attributes:
+        name: The parameter's current name read out — binary-derived → untrusted.
+        type: The parameter's type as an :class:`ExportedTypeRef`.
+    """
+
+    name: Untrusted[str]
+    type: ExportedTypeRef
+
+
+class ExportedFieldSpec(_Out):
+    """The exported view of a :class:`FieldSpec` — ``name`` leaf Untrusted-wrapped.
+
+    Attributes:
+        name: The member's current name read out — binary-derived → untrusted.
+        type: The member's type as an :class:`ExportedTypeRef`.
+        offset: Struct-only explicit byte offset, or ``None`` — server-safe scalar.
+    """
+
+    name: Untrusted[str]
+    type: ExportedTypeRef
+    offset: int | None = None
 
 
 class ExportedRenameFunctionEntry(_ExportEntry):
@@ -2113,8 +2178,8 @@ class ExportedSetFunctionSignatureEntry(_ExportEntry):
 
     kind: Literal["set_function_signature"]
     function: str
-    return_type: TypeRef
-    parameters: list[ParamSpec] = Field(default_factory=list)
+    return_type: ExportedTypeRef
+    parameters: list[ExportedParamSpec] = Field(default_factory=list)
     calling_convention: str | None = None
 
 
@@ -2124,13 +2189,14 @@ class ExportedApplyDataTypeEntry(_ExportEntry):
     Attributes:
         kind: Discriminator — always ``"apply_data_type"``.
         address: The address (hex — server-safe).
-        type: The applied type as a :class:`TypeRef` — safe structured reference.
+        type: The applied type as an :class:`ExportedTypeRef` — its ``named`` leaf is the read-out,
+            binary-derived type name (untrusted-wrapped — ADR-005).
         clear_existing: Whether conflicting data is cleared first — safe.
     """
 
     kind: Literal["apply_data_type"]
     address: str
-    type: TypeRef
+    type: ExportedTypeRef
     clear_existing: bool = False
 
 
@@ -2139,14 +2205,15 @@ class ExportedDefineStructEntry(_ExportEntry):
 
     Attributes:
         kind: Discriminator — always ``"define_struct"``.
-        name: The composite's name — a USER_DEFINED identifier (allow-listed) → safe to round-trip.
-        fields: The member list.
+        name: The composite's name read out of the hostile program — binary-derived → untrusted
+            (a USER_DEFINED identifier a prior injection-steered write may control; ADR-005).
+        fields: The member list (each member name is binary-derived → untrusted).
         packed: Whether the struct is packed — safe.
     """
 
     kind: Literal["define_struct"]
-    name: str
-    fields: list[FieldSpec]
+    name: Untrusted[str]
+    fields: list[ExportedFieldSpec]
     packed: bool = False
 
 
@@ -2155,13 +2222,13 @@ class ExportedDefineUnionEntry(_ExportEntry):
 
     Attributes:
         kind: Discriminator — always ``"define_union"``.
-        name: The composite's name — a USER_DEFINED identifier (allow-listed) → safe.
-        fields: The member list.
+        name: The composite's name read out — binary-derived → untrusted (ADR-005).
+        fields: The member list (each member name is binary-derived → untrusted).
     """
 
     kind: Literal["define_union"]
-    name: str
-    fields: list[FieldSpec]
+    name: Untrusted[str]
+    fields: list[ExportedFieldSpec]
 
 
 #: The discriminated union of EXPORTED entries (output view). Same dependency order as ``Entry``.
