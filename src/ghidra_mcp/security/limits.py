@@ -38,6 +38,7 @@ _HARD_CEILINGS: dict[str, int] = {
     "tool_timeout_s": HARD_MAX_ANALYSIS_TIMEOUT_S,
     "max_response_bytes": DEFAULT_MAX_RESPONSE_BYTES,
     "max_sessions": HARD_MAX_SESSIONS,
+    "max_sessions_per_owner": HARD_MAX_SESSIONS,
 }
 
 
@@ -51,6 +52,9 @@ class Limits:
         tool_timeout_s: Per-tool-call wall-clock.
         max_response_bytes: Cap on a single tool response payload.
         max_sessions: Worker-pool concurrency cap (backpressure above this).
+        max_sessions_per_owner: Optional per-principal session cap (multi-principal
+            noisy-neighbor fairness — ADR-017); ``None`` = off (the global ``max_sessions``
+            still bounds total exhaustion). Set below ``max_sessions`` for multi-principal.
     """
 
     max_binary_bytes: int = DEFAULT_MAX_BINARY_BYTES
@@ -58,6 +62,7 @@ class Limits:
     tool_timeout_s: int = DEFAULT_TOOL_TIMEOUT_S
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
     max_sessions: int = DEFAULT_MAX_SESSIONS
+    max_sessions_per_owner: int | None = None
 
 
 def _validation_error(detail: str) -> GhidraMcpError:

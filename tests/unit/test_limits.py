@@ -78,6 +78,7 @@ def test_stricter_override_is_honored() -> None:
         ("tool_timeout_s", HARD_MAX_ANALYSIS_TIMEOUT_S),
         ("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES),
         ("max_sessions", HARD_MAX_SESSIONS),
+        ("max_sessions_per_owner", HARD_MAX_SESSIONS),
     ],
 )
 def test_widening_override_is_clamped_to_ceiling(key: str, ceiling: int) -> None:
@@ -92,6 +93,7 @@ def test_widening_override_is_clamped_to_ceiling(key: str, ceiling: int) -> None
         ("max_binary_bytes", HARD_MAX_BINARY_BYTES),
         ("analysis_timeout_s", HARD_MAX_ANALYSIS_TIMEOUT_S),
         ("max_sessions", HARD_MAX_SESSIONS),
+        ("max_sessions_per_owner", HARD_MAX_SESSIONS),
     ],
 )
 def test_exact_ceiling_is_allowed(key: str, ceiling: int) -> None:
@@ -108,6 +110,12 @@ def test_response_bytes_cannot_be_raised_above_default() -> None:
 def test_value_one_is_the_floor() -> None:
     """The minimum accepted positive value is 1 (boundary)."""
     assert resolve_limits({"max_sessions": 1}).max_sessions == 1
+
+
+def test_max_sessions_per_owner_defaults_off_and_is_settable() -> None:
+    """The per-owner cap is OFF by default (None) and accepts a positive override (ADR-017)."""
+    assert resolve_limits().max_sessions_per_owner is None
+    assert resolve_limits({"max_sessions_per_owner": 2}).max_sessions_per_owner == 2
 
 
 # ----------------------------------------------------------------------------------------------

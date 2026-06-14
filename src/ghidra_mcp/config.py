@@ -25,6 +25,7 @@ _ENV_LOG_FORMAT = "GHIDRA_MCP_LOG_FORMAT"
 _ENV_SESSION_TTL = "GHIDRA_MCP_SESSION_TTL_SECONDS"
 _ENV_SESSION_IDLE = "GHIDRA_MCP_SESSION_IDLE_SECONDS"
 _ENV_MAX_SESSIONS = "GHIDRA_MCP_MAX_SESSIONS"
+_ENV_MAX_SESSIONS_PER_OWNER = "GHIDRA_MCP_MAX_SESSIONS_PER_OWNER"
 _ENV_MAX_BINARY_BYTES = "GHIDRA_MCP_MAX_BINARY_BYTES"
 _ENV_ANALYSIS_TIMEOUT = "GHIDRA_MCP_ANALYSIS_TIMEOUT_SECONDS"
 _ENV_TOOL_TIMEOUT = "GHIDRA_MCP_TOOL_TIMEOUT_SECONDS"
@@ -519,6 +520,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     overrides: dict[str, int] = {}
     for env_name, limit_key in (
         (_ENV_MAX_SESSIONS, "max_sessions"),
+        (_ENV_MAX_SESSIONS_PER_OWNER, "max_sessions_per_owner"),
         (_ENV_MAX_BINARY_BYTES, "max_binary_bytes"),
         (_ENV_ANALYSIS_TIMEOUT, "analysis_timeout_s"),
         (_ENV_TOOL_TIMEOUT, "tool_timeout_s"),
