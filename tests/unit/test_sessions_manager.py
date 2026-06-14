@@ -564,3 +564,72 @@ def test_default_owner_is_local_operator() -> None:
     assert mgr.authorize(info.session_id, caller="local").session_id == info.session_id
     with pytest.raises(GhidraMcpError):
         mgr.authorize(info.session_id, caller="someone-else")
+
+
+# ==============================================================================================
+# record_binary_hash (ADR-018 TB8) — the security-load-bearing program-identity binding source.
+# It stamps the worker-computed digest onto the session; the import handler later compares an
+# annotation document's binary.sha256 against it (a doc minted for a different binary is rejected).
+# Owner-scoped via the shared _get_live_locked chokepoint (BOLA-safe). Exercises the REAL method.
+# ==============================================================================================
+_HASH_A = "a" * 64
+_HASH_B = "b" * 64
+
+
+@pytest.mark.critical
+def test_record_binary_hash_reflects_worker_digest_on_session() -> None:
+    # abuse case 71/73 support — the recorded digest is the authoritative program identity the
+    # import hash-binding check reads. Before recording it is None; after, it is the worker digest.
+    mgr, _ = _mgr(max_sessions=8)
+    info = mgr.create(owner=_A)
+    assert info.binary_sha256 is None  # no binary imported yet
+    mgr.record_binary_hash(info.session_id, _HASH_A, caller=_A)
+    assert mgr.authorize(info.session_id, caller=_A).binary_sha256 == _HASH_A
+
+
+@pytest.mark.critical
+def test_record_binary_hash_is_idempotent_for_same_bytes() -> None:
+    # Re-importing the same bytes records the same hash (stable identity; set-once-per-binary).
+    mgr, _ = _mgr(max_sessions=8)
+    info = mgr.create(owner=_A)
+    mgr.record_binary_hash(info.session_id, _HASH_A, caller=_A)
+    mgr.record_binary_hash(info.session_id, _HASH_A, caller=_A)
+    assert mgr.authorize(info.session_id, caller=_A).binary_sha256 == _HASH_A
+
+
+@pytest.mark.critical
+def test_record_binary_hash_foreign_caller_is_session_invalid_and_no_stamp() -> None:
+    # BOLA: a foreign caller cannot stamp another principal's session — denied the SAME
+    # SESSION_INVALID as an unknown id (owner check before any state change). A's hash is untouched.
+    mgr, _ = _mgr(max_sessions=8)
+    info = mgr.create(owner=_A)
+    foreign = _invalid_envelope_fields(
+        mgr, mgr.record_binary_hash, info.session_id, _HASH_B, caller=_B
+    )
+    unknown = _invalid_envelope_fields(
+        mgr, mgr.record_binary_hash, "totally-unknown-id", _HASH_B, caller=_B
+    )
+    assert foreign == unknown
+    assert foreign["type"] is ErrorType.SESSION_INVALID
+    # B's stamp never landed: A's session still has no recorded hash.
+    assert mgr.authorize(info.session_id, caller=_A).binary_sha256 is None
+
+
+@pytest.mark.critical
+def test_record_binary_hash_unknown_session_is_session_invalid() -> None:
+    # An unknown id fails closed with SESSION_INVALID (BOLA-safe; no oracle).
+    mgr, _ = _mgr(max_sessions=8)
+    with pytest.raises(GhidraMcpError) as ei:
+        mgr.record_binary_hash("no-such-session", _HASH_A, caller=_A)
+    assert ei.value.envelope.type is ErrorType.SESSION_INVALID
+
+
+@pytest.mark.critical
+def test_record_binary_hash_evicted_session_is_session_invalid() -> None:
+    # An evicted id is indistinguishable from unknown (BOLA-safe) and the stamp cannot land.
+    mgr, _ = _mgr(max_sessions=8)
+    info = mgr.create(owner=_A)
+    mgr.evict(info.session_id, reason="close")
+    with pytest.raises(GhidraMcpError) as ei:
+        mgr.record_binary_hash(info.session_id, _HASH_A, caller=_A)
+    assert ei.value.envelope.type is ErrorType.SESSION_INVALID

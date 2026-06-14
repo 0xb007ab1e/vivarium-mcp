@@ -775,8 +775,61 @@ blast radius equals the v1.1 write tools', no more.
 | **E** | Import does more than live writes / cross-owner | import ≡ existing gated writes (same consent, same `allow_structural`, same validators); **owner-scoped** (ADR-017) — a principal imports only into its own session |
 
 **Residual / assumptions:** the client owns the exported artifact's confidentiality + integrity at rest
-(out of our boundary by D2); applicability is content-hash-bound (no fuzzy/cross-binary apply). The
-formal abuse-case list (tampered doc, wrong-binary hash, oversized count/field, injection in an
-imported name/comment, structural entry without `allow_structural`, cross-owner import, unknown
-`kind`/`schema_version`) is added with the **implementation** PR (acceptance criteria), per the
-design-then-implement rhythm.
+(out of our boundary by D2); applicability is content-hash-bound (no fuzzy/cross-binary apply).
+
+### Abuse cases for the annotation-persistence increment (append to §6; benign/synthetic fixtures only)
+
+These map 1:1 to the v1.2 ADR-018 tests (`tests/unit/test_annotation_validation.py`,
+`tests/unit/test_annotation_persistence.py`) and run against the **real** `validate_annotation_document`
++ the real registry handlers with a fake `SessionManager` + `FakeGhidraPort` (hermetic — synthetic,
+value-free fixtures, no real binary/secret/worker; the JVM-edge `_gh_export_annotations` enumeration is
+integration-skipped like prior worker rungs). Each must FAIL the attack (the control holds); the
+positive cases (68 export round-trip; 70 happy import) must SUCCEED:
+
+68. **Export is read-only, owner-scoped, Untrusted-wrapped (POSITIVE)** — `session_export_annotations`
+    requires **no** write consent, is denied the BOLA-safe `SESSION_INVALID` for a foreign/unknown id,
+    enumerates only `USER_DEFINED` annotations dependency-ordered, wraps binary-derived strings
+    `Untrusted` (ADR-005), and the **server overlays the authoritative `binary.sha256`** (not the
+    worker's). The server persists nothing. (TB8-I/E)
+69. **Wrong-binary hash → fail closed** — `session_import_annotations` of a document whose
+    `binary.sha256` ≠ the session's recorded program hash (or a session with no recorded hash) is
+    rejected `VALIDATION` **before any write**; applying one binary's addresses/types to another is
+    refused. (TB8-S — the applicability-spoof crux)
+70. **Happy import replays the existing gated writes (POSITIVE)** — a well-formed, hash-matching,
+    consented document applies every entry **via the existing write handlers/port methods** (a
+    full-kinds document exercises all nine — proving import adds **no new write primitive**); the
+    per-entry outcome report records applied/rejected (counts + kind/index only, never values).
+    (TB8 core property)
+71. **Tampered / injection-bearing entry rejected** — a document entry with an injection-steered
+    `new_name` (markup / `../path` / zero-width / RTL / control char), a malicious comment, or a
+    `TypeRef.named` carrying C-declaration syntax is rejected by the **live validators**
+    (`validate_annotation_document` → `validate_entry` → `validate_write_name`/`validate_comment_text`/
+    `validate_type_ref`) — fail closed, no write. Offline edits cannot smuggle an unvalidated write.
+    (TB8-T)
+72. **Oversized count / field → bounded** — a document with > `_MAX_ENTRIES` entries is
+    `LIMIT_EXCEEDED`; an over-length comment is `LIMIT_EXCEEDED`; field/param/composite bounds reuse
+    the existing write caps (DoS — CWE-400). (TB8-D)
+73. **Structural entry without `allow_structural` → denied** — an import containing **any** structural
+    entry — the Phase-A name-only renames `rename_local_variable`/`rename_parameter` (ADR-013) **or**
+    the type-aware `set_function_signature`/`apply_data_type`/`define_struct`/`define_union`
+    (ADR-014/015) — on a session with write consent but **not** `allow_structural` is denied up front
+    "structural writes not permitted"; on a read-only session, "session is read-only" (the same
+    `require_write_consent(structural=True)` chokepoint as live writes — the human-in-the-loop gate is
+    not bypassed by importing). The up-front import gate (`STRUCTURAL_ENTRY_KINDS`) is single-sourced
+    with the per-entry handlers, so it lists **every** kind whose handler requires structural consent.
+    No structural write committed. (TB8-E / LLM08)
+74. **Cross-owner import → `SESSION_INVALID`** — principal B importing into A's session is denied the
+    same BOLA-safe `SESSION_INVALID` as an unknown id; A's session is untouched and no write runs
+    (owner-scoped — ADR-017). (TB8-E / BOLA)
+75. **Unknown `kind` / `schema_version` → rejected** — an entry with an unknown `kind` is rejected at
+    document construction (the discriminated union admits no other variant); an unsupported
+    `schema_version` is rejected `VALIDATION` (forward-compat is opt-in, never silent). No write.
+    (TB8-T / fail-closed)
+76. **Per-entry transaction + best-effort report** — a validation-clean entry whose **write** cannot
+    apply (e.g. worker `not-found`) is recorded as rejected with a safe reason while the other clean
+    entries still apply (each its own transaction; partial application matches the per-write model).
+    The server persists nothing across the batch. (TB8-T / atomicity)
+77. **ADR-001 invariant under persistence** — no JVM/PyGhidra import on any server-side module,
+    including the new export/import handlers and the schema/validation code: export enumeration runs in
+    the worker (`_gh_export_annotations`); import re-validation + replay-orchestration are JVM-free
+    server code over the existing write RPCs. (TB8-E — extends the prior ADR-001 invariant cases)

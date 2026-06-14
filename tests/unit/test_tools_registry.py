@@ -58,6 +58,7 @@ class FakeSessionManager:
         self.created_owners: list[str] = []  # ADR-017: owner principal threaded into create
         self.evicted: list[tuple[str, str]] = []
         self.ensured: list[str] = []
+        self.recorded_hashes: list[tuple[str, str]] = []  # ADR-018: program-hash binding records
         self.created = 0
 
     def ensure_worker(self, session_id: str, *, caller: str = "local") -> None:
@@ -86,6 +87,10 @@ class FakeSessionManager:
         """Record the eviction and report a verified wipe (caller for owner-scoped close)."""
         self.evicted.append((session_id, reason))
         return True
+
+    def record_binary_hash(self, session_id: str, sha256: str, *, caller: str = "local") -> None:
+        """Record the worker-computed program hash (the import handler calls this — ADR-018)."""
+        self.recorded_hashes.append((session_id, sha256))
 
 
 def _u(text: str, origin: DataOrigin = DataOrigin.BINARY) -> Untrusted[str]:
@@ -356,14 +361,15 @@ def ctx() -> reg.ToolContext:
     )
 
 
-def test_catalog_is_exactly_47_unique_tools() -> None:
+def test_catalog_is_exactly_49_unique_tools() -> None:
     # 22 Tier-1 + 5 v1.1 semantic-naming (ADR-007) + 8 v1.1 Tier-2 metrics (ADR-008; READ-ONLY)
     # + 6 v1.1 mutation/write (ADR-012) + 2 v1.1 structural mutation (ADR-013 Phase A) + 2 v1.1
     # structural type-aware mutation (ADR-014 Phase B) + 2 v1.1 composite-type creation (ADR-015
-    # Phase C) — the last 12 GATED by per-session write-consent (the structural 6 additionally by
-    # allow_structural).
-    assert len(reg.TIER1_TOOL_NAMES) == 47
-    assert len(set(reg.TIER1_TOOL_NAMES)) == 47
+    # Phase C) + 2 v1.2 annotation persistence (ADR-018: export read-only + import GATED) — the
+    # 12 mutation tools GATED by per-session write-consent (the structural 6 additionally by
+    # allow_structural); import is GATED identically (+ allow_structural for structural entries).
+    assert len(reg.TIER1_TOOL_NAMES) == 49
+    assert len(set(reg.TIER1_TOOL_NAMES)) == 49
 
 
 def test_handler_table_matches_frozen_allow_list() -> None:
@@ -534,6 +540,33 @@ def test_session_import_uses_manager_lifecycle_keeps_worker_sha256(ctx: reg.Tool
     # Import triggers the manager-owned worker spawn (idempotent) before contacting the worker.
     sessions = cast(FakeSessionManager, ctx.sessions)
     assert sessions.ensured == [_VALID_SID]
+    # The worker-computed program hash is recorded on the session (ADR-018 binding source).
+    assert sessions.recorded_hashes == [(_VALID_SID, "a" * 64)]
+
+
+@pytest.mark.critical
+def test_session_import_skips_hash_record_when_worker_returns_no_hash(
+    ctx: reg.ToolContext,
+) -> None:
+    """ADR-018: a worker import that yields no digest records no hash (the branch stays skipped)."""
+
+    class _NoHashPort(FakePort):
+        def import_binary(self, sid: str, a: s.SessionImportIn) -> s.SessionInfo:
+            self._rec("import_binary", sid)
+            return s.SessionInfo(
+                session_id="WORKER-FORGED",
+                state="worker-forged",
+                created_at=1,
+                expires_at=2,
+                binary_sha256=None,
+            )
+
+    ctx2 = reg.ToolContext(
+        config=ctx.config, sessions=ctx.sessions, port=cast(GhidraPort, _NoHashPort())
+    )
+    handlers = reg.build_handlers(ctx2)
+    handlers["session_import"](session_id=_VALID_SID, source_ref="upload-1")
+    assert cast(FakeSessionManager, ctx2.sessions).recorded_hashes == []
 
 
 @pytest.mark.critical

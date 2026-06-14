@@ -6,11 +6,14 @@
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **47** tools (asserted in tests) —
+- **Allow-list only:** the catalog is fixed; there are exactly **49** tools (asserted in tests) —
   22 Tier-1 read-only (v1) + 5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
   reporting/metrics tools (ADR-008; all read-only) + **6 v1.1 mutation/write tools (ADR-012) + 6
-  v1.1 structural-write tools (ADR-013 Phase A + ADR-014 Phase B + ADR-015 Phase C)** — the last 12 GATED by per-session write-consent
-  (structural additionally by `allow_structural`).
+  v1.1 structural-write tools (ADR-013 Phase A + ADR-014 Phase B + ADR-015 Phase C)** + **2 v1.2
+  annotation-persistence tools (ADR-018: `session_export_annotations` read-only +
+  `session_import_annotations` GATED)** — the 12 mutation tools GATED by per-session write-consent
+  (structural additionally by `allow_structural`); import is GATED identically (and additionally by
+  `allow_structural` when any imported entry is structural).
 - **Session-scoped:** every tool except `session_create` takes an opaque `session_id`, authorized
   server-side (BOLA defense). Inputs are `frozen` and reject unknown fields (`extra="forbid"`).
 - **Bounded by default:** list/search/read tools take `offset` + `limit` (or `length`) with hard
@@ -158,6 +161,25 @@ identifier allow-list / `validate_comment_text` normalization — stored-injecti
 > bound the rest (ADR-015 §3). See `docs/adr/ADR-012-mutation-tools.md`,
 > `docs/adr/ADR-013-structural-mutation.md`, `docs/adr/ADR-014-structural-mutation-phase-b.md`,
 > `docs/adr/ADR-015-composite-type-creation.md`.
+
+### Cross-session annotation persistence (v1.2 — ADR-018; TB8)
+| Tool | Input | Output | Notes |
+|---|---|---|---|
+| `session_export_annotations` | `SessionExportAnnotationsIn{session_id}` | `SessionExportAnnotationsOut{document}` | **read-only** (no consent); owner-scoped; worker enumerates `USER_DEFINED` annotations only, dependency-ordered, bounded (over the cap → `limit-exceeded`); binary-derived strings `Untrusted`-wrapped; server overlays the authoritative `binary.sha256` |
+| `session_import_annotations` | `SessionImportAnnotationsIn{session_id, document}` | `SessionImportAnnotationsOut{session_id, total, applied, rejected, outcomes[{index, kind, applied, reason?}]}` | **GATED** (write-consent; `allow_structural` if any entry is structural); document **fully untrusted** → schema-validate → **binary-hash binding verified** → consent → **per-entry re-validate + replay via the EXISTING gated write path** (no new write primitive); per-entry outcome report; server persists nothing |
+
+> The annotation **document** = `{schema_version, binary:{sha256, name?, size?}, entries:[Entry]}`,
+> a versioned, **binary-hash-bound**, dependency-ordered (composites/types first, then refs, renames,
+> comments) list of typed `Entry` variants — one per existing write tool
+> (`rename_function`/`rename_symbol`/`rename_local_variable`/`rename_parameter`/`set_comment`/
+> `set_function_signature`/`apply_data_type`/`define_struct`/`define_union`). It is **inert structured
+> JSON** (never Ghidra-native — ADR-018 D3). **Export** is the read-out (read-only). **Import** is the
+> new trust boundary (TB8): it adds **no new write primitive** — it is a schema-validated, hash-bound,
+> consent-gated **batch replay of the existing v1.1 gated writes**, each re-validated through the live
+> validators and applied in its own Ghidra transaction (best-effort per entry). Persistence is
+> **stateless/client-owned** (the server stores nothing — ADR-002 preserved). Export adds **one** worker
+> RPC (`export_annotations`); import reuses the existing write RPCs (no new import RPC). See
+> `docs/adr/ADR-018-annotation-persistence.md`.
 
 > `*` marks an `Untrusted[...]`-wrapped (binary-derived) field.
 

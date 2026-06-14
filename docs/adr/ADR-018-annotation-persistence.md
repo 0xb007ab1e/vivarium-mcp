@@ -80,7 +80,13 @@ have been tampered offline). The server:
    meaningless and dangerous.
 3. **Gates** exactly like live writes: `require_write_consent`; any **structural** entry additionally
    requires `require_write_consent(structural=True)` (LLM08 — the human-in-the-loop capability gate is
-   not bypassed by importing).
+   not bypassed by importing). The **structural** kinds (`STRUCTURAL_ENTRY_KINDS`, the single source of
+   truth shared with the handlers) are **every** entry whose live handler calls
+   `require_write_consent(structural=True)`: the Phase-A name-only renames
+   `rename_local_variable`/`rename_parameter` (ADR-013) **and** the Phase-B/C type-aware writes
+   `set_function_signature`/`apply_data_type`/`define_struct`/`define_union` (ADR-014/015). A
+   local/param-only document is therefore denied up front without `allow_structural`, identical to the
+   per-entry handler.
 4. **Per entry:** re-validate through the **same** validator (`validate_write_name` /
    `validate_comment_text` / `validate_target_ref` / `validate_type_ref` / `validate_signature` /
    `validate_composite`), then **replay via the existing write handler/worker RPC**, each in its own

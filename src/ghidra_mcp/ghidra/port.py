@@ -234,3 +234,22 @@ class GhidraPort(Protocol):
     def define_union(self, sid: str, a: s.DefineUnionIn) -> s.DefineUnionResult:
         """Create a new union from a resolved field list (one transaction — ADR-015)."""
         ...
+
+    # --- cross-session annotation persistence (v1.2 — ADR-018; TB8) ---
+    # ONE new worker method (`export_annotations`): the worker enumerates the program's
+    # USER_DEFINED annotations only, dependency-ordered, bounded. IMPORT adds NO new port/worker
+    # method — it is server-side orchestration (the registry) that replays each entry via the
+    # EXISTING write methods above (rename_function/.../define_union). The adapter wraps every
+    # binary-derived string in the exported document as Untrusted (ADR-005).
+    def export_annotations(
+        self, sid: str, a: s.SessionExportAnnotationsIn
+    ) -> s.SessionExportAnnotationsOut:
+        """Read out the session's USER_DEFINED annotations as a versioned, hash-bound document.
+
+        Read-only (no write consent). The worker enumerates ONLY ``USER_DEFINED`` annotations
+        (never Ghidra auto-analysis output), dependency-ordered (composites/types before the
+        signatures/applies that reference them); over the entry cap → ``limit-exceeded`` (no
+        silent truncation). The adapter assembles the document, wrapping binary-derived strings as
+        ``Untrusted`` (ADR-005). The server overlays the authoritative ``binary.sha256`` binding.
+        """
+        ...
