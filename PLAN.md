@@ -17,7 +17,9 @@ is the central security control.
   tools); `runScript` out of scope.
 - **v1.1:** ✅ **DONE** — Tier 2 reporting/metrics (cyclomatic complexity, code/data coverage,
   imports/exports, IOC/crypto scans, call-graph metrics, program-summary report); ✅ **DONE** —
-  HTTP transport (ADR-011 / TB6, merged 2026-06-12). **Still deferred:** mutation tools (gated);
+  HTTP transport (ADR-011 / TB6, merged 2026-06-12); ✅ **DONE** — mutation/write tools (gated,
+  default-deny per-session write-consent; ADR-012 annotations + ADR-013/014/015 structural A/B/C =
+  composite types; catalog → 47 tools; merged 2026-06-14, #42/#44/#46/#48). **Still deferred:**
   behavioral-equivalence differential harness (ADR-010); multi-principal authZ.
 - **Transport:** design **configurable (stdio + HTTP)**; **build/harden stdio in v1**. ✅ **HTTP
   DONE** — shipped as a gated, separately threat-modeled (TB6) v1.1 increment (ADR-011, slices 1–6,
@@ -92,8 +94,9 @@ Contract changes route through the PM (batch-atomicity mandate).
 5. ✅ **v1.1 increments shipped to `main` (post-integration):** semantic-naming tools + reference
    loop + sandboxed compile eval + `naming_accuracy` metric (PRs #26–29); Tier-2 reporting/metrics
    (8 read-only tools; PR #30); **HTTP transport** (ADR-011 / TB6; slices 1–6 = PRs #32–#36; merged
-   2026-06-12). Still deferred: mutation tools (gated), behavioral-equivalence harness, multi-
-   principal authZ.
+   2026-06-12); **mutation/write tools** (gated; ADR-012 annotations + ADR-013/014/015 structural
+   A/B/C composite types; catalog → 47 tools; PRs #42/#44/#46/#48; merged 2026-06-14). Still
+   deferred: behavioral-equivalence harness (ADR-010), multi-principal authZ.
 6. Release prep (**`sdlc-release-manager`**) — tag/deploy gated.
 
 ## 8. ADR log (decisions to record in `docs/adr/`)
