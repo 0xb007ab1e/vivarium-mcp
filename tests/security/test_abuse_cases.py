@@ -1339,6 +1339,104 @@ def test_per_owner_session_cap_isolates_noisy_neighbor() -> None:
     assert mgr.create(owner=_OWNER_B).session_id is not None
 
 
+# ==============================================================================================
+# TB6 (delta) — mTLS identity-source abuse cases 67-71 (threat-model §13, ADR-019 increment A).
+# mTLS = server-terminated, in-app: the TLS handshake (uvicorn CERT_REQUIRED + the client-CA bundle)
+# is the FIRST gate (rejects any client without a CA-signed cert — integration-gated below); the
+# :class:`~ghidra_mcp.server.auth.MtlsAuthenticator` is the in-app SECOND gate, mapping the VERIFIED
+# peer cert's configured field → principal (fail closed, no oracle). These run against the REAL
+# ``MtlsAuthenticator`` driven with SYNTHETIC parsed-cert dicts (the shape ``ssl.getpeercert()``
+# returns) — hermetic, no real keys/secrets. Each FAILS the attack: an absent/empty identity is a
+# generic reject; distinct certs become distinct owner-scoped principals (composing ADR-017); the
+# cert material is never logged.
+# ==============================================================================================
+from ghidra_mcp.server.auth import MtlsAuthenticator  # noqa: E402  # local to the TB6 mTLS block
+
+
+def _peer(cn: str) -> dict[str, object]:
+    """A synthetic verified-peer-cert dict (subject CN), the shape ssl.getpeercert() returns."""
+    return {"subject": ((("commonName", cn),),)}
+
+
+# --- Case 67 — no client cert → generic reject (TB6-S, fail closed) -------------------------
+@pytest.mark.critical
+def test_mtls_no_client_cert_is_rejected() -> None:
+    """No verified peer cert (None) → the authenticator fails closed (→ generic 401, no oracle).
+
+    Defense in depth: even though uvicorn's CERT_REQUIRED handshake already rejects a client without
+    a CA-signed cert (case 70, integration-gated), the in-app authenticator must not admit a request
+    that somehow lacks a verified cert.
+    """
+    auth = MtlsAuthenticator()
+    assert auth.authenticate(AuthContext(peer_certificate=None)) is None
+    assert auth.authenticate(AuthContext()) is None  # default-None peer cert
+
+
+# --- Case 68 — empty mapped field → generic reject (TB6-S, no anonymous principal) ----------
+@pytest.mark.critical
+def test_mtls_empty_mapped_field_is_rejected() -> None:
+    """A verified cert whose configured field is empty/missing → reject (no empty-id principal)."""
+    auth = MtlsAuthenticator()  # cn
+    assert auth.authenticate(AuthContext(peer_certificate=_peer(""))) is None  # empty CN
+    no_cn = {"subject": ((("organizationName", "acme"),),)}  # CN absent entirely
+    assert auth.authenticate(AuthContext(peer_certificate=no_cn)) is None
+
+
+# --- Case 69 — two distinct certs → two distinct owner-scoped principals (TB6-S/E, ADR-017) ---
+@pytest.mark.critical
+def test_mtls_two_distinct_certs_yield_two_distinct_owner_scoped_principals() -> None:
+    """Distinct client certs map to distinct principals → distinct, isolated session ownership.
+
+    Composes with ADR-017: each principal owns only the sessions it creates; one cannot reach the
+    other's (the manager owner check, proven in cases 61-63). Here we prove the identity *source*
+    yields distinct principal ids, and a real :class:`SessionManager` scopes ownership by them.
+    """
+    auth = MtlsAuthenticator()
+    p_alice = auth.authenticate(AuthContext(peer_certificate=_peer("alice")))
+    p_bob = auth.authenticate(AuthContext(peer_certificate=_peer("bob")))
+    assert p_alice is not None and p_bob is not None  # both authenticated (and narrow the type)
+    assert p_alice == Principal(id="alice")
+    assert p_bob == Principal(id="bob")
+    assert p_alice != p_bob
+    # Distinct mTLS principals → distinct owner-scoped sessions (BOLA closed — TB6-I / ADR-017).
+    mgr = _abuse_mgr()
+    a = mgr.create(owner=p_alice.id)
+    foreign = _invalid_fields(mgr.authorize, a.session_id, caller=p_bob.id)
+    unknown = _invalid_fields(mgr.authorize, "unknown-id", caller=p_bob.id)
+    assert foreign == unknown  # bob cannot distinguish alice's session from a non-existent one
+    assert mgr.authorize(a.session_id, caller=p_alice.id).session_id == a.session_id
+
+
+# --- Case 70 — untrusted-CA cert rejected at the TLS handshake (TB6-S/T, LIVE) --------------
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_mtls_untrusted_ca_cert_rejected_at_handshake() -> None:
+    """Case 70 (live): a client cert NOT signed by the configured client-CA bundle is rejected by
+    the TLS handshake itself (uvicorn ``ssl_cert_reqs=CERT_REQUIRED`` + ``ssl_ca_certs``) — the
+    connection never reaches the ASGI app, so there is no in-app code path to unit-test. The config
+    layer GUARANTEES the CA bundle is set for ``auth_mode=mtls`` (``test_mtls_without_client_ca_
+    fails_closed``); this case asserts the live transport gate. Promoted to WS5 (needs the live
+    uvicorn TLS listener + a synthetic client keypair from an untrusted CA; no real secrets)."""
+
+
+# --- Case 71 — cert / peer material is never logged (TB6-R/I) -------------------------------
+@pytest.mark.critical
+def test_mtls_cert_material_is_never_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """Authenticating an mTLS request must not emit the cert subject/SAN into any log record.
+
+    The authenticator is pure (it logs nothing itself); this guards against a regression that would
+    log the cert. We authenticate with a distinctive CN and assert it appears in NO captured log
+    (TB6-R/I — credential/cert material is never logged or echoed; topic-logging-observability).
+    """
+    marker = "secret-cn-marker-7f3a"
+    with caplog.at_level("DEBUG"):
+        principal = MtlsAuthenticator().authenticate(AuthContext(peer_certificate=_peer(marker)))
+    assert principal == Principal(id=marker)  # mapping worked
+    assert all(marker not in rec.getMessage() for rec in caplog.records)
+    # AuthContext keeps the cert out of repr (field repr=False) — a logged ctx would not leak it.
+    assert marker not in repr(AuthContext(peer_certificate=_peer(marker)))
+
+
 # --- Live cross-principal cases (control needs the real server/worker) — WS5 ----------------
 @pytest.mark.integration
 @pytest.mark.skip(reason=_INTEGRATION_REASON)

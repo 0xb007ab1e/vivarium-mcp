@@ -234,3 +234,99 @@ def test_multi_token_value_too_long_fails_closed() -> None:
     huge = ",".join(f"p{i}:{'x' * 24}" for i in range(1000))
     with pytest.raises(GhidraMcpError, match="is too long"):
         load_config(_bearer_env(GHIDRA_MCP_HTTP_BEARER_TOKENS=huge))
+
+
+# ==============================================================================================
+# mTLS config (ADR-019 increment A): client-CA bundle (required for mtls) + principal-field
+# selector (validated allow-list). The CA path / field are NOT secrets. Fail-closed startup.
+# ==============================================================================================
+def _mtls_env(**extra: str) -> dict[str, str]:
+    """A loopback HTTP env with auth=mtls (loopback so TLS server cert is not also required)."""
+    return _env(
+        GHIDRA_MCP_TRANSPORT="http",
+        GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
+        GHIDRA_MCP_HTTP_AUTH="mtls",
+        **extra,
+    )
+
+
+def test_mtls_with_client_ca_defaults_to_cn_field() -> None:
+    cfg = load_config(_mtls_env(GHIDRA_MCP_HTTP_TLS_CLIENT_CA="/etc/ca/clients.pem"))
+    assert cfg.http is not None
+    assert cfg.http.auth_mode == "mtls"
+    assert cfg.http.tls_client_ca == "/etc/ca/clients.pem"
+    assert cfg.http.mtls_principal_field == "cn"  # secure default
+
+
+def test_mtls_without_client_ca_fails_closed() -> None:
+    """mTLS needs the CA bundle for the handshake verify gate — refuse to boot without it."""
+    with pytest.raises(GhidraMcpError, match="mTLS auth requires a client-CA bundle"):
+        load_config(_mtls_env())
+
+
+@pytest.mark.parametrize("field_name", ["cn", "san-dns", "san-uri", "san-email", "dn"])
+def test_mtls_principal_field_accepts_each_valid_choice(field_name: str) -> None:
+    cfg = load_config(
+        _mtls_env(
+            GHIDRA_MCP_HTTP_TLS_CLIENT_CA="/ca.pem",
+            GHIDRA_MCP_HTTP_MTLS_PRINCIPAL_FIELD=field_name,
+        )
+    )
+    assert cfg.http is not None
+    assert cfg.http.mtls_principal_field == field_name
+
+
+def test_mtls_principal_field_rejects_unknown_choice() -> None:
+    with pytest.raises(GhidraMcpError, match="unsupported value"):
+        load_config(
+            _mtls_env(
+                GHIDRA_MCP_HTTP_TLS_CLIENT_CA="/ca.pem",
+                GHIDRA_MCP_HTTP_MTLS_PRINCIPAL_FIELD="serial",
+            )
+        )
+
+
+def test_mtls_over_network_bind_requires_server_tls_too() -> None:
+    """A network mtls bind still needs the server TLS cert/key (defense in depth, existing rule)."""
+    with pytest.raises(GhidraMcpError, match="requires TLS"):
+        load_config(
+            _env(
+                GHIDRA_MCP_TRANSPORT="http",
+                GHIDRA_MCP_HTTP_BIND="0.0.0.0:8765",
+                GHIDRA_MCP_HTTP_AUTH="mtls",
+                GHIDRA_MCP_HTTP_TLS_CLIENT_CA="/ca.pem",
+            )
+        )
+
+
+def test_mtls_network_bind_full_valid_config() -> None:
+    cfg = load_config(
+        _env(
+            GHIDRA_MCP_TRANSPORT="http",
+            GHIDRA_MCP_HTTP_BIND="0.0.0.0:8765",
+            GHIDRA_MCP_HTTP_AUTH="mtls",
+            GHIDRA_MCP_HTTP_TLS_CERT="/c.pem",
+            GHIDRA_MCP_HTTP_TLS_KEY="/k.pem",
+            GHIDRA_MCP_HTTP_TLS_CLIENT_CA="/ca.pem",
+            GHIDRA_MCP_HTTP_MTLS_PRINCIPAL_FIELD="san-uri",
+        )
+    )
+    assert cfg.http is not None
+    h = cfg.http
+    assert h.is_network is True and h.auth_mode == "mtls"
+    assert h.tls_client_ca == "/ca.pem" and h.mtls_principal_field == "san-uri"
+
+
+def test_non_mtls_config_leaves_client_ca_none() -> None:
+    """The client CA is read but irrelevant for non-mtls modes; bearer leaves it None by default."""
+    cfg = load_config(
+        _env(
+            GHIDRA_MCP_TRANSPORT="http",
+            GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
+            GHIDRA_MCP_HTTP_AUTH="bearer",
+            GHIDRA_MCP_HTTP_BEARER_TOKEN=_TOKEN,
+        )
+    )
+    assert cfg.http is not None
+    assert cfg.http.tls_client_ca is None
+    assert cfg.http.mtls_principal_field == "cn"  # default, harmless for bearer

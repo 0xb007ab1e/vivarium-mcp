@@ -379,10 +379,21 @@ def run_http(
         http.auth_mode,
         bearer_token=http.bearer_token,
         bearer_tokens=http.bearer_tokens,
+        mtls_principal_field=http.mtls_principal_field,
     )
     asgi = build_http_asgi_app(app.streamable_http_app(), http, authenticator=authenticator)
     _install_shutdown_handlers()
     log_level = config.log_level.lower()
+    # mTLS (ADR-019 D2): require + verify a CA-signed client cert at the TLS handshake (the first
+    # gate). Without this uvicorn would not request a client cert and the in-app authenticator would
+    # have nothing to map — so the transport gate and the in-app gate are wired together (fail
+    # closed; config guarantees tls_client_ca is set when auth_mode == "mtls").
+    import ssl
+
+    ssl_kwargs: dict[str, object] = {"ssl_certfile": http.tls_cert, "ssl_keyfile": http.tls_key}
+    if http.auth_mode == "mtls":
+        ssl_kwargs["ssl_ca_certs"] = http.tls_client_ca
+        ssl_kwargs["ssl_cert_reqs"] = ssl.CERT_REQUIRED
     try:
         if http.is_unix_socket:
             uvicorn.run(asgi, uds=http.bind[len("unix:") :], log_level=log_level)
@@ -392,9 +403,8 @@ def run_http(
                 asgi,
                 host=host.strip("[]"),
                 port=int(port),
-                ssl_certfile=http.tls_cert,
-                ssl_keyfile=http.tls_key,
                 log_level=log_level,
+                **ssl_kwargs,  # type: ignore[arg-type]
             )
         return 0
     except KeyboardInterrupt:
