@@ -19,8 +19,11 @@ is the central security control.
   imports/exports, IOC/crypto scans, call-graph metrics, program-summary report); ✅ **DONE** —
   HTTP transport (ADR-011 / TB6, merged 2026-06-12); ✅ **DONE** — mutation/write tools (gated,
   default-deny per-session write-consent; ADR-012 annotations + ADR-013/014/015 structural A/B/C =
-  composite types; catalog → 47 tools; merged 2026-06-14, #42/#44/#46/#48). **Still deferred:**
-  behavioral-equivalence differential harness (ADR-010); multi-principal authZ.
+  composite types; catalog → 47 tools; merged 2026-06-14, #42/#44/#46/#48); ✅ **DONE** —
+  behavioral-equivalence differential harness (ADR-016, completing ADR-010's deferred metric; merged
+  2026-06-14, #50/#51); ✅ **DONE** — multi-principal authZ (ADR-017 — per-principal session
+  ownership + multi-token bearer; threat-model TB6-I now ENFORCED; merged 2026-06-15, #52/#53).
+  **🎉 v1.1 backlog COMPLETE.**
 - **Transport:** design **configurable (stdio + HTTP)**; **build/harden stdio in v1**. ✅ **HTTP
   DONE** — shipped as a gated, separately threat-modeled (TB6) v1.1 increment (ADR-011, slices 1–6,
   merged 2026-06-12; stdio remains the default).
@@ -95,8 +98,10 @@ Contract changes route through the PM (batch-atomicity mandate).
    loop + sandboxed compile eval + `naming_accuracy` metric (PRs #26–29); Tier-2 reporting/metrics
    (8 read-only tools; PR #30); **HTTP transport** (ADR-011 / TB6; slices 1–6 = PRs #32–#36; merged
    2026-06-12); **mutation/write tools** (gated; ADR-012 annotations + ADR-013/014/015 structural
-   A/B/C composite types; catalog → 47 tools; PRs #42/#44/#46/#48; merged 2026-06-14). Still
-   deferred: behavioral-equivalence harness (ADR-010), multi-principal authZ.
+   A/B/C composite types; catalog → 47 tools; PRs #42/#44/#46/#48; merged 2026-06-14);
+   **behavioral-equivalence harness** (ADR-016, completes ADR-010's deferred metric; PRs #50/#51;
+   merged 2026-06-14); **multi-principal authZ** (ADR-017 — per-principal session ownership +
+   multi-token bearer, TB6-I enforced; PRs #52/#53; merged 2026-06-15). **v1.1 backlog COMPLETE.**
 6. Release prep (**`sdlc-release-manager`**) — tag/deploy gated.
 
 ## 8. ADR log (decisions to record in `docs/adr/`)
@@ -107,12 +112,13 @@ Contract changes route through the PM (batch-atomicity mandate).
   ADR-007/008 v1.1 semantic-naming + Tier-2 extraction primitives. **ADR-009 Concrete worker
   launcher + import-root mount + per-session socket dir** (WS2/WS3 seam; the chain-wiring work —
   short per-session UDS dir token keeps the path under the AF_UNIX limit). ADR-010 semantic-naming
-  eval (sandboxed compile / TB5). **✅ ADR-011 HTTP transport (v1.1; DONE — merged 2026-06-12,
+  eval (sandboxed compile / TB5; its deferred behavioral-equivalence metric completed by ADR-016). **✅ ADR-011 HTTP transport (v1.1; DONE — merged 2026-06-12,
   slices 1–6 = PRs #32–#36)** — MCP Streamable HTTP; secure-by-default exposure
   (stdio→loopback→UDS→gated network), bearer auth (mTLS/OAuth port-ready stubs), TLS off-loopback,
   fail-closed startup; `std-owasp-api` edge (size-cap/rate-limit/CORS/headers); network boundary
-  threat-modeled as **TB6** (BOLA closed-by-construction in single-principal v1.1 — per-principal
-  owner check deferred to multi-principal, ADR-011 §6); activates
+  threat-modeled as **TB6** (BOLA now closed by an **enforced per-principal owner check** —
+  ADR-017, per-principal session ownership + multi-token bearer; the ADR-011 §6 single-principal
+  deferral is resolved); activates
   `std-owasp-api`/`std-zero-trust`/`topic-authn-authz`; operator runbook
   `docs/runbooks/http-exposure.md`; design `docs/design/http-transport.md`.
 
