@@ -6,7 +6,7 @@ All notable changes to `ghidra-mcp` are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.2.0] — 2026-06-15
+## [0.2.0] — 2026-06-13
 
 The **first write surface.** v0.1.0 was strictly read-only; this release adds an allow-listed,
 default-deny **mutation/write** tier (annotation + structural), a behavioral-equivalence naming
