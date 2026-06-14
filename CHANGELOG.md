@@ -6,6 +6,120 @@ All notable changes to `ghidra-mcp` are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-06-15
+
+The **first write surface.** v0.1.0 was strictly read-only; this release adds an allow-listed,
+default-deny **mutation/write** tier (annotation + structural), a behavioral-equivalence naming
+metric, and **multi-principal authorization** for the HTTP transport. The tool catalog grows
+**35 → 47**. Ghidra still runs **isolated, headless, and out-of-process** (ADR-001 unchanged);
+the analyzed binary remains hostile input; the server never loads the JVM or mutates — every
+write executes only inside the hardened worker, in one transaction with rollback.
+
+> **Pre-1.0 / private:** the tool catalog, RPC, and envelope contracts may still evolve before
+> 1.0. **This release is backward-compatible:** all new tools are **additive** (no existing
+> tool / RPC method / envelope shape changed), the new write tier and per-owner session cap are
+> **opt-in and default-off**, and existing stdio / single-principal users are unaffected (the
+> session `owner` defaults to the implicit `local` principal). See `docs/contracts/`.
+
+### Added
+
+**Mutation / write tools — the headline (first write/agency boundary — threat-model TB7)**
+- **Default-deny write consent (ADR-012):** a session is read-only until the operator calls the
+  explicit, auditable, revocable, per-session, non-transferable **`session_enable_writes`**
+  human-in-the-loop gate (OWASP LLM08 least-agency). `session_disable_writes` reverts to
+  read-only; **`session_undo`** reverts the last committed mutation transaction. Every write runs
+  `authorize → require_write_consent → validate → worker-RPC → audit`; the server **never
+  mutates** (ADR-001) — the write executes only in the worker inside **one Ghidra transaction**
+  (commit on success, `endTransaction(commit=False)` rollback on any failure — fail closed).
+- **Annotation writes (ADR-012):** `rename_function`, `rename_symbol`, `set_comment`.
+  Attacker-influenced `new_name` / comment `text` are validated **on the way in** (the
+  `validate_write_name` identifier allow-list / bounded `validate_comment_text` normalization —
+  stored-injection / data-poisoning defense), and the read path still wraps `Untrusted[...]` +
+  normalizes **on the way out** (two-sided defense, ADR-005).
+- **Structural writes — Phase A (ADR-013):** `rename_local_variable`, `rename_parameter` via the
+  HighFunction path (name-only; the `updateDBVariable` data type is `null` — **no C parser
+  surface**). HighSymbol resolution (decompile) happens **before** the transaction opens, so a
+  resolution failure is a clean `not-found` with no transaction.
+- **Structural writes — Phase B (ADR-014):** `set_function_signature`, `apply_data_type` over a
+  **structured / constrained `TypeRef`** (resolved base/named types, bounded pointer-levels and
+  array-length, closed-vocabulary calling convention) — **resolved against the program's
+  `DataTypeManager`, never parsed from a C string**, so the C-parser injection surface is
+  eliminated by construction (LLM07).
+- **Structural writes — Phase C (ADR-015):** `define_struct`, `define_union` — composite
+  *creation*. The empty composite is pre-registered so self-`named` pointers resolve (true
+  self-referential types); a **by-value self-embed (incl. array-of-self) is rejected**, name
+  collisions are fail-closed REJECTED, and a 1 MiB size cap + transactional rollback bound the
+  rest.
+- **Two-level consent for structural writes:** the six structural tools (Phase A/B/C) require, in
+  addition to write consent, the **separate `allow_structural` opt-in**
+  (`session_enable_writes{allow_structural: true}` → `require_write_consent(structural=True)`).
+- **Per-write audit** (intent + outcome: tool, opaque session id, target address, value sizes,
+  applied/denied — **never** binary-derived content or the new value verbatim; redacted) on an
+  append-only stream; write-consent grant/revoke is itself audited. Mutations are
+  **session-scoped + ephemeral** (lost on evict — ADR-002; no persistence).
+
+**Behavioral-equivalence naming metric (ADR-016)**
+- Completes ADR-010's deferred **`behavioral_equivalence`** metric with a client-side
+  **differential harness** for semantic-naming quality (alongside the existing `naming_accuracy`
+  + compile-rate). Evaluation extends the TB5 sandbox (rootless, no-egress, read-only rootfs,
+  caps dropped, resource-capped, kill-on-timeout); it **never executes the hostile binary** —
+  best-effort C remains a measured metric, not a guarantee.
+
+**Multi-principal authorization for HTTP (ADR-017 — threat-model TB6)**
+- **Multi-token bearer:** the single shared bearer token is replaced by a **token → principal-id
+  map**, so distinct tokens authenticate distinct principals (constant-time compare, **no
+  which-token timing oracle**, generic `401`, tokens never logged; mTLS/OAuth remain pluggable
+  port stubs).
+- **Enforced per-principal session ownership:** a session is owned by its creating principal; the
+  `owner` is server-derived and immutable. Every session-scoped entry point (read / write /
+  close) goes through the shared owner check (complete mediation).
+- **Operator-configurable per-owner session cap** (`GHIDRA_MCP_MAX_SESSIONS_PER_OWNER`; **default
+  off** — the global `max_sessions` backstops) bounds the noisy-neighbor / pool-monopolization
+  case in a multi-principal deployment.
+
+**Supply chain & operations**
+- **Daily scheduled CVE rescan of `main` (`scheduled-rescan.yml`):** SCA (pip-audit on the
+  hash-pinned runtime + dev lockfiles) **and** a digest-pinned image rebuild + Trivy scan, on a
+  daily cron, **scan-only** (never builds-to-push / signs / publishes), **fail-closed** on a new
+  HIGH/CRITICAL — the failed run is the alert. Surfaces a new CVE in an **unchanged** dependency
+  or pinned base between releases (the gap that let CVE-2026-45447 / openssl reach the v0.1.0 tag).
+
+### Changed
+- **Tool catalog: 35 → 47** — 22 Tier-1 read-only + 5 semantic-naming + 8 Tier-2 reporting
+  (all read-only, unchanged) **+ 12 new write tools** (6 annotation/lifecycle ADR-012, 6
+  structural ADR-013/014/015). The exact count is asserted in tests.
+- **HTTP BOLA (TB6-I) is now ENFORCED, no longer deferred (ADR-017):** v0.1.0 closed BOLA "by
+  construction" for a single principal (256-bit CSPRNG session-id capability); v0.2.0 adds an
+  **enforced per-principal owner check** on top — a cross-principal session reference returns the
+  **same `SESSION_INVALID`** as unknown/expired/evicted (no oracle). Transparent to existing
+  single-principal / stdio users (owner defaults to `local`).
+
+### Security
+- **TB7 — write/agency boundary (ADR-012/013/014/015):** mutation raises OWASP LLM08 agency (the
+  read-only "no destructive action exists" bound no longer holds inside a write-enabled session).
+  Bounded — not prevented — by default-deny consent (human gate), the second `allow_structural`
+  gate, allow-list / structured-input validation (no free-form C parsed), one-transaction
+  rollback, per-write audit, `session_undo`, and ADR-002 session ephemerality. Worst case is a
+  mis-annotated / mis-restructured **disposable** session — never host or durable-data compromise.
+- **TB5 — eval boundary extended (ADR-016):** the behavioral-equivalence harness compiles
+  attacker-derived C in the existing no-egress / read-only / resource-capped / kill-on-timeout
+  sandbox; compile-only, never links or runs the binary.
+- **TB6 — enforced ownership + multi-token authn (ADR-017):** closes the deferred BOLA gap;
+  forging another principal requires their secret token; identity is server-derived only.
+
+### Notes
+- **Pre-1.0 contract posture:** contracts remain frozen per release but may evolve before 1.0;
+  this release is additive and backward-compatible (see the version header above).
+- **New environment variables (opt-in):**
+  - **Multi-token bearer map** — operator supplies a token → principal-id mapping (secret-managed
+    credentials, never in source/logs); see `docs/runbooks/http-exposure.md`. HTTP off-loopback
+    still requires **TLS + an authenticator** or the server fails closed at startup (unchanged).
+  - **`GHIDRA_MCP_MAX_SESSIONS_PER_OWNER`** — per-owner session cap; **default off** (global
+    `max_sessions` backstops).
+- **Upgrade is transparent for read-only / stdio / single-principal users.** To use writes an
+  operator must explicitly call `session_enable_writes` (and `{allow_structural: true}` for the
+  6 structural tools). No DB schema or migration (sessions are ephemeral; no persistence).
+
 ## [0.1.0] — 2026-06-12
 
 First tagged release. A secure [MCP](https://modelcontextprotocol.io) server that exposes
@@ -85,5 +199,6 @@ analyzer is the central security control.
   off-by-default and fail-closed. See `docs/security/threat-model.md` and `SECURITY.md` for the
   reporting channel.
 
-[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/0xb007ab1e/ghidra-mcp/releases/tag/v0.1.0
