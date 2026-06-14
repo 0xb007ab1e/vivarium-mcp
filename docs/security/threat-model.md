@@ -6,7 +6,7 @@
 > network boundary (TB6, ADR-011)**, the **annotation-mutation (write) boundary (TB7, §10,
 > ADR-012)**, the **structural-mutation Phase A (TB7 structural, §10, ADR-013)**, and the
 > **structural-mutation Phase B — signature + data-type apply (TB7 structural Phase B, §10,
-> ADR-014 — PROPOSED)**.
+> ADR-014)**, and (v1.2) the **annotation-persistence import boundary (TB8, §12, ADR-018)**.
 > Source of truth: [`PLAN.md`](../../PLAN.md).
 > **Data classification:** the analyzed binary and all derived artifacts are **confidential** and
 > of **hostile origin** (master §5).
@@ -65,6 +65,7 @@ flowchart LR
 | **TB5** | naming eval → compiler | **attacker-derived C compiled** (v1.1 eval; ADR-010) | sandbox like TB3: rootless container, no egress, ro-rootfs, caps dropped, resource caps, kill-on-timeout, compile-only (no link/run) |
 | **TB6** | network client → server (HTTP) | **first network attack surface** (v1.1; ADR-011/ADR-017) | secure-by-default: stdio default, else loopback; network bind needs TLS+auth (fail closed); **multi-token bearer** auth → distinct principals (mTLS/OAuth-pluggable); rate-limit + size caps + strict CORS; per-request authZ; **BOLA closed by an enforced per-principal owner check** (session owned by its creating principal; foreign id → same `SESSION_INVALID`, no oracle — ADR-017) on top of the CSPRNG session-id capability; operator-configurable per-owner session cap (noisy-neighbor; default off, global cap backstops); same read-only catalog |
 | **TB7** | client write-request → program mutation | **first write/agency boundary** — an LLM-exposed tool now *mutates* the per-session analysis (rename/comment) (v1.1 PROPOSED; ADR-012, §10) | **default-deny write consent** per session (human-in-the-loop gate — LLM08); annotation-only minimal set (rename function/symbol, set comment); allow-list write-name validation + comment normalization on the way IN (stored-injection defense); **one Ghidra transaction per write → rollback on failure**; per-write audit (intent+outcome); **session-scoped + ephemeral** (no persistence — wiped on evict, ADR-002); server NEVER mutates (ADR-001 — write executes only in the worker) |
+| **TB8** | annotation-import document → server | **NEW write boundary (v1.2; ADR-018)** — a client-supplied, offline-tamperable annotation document is replayed as writes | treat the document as **fully untrusted**: schema-validate + bound (count/size); **binary-hash binding** (reject a doc minted for a different program); **consent-gated** (+ `allow_structural` for structural entries); **every entry re-validated through the live validators + replayed via the existing gated write path** (no new write primitive) in per-entry transactions w/ rollback; owner-scoped (ADR-017); per-entry audited; **server persists nothing** (stateless — ADR-002 preserved); export carries the binary's confidential artifacts off-server to the client (master §5) |
 
 ## 3. STRIDE per element / flow
 
@@ -751,3 +752,31 @@ synthetic principal ids, synthetic tokens; NO real secrets/worker). Each FAILS t
     session/worker/store are untouched. The manager + authenticator controls are proven hermetically
     (61-66); the per-request-principal → `ToolContext` → manager wiring is promoted to integration
     (WS5). (TB6-I)
+
+## 12. TB8 — Annotation-import document → Server (v1.2 — ADR-018, ACCEPTED design)
+
+The first **v1.2** increment adds cross-session annotation **persistence**: `session_export_annotations`
+emits a versioned, **binary-hash-bound**, structured (inert) document of the session's `USER_DEFINED`
+annotations; `session_import_annotations` **replays** such a document into a fresh same-binary session.
+Persistence is **stateless/client-owned** (the server stores nothing — ADR-002 preserved); the new
+boundary is the **import** of a client-supplied, possibly offline-tampered document.
+
+**Core property:** import adds **no new write primitive** — it is a schema-validated, hash-bound,
+consent-gated **batch replay of the existing v1.1 gated writes**, each re-validated and transacted. Its
+blast radius equals the v1.1 write tools', no more.
+
+| STRIDE | Threat | Mitigation |
+|--------|--------|------------|
+| **S** | Document forged for / claims a different binary | `binary.sha256` verified against the session's real program hash; mismatch → fail closed (`validation`/`not-found`) |
+| **T** | Document tampered offline (smuggled/injection-bearing entries) | every entry re-validated through the **live validators** (`validate_write_name`/`validate_comment_text`/`validate_target_ref`/`validate_type_ref`/`validate_signature`/`validate_composite`) and applied only via the **existing gated write path**; no document claim is trusted (two-sided validate-in defense) |
+| **R** | Repudiation of a bulk import | per-import + per-entry audit (count, principal, session, outcome — sizes/flags only, never the values) |
+| **I** | Confidential/hostile artifacts leave the session | strings stay untrusted-wrapped (ADR-005); **server persists nothing** (stateless); the exported document inherits the binary's CONFIDENTIAL class (master §5) — owned + classified by the client |
+| **D** | Oversized / flooding document | bounded entry count + per-field sizes (schema); each replay is a bounded transaction; consent-gated; owner-scoped |
+| **E** | Import does more than live writes / cross-owner | import ≡ existing gated writes (same consent, same `allow_structural`, same validators); **owner-scoped** (ADR-017) — a principal imports only into its own session |
+
+**Residual / assumptions:** the client owns the exported artifact's confidentiality + integrity at rest
+(out of our boundary by D2); applicability is content-hash-bound (no fuzzy/cross-binary apply). The
+formal abuse-case list (tampered doc, wrong-binary hash, oversized count/field, injection in an
+imported name/comment, structural entry without `allow_structural`, cross-owner import, unknown
+`kind`/`schema_version`) is added with the **implementation** PR (acceptance criteria), per the
+design-then-implement rhythm.
