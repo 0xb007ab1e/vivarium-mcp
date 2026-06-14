@@ -24,6 +24,11 @@ is the central security control.
   2026-06-14, #50/#51); ✅ **DONE** — multi-principal authZ (ADR-017 — per-principal session
   ownership + multi-token bearer; threat-model TB6-I now ENFORCED; merged 2026-06-15, #52/#53).
   **🎉 v1.1 backlog COMPLETE.**
+- **v1.2 (candidate backlog):** the deferred/out-of-scope items the v1.1 ADRs recorded —
+  mTLS/OAuth identity sources, composite nested-define + cycle detector, type deletion, mutation
+  persistence/export (new trust boundary), deeper behavioral-equivalence eval. See
+  [`docs/roadmap-v1.2.md`](docs/roadmap-v1.2.md). Not committed scope; promoted via design ADR →
+  ratify → implement → review → merge.
 - **Transport:** design **configurable (stdio + HTTP)**; **build/harden stdio in v1**. ✅ **HTTP
   DONE** — shipped as a gated, separately threat-modeled (TB6) v1.1 increment (ADR-011, slices 1–6,
   merged 2026-06-12; stdio remains the default).
