@@ -6,6 +6,21 @@ All notable changes to `ghidra-mcp` are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-06-13
+
+Patch release: a defense-in-depth hardening of the (gated, client-side) naming-eval differential
+runner. No tool/RPC/envelope contract change; no behavior change for normal use.
+
+### Security
+- **Bounded-streaming stdout capture in the differential-run sandbox (ADR-016 F1 / CWE-400).** The
+  exec runner previously buffered a candidate's entire stdout (`subprocess.run(capture_output=True)`)
+  before truncating to `max_stdout_bytes`, so the cap bounded only the *retained* output — a candidate
+  flooding stdout could force the host to buffer far more during capture. It now performs a single
+  bounded `read(cap)` at the subprocess boundary (`_read_capped`) then kills + reaps the child, so
+  **peak host memory during capture is bounded by the cap**; the engine `--timeout` remains the
+  wall-clock backstop. Confined to the gated TB5 eval path; the threat-model TB5 mitigation wording is
+  corrected to match.
+
 ## [0.2.0] — 2026-06-13
 
 The **first write surface.** v0.1.0 was strictly read-only; this release adds an allow-listed,
@@ -199,6 +214,7 @@ analyzer is the central security control.
   off-by-default and fail-closed. See `docs/security/threat-model.md` and `SECURITY.md` for the
   reporting channel.
 
-[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/0xb007ab1e/ghidra-mcp/releases/tag/v0.1.0
