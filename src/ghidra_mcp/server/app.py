@@ -394,6 +394,11 @@ def run_http(
     if http.auth_mode == "mtls":
         ssl_kwargs["ssl_ca_certs"] = http.tls_client_ca
         ssl_kwargs["ssl_cert_reqs"] = ssl.CERT_REQUIRED
+        # KNOWN LIMITATION (ADR-019 A): the transport->scope peer-cert bridge is not yet wired, so
+        # the verified client cert never reaches the authenticator and ALL requests fail closed
+        # (rejected). The TLS handshake (CERT_REQUIRED) still gates uncertified clients. Tracked as
+        # the WS5 integration follow-up; warn loudly so an operator is not met with a silent 401.
+        _log.warning("auth.mtls_bridge_pending")
     try:
         if http.is_unix_socket:
             uvicorn.run(asgi, uds=http.bind[len("unix:") :], log_level=log_level)

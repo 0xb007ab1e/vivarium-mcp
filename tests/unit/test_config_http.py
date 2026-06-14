@@ -241,13 +241,28 @@ def test_multi_token_value_too_long_fails_closed() -> None:
 # selector (validated allow-list). The CA path / field are NOT secrets. Fail-closed startup.
 # ==============================================================================================
 def _mtls_env(**extra: str) -> dict[str, str]:
-    """A loopback HTTP env with auth=mtls (loopback so TLS server cert is not also required)."""
+    """A loopback HTTP env with auth=mtls + server TLS (mTLS requires server TLS — ADR-019)."""
     return _env(
         GHIDRA_MCP_TRANSPORT="http",
         GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
         GHIDRA_MCP_HTTP_AUTH="mtls",
+        GHIDRA_MCP_HTTP_TLS_CERT="/c.pem",
+        GHIDRA_MCP_HTTP_TLS_KEY="/k.pem",
         **extra,
     )
+
+
+def test_mtls_without_server_tls_fails_closed() -> None:
+    """auth=mtls with no server cert is refused — the client-cert handshake needs a TLS listener."""
+    with pytest.raises(GhidraMcpError, match="requires server TLS"):
+        load_config(
+            _env(
+                GHIDRA_MCP_TRANSPORT="http",
+                GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
+                GHIDRA_MCP_HTTP_AUTH="mtls",
+                GHIDRA_MCP_HTTP_TLS_CLIENT_CA="/ca.pem",
+            )
+        )
 
 
 def test_mtls_with_client_ca_defaults_to_cn_field() -> None:

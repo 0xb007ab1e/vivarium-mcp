@@ -877,3 +877,9 @@ live uvicorn mTLS handshake (case 70) is integration-gated — no real keys/secr
 **OAuth abuse cases (increment B — not yet built):** `alg:none`, wrong `iss`/`aud`,
 expired/not-yet-valid, bad signature, unknown `kid`, missing `sub`. JWT validation hermetic with a
 test keypair; JWKS mocked.
+
+**Live status (mTLS, increment A):** the authenticator + cert-field mapping + config + the
+`CERT_REQUIRED` transport gate are built and unit-proven, but the uvicorn transport→scope peer-cert
+**bridge is not yet wired** (uvicorn does not populate the ASGI TLS extension). Until that WS5
+integration step lands, `auth_mode=mtls` is **fail-closed but non-functional** (no peer cert reaches
+the authenticator → all requests rejected); startup requires server TLS and warns. No fail-open.

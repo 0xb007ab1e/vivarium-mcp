@@ -489,6 +489,11 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
         # The handshake gate (uvicorn CERT_REQUIRED) cannot verify clients without a CA bundle —
         # refuse to boot rather than fall back to an unverified/no-auth posture (fail closed).
         raise _startup_error("mTLS auth requires a client-CA bundle (set the client CA path)")
+    if auth_mode == "mtls" and tls_cert is None:
+        # mTLS runs the client-cert handshake on the server's TLS listener; on a PLAINTEXT listener
+        # uvicorn silently ignores CERT_REQUIRED / ssl_ca_certs (is_ssl is False) — the handshake
+        # gate would not exist (CWE-1188). Refuse to boot (fail closed; covers loopback + UDS).
+        raise _startup_error("mTLS auth requires server TLS (set cert and key)")
     if "*" in cors_origins:
         raise _startup_error("HTTP CORS origins must be explicit; '*' is not allowed")
 
