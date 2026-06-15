@@ -108,6 +108,8 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     # composite-type creation (v1.1 — ADR-015 Phase C; additionally GATED by allow_structural)
     "define_struct",
     "define_union",
+    # multi-type composite batch (v1.2 — ADR-021; additionally GATED by allow_structural)
+    "define_types",
     # cross-session annotation persistence (v1.2 — ADR-018; export=read-only, import=GATED by
     # write-consent + allow_structural for structural entries)
     "session_export_annotations",
@@ -881,6 +883,42 @@ def _handle_define_union(ctx: ToolContext, args: s.DefineUnionIn) -> s.DefineUni
     return result
 
 
+# --- multi-type composite batch (v1.2 — ADR-021). Same structural gate as ADR-015 PLUS the
+# batch-aware validator: a batch is validated as a bounded list of per-type-valid composites with
+# intra-batch UNIQUE names AND the BY-VALUE CYCLE DETECTOR (validate_types_batch) BEFORE the worker
+# — NO C string is parsed. The worker pre-registers ALL empties inside ONE transaction, name-
+# collision-REJECTs each, batch-total size-checks, and rolls back the WHOLE batch on any failure.
+def _handle_define_types(ctx: ToolContext, args: s.DefineTypesIn) -> s.DefineTypesResult:
+    """Create a batch of interdependent composites in one transaction (structural; gated)."""
+    ctx.sessions.require_write_consent(args.session_id, structural=True, caller=ctx.caller_id)
+    v.validate_types_batch(
+        args
+    )  # per-type valid + intra-batch unique names + by-value cycle detect
+    # Audit the SHAPE only — never field/type contents (those are attacker-influenced and persisted;
+    # log opaque sizes/counts — topic-logging-observability, master §5).
+    _log.info(
+        "tool.define_types.intent",
+        extra={
+            "tool": "define_types",
+            "session": args.session_id,
+            "type_count": len(args.types),
+            "name_lens": [len(t.name) for t in args.types],
+            "field_counts": [len(t.fields) for t in args.types],
+        },
+    )
+    result = ctx.port.define_types(args.session_id, args)
+    _log.info(
+        "tool.define_types.outcome",
+        extra={
+            "tool": "define_types",
+            "session": args.session_id,
+            "type_count": len(result.types),
+            "applied": result.applied,
+        },
+    )
+    return result
+
+
 # =====================================================================================
 # Cross-session annotation persistence (v1.2 — ADR-018; TB8). Export is READ-ONLY + owner-scoped;
 # import is the NEW trust boundary: a client-supplied, offline-tamperable document REPLAYED as
@@ -1158,6 +1196,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     # composite-type creation (v1.1 — ADR-015 Phase C; gated additionally by allow_structural)
     "define_struct": (_handle_define_struct, s.DefineStructIn),
     "define_union": (_handle_define_union, s.DefineUnionIn),
+    "define_types": (_handle_define_types, s.DefineTypesIn),
     # cross-session annotation persistence (v1.2 — ADR-018; export=read-only, import=gated)
     "session_export_annotations": (
         _handle_session_export_annotations,

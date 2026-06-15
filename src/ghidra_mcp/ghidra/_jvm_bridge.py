@@ -411,6 +411,24 @@ class PyGhidraBackend:
         fields = _require(params, "fields")
         return self._gh_define_union(name, fields)
 
+    def define_types(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Create a BATCH of interdependent composites in ONE transaction (write — ADR-021).
+
+        Args:
+            params: ``{"types": [{"kind": "struct"|"union", "name": str, "fields": [FieldSpec],
+                "packed": bool}]}``. The worker REJECTs a name collision for EACH batch name vs the
+                existing program (read-only, before the txn), then inside ONE transaction
+                pre-registers ALL empty composites (so an in-batch ``named`` ref resolves), resolves
+                + adds each type's members (batch-total size-checked), and finalizes — ANY failure
+                rolls back the WHOLE batch (no partial type). The server has already run the
+                by-value cycle detector at the boundary. NO C string is parsed.
+
+        Returns:
+            ``{"types": [{"name", "kind", "size", "field_count"}], "applied": bool}`` (plain).
+        """
+        types = _require(params, "types")
+        return self._gh_define_types(types)
+
     # --- annotation persistence (v1.2 — ADR-018; export read-out ONLY) -----------------------
     def export_annotations(self, params: dict[str, Any]) -> dict[str, Any]:
         """Enumerate the program's USER_DEFINED annotations as a plain document (read-only — v1.2).
@@ -1981,6 +1999,115 @@ class PyGhidraBackend:
             "field_count": result_holder["field_count"],
             "applied": True,
         }
+
+    def _gh_define_types(
+        self, types: list[dict[str, Any]]
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Create a BATCH of interdependent composites in ONE transaction (ADR-021).
+
+        Generalizes :meth:`_gh_define_struct` / :meth:`_gh_define_union` from one composite to a
+        batch: name-collision REJECT for EACH batch name vs the existing program (read-only, before
+        the txn), then INSIDE the one transaction — pre-register EVERY empty composite (struct/union
+        per ``kind``) so an in-batch ``named`` ref (pointer OR by-value) resolves, resolve + add
+        each type's members against the pre-registered handles + existing/base types (batch-total
+        size-checked against ``_MAX_COMPOSITE_SIZE``), and let ``_in_transaction`` finalize/roll
+        back. ANY failure rolls back the WHOLE batch (no partial/orphan type — ``_in_transaction``
+        does ``endTransaction(False)`` on exception). The server has already rejected by-value
+        cycles at the boundary (the cycle detector). NO C string is parsed.
+
+        Args:
+            types: The batch ``[{"kind", "name", "fields": [FieldSpec], "packed": bool}]``.
+
+        Returns:
+            ``{"types": [{"name", "kind", "size", "field_count"}], "applied": True}`` (plain).
+
+        Raises:
+            WorkerError: ``analysis-failed`` on a name collision or a rolled-back write;
+                ``not-found`` if a member ``TypeRef`` does not resolve; ``limit-exceeded`` if the
+                batch-total computed size exceeds ``_MAX_COMPOSITE_SIZE``.
+        """
+        from ghidra.program.model.data import (
+            ArrayDataType,
+            CategoryPath,
+            PointerDataType,
+            StructureDataType,
+            UnionDataType,
+        )
+
+        program = self._require_program()
+        manager = program.getDataTypeManager()
+        batch_names = {str(_require(spec, "name")) for spec in types}
+        for name in batch_names:
+            self._reject_type_collision(manager, name)  # read-only, before the txn (no partial)
+
+        result_holder: dict[str, list[dict[str, Any]]] = {"types": []}
+
+        def _resolve_member(type_ref: dict[str, Any], registered: dict[str, Any]) -> Any:
+            """Resolve one member to a ``DataType``, preferring a pre-registered batch handle."""
+            named = type_ref.get("named")
+            if (
+                named in registered
+            ):  # an in-batch reference — resolve against the pre-registered type
+                leaf = registered[named]
+                pointer_levels = int(type_ref.get("pointer_levels") or 0)
+                if pointer_levels == 0:
+                    # A by-value embed of a batch member is a cycle the boundary already rejects;
+                    # be self-protecting (defense in depth — the detector is the primary control).
+                    from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+                    raise WorkerError(
+                        CODE_ANALYSIS_FAILED, "by-value batch self/cyclic reference is rejected"
+                    )
+                for _ in range(pointer_levels):
+                    leaf = PointerDataType(leaf)
+                array_len = type_ref.get("array_len")
+                if array_len is not None:
+                    leaf = ArrayDataType(leaf, int(array_len), leaf.getLength())
+                return leaf
+            return self._gh_resolve_type_ref(type_ref)  # existing/base/derived program type
+
+        def _write() -> None:
+            registered: dict[str, Any] = {}
+            # Pre-register EVERY empty composite first so any in-batch named ref resolves (§D2).
+            for spec in types:
+                name = str(_require(spec, "name"))
+                if str(spec.get("kind")) == "union":
+                    empty: Any = UnionDataType(CategoryPath.ROOT, name, manager)
+                else:
+                    empty = StructureDataType(CategoryPath.ROOT, name, 0, manager)
+                    if bool(spec.get("packed", False)):
+                        empty.setPackingEnabled(True)
+                registered[name] = manager.addDataType(empty, None)
+            # Resolve + add each type's members; bound the BATCH-TOTAL computed size (§Bounds).
+            total = 0
+            for spec in types:
+                name = str(_require(spec, "name"))
+                handle = registered[name]
+                for field in _require(spec, "fields"):
+                    dt = _resolve_member(_require(field, "type"), registered)
+                    length = int(dt.getLength())
+                    total += max(length, 0)
+                    if total > _MAX_COMPOSITE_SIZE:
+                        self._raise_composite_too_large()
+                    offset = field.get("offset")
+                    if str(spec.get("kind")) != "union" and offset is not None:
+                        handle.insertAtOffset(int(offset), dt, length, str(field["name"]), None)
+                    else:
+                        handle.add(dt, length, str(field["name"]), None)
+            for spec in types:
+                name = str(_require(spec, "name"))
+                handle = registered[name]
+                result_holder["types"].append(
+                    {
+                        "name": name,
+                        "kind": str(spec.get("kind")),
+                        "size": int(handle.getLength()),
+                        "field_count": int(handle.getNumComponents()),
+                    }
+                )
+
+        self._in_transaction("define_types", _write)
+        return {"types": result_holder["types"], "applied": True}
 
     # --- annotation-persistence JVM edge (ADR-018; export read-out, read-only) ----------------
     def _gh_export_annotations(self) -> dict[str, Any]:  # pragma: no cover - JVM edge

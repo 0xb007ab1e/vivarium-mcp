@@ -235,6 +235,17 @@ class GhidraPort(Protocol):
         """Create a new union from a resolved field list (one transaction — ADR-015)."""
         ...
 
+    # --- multi-type composite batch (v1.2 — ADR-021; GATED by allow_structural) ---
+    # The server checks structural write consent + validates the batch (validate_types_batch:
+    # per-type validate_composite, intra-batch dup-name, and the BY-VALUE CYCLE DETECTOR) BEFORE
+    # calling this; the worker pre-registers ALL empty composites, resolves each field's TypeRef
+    # (in-batch refs against the pre-registered handles), adds members (batch-total size-checked),
+    # REJECTs a name collision, and finalizes — ALL inside ONE transaction so any failure rolls back
+    # the WHOLE batch (no partial type — ADR-021). Every result field is server/worker-controlled.
+    def define_types(self, sid: str, a: s.DefineTypesIn) -> s.DefineTypesResult:
+        """Create a batch of interdependent composites in one transaction (ADR-021)."""
+        ...
+
     # --- cross-session annotation persistence (v1.2 — ADR-018; TB8) ---
     # ONE new worker method (`export_annotations`): the worker enumerates the program's
     # USER_DEFINED annotations only, dependency-ordered, bounded. IMPORT adds NO new port/worker

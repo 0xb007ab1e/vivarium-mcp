@@ -887,6 +887,21 @@ class RpcGhidraAdapter:
             )
         )
 
+    # --- multi-type composite batch (v1.2 — ADR-021; structured FieldSpec params) ---
+    # The server has already checked structural consent and validated the batch
+    # (validate_types_batch: per-type validate_composite, intra-batch dup-name, and the by-value
+    # cycle detector). Here the adapter serializes each entry to plain RPC params (one batch == one
+    # transaction) and builds the typed result — every field server/worker-controlled (no echo).
+    def define_types(self, sid: str, a: s.DefineTypesIn) -> s.DefineTypesResult:
+        """Create a batch of interdependent composites in one transaction (ADR-021)."""
+        return _build_define_types_result(
+            self._tool_call(
+                sid,
+                "define_types",
+                {"types": [_composite_spec_params(spec) for spec in a.types]},
+            )
+        )
+
     # --- cross-session annotation persistence (v1.2 — ADR-018; export read-out) ----------------
     # The worker enumerates ONLY USER_DEFINED annotations (not auto-analysis), dependency-ordered,
     # bounded (over the cap → limit-exceeded — no silent truncation). This adapter turns the plain
@@ -1840,6 +1855,47 @@ def _build_define_union_result(r: dict[str, Any]) -> s.DefineUnionResult:
         kind=str(r["kind"]),
         size=int(r["size"]),
         field_count=int(r["field_count"]),
+        applied=bool(r["applied"]),
+    )
+
+
+# --- multi-type composite batch (ADR-021) — like ADR-015, every result field is server/worker-
+# controlled (the names are the ones WE set + validated; sizes/counts/applied are worker scalars),
+# so NONE is Untrusted-wrapped. A future field echoing Ghidra's rendered layout MUST be Untrusted.
+def _composite_spec_params(spec: s.CompositeSpec) -> dict[str, Any]:
+    """Serialize a :class:`CompositeSpec` into plain RPC params (no C string — ADR-021/§2).
+
+    The worker resolves each member ``type`` against the program's ``DataTypeManager`` / the
+    pre-registered batch handles (NEVER parses it); the bounded ``kind``/``name``/``packed`` and
+    each field's ``name``/``offset`` are passed through.
+
+    Args:
+        spec: The validated :class:`CompositeSpec` to serialize.
+
+    Returns:
+        A plain, JSON-serializable dict mirroring the entry (``fields[].type`` a TypeRef dict).
+    """
+    return {
+        "kind": spec.kind,
+        "name": spec.name,
+        "fields": [_field_spec_params(f) for f in spec.fields],
+        "packed": spec.packed,
+    }
+
+
+@_fail_closed
+def _build_define_types_result(r: dict[str, Any]) -> s.DefineTypesResult:
+    """Build a ``DefineTypesResult`` — all fields server/worker-controlled, SAFE (ADR-021)."""
+    return s.DefineTypesResult(
+        types=[
+            s.DefinedType(
+                name=str(t["name"]),
+                kind=str(t["kind"]),
+                size=int(t["size"]),
+                field_count=int(t["field_count"]),
+            )
+            for t in r["types"]
+        ],
         applied=bool(r["applied"]),
     )
 

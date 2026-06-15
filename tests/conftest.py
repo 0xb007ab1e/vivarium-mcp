@@ -564,6 +564,21 @@ class FakeGhidraPort:
         """Reserved composite-creation stub (ADR-015)."""
         raise NotImplementedError("RESERVED (v1.1 ADR-015): define_union")
 
+    def define_types(self, sid: str, a: s.DefineTypesIn) -> s.DefineTypesResult:
+        """Return a deterministic batch result mirroring the real adapter contract (ADR-021).
+
+        Every field is server/worker-controlled (no Untrusted echo — ADR-015 §7). The size is a
+        fixed positive scalar; the per-type ``field_count`` mirrors the requested field count.
+        """
+        self._maybe_fail()
+        return s.DefineTypesResult(
+            types=[
+                s.DefinedType(name=spec.name, kind=spec.kind, size=8, field_count=len(spec.fields))
+                for spec in a.types
+            ],
+            applied=True,
+        )
+
     def export_annotations(
         self, sid: str, a: s.SessionExportAnnotationsIn
     ) -> s.SessionExportAnnotationsOut:

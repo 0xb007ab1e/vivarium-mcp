@@ -928,7 +928,33 @@ by-value cycle detector.**
 | **T** | Partial / corrupt batch | **one transaction, rollback-all** on any failure — no partial batch, no orphan type |
 | **I/E** | Injection / over-agency | structured `TypeRef` only (no C parser — ADR-014); name-collision (existing or intra-batch dup) fail-closed REJECT (ADR-015 §6); **structural** write-consent (ADR-012); owner-scoped (ADR-017); server never assembles (ADR-001) |
 
-The formal abuse-case list (by-value self-cycle, A↔B by-value cycle rejected, **A↔B pointer cycle
-allowed**, oversized batch/type/total, dup name in batch, collision with existing type,
-partial-failure rolls back the whole batch, no-C-parser, cross-owner, structural-consent-required)
-lands with the **implementation** PR.
+The formal abuse-case list landed with the implementation PR (`tests/security/test_abuse_cases.py`,
+continuing the numbering after the current last case 82):
+
+83. **By-value self-cycle rejected** — a `define_types` batch with a struct whose member embeds
+    itself by value (`named == self`, `pointer_levels == 0`, incl. array-of-self) is rejected
+    `VALIDATION` by the per-type self-embed check + the by-value cycle detector; no write. (TB7-D)
+84. **A↔B by-value cycle rejected** — A has a by-value member of B and B a by-value member of A →
+    the cycle detector rejects `VALIDATION`, no write. (TB7-D — the load-bearing control)
+85. **A→B→C→A by-value cycle rejected** — a 3-node by-value cycle is detected/rejected. (TB7-D)
+86. **A↔B POINTER cycle ALLOWED (positive)** — A has `B *next` and B has `A *prev`
+    (`pointer_levels >= 1`) → no edge → the detector allows it (mutually-recursive pointer
+    structures). Also: a diamond (A→B, A→C, B→D, C→D, by value, acyclic) is allowed. (positive)
+87. **Oversized batch / per-type / batch-total** — a `types` list over `_MAX_TYPES_PER_BATCH` →
+    `LIMIT_EXCEEDED` at the boundary; an over-`_MAX_FIELDS` per-type → `LIMIT_EXCEEDED`; a
+    batch-total computed size over `_MAX_COMPOSITE_SIZE` → `limit-exceeded` at the worker
+    (integration-gated, like ADR-015 case 45). (TB7-D / CWE-400/190)
+88. **Duplicate type name in batch** — two batch entries named `T` → `VALIDATION`, no write. (TB7-T)
+89. **Collision with an existing program type** — a batch name that already names a program type →
+    fail-closed REJECT `analysis-failed`, whole batch rolled back (worker concern,
+    integration-gated). (TB7-T)
+90. **Partial failure → whole batch rolled back** — any member failure (unresolvable ref, size cap,
+    `addDataType`/commit) rolls back the WHOLE batch via `_in_transaction` — no partial/orphan type
+    (integration-gated). (TB7-T — one transaction, rollback-all)
+91. **No C parsed** — a `CompositeSpec` field `type.named` carrying C-declaration syntax / a struct
+    body is rejected by `validate_type_ref` (never parsed); the architecture-invariant scan confirms
+    no `CParser`/`DataTypeParser` on a client value. (TB7-I)
+92. **Cross-owner → SESSION_INVALID; structural-consent required** — `define_types` on a
+    foreign/unknown session yields the same `SESSION_INVALID` envelope (BOLA, no oracle); on a
+    session without `allow_structural`, it is denied (`require_write_consent(structural=True)`
+    chokepoint). (TB7-E / gating / BOLA)

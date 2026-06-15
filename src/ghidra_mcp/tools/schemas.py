@@ -1732,6 +1732,120 @@ class DefineUnionResult(_Out):
     applied: bool
 
 
+# --- multi-type composite batch (v1.2 — ADR-021; GATED by allow_structural) ---------------------
+#
+# Generalizes the ADR-015 single-composite model to a BATCH of interdependent NEW composites created
+# in ONE transaction: a field of one batch member may reference ANOTHER batch member (existing/base/
+# self too). The worker pre-registers ALL empty composites in the batch before resolving any field,
+# so an in-batch ``named`` ref (pointer OR by-value) resolves. The load-bearing NEW control is the
+# pure BY-VALUE CYCLE DETECTOR (core.validation.validate_types_batch): because every batch type is
+# pre-registered, a by-value cycle (A embeds B embeds A, or self) WOULD otherwise resolve into an
+# infinite-size type — it must be rejected at the boundary. Pointer members create NO edge (fixed
+# size), so mutually-recursive POINTER structs are allowed. NO free-form C (ADR-014). Every result
+# field is SAFE — server/worker scalars, no binary-derived echo (ADR-015 §7).
+_MAX_TYPES_PER_BATCH = 64  # a batch of >64 interdependent types is pathological (CWE-400)
+
+
+class CompositeSpec(_In):
+    """One composite entry in a :class:`DefineTypesIn` batch (ADR-021 §D1).
+
+    A kind-discriminated struct/union entry. A ``struct`` honors per-member ``offset`` and
+    ``packed`` (sequential/explicit-offset layout); a ``union`` overlays all members at offset 0 and
+    so ignores ``packed`` and REQUIRES every member ``offset`` to be ``None`` (model-validated).
+    Reuses the ADR-015 recursion model: a by-value self-embed (``named == name`` with
+    ``pointer_levels == 0``, incl. an array-of-self) is rejected at construction; a pointer-to-self
+    is fixed-size and allowed. A field's ``type.named`` may reference an existing program type, a
+    base type, **self**, OR another composite defined in the SAME batch — the batch-level
+    :func:`validate_types_batch` runs the by-value cycle detector over those in-batch edges.
+
+    Attributes:
+        kind: ``"struct"`` or ``"union"`` — selects the per-entry assembly path (a meaningful
+            discriminator for a list input — ADR-021 §D1; it does NOT reopen ADR-015's single-tool
+            split).
+        name: The new type's name — validated as a persisted write-name; collision-checked at the
+            worker before assembly (fail-closed REJECT).
+        fields: The ordered member list — non-empty, bounded by ``_MAX_FIELDS``; no duplicate member
+            names; no by-value self-embed (validated end-to-end at the boundary).
+        packed: Struct only — ``True`` packs (no alignment padding). Ignored for a union.
+    """
+
+    kind: Literal["struct", "union"]
+    name: str = Field(min_length=1, max_length=_MAX_NAME)
+    fields: list[FieldSpec] = Field(min_length=1, max_length=_MAX_FIELDS)
+    packed: bool = Field(default=False)
+
+    @model_validator(mode="after")
+    def _no_self_embed_and_union_shape(self) -> CompositeSpec:
+        """Reject a by-value self-embed and (for a union) any per-member ``offset`` (ADR-015 §3.2).
+
+        Returns:
+            ``self`` when the entry shape is valid for its ``kind``.
+
+        Raises:
+            ValueError: When a member embeds the composite by value, or a union member carries a
+                non-``None`` ``offset`` (a struct-only field — mapped to ``VALIDATION`` at the
+                server boundary).
+        """
+        _reject_self_embed(self.name, self.fields)
+        if self.kind == "union":
+            for field in self.fields:
+                if field.offset is not None:
+                    raise ValueError("a union member may not carry an offset")
+        return self
+
+
+class DefineTypesIn(_SessionScopedIn):
+    """Arguments for ``define_types`` — create a BATCH of interdependent composites (ADR-021 §D1).
+
+    Gated by ``session_enable_writes{allow_structural: true}`` + ``require_write_consent(
+    structural=True)``. The worker pre-registers EVERY empty composite in the batch (so any in-batch
+    ``named`` ref resolves), resolves + adds each type's members, enforces a batch-total size cap,
+    and commits — all inside ONE transaction; ANY failure rolls back the WHOLE batch (no partial
+    type, no orphan). A name collision (with an existing program type OR a duplicate name within the
+    batch) is a fail-closed REJECT. The boundary runs the by-value cycle detector
+    (:func:`validate_types_batch`) before the worker. NO free-form C is parsed.
+
+    Attributes:
+        types: The batch of composites — non-empty, bounded by ``_MAX_TYPES_PER_BATCH`` (DoS —
+            CWE-400). Mixed struct + union is allowed; a member's ``type.named`` may reference
+            another batch member (a by-value cycle is rejected; a pointer cycle is allowed).
+    """
+
+    types: list[CompositeSpec] = Field(min_length=1, max_length=_MAX_TYPES_PER_BATCH)
+
+
+class DefinedType(_Out):
+    """One created composite's summary in a :class:`DefineTypesResult` (ADR-021 §D1) — all SAFE.
+
+    Attributes:
+        name: The type's name — the one WE set + server-validated — SAFE.
+        kind: ``"struct"`` or ``"union"`` — SAFE.
+        size: The assembled total size in bytes — worker-computed scalar, SAFE.
+        field_count: Number of members added — SAFE.
+    """
+
+    name: str
+    kind: str
+    size: int
+    field_count: int
+
+
+class DefineTypesResult(_Out):
+    """Result of ``define_types`` (ADR-021 §D1) — all fields server/worker-controlled, SAFE.
+
+    There is NO binary-derived echo (a future field echoing Ghidra's rendered layout MUST be
+    ``Untrusted`` — ADR-015 §7). The batch is one transaction, so ``applied`` reflects the whole
+    batch (it is ``True`` only when every type was created and the transaction committed).
+
+    Attributes:
+        types: Per-type summaries in declaration order — every field SAFE.
+        applied: Whether the batch committed — server/worker-controlled, SAFE.
+    """
+
+    types: list[DefinedType]
+    applied: bool
+
+
 # =====================================================================================
 # Cross-session annotation persistence (v1.2 — ADR-018; TB8). EXPORT + IMPORT round-trip.
 #

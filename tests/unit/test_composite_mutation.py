@@ -128,6 +128,16 @@ class _FakePort:
             name=a.name, kind="union", size=8, field_count=len(a.fields), applied=True
         )
 
+    def define_types(self, sid: str, a: s.DefineTypesIn) -> s.DefineTypesResult:
+        self.calls.append(("define_types", sid))
+        return s.DefineTypesResult(
+            types=[
+                s.DefinedType(name=spec.name, kind=spec.kind, size=8, field_count=len(spec.fields))
+                for spec in a.types
+            ],
+            applied=True,
+        )
+
 
 def _ctx() -> reg.ToolContext:
     config = Config(
@@ -380,3 +390,157 @@ def test_build_define_union_result_fields_are_safe() -> None:
     )
     assert out.name == "V" and out.kind == "union"
     assert out.size == 8 and out.field_count == 2 and out.applied is True
+
+
+# --- multi-type composite batch (ADR-021) — the define_types handler + adapter -----------------
+def _batch_kwargs() -> dict[str, object]:
+    """A small acyclic batch: A embeds B by value; B is a leaf (the headline capability)."""
+    return {
+        "types": [
+            s.CompositeSpec(
+                kind="struct", name="A", fields=[s.FieldSpec(name="b", type=s.TypeRef(named="B"))]
+            ),
+            s.CompositeSpec(kind="struct", name="B", fields=[s.FieldSpec(name="x", type=_ref())]),
+        ]
+    }
+
+
+@pytest.mark.critical
+def test_define_types_without_allow_structural_is_denied(ctx: reg.ToolContext) -> None:
+    handlers = reg.build_handlers(ctx)
+    handlers["session_enable_writes"](session_id=_VALID_SID, allow_structural=False)
+    with pytest.raises(GhidraMcpError) as exc:
+        handlers["define_types"](session_id=_VALID_SID, **_batch_kwargs())
+    assert exc.value.envelope.type is ErrorType.VALIDATION
+    assert _port(ctx).calls == []  # fail closed — no write reached the worker
+
+
+@pytest.mark.critical
+def test_define_types_with_structural_consent_calls_port(ctx: reg.ToolContext) -> None:
+    handlers = reg.build_handlers(ctx)
+    handlers["session_enable_writes"](session_id=_VALID_SID, allow_structural=True)
+    out = handlers["define_types"](session_id=_VALID_SID, **_batch_kwargs())
+    assert isinstance(out, s.DefineTypesResult)
+    assert {t.name for t in out.types} == {"A", "B"} and out.applied is True
+    assert ("define_types", _VALID_SID) in _port(ctx).calls
+    assert (_VALID_SID, True) in cast(_FakeSessions, ctx.sessions).consent_checks
+
+
+@pytest.mark.critical
+def test_define_types_rejects_by_value_cycle_before_port(ctx: reg.ToolContext) -> None:
+    handlers = reg.build_handlers(ctx)
+    handlers["session_enable_writes"](session_id=_VALID_SID, allow_structural=True)
+    # A↔B by-value cycle — the load-bearing detector rejects it AFTER consent, BEFORE the worker.
+    cyclic = s.DefineTypesIn.model_construct(
+        session_id=_VALID_SID,
+        types=[
+            s.CompositeSpec.model_construct(
+                kind="struct",
+                name="A",
+                fields=[
+                    s.FieldSpec.model_construct(
+                        name="b",
+                        type=s.TypeRef.model_construct(
+                            base=None, named="B", pointer_levels=0, array_len=None
+                        ),
+                        offset=None,
+                    )
+                ],
+                packed=False,
+            ),
+            s.CompositeSpec.model_construct(
+                kind="struct",
+                name="B",
+                fields=[
+                    s.FieldSpec.model_construct(
+                        name="a",
+                        type=s.TypeRef.model_construct(
+                            base=None, named="A", pointer_levels=0, array_len=None
+                        ),
+                        offset=None,
+                    )
+                ],
+                packed=False,
+            ),
+        ],
+    )
+    with pytest.raises(GhidraMcpError) as exc:
+        reg._handle_define_types(ctx, cyclic)
+    assert exc.value.envelope.type is ErrorType.VALIDATION
+    assert _port(ctx).calls == []
+
+
+@pytest.mark.critical
+def test_define_types_allows_pointer_cycle_through_to_port(ctx: reg.ToolContext) -> None:
+    handlers = reg.build_handlers(ctx)
+    handlers["session_enable_writes"](session_id=_VALID_SID, allow_structural=True)
+    # Mutually-recursive POINTER cycle is allowed (no by-value edge) → reaches the port.
+    out = handlers["define_types"](
+        session_id=_VALID_SID,
+        types=[
+            s.CompositeSpec(
+                kind="struct",
+                name="A",
+                fields=[s.FieldSpec(name="next", type=s.TypeRef(named="B", pointer_levels=1))],
+            ),
+            s.CompositeSpec(
+                kind="struct",
+                name="B",
+                fields=[s.FieldSpec(name="prev", type=s.TypeRef(named="A", pointer_levels=1))],
+            ),
+        ],
+    )
+    assert isinstance(out, s.DefineTypesResult) and out.applied is True
+    assert ("define_types", _VALID_SID) in _port(ctx).calls
+
+
+def test_define_types_on_unknown_session_is_session_invalid(ctx: reg.ToolContext) -> None:
+    handlers = reg.build_handlers(ctx)
+    with pytest.raises(GhidraMcpError) as exc:
+        handlers["define_types"](session_id="foreign", **_batch_kwargs())
+    assert exc.value.envelope.type is ErrorType.SESSION_INVALID
+    assert _port(ctx).calls == []
+
+
+@pytest.mark.critical
+def test_adapter_define_types_builds_typed_result() -> None:
+    captured: dict[str, Any] = {}
+    canned = {
+        "types": [
+            {"name": "A", "kind": "struct", "size": 8, "field_count": 1},
+            {"name": "B", "kind": "struct", "size": 4, "field_count": 1},
+        ],
+        "applied": True,
+    }
+    adapter = _adapter_with_stubbed_call(captured, canned)
+    out = adapter.define_types(
+        "sidX",
+        s.DefineTypesIn(
+            session_id="sidX",
+            types=[
+                s.CompositeSpec(
+                    kind="struct",
+                    name="A",
+                    fields=[s.FieldSpec(name="b", type=s.TypeRef(named="B"))],
+                ),
+                s.CompositeSpec(
+                    kind="struct", name="B", fields=[s.FieldSpec(name="x", type=_ref())]
+                ),
+            ],
+        ),
+    )
+    assert captured["method"] == "define_types"
+    assert captured["params"]["types"][0] == {
+        "kind": "struct",
+        "name": "A",
+        "fields": [
+            {
+                "name": "b",
+                "type": {"base": None, "named": "B", "pointer_levels": 0, "array_len": None},
+                "offset": None,
+            }
+        ],
+        "packed": False,
+    }
+    assert isinstance(out, s.DefineTypesResult)
+    assert {t.name for t in out.types} == {"A", "B"} and out.applied is True
