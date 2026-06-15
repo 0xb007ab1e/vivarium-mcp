@@ -865,10 +865,12 @@ JWT/JWKS local** (introspection deferred).
 - **Case 69** — two distinct verified certs → two distinct principals → two distinct owner-scoped
   sessions; cross-principal access is the same `SESSION_INVALID` as unknown (composes ADR-017,
   cases 61-63). *(hermetic)*
-- **Case 70** — a cert from an **untrusted CA** is rejected at the **TLS handshake**
-  (uvicorn `ssl_cert_reqs=CERT_REQUIRED` + `ssl_ca_certs` — the connection never reaches the app;
-  config guarantees the CA bundle is set for `auth_mode=mtls`). *(LIVE — integration-gated; needs the
-  uvicorn TLS listener + a synthetic untrusted-CA keypair)*
+- **Case 70** — a cert from an **untrusted CA** (and a client presenting **no** cert) is rejected at
+  the **TLS handshake** (uvicorn `ssl_cert_reqs=CERT_REQUIRED` + `ssl_ca_certs` — the connection never
+  reaches the app; config guarantees the CA bundle is set for `auth_mode=mtls`). *(LIVE — implemented
+  in `tests/integration/test_mtls_bridge.py`, integration-gated; a live uvicorn TLS listener + a
+  synthetic untrusted-CA keypair. The same live test proves the POSITIVE path: a CA-signed cert
+  authenticates as its CN-derived principal via the ADR-020 peer-cert bridge.)*
 - **Case 71** — the cert subject/SAN material is **never logged** (TB6-R/I); `AuthContext` keeps the
   peer cert out of `repr`. *(hermetic)*
 
@@ -896,11 +898,14 @@ JWT validation is hermetic with an in-test **RSA/EC keypair** (PyJWT mints the t
 The live IdP+JWKS path (real `PyJWKClient` fetch + a real IdP-minted token over the HTTP transport) is
 **integration-gated** with a tracked reason.
 
-**Live status (mTLS, increment A):** the authenticator + cert-field mapping + config + the
-`CERT_REQUIRED` transport gate are built and unit-proven, but the uvicorn transport→scope peer-cert
-**bridge is not yet wired** (uvicorn does not populate the ASGI TLS extension). Until that WS5
-integration step lands, `auth_mode=mtls` is **fail-closed but non-functional** (no peer cert reaches
-the authenticator → all requests rejected); startup requires server TLS and warns. No fail-open.
+**Live status (mTLS — FUNCTIONAL, ADR-020):** the authenticator + cert-field mapping + config + the
+`CERT_REQUIRED` transport gate (ADR-019 increment A) are complemented by the uvicorn transport→scope
+peer-cert **bridge** (`MtlsAwareProtocol`, ADR-020) — so `auth_mode=mtls` is **end-to-end
+functional**: the verified client cert reaches the authenticator and resolves to its cert-derived
+principal. The handshake `CERT_REQUIRED` gate is the first line; the in-app authenticator the second
+(defense in depth). Fail-closed preserved (an empty/absent `getpeercert()` injects no `peercert` →
+generic `401`); the cert is read **only** from the verified TLS object, never a header (no spoofing).
+Verified live by `tests/integration/test_mtls_bridge.py` (real TLS, synthetic certs). No fail-open.
 
 **Live status (OAuth, increment B):** the authenticator (JWKS fetch+cache, pinned-alg signature
 verify, `iss`/`aud`/`exp`/`nbf`, `sub`→principal, fail-closed) + config + `build_authenticator`

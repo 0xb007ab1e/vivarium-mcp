@@ -6,6 +6,22 @@ All notable changes to `ghidra-mcp` are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **mTLS peer-cert bridge — `auth_mode=mtls` now functional (ADR-020).** A custom uvicorn HTTP
+  protocol (`MtlsAwareProtocol`, used **only** for `auth_mode=mtls`) injects the **verified** client
+  certificate into the ASGI scope, so it reaches the in-app `MtlsAuthenticator` and resolves to its
+  cert-derived principal. Completes the ADR-019 increment-A seam: the `[0.3.0]` "Known limitation"
+  (the cert never reaching the authenticator → all requests rejected) is resolved. Fail-closed
+  preserved (an empty/absent peer cert injects nothing → generic `401`); the cert is read **only**
+  from the verified TLS object, never a header (no spoofing). No new dependency; every other
+  transport/auth path is unchanged.
+
+### Security
+- mTLS is now end-to-end verified by a **real-TLS integration test** (synthetic CA + server/client
+  certs; no real secrets): a CA-signed client cert authenticates as its CN principal, and a client
+  with no/untrusted cert is rejected at the handshake (ADR-019 abuse case 70 promoted from skip).
+- Removed the `auth.mtls_bridge_pending` startup warning (the bridge is now wired).
+
 ## [0.3.0] — 2026-06-15
 
 Cross-session **annotation persistence** plus two new pluggable **authentication identity sources**
@@ -38,10 +54,11 @@ remains hostile input.
   → principal. JWKS is fetched + cached (no per-request round-trip); failures fail closed, no oracle,
   the token is never logged. Config: `…_OAUTH_ISSUER` / `…_AUDIENCE` / `…_JWKS_URI` /
   `…_PRINCIPAL_CLAIM` / `…_ALGORITHMS` / `…_LEEWAY_SECONDS`.
-- **mTLS (`GHIDRA_MCP_HTTP_AUTH=mtls`) — seam shipped, see Known limitations.** Server-terminated
-  client-cert verification (uvicorn `CERT_REQUIRED` + a configured client-CA bundle); the verified
-  cert's configured field (CN / SAN / DN) maps to the principal. Config: `…_TLS_CLIENT_CA`,
-  `…_MTLS_PRINCIPAL_FIELD`.
+- **mTLS (`GHIDRA_MCP_HTTP_AUTH=mtls`) — seam shipped (made functional in [Unreleased] / ADR-020).**
+  Server-terminated client-cert verification (uvicorn `CERT_REQUIRED` + a configured client-CA
+  bundle); the verified cert's configured field (CN / SAN / DN) maps to the principal. Config:
+  `…_TLS_CLIENT_CA`, `…_MTLS_PRINCIPAL_FIELD`. (In 0.3.0 the verified cert did not yet reach the
+  authenticator — wired by the ADR-020 peer-cert bridge in [Unreleased].)
 - Both produce distinct **`Principal`s** that feed the existing per-principal session-ownership
   mechanism (ADR-017) unchanged. Hardens trust boundary **TB6** (threat-model §13).
 
@@ -61,12 +78,13 @@ remains hostile input.
   (`pyjwt 2.13.0`, `cryptography 48.0.0`); `pip-audit` reports no known vulnerabilities.
 
 ### Known limitations
-- **`auth_mode=mtls` is not yet end-to-end functional.** uvicorn does not surface the verified peer
-  certificate into the request scope, so the transport→scope peer-cert bridge is a tracked follow-up;
-  until it lands, an `mtls` endpoint is **fail-closed** (the TLS handshake still requires a CA-signed
-  client cert, and the authenticator rejects when no cert reaches it) and startup logs
-  `auth.mtls_bridge_pending`. **Use `oauth` or `bearer` for functional network auth.** mTLS startup
-  now requires server TLS (refuses a plaintext mtls listener).
+- **`auth_mode=mtls` is not yet end-to-end functional.** *(RESOLVED in [Unreleased] by the ADR-020
+  peer-cert bridge — `auth_mode=mtls` is now functional.)* In 0.3.0, uvicorn did not surface the
+  verified peer certificate into the request scope, so the transport→scope peer-cert bridge was a
+  tracked follow-up; until it landed, an `mtls` endpoint was **fail-closed** (the TLS handshake still
+  required a CA-signed client cert, and the authenticator rejected when no cert reached it) and
+  startup logged `auth.mtls_bridge_pending`. mTLS startup requires server TLS (refuses a plaintext
+  mtls listener).
 
 ## [0.2.1] — 2026-06-13
 
