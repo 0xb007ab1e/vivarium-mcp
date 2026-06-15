@@ -6,6 +6,68 @@ All notable changes to `ghidra-mcp` are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-15
+
+Cross-session **annotation persistence** plus two new pluggable **authentication identity sources**
+(mTLS, OAuth) for the HTTP transport. The tool catalog grows **47 → 49**. Backward-compatible: all
+new tools are additive (no existing tool / RPC / envelope contract changed), and the new auth modes
+are opt-in. Ghidra still runs **isolated, headless, out-of-process** (ADR-001); the analyzed binary
+remains hostile input.
+
+> **Pre-1.0 / private:** the tool catalog, RPC, and envelope contracts may still evolve before 1.0.
+
+### Added
+
+**Cross-session annotation persistence (ADR-018 — tools 47 → 49)**
+- **`session_export_annotations`** — exports a session's `USER_DEFINED` annotations
+  (renames / comments / signatures / applied + defined types) as a **versioned, binary-hash-bound,
+  structured document**; read-only, owner-scoped, binary-derived strings wrapped `Untrusted`
+  (ADR-005), bounded.
+- **`session_import_annotations`** — replays such a document into a fresh same-binary session:
+  schema-validated → **binary-hash verified** (mismatch fails closed) → write-consent gated
+  (+ `allow_structural`) → **every entry re-validated through the live validators and replayed via
+  the existing gated write tools** (one transaction each). **Import adds no new write primitive.**
+- **Stateless / client-owned:** the server persists nothing (ADR-002 preserved) — export returns the
+  document, import takes it; the client owns the artifact + its confidentiality. New trust boundary
+  **TB8** (threat-model §12).
+
+**Pluggable authentication identity sources for HTTP (ADR-019)**
+- **OAuth (`GHIDRA_MCP_HTTP_AUTH=oauth`) — functional.** JWT access tokens validated locally via
+  **JWKS**: a **pinned asymmetric algorithm allow-list** (`alg:none` and HS/RS confusion impossible —
+  the token's `alg` is never trusted), `iss` / `aud` / `exp` / `nbf` enforced, `sub` (configurable)
+  → principal. JWKS is fetched + cached (no per-request round-trip); failures fail closed, no oracle,
+  the token is never logged. Config: `…_OAUTH_ISSUER` / `…_AUDIENCE` / `…_JWKS_URI` /
+  `…_PRINCIPAL_CLAIM` / `…_ALGORITHMS` / `…_LEEWAY_SECONDS`.
+- **mTLS (`GHIDRA_MCP_HTTP_AUTH=mtls`) — seam shipped, see Known limitations.** Server-terminated
+  client-cert verification (uvicorn `CERT_REQUIRED` + a configured client-CA bundle); the verified
+  cert's configured field (CN / SAN / DN) maps to the principal. Config: `…_TLS_CLIENT_CA`,
+  `…_MTLS_PRINCIPAL_FIELD`.
+- Both produce distinct **`Principal`s** that feed the existing per-principal session-ownership
+  mechanism (ADR-017) unchanged. Hardens trust boundary **TB6** (threat-model §13).
+
+### Changed
+- Tool catalog **47 → 49** (the two persistence tools; all prior tools unchanged).
+
+### Security
+- **TB8** (annotation-import) and **TB6** (mTLS/OAuth identity) threat-modeled (STRIDE); 25 new
+  abuse-case tests (annotation-import 68–77; mTLS 67–71; OAuth 72–82, renumbered in §13).
+- Network principals are now **cryptographically proven** (client cert / JWKS-verified JWT), not just
+  shared bearer secrets; all auth modes are fail-closed with no credential oracle and no token/cert
+  logging.
+
+### Dependencies
+- Promoted **`pyjwt[crypto]`** (MIT) + **`cryptography`** (Apache-2.0 / BSD) to direct dependencies
+  for OAuth (already present transitively via `mcp`); pinned + hashed in the lockfile
+  (`pyjwt 2.13.0`, `cryptography 48.0.0`); `pip-audit` reports no known vulnerabilities.
+
+### Known limitations
+- **`auth_mode=mtls` is not yet end-to-end functional.** uvicorn does not surface the verified peer
+  certificate into the request scope, so the transport→scope peer-cert bridge is a tracked follow-up;
+  until it lands, an `mtls` endpoint is **fail-closed** (the TLS handshake still requires a CA-signed
+  client cert, and the authenticator rejects when no cert reaches it) and startup logs
+  `auth.mtls_bridge_pending`. **Use `oauth` or `bearer` for functional network auth.** mTLS startup
+  now requires server TLS (refuses a plaintext mtls listener).
+
 ## [0.2.1] — 2026-06-13
 
 Patch release: a defense-in-depth hardening of the (gated, client-side) naming-eval differential
@@ -214,7 +276,8 @@ analyzer is the central security control.
   off-by-default and fail-closed. See `docs/security/threat-model.md` and `SECURITY.md` for the
   reporting channel.
 
-[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/0xb007ab1e/ghidra-mcp/releases/tag/v0.1.0
