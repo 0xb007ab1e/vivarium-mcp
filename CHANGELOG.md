@@ -6,6 +6,53 @@ All notable changes to `ghidra-mcp` are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-15
+
+Composite-batch type creation + a deeper naming-eval. The tool catalog grows **49 → 50**.
+Backward-compatible: the new tool is additive (no existing tool / RPC / envelope contract changed)
+and gated; the eval refinement is client-side and additive.
+
+> **Pre-1.0 / private:** the tool catalog, RPC, and envelope contracts may still evolve before 1.0.
+
+### Added
+
+**`define_types` — multi-type composite batch (ADR-021 — tools 49 → 50, GATED)**
+- Create a **batch of interdependent new composites** (structs/unions) in **one transaction** — a
+  field may reference **another new composite in the same batch** (beyond ADR-015's single-composite
+  `define_struct`/`define_union`, which remain). Gated by per-session write-consent + `allow_structural`.
+- **By-value cycle detector:** an iterative 3-colour DFS over by-value member edges (`pointer_levels
+  == 0`, array-of-B included) **rejects** any by-value cycle (self / array-of-self / A↔B / longer) →
+  infinite-size types are impossible; **pointer members create no edge**, so **mutually-recursive
+  pointer structs are allowed**.
+- Assembly **pre-registers all empties** in the batch, resolves + adds each, enforces a batch-total
+  size cap, and **rolls back the whole batch** on any failure (no partial/orphan type). Structured
+  `TypeRef` only (no C parsed); name-collision (existing or intra-batch dup) fail-closed REJECT.
+
+**Deeper behavioral-equivalence eval (ADR-022 — client-side)**
+- `behavioral_equivalence_normalized` — a second naming-eval score reported **alongside** the
+  unchanged strict byte-exact `behavioral_equivalence`. A conservative `normalize_output` masks
+  volatile tokens (pointers `0x…`, ISO/clock timestamps, labelled PIDs, trailing whitespace) so two
+  builds that differ **only** in volatile output are no longer scored as divergent. Invariant
+  `normalized >= strict`; over-normalization risks false positives, so **strict stays the primary
+  signal** (measured, not guaranteed).
+- Seeded, deterministic `generate_fuzz_vectors` broadens behavioral coverage beyond the fixed
+  vectors. Still **never runs the analyzed (hostile) binary** — A = trusted-source build vs B =
+  recompiled renamed-C, both sandboxed (TB5).
+
+### Changed
+- Tool catalog **49 → 50** (`define_types`); all prior tools unchanged.
+
+### Security
+- **TB7** extended (ADR-021): the by-value cycle detector + one-transaction rollback-all bound the
+  composite-batch write surface; structural consent + owner-scoping unchanged.
+- **TB5** extended (ADR-022): normalization is a pure transform on inert captured bytes; fuzz inputs
+  are seeded/bounded synthetic; the eval never executes the hostile original.
+
+### Notes
+- **Backward-compatible** (additive gated tool + additive client-side metric).
+- **Tracked follow-ups:** `define_types` persistence round-trip of mutually-recursive pointer
+  composites (ADR-021 §b); memory-state / coverage-guided equivalence (ADR-022 deferred).
+
 ## [0.3.1] — 2026-06-15
 
 Patch release: the **mTLS peer-cert bridge** — `auth_mode=mtls` is now end-to-end functional (ADR-020), resolving the v0.3.0 known limitation. No new dependency; no other auth/transport path changed.
@@ -298,7 +345,8 @@ analyzer is the central security control.
   off-by-default and fail-closed. See `docs/security/threat-model.md` and `SECURITY.md` for the
   reporting channel.
 
-[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.2.0...v0.2.1
