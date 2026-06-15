@@ -1408,15 +1408,11 @@ def test_mtls_two_distinct_certs_yield_two_distinct_owner_scoped_principals() ->
 
 
 # --- Case 70 — untrusted-CA cert rejected at the TLS handshake (TB6-S/T, LIVE) --------------
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_mtls_untrusted_ca_cert_rejected_at_handshake() -> None:
-    """Case 70 (live): a client cert NOT signed by the configured client-CA bundle is rejected by
-    the TLS handshake itself (uvicorn ``ssl_cert_reqs=CERT_REQUIRED`` + ``ssl_ca_certs``) — the
-    connection never reaches the ASGI app, so there is no in-app code path to unit-test. The config
-    layer GUARANTEES the CA bundle is set for ``auth_mode=mtls`` (``test_mtls_without_client_ca_
-    fails_closed``); this case asserts the live transport gate. Promoted to WS5 (needs the live
-    uvicorn TLS listener + a synthetic client keypair from an untrusted CA; no real secrets)."""
+# PROMOTED (ADR-020): now implemented as a real-TLS integration test rather than an empty skip —
+# see tests/integration/test_mtls_bridge.py::test_mtls_untrusted_ca_cert_rejected_at_handshake_live
+# (a live uvicorn CERT_REQUIRED listener + synthetic certs; no real secrets), which also proves the
+# positive path (a CA-signed cert authenticates as its CN principal via the peer-cert bridge). The
+# handshake gate has no in-app code path to unit-test, so the live test is the canonical assertion.
 
 
 # --- Case 71 — cert / peer material is never logged (TB6-R/I) -------------------------------

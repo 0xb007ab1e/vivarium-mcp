@@ -121,12 +121,14 @@ owner-scoped session ownership; the manager's owner check is untouched.
    field; **two distinct certs → two distinct owner-scoped principals**; cert private data never
    logged) + `topic-testing` gates. Cert parsing hermetic with **synthetic** certs; live mTLS handshake
    integration-gated. No real secrets.
-5. **KNOWN LIMITATION (tracked):** uvicorn does not populate the ASGI TLS extension, so the
-   transport→scope peer-cert bridge that fills `scope["extensions"]["tls"]["peercert"]` is the WS5
-   integration follow-up. Until it lands, `auth_mode=mtls` is **fail-closed but non-functional**
-   (the verified cert never reaches the authenticator → all requests rejected); the TLS-layer
-   `CERT_REQUIRED` handshake still gates uncertified clients, and startup **requires server TLS**
-   (refuses a plaintext mtls listener) + logs `auth.mtls_bridge_pending`.
+5. **LIVE BRIDGE WIRED (ADR-020):** the transport→scope peer-cert bridge that fills
+   `scope["extensions"]["tls"]["peercert"]` is now implemented (`MtlsAwareProtocol`, a custom
+   uvicorn HTTP protocol used only when `auth_mode=mtls`), so `auth_mode=mtls` is **end-to-end
+   functional** — the verified client cert reaches the authenticator and resolves to its
+   cert-derived principal. The TLS-layer `CERT_REQUIRED` handshake remains the first gate (gates
+   uncertified clients); the in-app authenticator is the second (defense in depth). Startup still
+   **requires server TLS** (refuses a plaintext mtls listener); the `auth.mtls_bridge_pending`
+   startup warning is removed. See **ADR-020** for the bridge design + the real-TLS integration test.
 
 **B — OAuth (second, +pinned JWT dep):**
 1. add **PyJWT + cryptography** (pinned + hashed + vetted — `std-supplychain`).
