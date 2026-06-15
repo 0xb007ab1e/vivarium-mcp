@@ -6,6 +6,10 @@ All notable changes to `ghidra-mcp` are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-06-15
+
+Patch release: the **mTLS peer-cert bridge** — `auth_mode=mtls` is now end-to-end functional (ADR-020), resolving the v0.3.0 known limitation. No new dependency; no other auth/transport path changed.
+
 ### Added
 - **mTLS peer-cert bridge — `auth_mode=mtls` now functional (ADR-020).** A custom uvicorn HTTP
   protocol (`MtlsAwareProtocol`, used **only** for `auth_mode=mtls`) injects the **verified** client
@@ -294,7 +298,8 @@ analyzer is the central security control.
   off-by-default and fail-closed. See `docs/security/threat-model.md` and `SECURITY.md` for the
   reporting channel.
 
-[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.1.0...v0.2.0
