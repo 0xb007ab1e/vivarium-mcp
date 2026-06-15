@@ -37,7 +37,7 @@ import pytest
 
 from ghidra_mcp.naming.compile import ContainerExecRunner
 from ghidra_mcp.naming.loop import Namer, ProposedName, orchestrate
-from ghidra_mcp.naming.metrics import score
+from ghidra_mcp.naming.metrics import generate_fuzz_vectors, score
 from ghidra_mcp.tools.schemas import AnalysisOrderOut, FunctionContext
 
 _ENV_INTEGRATION = "GHIDRA_MCP_INTEGRATION"
@@ -57,6 +57,12 @@ _VECTORS = _FIXTURES_OSS / "cjson_input_vectors.json"
 #: Bound the functions named per run (pipeline proof, not a full-program pass) — matches the
 #: naming-eval e2e so the round-trips + builds stay fast on CI.
 _MAX_FUNCS = 30
+
+#: Seeded fuzz-vector parameters (ADR-022 D2) — deterministic + bounded so the gated e2e stays
+#: reproducible and fast. Fixed seed ⇒ the same broadened input set every run (hermetic).
+_FUZZ_SEED = 0xC0FFEE
+_FUZZ_COUNT = 16
+_FUZZ_MAX_LEN = 64
 
 
 def _truthy(v: str | None) -> bool:
@@ -207,10 +213,19 @@ def _exec_runner() -> ContainerExecRunner:
 
 
 def test_behavioral_equivalence_over_cjson() -> None:
-    """A-vs-B differential run over cJSON: the metric is measured + well-formed (ADR-016)."""
+    """A-vs-B differential run over cJSON: strict + normalized are measured + well-formed.
+
+    Runs the fixed committed vectors **and** seeded fuzz vectors (ADR-022 D2) through the same
+    sandbox, and reports both the strict byte-exact score (ADR-016 D2) and the looser normalized
+    score (ADR-022 D1). The fuzz vectors are deterministic (fixed seed) so the run is reproducible.
+    """
     fixtures_dir = Path(os.environ[_ENV_FIXTURES])
-    vectors = _load_vectors()
-    assert vectors, "no synthetic input vectors loaded"
+    # Fixed committed vectors broadened with seeded, bounded fuzz vectors (ADR-022 D2 — the SAME
+    # synthetic vectors feed both builds A and B; deterministic, never attacker-controlled).
+    fixed = _load_vectors()
+    assert fixed, "no synthetic input vectors loaded"
+    fuzz = generate_fuzz_vectors(seed=_FUZZ_SEED, count=_FUZZ_COUNT, max_len=_FUZZ_MAX_LEN)
+    vectors = fixed + fuzz
 
     candidate_tu = asyncio.run(_collect_candidate(fixtures_dir))
 
@@ -233,11 +248,16 @@ def test_behavioral_equivalence_over_cjson() -> None:
 
     # The reference build (A) must itself run cleanly on every vector — trusted known source.
     assert all(r.ok for r in runs_a), "reference build A failed to build/run (fixture/toolchain?)"
-    # The metric is MEASURED + well-formed; we do NOT gate on the stub's (expected ~0) score.
+    # Both metrics are MEASURED + well-formed; we do NOT gate on the stub's (expected ~0) score.
     be = metrics.behavioral_equivalence
+    be_norm = metrics.behavioral_equivalence_normalized
     assert be is not None and 0.0 <= be <= 1.0
+    assert be_norm is not None and 0.0 <= be_norm <= 1.0
+    # Invariant (ADR-022 D1): normalization only loosens the compare → normalized >= strict.
+    assert be_norm >= be
     print(
-        f"behavioral_equivalence[stub]: {be:.3f} over {len(vectors)} vectors (stub → ~0 expected)"
+        f"behavioral_equivalence[stub]: strict={be:.3f} normalized={be_norm:.3f} "
+        f"over {len(vectors)} vectors ({len(fixed)} fixed + {len(fuzz)} fuzz; stub → ~0 expected)"
     )
 
 
