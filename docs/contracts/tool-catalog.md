@@ -6,7 +6,7 @@
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **49** tools (asserted in tests) —
+- **Allow-list only:** the catalog is fixed; there are exactly **50** tools (asserted in tests) —
   22 Tier-1 read-only (v1) + 5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
   reporting/metrics tools (ADR-008; all read-only) + **6 v1.1 mutation/write tools (ADR-012) + 6
   v1.1 structural-write tools (ADR-013 Phase A + ADR-014 Phase B + ADR-015 Phase C)** + **2 v1.2
@@ -141,7 +141,21 @@ identifier allow-list / `validate_comment_text` normalization — stored-injecti
 | `apply_data_type` | `ApplyDataTypeIn{address, type: TypeRef, clear_existing=false}` | `ApplyDataTypeResult{address, type_name*, size, applied}` | **structural** (ADR-014 Phase B); applies an EXISTING/resolvable type; gated by `allow_structural` |
 | `define_struct` | `DefineStructIn{name, fields: [FieldSpec], packed=false}` | `DefineStructResult{name, kind, size, field_count, applied}` | **structural** (ADR-015 Phase C); creates a NEW struct; gated by `allow_structural` |
 | `define_union` | `DefineUnionIn{name, fields: [FieldSpec]}` | `DefineUnionResult{name, kind, size, field_count, applied}` | **structural** (ADR-015 Phase C); creates a NEW union; gated by `allow_structural` |
+| `define_types` | `DefineTypesIn{types: [CompositeSpec]}` | `DefineTypesResult{types: [{name, kind, size, field_count}], applied}` | **structural** (ADR-021); creates a BATCH of interdependent NEW composites in ONE transaction (a field may reference another batch member); GATED by write-consent + `allow_structural`; **by-value cycles rejected, pointer cycles allowed** |
 
+> `CompositeSpec` = `{kind: "struct"\|"union", name, fields: [FieldSpec], packed=false}` (a struct
+> honors `offset`/`packed`; a union overlays all members at offset 0 and rejects a member `offset`).
+> A `define_types` batch is `1..64` entries (`_MAX_TYPES_PER_BATCH`); a field's `type.named` may
+> reference an existing program type, a base type, **self**, or **another composite in the same
+> batch**. The boundary runs a **by-value cycle detector**: an edge A→B exists iff A has a member of
+> type B (a batch member) with `pointer_levels == 0` (by-value; **array-of-B counts**); ANY by-value
+> cycle (incl. self / array-of-self) → `VALIDATION`, no write. A `pointer_levels >= 1` member creates
+> **no edge** → mutually-recursive *pointer* structs are allowed. The worker pre-registers ALL empty
+> composites in the batch, resolves + adds each, batch-total size-caps, and rolls back the WHOLE batch
+> on any failure (no partial type). Name collision (existing or intra-batch dup) → fail-closed REJECT.
+> `define_types` is NOT (yet) an annotation-persistence entry variant — round-trip of mutually-
+> recursive pointer composites is a tracked follow-up (ADR-021 §Persistence interaction).
+>
 > `TypeRef` = `{base: BaseType|null, named: str|null, pointer_levels: 0..8, array_len: 1..65536|null}`
 > (exactly one of `base`/`named`); `ParamSpec` = `{name, type: TypeRef}`; `FieldSpec` =
 > `{name, type: TypeRef, offset?}` (struct only; union members are all at offset 0). A `TypeRef` is

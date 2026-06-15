@@ -23,7 +23,9 @@ from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 if TYPE_CHECKING:  # avoid an import cycle at runtime (schemas imports nothing from this module).
     from ghidra_mcp.tools.schemas import (
         AnnotationDocument,
+        CompositeSpec,
         DefineStructIn,
+        DefineTypesIn,
         DefineUnionIn,
         Entry,
         FieldSpec,
@@ -106,6 +108,11 @@ MAX_FIELDS = 256
 
 MAX_COMPOSITE_SIZE = 1_048_576
 """Maximum total computed size of an assembled composite (1 MiB; worker enforces post-resolve)."""
+
+# --- multi-type composite batch bounds (ADR-021 §Bounds; mirror schemas._MAX_TYPES_PER_BATCH). A
+# batch of interdependent NEW composites built in one transaction (DoS — CWE-400). ---
+MAX_TYPES_PER_BATCH = 64
+"""Maximum composites accepted in one ``define_types`` batch (cycle-detect/assembly DoS guard)."""
 
 # Closed base-type vocabulary (ADR-014 §2.5). Mirrors schemas.BaseType; mapped to Ghidra built-ins
 # in the worker. A ``base`` outside this set fails closed — never extensible by the client.
@@ -610,7 +617,9 @@ def validate_field_spec(field: FieldSpec) -> None:
             raise _validation_error("field offset is out of range")
 
 
-def validate_composite(payload: DefineStructIn | DefineUnionIn, *, kind: str) -> None:
+def validate_composite(
+    payload: DefineStructIn | DefineUnionIn | CompositeSpec, *, kind: str
+) -> None:
     """Validate a ``define_struct`` / ``define_union`` payload end-to-end (ADR-015 §4) — allow-list.
 
     Enforces, fail-closed and value-free: ``name`` via :func:`validate_write_name` (persisted type
@@ -656,6 +665,114 @@ def validate_composite(payload: DefineStructIn | DefineUnionIn, *, kind: str) ->
         # A union overlays all members at offset 0 — an offset is a struct-only field (foot-gun).
         if kind == "union" and field.offset is not None:
             raise _validation_error("a union member may not carry an offset")
+
+
+def _detect_by_value_cycle(types: list[CompositeSpec]) -> None:
+    """Reject ANY by-value cycle among the batch's composites (the load-bearing control — ADR-021).
+
+    Builds a directed graph over the batch and runs a pure, ``O(V+E)`` cycle detector (iterative DFS
+    with a three-colour visit state). An edge **A → B** exists iff A has a member whose
+    ``TypeRef.named`` is **B** (another composite in THIS batch) with ``pointer_levels == 0`` — a
+    *by-value* member, which **includes an array of B** (an array-of-B is still embedded by value,
+    so its element type makes the edge). A ``pointer_levels >= 1`` member creates **NO edge** (a
+    pointer is fixed-size regardless of target), so mutually-recursive *pointer* structures are
+    allowed (e.g. ``B *next`` in A and ``A *prev`` in B). A member whose ``named`` is NOT a batch
+    member (an existing/unknown program type) creates no edge here — it is the worker's resolution
+    concern (``not-found``), not the detector's.
+
+    Because the worker pre-registers EVERY batch composite in the ``DataTypeManager`` before
+    resolving any field, a by-value cycle WOULD otherwise resolve into an infinite-size type — so
+    any such cycle (incl. a self by-value embed and an array-of-self, already caught per-type,
+    re-asserted here for the cross-type case) is rejected at the boundary with ``VALIDATION``.
+
+    Args:
+        types: The batch of :class:`CompositeSpec` entries (names are assumed batch-unique; the
+            caller enforces intra-batch name uniqueness before this runs).
+
+    Raises:
+        GhidraMcpError: With a ``VALIDATION`` envelope when a by-value cycle exists. The detail
+            names the condition, never echoes a (potentially untrusted) type name.
+    """
+    batch_names = {spec.name for spec in types}
+    # Adjacency: A -> {B, ...} for each by-value (pointer_levels == 0) member of A naming a batch B.
+    adjacency: dict[str, list[str]] = {}
+    for spec in types:
+        targets: list[str] = []
+        for field in spec.fields:
+            named = field.type.named
+            # by-value edge (incl. array-of-B; array_len ignored). Deterministic field-ordered list,
+            # NOT a set: set iteration order is PYTHONHASHSEED-dependent (flaky traversal/coverage).
+            if (
+                named is not None
+                and named in batch_names
+                and field.type.pointer_levels == 0
+                and named not in targets
+            ):
+                targets.append(named)
+        adjacency[spec.name] = targets
+
+    # Iterative DFS with WHITE (unvisited) / GREY (on the current stack) / BLACK (done). A back-edge
+    # to a GREY node is a cycle. Iterative (no recursion) so a deep batch cannot blow the stack.
+    white, grey, black = 0, 1, 2
+    colour: dict[str, int] = dict.fromkeys(adjacency, white)
+    for start in adjacency:
+        if colour[start] != white:
+            continue
+        stack: list[tuple[str, bool]] = [(start, False)]
+        while stack:
+            node, leaving = stack.pop()
+            if leaving:
+                colour[node] = black
+                continue
+            if colour[node] != white:
+                continue  # already visited (grey on-stack or black done) via another path — skip
+            colour[node] = grey
+            stack.append((node, True))  # post-visit marker (turns the node BLACK after its subtree)
+            for target in adjacency[node]:
+                if colour[target] == grey:
+                    raise _validation_error("a composite batch may not contain a by-value cycle")
+                if colour[target] == white:
+                    stack.append((target, False))
+
+
+def validate_types_batch(payload: DefineTypesIn) -> None:
+    """Validate a ``define_types`` batch end-to-end (ADR-021 §D2) — allow-list + cycle detection.
+
+    The crux validator (100% line+branch — the load-bearing new control). Enforces, fail-closed and
+    value-free: a bounded, non-empty ``types`` list (``1 <= len <= MAX_TYPES_PER_BATCH`` — DoS,
+    CWE-400); per-type :func:`validate_composite` (name + bounded fields + resolved ``TypeRef``s +
+    no duplicate member / by-value self-embed / union-offset); **no duplicate type name within the
+    batch** (the boundary's intra-batch dup check — a collision with an EXISTING program type is
+    the worker's concern); and the **by-value cycle detector** (:func:`_detect_by_value_cycle`). NO
+    value is parsed by a C-type parser — the structured model assembles typed Java objects (worker).
+
+    Args:
+        payload: The :class:`DefineTypesIn` batch to validate.
+
+    Raises:
+        GhidraMcpError: With a ``VALIDATION`` envelope on any per-type / duplicate-name / cycle
+            violation; with a ``LIMIT_EXCEEDED`` envelope when the batch (or a per-type field count)
+            exceeds the max.
+    """
+    types = payload.types
+    if len(types) < 1:
+        raise _validation_error("a type batch must define at least one composite")
+    if len(types) > MAX_TYPES_PER_BATCH:
+        raise _limit_error("type-batch size exceeds the maximum")
+
+    seen: set[str] = set()
+    for spec in types:
+        # Per-type end-to-end validation (reuse the single-composite validator for its variant). The
+        # name is allow-listed here (validate_write_name); add the intra-batch duplicate-name check.
+        validate_composite(spec, kind=spec.kind)
+        if spec.name in seen:
+            raise _validation_error("composite types in a batch must have unique names")
+        seen.add(spec.name)
+
+    # The load-bearing new control: reject any by-value cycle over the in-batch named edges (pointer
+    # edges create none → pointer cycles are allowed). Runs AFTER dup-name so the graph keys are
+    # unique (ADR-021 §D2).
+    _detect_by_value_cycle(types)
 
 
 def validate_entry(entry: Entry) -> None:

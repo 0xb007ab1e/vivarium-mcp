@@ -87,6 +87,12 @@ string**; an unresolvable ref fails closed; same gate + transaction semantics), 
 composite is pre-registered in the DTM at the start of the transaction so self-`named` pointers
 resolve; a by-value self-embed is rejected, a name collision is fail-closed rejected, and the
 1 MiB size cap + transactional rollback bound the rest; structured `FieldSpec`s, no C parsed), the
+v1.2 **multi-type composite batch primitive** `define_types` (ADR-021 — a BATCH of interdependent new
+composites created in ONE transaction: the worker pre-registers ALL empty composites in the batch so
+an in-batch `named` ref resolves, resolves + adds each, batch-total size-caps, and rolls back the
+WHOLE batch on any failure; the server runs a **by-value cycle detector** at the boundary — by-value
+cycles rejected, pointer cycles allowed — and name-collision/intra-batch-dup is fail-closed REJECT;
+structured `FieldSpec`s, no C parsed), the
 v1.2 **annotation-export read-out primitive** `export_annotations` (ADR-018 — read-only; enumerates
 the program's `USER_DEFINED` annotations only, dependency-ordered + bounded, returns an inert plain
 document; over the entry cap → `limit-exceeded`), plus a `ping`/`shutdown` control pair.

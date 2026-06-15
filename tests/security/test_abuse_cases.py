@@ -1674,3 +1674,238 @@ def test_oauth_live_jwks_validation_end_to_end() -> None:
     the pinned-alg / iss / aud / exp / nbf / sub controls are proven hermetically above (cases
     72-82) with an in-test keypair + mocked JWKS; this live path (an actual IdP + network egress) is
     promoted to WS5 — no live IdP / network / real secrets in the unit suite."""
+
+
+# ==============================================================================================
+# TB7 (delta) — Multi-type composite batch `define_types` abuse cases 83-92 (threat-model §14,
+# ADR-021). The load-bearing NEW control is the pure BY-VALUE CYCLE DETECTOR (validate_types_batch):
+# because the worker pre-registers ALL batch composites before resolving any field, a by-value cycle
+# would otherwise resolve into an infinite-size type. By-value cycles (incl. self / array-of-self)
+# are rejected at the boundary; pointer cycles are allowed (fixed size). The worker-edge proofs
+# (one transaction, rollback-all, name-collision, batch-total size cap) are integration-gated like
+# every `_gh_*`. Synthetic shapes only; deterministic + hermetic.
+# ==============================================================================================
+def _composite(kind: str, name: str, fields: list[_s.FieldSpec], **kw: object) -> _s.CompositeSpec:
+    """Build a ``CompositeSpec`` (model_construct) — reach the pure validator's reject branches."""
+    return _s.CompositeSpec.model_construct(
+        kind=kind, name=name, fields=fields, packed=bool(kw.get("packed", False))
+    )
+
+
+def _types_batch(specs: list[_s.CompositeSpec]) -> _s.DefineTypesIn:
+    """Build a ``DefineTypesIn`` (model_construct) for the pure ``validate_types_batch``."""
+    return _s.DefineTypesIn.model_construct(session_id="sid", types=specs)
+
+
+# --- Case 83 — by-value self-cycle rejected ------------------------------------------------
+@pytest.mark.critical
+def test_batch_by_value_self_cycle_rejected() -> None:
+    """A batch struct embedding itself by value (incl. array-of-self) is REJECTED VALIDATION (the
+    per-type self-embed check + the cycle detector's self-edge); no write (ADR-021 §D2)."""
+    for field in (_field("self", named="A"), _field("kids", named="A", array_len=4)):
+        with pytest.raises(GhidraMcpError) as ei:
+            _v.validate_types_batch(_types_batch([_composite("struct", "A", [field])]))
+        assert ei.value.envelope.type is ErrorType.VALIDATION
+
+
+# --- Case 84 — A↔B by-value cycle rejected (the load-bearing control) ----------------------
+@pytest.mark.critical
+def test_batch_two_node_by_value_cycle_rejected() -> None:
+    """A embeds B by value and B embeds A by value → the by-value cycle detector REJECTS VALIDATION,
+    no write. The headline control: pre-registration would otherwise resolve it to infinite size."""
+    batch = _types_batch(
+        [
+            _composite("struct", "A", [_field("b", named="B")]),
+            _composite("struct", "B", [_field("a", named="A")]),
+        ]
+    )
+    with pytest.raises(GhidraMcpError) as ei:
+        _v.validate_types_batch(batch)
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+    assert "cycle" in ei.value.envelope.detail  # names the condition, never echoes a type name
+
+
+# --- Case 85 — A→B→C→A by-value cycle rejected ---------------------------------------------
+@pytest.mark.critical
+def test_batch_three_node_by_value_cycle_rejected() -> None:
+    """A multi-hop by-value cycle (A→B→C→A) is detected (DFS back-edge) and REJECTED VALIDATION."""
+    batch = _types_batch(
+        [
+            _composite("struct", "A", [_field("b", named="B")]),
+            _composite("struct", "B", [_field("c", named="C")]),
+            _composite("struct", "C", [_field("a", named="A")]),
+        ]
+    )
+    with pytest.raises(GhidraMcpError) as ei:
+        _v.validate_types_batch(batch)
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+
+
+# --- Case 86 — A↔B POINTER cycle ALLOWED + diamond ALLOWED (POSITIVE) ----------------------
+@pytest.mark.critical
+def test_batch_pointer_cycle_and_diamond_allowed() -> None:
+    """Positive control: a mutually-recursive POINTER cycle (``B *next`` in A, ``A *prev`` in B) has
+    NO by-value edge → ALLOWED. A diamond (A→B, A→C, B→D, C→D by value) is acyclic → ALLOWED. These
+    must NOT trip the cycle detector (ADR-021 §D2 — pointer is fixed-size)."""
+    pointer_cycle = _types_batch(
+        [
+            _composite("struct", "A", [_field("next", named="B", pointer_levels=1)]),
+            _composite("struct", "B", [_field("prev", named="A", pointer_levels=1)]),
+        ]
+    )
+    _v.validate_types_batch(pointer_cycle)  # no raise
+    diamond = _types_batch(
+        [
+            _composite("struct", "A", [_field("b", named="B"), _field("c", named="C")]),
+            _composite("struct", "B", [_field("d", named="D")]),
+            _composite("struct", "C", [_field("d", named="D")]),
+            _composite("struct", "D", [_field("x")]),
+        ]
+    )
+    _v.validate_types_batch(diamond)  # no raise
+
+
+# --- Case 87 — oversized batch / per-type / batch-total size DoS ---------------------------
+@pytest.mark.critical
+def test_batch_oversized_type_count_rejected_at_boundary() -> None:
+    """A ``types`` list longer than ``MAX_TYPES_PER_BATCH`` is rejected LIMIT_EXCEEDED before the
+    worker (CWE-400). A per-type over-``MAX_FIELDS`` is rejected by the reused validator."""
+    over = [_composite("struct", f"T{i}", [_field("x")]) for i in range(_v.MAX_TYPES_PER_BATCH + 1)]
+    with pytest.raises(GhidraMcpError) as ei:
+        _v.validate_types_batch(_types_batch(over))
+    assert ei.value.envelope.type is ErrorType.LIMIT_EXCEEDED
+    # per-type field-count bound (defense in depth — reuses validate_composite's LIMIT branch)
+    big = _composite("struct", "Big", [_field(f"f{i}") for i in range(_v.MAX_FIELDS + 1)])
+    with pytest.raises(GhidraMcpError) as ei2:
+        _v.validate_types_batch(_types_batch([big]))
+    assert ei2.value.envelope.type is ErrorType.LIMIT_EXCEEDED
+
+
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_batch_total_size_rejected_at_worker() -> None:
+    """Case 87 (live): a batch whose BATCH-TOTAL computed size exceeds ``_MAX_COMPOSITE_SIZE`` is
+    rejected ``limit-exceeded`` during worker assembly with no finalized type; the running size sum
+    is overflow-guarded (ADR-021 §Bounds). Promoted to WS5 (needs resolved DataType lengths)."""
+
+
+# --- Case 88 — duplicate type name in batch rejected --------------------------------------
+@pytest.mark.critical
+def test_batch_duplicate_type_name_rejected() -> None:
+    """Two batch entries named ``T`` → REJECT VALIDATION (the boundary's intra-batch dup check); a
+    collision with an EXISTING program type is the worker's concern (case 89)."""
+    batch = _types_batch(
+        [_composite("struct", "T", [_field("x")]), _composite("union", "T", [_field("y")])]
+    )
+    with pytest.raises(GhidraMcpError) as ei:
+        _v.validate_types_batch(batch)
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+
+
+# --- Case 89 — collision with an existing program type (worker REJECT) ---------------------
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_batch_collision_with_existing_type_rejected() -> None:
+    """Case 89 (live): a batch name that already names a program type is fail-closed REJECTED
+    ``analysis-failed`` BEFORE assembly (the per-name ``_reject_type_collision`` lookup), and the
+    whole batch is rolled back — no partial type, no silent replace (ADR-015 §6 per member).
+    Promoted to WS5 (needs the worker DataTypeManager lookup)."""
+
+
+# --- Case 90 — partial failure rolls back the WHOLE batch ---------------------------------
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_batch_partial_failure_rolls_back_whole_batch() -> None:
+    """Case 90 (live): any member failure (unresolvable ref → not-found, size cap, addDataType or
+    commit) inside the ONE transaction rolls back the WHOLE batch via ``_in_transaction``
+    (endTransaction False) — no partial/orphan type survives (ADR-021 §D2). Promoted to WS5 (needs
+    the real DTM pre-register-all + rollback)."""
+
+
+# --- Case 91 — no C parsed (the design-eliminated parser surface) --------------------------
+@pytest.mark.critical
+@pytest.mark.parametrize("payload", ["struct{int x;}", "int*", "a;b", "rtl‮name"])
+def test_batch_field_type_ref_injection_rejected(payload: str) -> None:
+    """A ``CompositeSpec`` field ``type.named`` carrying C-declaration syntax / markup is rejected
+    by ``validate_type_ref`` (never parsed) → VALIDATION; no type defined. The structured model
+    admits only a single LOOKED-UP identifier (CParser/DataTypeParser never instantiated)."""
+    bad = _s.FieldSpec.model_construct(
+        name="f",
+        type=_s.TypeRef.model_construct(base=None, named=payload, pointer_levels=0, array_len=None),
+        offset=None,
+    )
+    with pytest.raises(GhidraMcpError) as ei:
+        _v.validate_types_batch(_types_batch([_composite("struct", "A", [bad])]))
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+    assert payload.strip() not in ei.value.envelope.detail
+
+
+@pytest.mark.critical
+def test_batch_write_path_does_not_parse_c() -> None:
+    """No server-side composite-batch module INSTANTIATES a C/type parser on a client value: scan
+    the write-path modules for a ``CParser(``/``DataTypeParser(`` call — the structured TypeRef
+    model eliminates the parser surface by construction (ADR-014). (A docstring may NAME the parser
+    to explain its absence; only an instantiation call would be the vulnerability.)"""
+    src = Path(__file__).resolve().parents[2] / "src" / "ghidra_mcp"
+    for path in (
+        src / "tools" / "registry.py",
+        src / "core" / "validation.py",
+        src / "ghidra" / "rpc_client.py",
+    ):
+        text = path.read_text(encoding="utf-8")
+        assert "CParser(" not in text and "DataTypeParser(" not in text
+
+
+# --- Case 92 — cross-owner SESSION_INVALID + structural consent required -------------------
+@pytest.mark.critical
+def test_batch_cross_owner_is_session_invalid_no_oracle() -> None:
+    """A ``define_types`` against an unknown/foreign session id yields the SAME SESSION_INVALID
+    envelope (BOLA, no oracle) — the same chokepoint as case 52, unchanged for the batch tool."""
+    mgr = _ConsentManager(_VALID_SID)
+
+    def _env(sid: str) -> dict[str, object]:
+        with pytest.raises(GhidraMcpError) as ei:
+            mgr.require_write_consent(sid)
+        env = ei.value.envelope
+        return {"type": env.type, "title": env.title, "detail": env.detail, "status": env.status}
+
+    assert _env("guessed-id") == _env("another-users-id")
+    assert _env("guessed-id")["type"] is ErrorType.SESSION_INVALID
+
+
+@pytest.mark.critical
+@pytest.mark.parametrize("structural_granted", [False, True])
+def test_batch_requires_structural_consent(structural_granted: bool) -> None:
+    """``define_types`` needs the ``allow_structural`` opt-in (not plain write consent) — the
+    ``require_write_consent(structural=True)`` chokepoint; else fail closed VALIDATION (ADR-021).
+    The handler-level proof (with ``build_handlers`` + the real gate) is in
+    ``test_composite_mutation``; this asserts the gate contract directly (mirrors case 50)."""
+    granted = {"writes": True, "structural": structural_granted}
+
+    def _require_write_consent(*, structural: bool) -> None:
+        if not granted["writes"]:
+            raise GhidraMcpError(
+                ErrorEnvelope(
+                    type=ErrorType.VALIDATION,
+                    title="Invalid arguments",
+                    detail="session is read-only",
+                    status=400,
+                )
+            )
+        if structural and not granted["structural"]:
+            raise GhidraMcpError(
+                ErrorEnvelope(
+                    type=ErrorType.VALIDATION,
+                    title="Invalid arguments",
+                    detail="structural writes not permitted",
+                    status=400,
+                )
+            )
+
+    if structural_granted:
+        _require_write_consent(structural=True)  # no raise once the tier is granted
+    else:
+        with pytest.raises(GhidraMcpError) as ei:
+            _require_write_consent(structural=True)
+        assert ei.value.envelope.type is ErrorType.VALIDATION
+        assert "structural" in ei.value.envelope.detail

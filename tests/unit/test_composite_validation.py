@@ -316,3 +316,300 @@ def test_union_schema_rejects_member_offset_at_construction() -> None:
             name="U",
             fields=[s.FieldSpec(name="a", type=s.TypeRef(base="int"), offset=0)],
         )
+
+
+# =================================================================================================
+# ADR-021 — multi-type composite batch validator (validate_types_batch + the by-value cycle
+# detector). The detector is the load-bearing NEW control → full line + branch coverage: every
+# edge-build branch (by-value vs pointer, in-batch vs out-of-batch, array-of-self), every cycle
+# shape (self / A↔B / 3-cycle), and the allow cases (pointer cycle, diamond) are asserted.
+# =================================================================================================
+def _spec(kind: str, name: str, fields: list[s.FieldSpec], **kw: object) -> s.CompositeSpec:
+    """Build a ``CompositeSpec`` (model_construct — bypass the schema validator to reach the pure
+    ``validate_types_batch`` reject branches with a known-bad shape)."""
+    return s.CompositeSpec.model_construct(
+        kind=kind, name=name, fields=fields, packed=bool(kw.get("packed", False))
+    )
+
+
+def _batch(types: list[s.CompositeSpec]) -> s.DefineTypesIn:
+    """Build a ``DefineTypesIn`` (model_construct) from a list of composite entries."""
+    return s.DefineTypesIn.model_construct(session_id="sid", types=types)
+
+
+def _named_field(
+    name: str, target: str, pointer_levels: int = 0, array_len: int | None = None
+) -> s.FieldSpec:
+    """A member whose type is a ``named`` reference to ``target`` (pointer/array modifiers)."""
+    return s.FieldSpec.model_construct(
+        name=name,
+        type=s.TypeRef.model_construct(
+            base=None,
+            named=target,
+            pointer_levels=pointer_levels,
+            array_len=array_len,
+        ),
+        offset=None,
+    )
+
+
+# --- validate_types_batch: acceptance --------------------------------------------------------
+@pytest.mark.critical
+def test_batch_accepts_minimal_single_type() -> None:
+    v.validate_types_batch(_batch([_spec("struct", "A", [_field("x")])]))  # no raise
+
+
+@pytest.mark.critical
+def test_batch_accepts_mixed_struct_and_union() -> None:
+    batch = _batch(
+        [
+            _spec("struct", "A", [_field("x")]),
+            _spec("union", "U", [_field("a"), _field("b")]),
+        ]
+    )
+    v.validate_types_batch(batch)  # no raise — mixed kinds allowed (ADR-021 D1)
+
+
+@pytest.mark.critical
+def test_batch_accepts_a_referencing_new_b_by_value_acyclic() -> None:
+    # A embeds B by value, B references nothing back → acyclic → allowed (the headline capability).
+    batch = _batch(
+        [
+            _spec("struct", "A", [_named_field("b", "B")]),
+            _spec("struct", "B", [_field("x")]),
+        ]
+    )
+    v.validate_types_batch(batch)  # no raise
+
+
+@pytest.mark.critical
+def test_batch_accepts_diamond_without_cycle() -> None:
+    # A→B, A→C, B→D, C→D (all by value) — a DAG/diamond, no cycle → allowed.
+    batch = _batch(
+        [
+            _spec("struct", "A", [_named_field("b", "B"), _named_field("c", "C")]),
+            _spec("struct", "B", [_named_field("d", "D")]),
+            _spec("struct", "C", [_named_field("d", "D")]),
+            _spec("struct", "D", [_field("x")]),
+        ]
+    )
+    v.validate_types_batch(batch)  # no raise
+
+
+@pytest.mark.critical
+def test_batch_dedups_repeated_by_value_edge_to_same_target() -> None:
+    # A has TWO by-value members (distinct names) both of type B -> a single A->B edge (the dedup
+    # `named not in targets` skip). No cycle -> allowed.
+    batch = _batch(
+        [
+            _spec("struct", "A", [_named_field("b1", "B"), _named_field("b2", "B")]),
+            _spec("struct", "B", [_field("x")]),
+        ]
+    )
+    v.validate_types_batch(batch)  # no raise
+
+
+def test_batch_revisits_shared_target_via_two_parents_no_cycle() -> None:
+    # A -> C and A -> B (field order), B -> C — a DAG where C is reached via two parents. With the
+    # detector's deterministic (field-order) adjacency, C is pushed by A, then re-pushed by B before
+    # the stale A-entry is popped, so the "node already visited via another path -> skip" branch is
+    # exercised deterministically. No by-value cycle -> allowed (regression: this coverage must not
+    # depend on set/hash order).
+    batch = _batch(
+        [
+            _spec("struct", "A", [_named_field("c", "C"), _named_field("b", "B")]),
+            _spec("struct", "B", [_named_field("c", "C")]),
+            _spec("struct", "C", [_field("x")]),
+        ]
+    )
+    v.validate_types_batch(batch)  # no raise
+
+
+def test_batch_allows_mutually_recursive_pointer_cycle() -> None:
+    # A has `B *next`, B has `A *prev` (pointer_levels >= 1) → NO edge → pointer cycle ALLOWED.
+    batch = _batch(
+        [
+            _spec("struct", "A", [_named_field("next", "B", pointer_levels=1)]),
+            _spec("struct", "B", [_named_field("prev", "A", pointer_levels=1)]),
+        ]
+    )
+    v.validate_types_batch(batch)  # no raise
+
+
+@pytest.mark.critical
+def test_batch_allows_reference_to_existing_non_batch_named() -> None:
+    # A member naming a type NOT in the batch creates no edge (the worker's not-found concern).
+    batch = _batch([_spec("struct", "A", [_named_field("e", "ExistingType", pointer_levels=0)])])
+    v.validate_types_batch(batch)  # no raise (the detector ignores non-batch named refs)
+
+
+# --- validate_types_batch: bounds + dup ------------------------------------------------------
+@pytest.mark.critical
+def test_batch_rejects_empty_type_list() -> None:
+    with pytest.raises(GhidraMcpError) as exc:
+        v.validate_types_batch(_batch([]))
+    assert exc.value.envelope.type is ErrorType.VALIDATION
+
+
+@pytest.mark.critical
+def test_batch_rejects_oversized_type_count() -> None:
+    over = [_spec("struct", f"T{i}", [_field("x")]) for i in range(v.MAX_TYPES_PER_BATCH + 1)]
+    with pytest.raises(GhidraMcpError) as exc:
+        v.validate_types_batch(_batch(over))
+    assert exc.value.envelope.type is ErrorType.LIMIT_EXCEEDED
+
+
+@pytest.mark.critical
+def test_batch_rejects_duplicate_type_names() -> None:
+    batch = _batch([_spec("struct", "T", [_field("x")]), _spec("union", "T", [_field("y")])])
+    with pytest.raises(GhidraMcpError) as exc:
+        v.validate_types_batch(batch)
+    assert exc.value.envelope.type is ErrorType.VALIDATION
+
+
+@pytest.mark.critical
+def test_batch_propagates_per_type_validation_failure() -> None:
+    # A per-type failure (bad member name) surfaces via the reused validate_composite.
+    bad = _spec(
+        "struct", "A", [s.FieldSpec.model_construct(name="../evil", type=_ref(), offset=None)]
+    )
+    with pytest.raises(GhidraMcpError) as exc:
+        v.validate_types_batch(_batch([bad]))
+    assert exc.value.envelope.type is ErrorType.VALIDATION
+
+
+# --- validate_types_batch: the by-value cycle detector (the load-bearing control) ------------
+@pytest.mark.critical
+def test_batch_rejects_self_by_value_cycle() -> None:
+    # A struct embedding itself by value — caught per-type AND by the detector's self-edge.
+    batch = _batch([_spec("struct", "A", [_named_field("self", "A")])])
+    with pytest.raises(GhidraMcpError) as exc:
+        v.validate_types_batch(batch)
+    assert exc.value.envelope.type is ErrorType.VALIDATION
+
+
+@pytest.mark.critical
+def test_batch_rejects_array_of_self_by_value_cycle() -> None:
+    # array-of-self (pointer_levels == 0, array_len set) is a by-value embed → cycle → REJECT.
+    batch = _batch([_spec("struct", "A", [_named_field("kids", "A", array_len=4)])])
+    with pytest.raises(GhidraMcpError) as exc:
+        v.validate_types_batch(batch)
+    assert exc.value.envelope.type is ErrorType.VALIDATION
+
+
+@pytest.mark.critical
+def test_batch_rejects_two_node_by_value_cycle() -> None:
+    # A embeds B by value, B embeds A by value → A↔B cycle → REJECT.
+    batch = _batch(
+        [
+            _spec("struct", "A", [_named_field("b", "B")]),
+            _spec("struct", "B", [_named_field("a", "A")]),
+        ]
+    )
+    with pytest.raises(GhidraMcpError) as exc:
+        v.validate_types_batch(batch)
+    assert exc.value.envelope.type is ErrorType.VALIDATION
+
+
+@pytest.mark.critical
+def test_batch_rejects_three_node_by_value_cycle() -> None:
+    # A→B→C→A (all by value) → cycle → REJECT (exercises the multi-hop DFS back-edge).
+    batch = _batch(
+        [
+            _spec("struct", "A", [_named_field("b", "B")]),
+            _spec("struct", "B", [_named_field("c", "C")]),
+            _spec("struct", "C", [_named_field("a", "A")]),
+        ]
+    )
+    with pytest.raises(GhidraMcpError) as exc:
+        v.validate_types_batch(batch)
+    assert exc.value.envelope.type is ErrorType.VALIDATION
+
+
+@pytest.mark.critical
+def test_batch_rejects_array_of_other_batch_member_cycle() -> None:
+    # An array-of-B (by value) closing a cycle B→A, A→B[] → REJECT (array element type makes edge).
+    batch = _batch(
+        [
+            _spec("struct", "A", [_named_field("bs", "B", array_len=2)]),
+            _spec("struct", "B", [_named_field("a", "A")]),
+        ]
+    )
+    with pytest.raises(GhidraMcpError) as exc:
+        v.validate_types_batch(batch)
+    assert exc.value.envelope.type is ErrorType.VALIDATION
+
+
+@pytest.mark.critical
+def test_batch_cycle_detail_never_echoes_type_name() -> None:
+    # The reject detail names the condition, never the (attacker-influenced) type name.
+    batch = _batch(
+        [
+            _spec("struct", "SecretName", [_named_field("b", "OtherName")]),
+            _spec("struct", "OtherName", [_named_field("a", "SecretName")]),
+        ]
+    )
+    with pytest.raises(GhidraMcpError) as exc:
+        v.validate_types_batch(batch)
+    assert "SecretName" not in exc.value.envelope.detail
+    assert "OtherName" not in exc.value.envelope.detail
+
+
+# --- CompositeSpec schema model validators (the duplicate barrier at construction) -----------
+def test_composite_spec_schema_rejects_by_value_self_embed_at_construction() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        s.CompositeSpec(
+            kind="struct", name="A", fields=[s.FieldSpec(name="self", type=s.TypeRef(named="A"))]
+        )
+
+
+def test_composite_spec_schema_rejects_union_member_offset_at_construction() -> None:
+    # The CompositeSpec union variant rejects a per-member offset at construction (schemas.py §D1).
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        s.CompositeSpec(
+            kind="union",
+            name="U",
+            fields=[s.FieldSpec(name="a", type=s.TypeRef(base="int"), offset=0)],
+        )
+
+
+def test_composite_spec_struct_allows_member_offset_at_construction() -> None:
+    # A struct member offset is allowed (the union branch must NOT fire for a struct).
+    spec = s.CompositeSpec(
+        kind="struct",
+        name="S",
+        fields=[s.FieldSpec(name="a", type=s.TypeRef(base="int"), offset=8)],
+    )
+    assert spec.kind == "struct"
+
+
+def test_composite_spec_union_with_offsetless_members_constructs() -> None:
+    # A valid union (every member offset None) iterates the union loop without raising (the
+    # offset-is-None branch of the model validator — covers the loop-continue path).
+    spec = s.CompositeSpec(
+        kind="union",
+        name="U",
+        fields=[
+            s.FieldSpec(name="i", type=s.TypeRef(base="int")),
+            s.FieldSpec(name="f", type=s.TypeRef(base="float")),
+        ],
+    )
+    assert spec.kind == "union" and len(spec.fields) == 2
+
+
+@pytest.mark.critical
+def test_batch_with_shared_target_visited_twice_is_acyclic() -> None:
+    # B is reachable from A both directly and via C; the detector must not false-positive (the
+    # already-BLACK / already-GREY skip branches). A→B, A→C, C→B, B leaf → acyclic.
+    batch = _batch(
+        [
+            _spec("struct", "A", [_named_field("b", "B"), _named_field("c", "C")]),
+            _spec("struct", "C", [_named_field("b", "B")]),
+            _spec("struct", "B", [_field("x")]),
+        ]
+    )
+    v.validate_types_batch(batch)  # no raise (B finalized once; the second visit is skipped)

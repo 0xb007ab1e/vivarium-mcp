@@ -92,6 +92,8 @@ RPC_METHODS = frozenset(
         # composite-type creation (v1.1 — ADR-015 Phase C; resolved FieldSpec list, NO C parser)
         "define_struct",
         "define_union",
+        # multi-type composite batch (v1.2 — ADR-021; pre-register ALL empties, one txn, rollback)
+        "define_types",
         # annotation persistence (v1.2 — ADR-018; export read-out ONLY — import is server-side
         # orchestration that replays the EXISTING write methods above, NO new import RPC).
         "export_annotations",
@@ -272,6 +274,11 @@ class GhidraBackend(Protocol):
 
     def define_union(self, params: dict[str, Any]) -> dict[str, Any]:
         """Create a new union from a resolved field list inside a transaction — v1.1."""
+        ...
+
+    # --- multi-type composite batch (v1.2 — ADR-021; pre-register all empties, one txn) ---
+    def define_types(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Create a batch of interdependent composites inside ONE transaction — v1.2."""
         ...
 
     # --- annotation persistence (v1.2 — ADR-018; export read-out ONLY) ---
