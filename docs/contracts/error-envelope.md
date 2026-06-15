@@ -28,8 +28,17 @@
 | `limit-exceeded` | size/count/time bound hit (DoS control) | 413 / 429 | maybe |
 | `timeout` | per-tool/analysis deadline elapsed; worker may be killed | 408 / 504 | maybe |
 | `worker-unavailable` | worker unreachable/crashed/evicted mid-call | 503 | yes |
+| `resource-exhausted` | worker OOM-killed / exited from resource pressure (ADR-023) | 503 | no |
 | `analysis-failed` | Ghidra couldn't analyze the input (not a server bug) | 422 | no |
 | `internal-error` | unexpected server fault; detail is generic | 500 | no |
+
+> **`resource-exhausted` (v1.3 — ADR-023 / F1):** an ADDITIVE slug — no existing slug is repurposed.
+> Distinct from `worker-unavailable` so a client can surface a precise "increase worker memory or
+> reduce input size" hint. **Not retryable** (the same input against the same memory cap would OOM
+> again — the operator must raise `GHIDRA_MCP_WORKER_MEM_MIB` or the client shrink the input). The
+> `detail` is a fixed, safe string (no binary content / host paths). The worker's death is
+> classified server-side via a container-engine metadata query (`OOMKilled` flag / exit 137) — NO
+> binary parsing (ADR-001).
 
 ## Disclosure rules (master §5, `topic-error-handling`)
 

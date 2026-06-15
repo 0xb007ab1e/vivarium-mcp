@@ -51,7 +51,12 @@ from ghidra_mcp.ghidra.rpc_framing import (
     RpcProtocolError,
 )
 from ghidra_mcp.logging import get_logger
-from ghidra_mcp.security.limits import Limits, check_binary_size
+from ghidra_mcp.security.limits import (
+    DEFAULT_WORKER_MEM_MIB,
+    Limits,
+    check_binary_size,
+    plausible_max_bytes,
+)
 from ghidra_mcp.tools import schemas as s
 
 
@@ -68,6 +73,16 @@ class WorkerProcess(Protocol):
 
     def is_alive(self) -> bool:
         """Whether the worker is still running."""
+        ...
+
+    def exit_diagnosis(self) -> str:
+        """Classify why the worker exited: ``"oom"`` / ``"other"`` / ``"unknown"`` (ADR-023 / F1).
+
+        A server-side container-engine metadata query only (NO binary parsing — ADR-001). The
+        adapter uses it on a transport failure to distinguish a memory-cap OOM (→
+        ``resource-exhausted``) from a generic crash (→ ``worker-unavailable``). Fails closed to
+        ``"unknown"`` (treated as a generic crash) on any engine error.
+        """
         ...
 
 
@@ -179,6 +194,7 @@ class RpcGhidraAdapter:
         limits: Limits | None = None,
         source_resolver: SourceResolver | None = None,
         connect_timeout_s: float = 30.0,
+        worker_mem_mib: int = DEFAULT_WORKER_MEM_MIB,
     ) -> None:
         """Initialize the adapter with injected runtime collaborators.
 
@@ -193,6 +209,9 @@ class RpcGhidraAdapter:
             source_resolver: Maps a (confined) ``source_ref`` to its byte size for the pre-Ghidra
                 size check (defaults to :func:`_default_source_size`).
             connect_timeout_s: How long to wait for the worker to bind/accept on its socket.
+            worker_mem_mib: Configured worker memory (MiB) — used ONLY for the warn-only OOM
+                pre-flight (ADR-023 / F1, :func:`plausible_max_bytes`); defaults to the built-in
+                worker memory default.
         """
         self._launcher = launcher
         self._socket_dir = socket_dir
@@ -202,6 +221,7 @@ class RpcGhidraAdapter:
         self._limits = limits if limits is not None else Limits()
         self._source_resolver = source_resolver or _default_source_size
         self._connect_timeout_s = connect_timeout_s
+        self._worker_mem_mib = worker_mem_mib
         self._sessions: dict[str, _Session] = {}
 
     # --- worker/session lifecycle -----------------------------------------------------------
@@ -254,6 +274,15 @@ class RpcGhidraAdapter:
             ) from exc
         # Fail closed BEFORE the worker: an over-cap binary is rejected pre-Ghidra (TB3 DoS).
         check_binary_size(size_bytes, self._limits)
+        # Warn-only OOM pre-flight (ADR-023 D3): an input plausibly too large for the worker's
+        # memory cap will likely OOM-kill it — emit a heads-up (size + configured memory ONLY; never
+        # content/path — error-envelope.md / master §5) and PROCEED. Not a reject gate; the hard
+        # size cap above and the worker's memory cgroup remain the enforcing controls.
+        if size_bytes > plausible_max_bytes(self._worker_mem_mib):
+            _log.warning(
+                "worker.preflight_oversized",
+                extra={"size_bytes": size_bytes, "worker_mem_mib": self._worker_mem_mib},
+            )
         result = self._call(
             session_id,
             "import_binary",
@@ -928,6 +957,27 @@ class RpcGhidraAdapter:
         """
         return self._call(sid, method, params, timeout_s=self._tool_timeout_s)
 
+    @staticmethod
+    def _diagnose_worker_exit(sess: _Session) -> str:
+        """Ask the worker handle why it exited (``"oom"`` / ``"other"`` / ``"unknown"``).
+
+        Wraps :meth:`WorkerProcess.exit_diagnosis` so a flaky engine query can never destabilize the
+        adapter: any exception fails closed to ``"unknown"`` (treated as a generic crash → the
+        existing ``worker-unavailable`` path), never spuriously to ``"oom"``.
+
+        Args:
+            sess: The per-session state whose worker just failed on the transport.
+
+        Returns:
+            The diagnosis string, or ``"unknown"`` if the query raises.
+        """
+        try:
+            return sess.worker.exit_diagnosis()
+        except Exception:
+            # Diagnosis is best-effort; a flaky engine query must never mask the underlying failure
+            # nor spuriously report an OOM the engine did not confirm (fail closed → generic crash).
+            return "unknown"
+
     def _call(
         self, session_id: str, method: str, params: dict[str, Any], *, timeout_s: float
     ) -> dict[str, Any]:
@@ -996,19 +1046,28 @@ class RpcGhidraAdapter:
                 ErrorType.WORKER_UNAVAILABLE, "worker protocol violation"
             ) from exc
         except (ConnectionError, EOFError, OSError) as exc:
-            # Crash / closed socket mid-call → kill + evict. Log the underlying socket error
-            # server-side (boundary-safe: errno/type only, no binary content) so the cause of a
-            # worker-unavailable (e.g. ECONNREFUSED on the connect, EOF mid-frame) is diagnosable.
+            # Crash / closed socket mid-call → kill + evict. Before killing, ask the engine WHY the
+            # worker died (server-side metadata query only — OOMKilled / exit 137; NO binary
+            # parsing, ADR-001): an OOM-killed worker (blew its memory cap on a hostile input) is
+            # surfaced as the distinct, actionable ``resource-exhausted`` (ADR-023 / F1); everything
+            # else stays the generic ``worker-unavailable``. Diagnosis fails closed to "unknown" →
+            # treated as a generic crash. The underlying socket error is logged server-side
+            # (boundary-safe: errno/type only, no binary content) for diagnosability.
+            diagnosis = self._diagnose_worker_exit(sess)
+            cause = "resource-exhausted" if diagnosis == "oom" else "transport"
             _log.warning(
                 "worker.rpc_failed",
                 extra={
                     "method": method,
-                    "cause": "transport",
+                    "cause": cause,
                     "exc": type(exc).__name__,
                     "detail": str(exc)[:300],
                 },
             )
             self.kill_worker(session_id)
+            if diagnosis == "oom":
+                # Fixed, safe, actionable detail (no binary content / host paths) — error-envelope.
+                raise _errors.resource_exhausted() from exc
             raise _errors.make_error(ErrorType.WORKER_UNAVAILABLE, "worker unavailable") from exc
 
     def _ensure_connected(self, sess: _Session) -> socket.socket:

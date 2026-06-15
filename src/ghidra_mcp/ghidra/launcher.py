@@ -72,6 +72,39 @@ class ContainerWorkerProcess:
         r = self.runner([self.engine, "inspect", "-f", "{{.State.Running}}", self.container_name])
         return r.returncode == 0 and r.stdout.strip() == "true"
 
+    def exit_diagnosis(self) -> str:
+        """Classify why the worker exited: ``"oom"`` / ``"other"`` / ``"unknown"`` (ADR-023 / F1).
+
+        Server-side container-engine METADATA query only (``inspect`` of ``State.OOMKilled`` and
+        ``State.ExitCode``) — it parses no binary and loads no JVM (ADR-001). Used by the adapter to
+        distinguish a memory-cap OOM (→ ``resource-exhausted``) from a generic crash/closed socket
+        (→ ``worker-unavailable``). Fails closed to ``"unknown"`` on any engine error or
+        unparseable output (never mis-report an OOM the engine didn't confirm).
+
+        Returns:
+            ``"oom"`` when the engine reports OOMKilled or an OOM-signature exit (137 = 128+SIGKILL,
+            the cgroup OOM-killer signal); ``"other"`` for any other confirmed exit; ``"unknown"``
+            when the engine query fails or its output cannot be parsed.
+        """
+        r = self.runner(
+            [
+                self.engine,
+                "inspect",
+                "-f",
+                "{{.State.OOMKilled}} {{.State.ExitCode}}",
+                self.container_name,
+            ]
+        )
+        if r.returncode != 0:
+            return "unknown"
+        parts = r.stdout.split()
+        if len(parts) != 2:
+            return "unknown"
+        oom_killed, exit_code = parts
+        if oom_killed == "true" or exit_code == "137":
+            return "oom"
+        return "other"
+
 
 class WorkerLaunchError(RuntimeError):
     """The worker container failed to spawn (boundary-safe message; no host detail)."""
@@ -92,7 +125,10 @@ class ContainerWorkerLauncher:
         run_as_uid / run_as_gid: Worker process uid/gid (default the hardened ``65532``). Must
             match the uid owning the bind-mounted socket dir under ``--userns keep-id`` (see the
             note at the ``--user`` flag); overridable so a host-run server can align the worker.
-        mem / cpus / pids / tmpfs_scratch / tmpfs_project: Resource bounds (F7 DoS).
+        mem_mib / cpus / pids / tmpfs_scratch_mib / tmpfs_project_mib: Resource bounds (F7/ADR-023
+            DoS caps), as resolved + clamped integers (whole MiB / whole CPUs / pid count). They are
+            rendered to the engine's spelling at argv build (``f"{mib}m"`` / ``str(cpus)``).
+            ``--memory-swap`` is pinned EQUAL to ``--memory`` (no swap — ADR-004 invariant).
         analysis_timeout_s: Passed to the worker as defense-in-depth (it enforces its own too).
         seccomp: Seccomp policy. ``"RuntimeDefault"`` (default) applies the engine's built-in
             profile by OMITTING the flag (passing the literal value would be read as a file path
@@ -107,11 +143,13 @@ class ContainerWorkerLauncher:
     engine: str = "podman"
     run_as_uid: int = 65532
     run_as_gid: int = 65532
-    mem: str = "4g"
-    cpus: str = "2"
+    # Resource bounds as resolved, clamped integers (ADR-023 / F1). Defaults mirror the historical
+    # hardcoded values (4g mem, 2 cpus, 512 pids, 2g scratch tmpfs, 4g project tmpfs).
+    mem_mib: int = 4096
+    cpus: int = 2
     pids: int = 512
-    tmpfs_scratch: str = "2g"
-    tmpfs_project: str = "4g"
+    tmpfs_scratch_mib: int = 2048
+    tmpfs_project_mib: int = 4096
     analysis_timeout_s: int = 600
     seccomp: str = "RuntimeDefault"
     runner: Runner = field(default=_default_runner)
@@ -170,16 +208,18 @@ class ContainerWorkerLauncher:
             "--read-only",
             "--tmpfs",
             # In-container mount spec, NOT a host temp path — the worker's scratch tmpfs (ADR-004).
-            f"/tmp/ghidra:rw,noexec,nosuid,nodev,mode=1777,size={self.tmpfs_scratch}",  # noqa: S108  # nosec B108
+            # Size rendered from the resolved MiB integer to the engine's ``Nm`` spelling.
+            f"/tmp/ghidra:rw,noexec,nosuid,nodev,mode=1777,size={self.tmpfs_scratch_mib}m",  # noqa: S108  # nosec B108
             "--tmpfs",
-            f"/work/project:rw,noexec,nosuid,nodev,mode=1777,size={self.tmpfs_project}",
-            # Resource bounds (F7): OOM/pids/cpu caps; OOM-kill → server evicts.
+            f"/work/project:rw,noexec,nosuid,nodev,mode=1777,size={self.tmpfs_project_mib}m",
+            # Resource bounds (F7/ADR-023): OOM/pids/cpu caps; OOM-kill → server evicts. Rendered
+            # from resolved integers; --memory-swap is pinned EQUAL to --memory (no swap — ADR-004).
             "--memory",
-            self.mem,
+            f"{self.mem_mib}m",
             "--memory-swap",
-            self.mem,
+            f"{self.mem_mib}m",
             "--cpus",
-            self.cpus,
+            str(self.cpus),
             "--pids-limit",
             str(self.pids),
             "--oom-kill-disable=false",
