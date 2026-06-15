@@ -700,12 +700,15 @@ def _detect_by_value_cycle(types: list[CompositeSpec]) -> None:
         targets: list[str] = []
         for field in spec.fields:
             named = field.type.named
-            if named is not None and named in batch_names and field.type.pointer_levels == 0:
-                if named not in targets:
-                    # by-value edge (incl. array-of-self/other; array_len ignored). DETERMINISTIC
-                    # field order (not a set) — set iteration order is PYTHONHASHSEED-dependent, which
-                    # made the traversal (and line coverage) non-deterministic; field order is stable.
-                    targets.append(named)
+            # by-value edge (incl. array-of-B; array_len ignored). Deterministic field-ordered list,
+            # NOT a set: set iteration order is PYTHONHASHSEED-dependent (flaky traversal/coverage).
+            if (
+                named is not None
+                and named in batch_names
+                and field.type.pointer_levels == 0
+                and named not in targets
+            ):
+                targets.append(named)
         adjacency[spec.name] = targets
 
     # Iterative DFS with WHITE (unvisited) / GREY (on the current stack) / BLACK (done). A back-edge
