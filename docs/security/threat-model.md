@@ -711,6 +711,36 @@ holds), deterministic + hermetic where marked:
     egress, write the host, or escalate. The argv-hardening half is asserted hermetically in
     `tests/unit/test_naming_compile.py`; the live containment is promoted to integration. (TB5-T/I/E)
 
+### TB5 (delta) — Deeper behavioral-equivalence: output normalization + seeded fuzz (v1.2 — ADR-022)
+
+ADR-022 refines the **measured** ADR-016 signal with two **pure, client-side** additions — **no new
+boundary** and no new exec surface (the same `ContainerExecRunner` / TB5 sandbox just runs more
+vectors). It **still never runs the hostile original** (ADR-001 / D1 preserved): A = trusted-source
+build, B = recompiled renamed-C, both sandboxed.
+
+- **Output normalization** (`normalize_output`, `behavioral_equivalence_normalized`) is a **pure
+  inert transform** on already-captured `(exit_code, stdout)` bytes (ADR-005): it canonicalizes
+  whitespace/line-endings and masks **volatile** tokens (pointer-like `0x…` hex, `HH:MM:SS` /
+  ISO-8601 timestamps, clearly-labelled PIDs) before a *second*, looser compare. It **executes
+  nothing**, masks only narrow well-delimited shapes (conservative — leaves ordinary text untouched,
+  so it can only loosen: `normalized >= strict`), and `exit_code` is **never** normalized. The
+  strict byte-exact `behavioral_equivalence` is **unchanged** and stays the **primary, conservative**
+  signal; normalized is reported **alongside** it as the *equivalent modulo volatile output* signal —
+  clients must not read it as a guarantee (it admits false positives by design).
+- **Seeded fuzz vectors** (`generate_fuzz_vectors(seed, count, max_len)`) are **author-generated,
+  synthetic, deterministic** stdin bytes (a fixed seed → fixed vectors via a *local* `random.Random`
+  — **no wall-clock / no module-level randomness**, hermetic per `topic-testing`), **bounded** in
+  count and per-vector length (CWE-400). They are fed to **both** builds through the existing TB5
+  sandbox — never attacker-controlled, never driving the host. The generator only *produces* inert
+  bytes; it executes nothing and fails closed (`ValueError`) on a negative bound.
+
+**Measured-not-guaranteed preserved.** Both scores are quality *signals*, not guarantees; strict
+stays the honest conservative number. The pure functions are 100%-covered unit-tested (normalizer
+masking + a non-masking case proving no over-stripping; fuzz determinism + bounds; the headline
+pointer-only-diff → strict<1 / normalized==1; and the `normalized >= strict` invariant on a mixed
+set — `tests/unit/test_naming_metrics.py`); the gated differential e2e runs fixed **+** fuzz vectors
+and reports both scores (`tests/e2e/test_behavioral_equivalence_oss.py`).
+
 ## 11. Addendum — v1.1 multi-principal authorization (TB6 strengthened — ADR-017)
 
 ADR-017 makes the HTTP boundary (TB6) truly multi-principal and **closes the TB6-I per-principal

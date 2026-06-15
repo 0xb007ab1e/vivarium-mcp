@@ -16,7 +16,14 @@ Scores a :class:`~ghidra_mcp.naming.loop.RenamedProgram` on quality signals:
   measured-not-guaranteed). It is computable **only** for ground-truth fixtures carrying trusted
   source + inputs; otherwise it stays ``None`` (honest unavailability). This module's core only
   *compares* inert captured run-results (:class:`RunResult`) — it executes nothing; the sandboxed
-  build+run+capture lives in the ``ExecRunner`` adapter (ADR-016 §Architecture / TB5).
+  build+run+capture lives in the ``ExecRunner`` adapter (ADR-016 §Architecture / TB5). ADR-022
+  refines this: ``behavioral_equivalence_normalized`` reports the **same** oracle but compares
+  ``stdout`` after a conservative, pure ``normalize_output`` (masks volatile pointers/timestamps/
+  PIDs, canonicalizes whitespace) so behaviorally-equivalent builds that differ only in volatile
+  output aren't penalized — reported **alongside** (never instead of) the strict byte-exact number
+  (strict stays the conservative truth; normalized only loosens, so ``normalized >= strict``). The
+  same ADR adds ``generate_fuzz_vectors`` — pure, deterministic, bounded synthetic stdin vectors
+  fed to both builds to broaden coverage.
 - **naming_accuracy** — how close are the proposed names to a known *ground truth* (e.g. the DWARF
   symbol names from an unstripped build)? Pure, given an injected ``ground_truth`` address→name map.
   Reports a strict ``exact_match_rate`` (normalized identifier equality) and a fairer
@@ -34,6 +41,7 @@ The behavioral-equivalence *core* never executes anything; it only compares the 
 
 from __future__ import annotations
 
+import random
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -136,6 +144,160 @@ def _runs_match(a: RunResult, b: RunResult) -> bool:
     return a.ok and b.ok and a.exit_code == b.exit_code and a.stdout == b.stdout
 
 
+#: Pointer-like / hex tokens, e.g. ``0x401286`` — a build's printed addresses vary run-to-run and
+#: build-to-build without any behavioral difference. Masked to a constant so two behaviorally
+#: equivalent builds aren't penalized for a volatile address. Anchored on ``0x`` so it does NOT
+#: touch ordinary decimal numbers (conservative — only the obviously-volatile form is masked).
+_PTR = re.compile(rb"0x[0-9a-fA-F]+")
+#: Clock-style timestamps, e.g. ``12:34:56`` (HH:MM:SS, with an optional ``.fff`` fraction). Masked
+#: because wall-clock output is volatile yet behaviorally irrelevant. Conservative: requires the
+#: full colon-delimited HH:MM:SS shape, so it won't strike arbitrary colon-separated text.
+_TIME = re.compile(rb"\d{2}:\d{2}:\d{2}(?:\.\d+)?")
+#: ISO-8601 date (optionally with a ``T``/space + the HH:MM:SS time above), e.g.
+#: ``2026-06-15T12:34:56``. The date half is masked first so the residual time is then ``_TIME``-
+#: masked uniformly. Conservative: requires the ``YYYY-MM-DD`` shape.
+_ISO_DATE = re.compile(rb"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?)?")
+#: A clearly-delimited PID, e.g. ``pid=1234`` / ``pid: 1234`` / ``[pid 1234]`` — a label
+#: ``pid`` (case-insensitive) followed by an ``=``/``:``/space separator then digits. Masked
+#: because a process id is volatile yet behaviorally irrelevant. Conservative: only the labelled
+#: form is masked (a bare number is NEVER treated as a PID — that would over-strip ordinary text).
+_PID = re.compile(rb"(?i)\bpid\b\s*[=:]?\s*\d+")
+
+#: The placeholder a masked volatile token is replaced with (a fixed, inert marker).
+_MASK = b"<X>"
+
+
+def normalize_output(stdout: bytes) -> bytes:
+    r"""Conservatively canonicalize inert captured stdout for the *looser* equivalence compare (D1).
+
+    A **pure** transform over already-captured, inert bytes (ADR-005) — it **executes nothing**,
+    only rewrites the byte string. It is deliberately **conservative**: it masks only obviously
+    *volatile* output (which varies run-to-run / build-to-build without any behavioral meaning) and
+    canonicalizes whitespace, so it can only ever *loosen* the match (``normalized >= strict``).
+    Over-normalizing risks false positives, so the masks target narrow, well-delimited shapes and
+    leave ordinary text untouched.
+
+    Rules applied (in order):
+
+    1. **Line endings** — CRLF / lone CR → LF (``\\r\\n``/``\\r`` → ``\\n``).
+    2. **Volatile token masks** → :data:`_MASK` (``b"<X>"``):
+
+       - ISO-8601 dates/datetimes (``2026-06-15`` / ``2026-06-15T12:34:56``) — masked first so the
+         residual clock time is then handled uniformly by the time rule;
+       - clock timestamps ``HH:MM:SS`` (optionally ``.fff``);
+       - clearly-labelled PIDs (``pid=1234`` / ``pid: 1234`` — the ``pid`` label is required);
+       - pointer-like hex tokens (``0x[0-9a-fA-F]+``).
+    3. **Trailing whitespace** — stripped from the end of every line (spaces/tabs before each
+       ``\\n`` and at end of output).
+
+    A bare decimal number, an ordinary colon (``key:value``), and arbitrary words are **not**
+    masked — only the specific volatile shapes above. Masking is idempotent and order-stable.
+
+    Args:
+        stdout: The captured, size-capped stdout bytes for one input vector (inert, untrusted —
+            ADR-005). Never executed or rendered.
+
+    Returns:
+        The normalized bytes, suitable for the *normalized* (looser) equivalence compare. The
+        strict oracle (:func:`behavioral_equivalence`) compares the raw bytes and is unaffected.
+    """
+    # 1. Canonicalize line endings (CRLF and lone CR → LF) before any other rule.
+    out = stdout.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    # 2. Mask volatile tokens. ISO dates first (so a trailing HH:MM:SS in a datetime is absorbed by
+    #    the date rule), then bare clock times, labelled PIDs, then pointer-like hex.
+    out = _ISO_DATE.sub(_MASK, out)
+    out = _TIME.sub(_MASK, out)
+    out = _PID.sub(_MASK, out)
+    out = _PTR.sub(_MASK, out)
+    # 3. Strip trailing whitespace from each line (and end-of-output).
+    out = re.sub(rb"[ \t]+(?=\n)", b"", out)
+    out = re.sub(rb"[ \t]+$", b"", out)
+    return out
+
+
+def behavioral_equivalence_normalized(
+    runs_a: list[RunResult] | None, runs_b: list[RunResult] | None
+) -> float | None:
+    """Match-rate over ``(exit_code, normalize_output(stdout))`` — the *looser* signal (D1).
+
+    The **same** differential oracle as :func:`behavioral_equivalence` — both sides must have run
+    (``ok`` true), ``exit_code`` is compared **exactly** (never normalized), the same ``None`` /
+    empty / mismatched-length unavailability rules hold — **except** ``stdout`` is compared
+    **after** :func:`normalize_output`. Because normalization only ever loosens the compare, this
+    score is ``>=`` the strict :func:`behavioral_equivalence` over the same runs (the *equivalent
+    modulo volatile output* signal). Strict stays the conservative truth; this is reported beside
+    it, never *instead* of it. Pure — it **executes nothing**, only compares inert bytes (ADR-005).
+
+    Args:
+        runs_a: The reference build's per-vector run-results, or ``None`` when unavailable (D1).
+        runs_b: The candidate build's per-vector run-results, or ``None``.
+
+    Returns:
+        The matching fraction in ``[0, 1]``, or ``None`` (honest *unavailable*) under the same rules
+        as :func:`behavioral_equivalence` (either side absent/empty, or lengths differ).
+    """
+    if not runs_a or not runs_b or len(runs_a) != len(runs_b):
+        # Same unavailability rule as the strict oracle — no shared vector set → not fabricated.
+        return None
+    matches = sum(1 for a, b in zip(runs_a, runs_b, strict=True) if _runs_match_normalized(a, b))
+    return matches / len(runs_a)
+
+
+def _runs_match_normalized(a: RunResult, b: RunResult) -> bool:
+    """Like :func:`_runs_match` but compares ``stdout`` after :func:`normalize_output` (D1).
+
+    ``ok`` and ``exit_code`` must still match exactly; only the stdout compare is loosened.
+    """
+    return (
+        a.ok
+        and b.ok
+        and a.exit_code == b.exit_code
+        and normalize_output(a.stdout) == normalize_output(b.stdout)
+    )
+
+
+def generate_fuzz_vectors(seed: int, count: int, max_len: int) -> list[bytes]:
+    """Generate ``count`` deterministic, bounded synthetic stdin vectors from ``seed`` (D2).
+
+    **Pure + deterministic + hermetic** (``topic-testing``): a fixed ``seed`` always yields the
+    identical list of vectors, using a *local* :class:`random.Random` instance — **no module-level
+    random and no wall-clock**. Broadens behavioral coverage beyond the few committed fixed vectors;
+    the same generated vectors are fed to **both** builds A and B through the sandboxed
+    :data:`ExecRunner` (TB5, unchanged exec model). The vectors are **author-generated synthetic
+    bytes** (not attacker-controlled) and are **bounded** in count and per-vector length (CWE-400):
+    each vector is ``0..max_len`` bytes drawn from the full byte range, so they exercise binary,
+    empty, and printable inputs without driving the host.
+
+    This function only *produces* inert byte strings — it **executes nothing** (ADR-005). Bounds are
+    validated up front and the function fails closed on a non-positive ``count``/``max_len`` or a
+    negative ``count``.
+
+    Args:
+        seed: The PRNG seed. A fixed seed → fixed vectors (reproducible). Different seeds → (with
+            overwhelming probability) different vectors.
+        count: How many vectors to generate (must be ``>= 0``; ``0`` yields an empty list).
+        max_len: The inclusive upper bound on each vector's length in bytes (must be ``>= 0``;
+            ``0`` yields all-empty vectors).
+
+    Returns:
+        A list of exactly ``count`` byte strings, each ``0..max_len`` bytes long, fully determined
+        by ``seed``.
+
+    Raises:
+        ValueError: If ``count`` or ``max_len`` is negative (fail closed — defensive bound).
+    """
+    if count < 0:
+        raise ValueError("count must be >= 0")
+    if max_len < 0:
+        raise ValueError("max_len must be >= 0")
+    rng = random.Random(seed)  # noqa: S311  # nosec B311 - synthetic fuzz inputs, not security RNG
+    vectors: list[bytes] = []
+    for _ in range(count):
+        length = rng.randint(0, max_len)
+        vectors.append(bytes(rng.randrange(256) for _ in range(length)))
+    return vectors
+
+
 @dataclass(frozen=True, slots=True)
 class NamingMetrics:
     """Measured quality of a naming pass (best-effort signals; see module docstring).
@@ -148,9 +310,14 @@ class NamingMetrics:
         name_coverage: ``named_functions / inferred_functions`` (``0.0`` when none inferred).
         compiles: Whether the translation unit compiled, or ``None`` if no compiler was run.
         compile_diagnostics: Compiler diagnostics when a runner ran, else ``None``.
-        behavioral_equivalence: Measured (exit_code, stdout) match-rate between the trusted
-            reference build (A) and the candidate build (B) over shared synthetic inputs (ADR-016),
-            or ``None`` when no trusted reference + inputs were supplied (honest unavailability).
+        behavioral_equivalence: Measured byte-exact (exit_code, stdout) match-rate between the
+            trusted reference build (A) and the candidate build (B) over shared synthetic inputs
+            (ADR-016 — the conservative, primary signal), or ``None`` when no trusted reference +
+            inputs were supplied (honest unavailability).
+        behavioral_equivalence_normalized: The same match-rate but with ``stdout`` compared after
+            :func:`normalize_output` (ADR-022 D1 — *equivalent modulo volatile output*; looser, so
+            always ``>=`` ``behavioral_equivalence`` over the same runs). Reported **alongside**
+            (never instead of) the strict number; ``None`` under the same unavailability rules.
         naming_accuracy: Proposed-vs-ground-truth name accuracy, or ``None`` if no ground truth
             was supplied.
     """
@@ -163,6 +330,7 @@ class NamingMetrics:
     compiles: bool | None = None
     compile_diagnostics: str | None = None
     behavioral_equivalence: float | None = None
+    behavioral_equivalence_normalized: float | None = None
     naming_accuracy: NamingAccuracy | None = None
 
 
@@ -318,9 +486,11 @@ def score(
         behavioral_runs: Optional ``(reference_runs, candidate_runs)`` — the per-input-vector
             :class:`RunResult` lists for build A (trusted reference source) and build B (the
             candidate recompiled C), already captured by a SANDBOXED :data:`ExecRunner` (ADR-016).
-            When supplied, ``behavioral_equivalence`` is the byte-exact match-rate; when ``None``
-            (default — no trusted reference + inputs), it stays ``None`` (honest unavailability,
-            D1). This core *compares* inert results only — it never executes anything.
+            When supplied, ``behavioral_equivalence`` is the byte-exact match-rate **and**
+            ``behavioral_equivalence_normalized`` the looser *modulo volatile output* match-rate
+            (ADR-022 D1 — both reported, strict primary); when ``None`` (default — no trusted
+            reference + inputs), both stay ``None`` (honest unavailability, D1). This core
+            *compares* inert results only — it never executes anything.
 
     Returns:
         The measured (best-effort) metrics.
@@ -338,9 +508,11 @@ def score(
     accuracy = naming_accuracy(program, ground_truth) if ground_truth is not None else None
 
     behavioral: float | None = None
+    behavioral_normalized: float | None = None
     if behavioral_runs is not None:
         runs_a, runs_b = behavioral_runs
         behavioral = behavioral_equivalence(runs_a, runs_b)
+        behavioral_normalized = behavioral_equivalence_normalized(runs_a, runs_b)
 
     return NamingMetrics(
         total_functions=len(program.functions),
@@ -351,5 +523,6 @@ def score(
         compiles=compiles,
         compile_diagnostics=diagnostics,
         behavioral_equivalence=behavioral,
+        behavioral_equivalence_normalized=behavioral_normalized,
         naming_accuracy=accuracy,
     )
