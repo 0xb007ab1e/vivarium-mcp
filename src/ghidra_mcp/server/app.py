@@ -380,6 +380,12 @@ def run_http(
         bearer_token=http.bearer_token,
         bearer_tokens=http.bearer_tokens,
         mtls_principal_field=http.mtls_principal_field,
+        oauth_issuer=http.oauth_issuer,
+        oauth_audience=http.oauth_audience,
+        oauth_jwks_uri=http.oauth_jwks_uri,
+        oauth_principal_claim=http.oauth_principal_claim,
+        oauth_algorithms=http.oauth_algorithms,
+        oauth_leeway_s=http.oauth_leeway_s,
     )
     asgi = build_http_asgi_app(app.streamable_http_app(), http, authenticator=authenticator)
     _install_shutdown_handlers()

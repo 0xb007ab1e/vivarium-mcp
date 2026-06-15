@@ -20,6 +20,10 @@ from ghidra_mcp.security.limits import Limits, resolve_limits
 from ghidra_mcp.server.auth import (
     MTLS_PRINCIPAL_FIELD_DEFAULT,
     MTLS_PRINCIPAL_FIELDS,
+    OAUTH_ALLOWED_ALGORITHMS,
+    OAUTH_DEFAULT_ALGORITHMS,
+    OAUTH_DEFAULT_LEEWAY_S,
+    OAUTH_PRINCIPAL_CLAIM_DEFAULT,
 )
 
 # Environment variable names (12-Factor; documented in .env.example). Centralized so the read set
@@ -58,6 +62,15 @@ _ENV_HTTP_BEARER_TOKENS = "GHIDRA_MCP_HTTP_BEARER_TOKENS"  # nosec B105 - env va
 # CA bundle is a (loggable) path, not a secret.
 _ENV_HTTP_TLS_CLIENT_CA = "GHIDRA_MCP_HTTP_TLS_CLIENT_CA"
 _ENV_HTTP_MTLS_PRINCIPAL_FIELD = "GHIDRA_MCP_HTTP_MTLS_PRINCIPAL_FIELD"
+# OAuth (v1.2 — ADR-019 increment B). Read only when auth_mode=oauth. All env-var NAMES, not
+# secrets; the VALUES (issuer/audience/JWKS URI/claim/algs/leeway) are non-secret config — the
+# access token is per-request and never stored. issuer/audience/JWKS URI are REQUIRED for oauth.
+_ENV_HTTP_OAUTH_ISSUER = "GHIDRA_MCP_HTTP_OAUTH_ISSUER"
+_ENV_HTTP_OAUTH_AUDIENCE = "GHIDRA_MCP_HTTP_OAUTH_AUDIENCE"
+_ENV_HTTP_OAUTH_JWKS_URI = "GHIDRA_MCP_HTTP_OAUTH_JWKS_URI"
+_ENV_HTTP_OAUTH_PRINCIPAL_CLAIM = "GHIDRA_MCP_HTTP_OAUTH_PRINCIPAL_CLAIM"
+_ENV_HTTP_OAUTH_ALGORITHMS = "GHIDRA_MCP_HTTP_OAUTH_ALGORITHMS"
+_ENV_HTTP_OAUTH_LEEWAY = "GHIDRA_MCP_HTTP_OAUTH_LEEWAY_SECONDS"
 _ENV_HTTP_CORS_ORIGINS = "GHIDRA_MCP_HTTP_CORS_ORIGINS"
 _ENV_HTTP_RATE_PER_S = "GHIDRA_MCP_HTTP_RATE_PER_SECOND"
 _ENV_HTTP_RATE_BURST = "GHIDRA_MCP_HTTP_RATE_BURST"
@@ -83,6 +96,15 @@ _VALID_HTTP_AUTH = frozenset({"none", "bearer", "mtls", "oauth"})
 # config allow-list and the authenticator can never drift apart.
 _VALID_MTLS_PRINCIPAL_FIELDS = MTLS_PRINCIPAL_FIELDS
 _DEFAULT_MTLS_PRINCIPAL_FIELD = MTLS_PRINCIPAL_FIELD_DEFAULT
+# OAuth (ADR-019 D3). Single source of truth in ``server.auth`` for the PINNED algorithm allow-list
+# + defaults, so config and the authenticator can never drift apart. The allow-list is asymmetric,
+# public-key-verified algs ONLY — ``none`` and every ``HS*`` (symmetric/confusion) alg are rejected.
+_VALID_OAUTH_ALGORITHMS = OAUTH_ALLOWED_ALGORITHMS
+_DEFAULT_OAUTH_ALGORITHMS = OAUTH_DEFAULT_ALGORITHMS
+_DEFAULT_OAUTH_PRINCIPAL_CLAIM = OAUTH_PRINCIPAL_CLAIM_DEFAULT
+_DEFAULT_OAUTH_LEEWAY_S = OAUTH_DEFAULT_LEEWAY_S
+# Bound on the OAuth principal-claim name (a short JWT claim key — bounds startup input, CWE-400).
+_MAX_OAUTH_CLAIM_LEN = 64
 
 # Cap on string-valued config to bound startup input (worker image refs, socket dirs).
 _MAX_CONFIG_STR_LEN = 512
@@ -129,6 +151,16 @@ class HttpConfig:
         mtls_principal_field: The verified peer-cert field that maps to the principal id under mTLS
             (one of :data:`_VALID_MTLS_PRINCIPAL_FIELDS`; default subject CN). Only meaningful when
             ``auth_mode == "mtls"``.
+        oauth_issuer / oauth_audience / oauth_jwks_uri: OAuth (ADR-019 D3) — the expected JWT
+            ``iss``/``aud`` and the issuer's JWKS endpoint. All three are REQUIRED (non-``None``)
+            when ``auth_mode == "oauth"``, else ``None``. None is a secret (the access token is
+            per-request, never stored) — safe to log.
+        oauth_principal_claim: The JWT claim mapped to the principal id (default ``sub``). Only
+            meaningful when ``auth_mode == "oauth"``.
+        oauth_algorithms: The PINNED algorithm allow-list (subset of :data:`_VALID_OAUTH_ALGORITHMS`
+            — asymmetric/public-key algs only; default :data:`_DEFAULT_OAUTH_ALGORITHMS`). The
+            token's own ``alg`` is never trusted (no ``alg:none`` / RS-HS confusion).
+        oauth_leeway_s: Clock-skew leeway (seconds) for ``exp``/``nbf`` under OAuth (small default).
         auth_mode: ``"none"`` (loopback/UDS only) / ``"bearer"`` (built) / ``"mtls"`` / ``"oauth"``.
         bearer_token: The first bearer secret when ``auth_mode == "bearer"`` (else ``None``) — NOT
             logged. Retained for back-compat / single-token construction; the authoritative source
@@ -158,6 +190,14 @@ class HttpConfig:
     # mTLS (ADR-019 A). Defaulted so existing keyword constructions stay valid. Neither is a secret.
     tls_client_ca: str | None = None
     mtls_principal_field: str = MTLS_PRINCIPAL_FIELD_DEFAULT
+    # OAuth (ADR-019 B). Defaulted so existing keyword constructions stay valid. None is a secret
+    # (the per-request access token is never stored here) — all safe to log.
+    oauth_issuer: str | None = None
+    oauth_audience: str | None = None
+    oauth_jwks_uri: str | None = None
+    oauth_principal_claim: str = OAUTH_PRINCIPAL_CLAIM_DEFAULT
+    oauth_algorithms: tuple[str, ...] = OAUTH_DEFAULT_ALGORITHMS
+    oauth_leeway_s: int = OAUTH_DEFAULT_LEEWAY_S
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,6 +466,45 @@ def _load_bearer_tokens(src: dict[str, str], *, single_token: str | None) -> dic
     return tokens
 
 
+def _load_oauth_algorithms(src: dict[str, str]) -> tuple[str, ...]:
+    """Parse the OAuth algorithm allow-list (comma-separated), validated against the safe set.
+
+    Each entry must be in :data:`_VALID_OAUTH_ALGORITHMS` — asymmetric, public-key-verified algs
+    only. ``none`` and every ``HS*`` (symmetric/confusion) alg are NOT in the set, so they are
+    rejected by construction: an operator can never widen the list to an unsafe alg (fail closed).
+    An unset/empty var yields the secure default (:data:`_DEFAULT_OAUTH_ALGORITHMS`).
+
+    Args:
+        src: The environment mapping.
+
+    Returns:
+        The validated, de-duplicated (order-preserving) algorithm tuple.
+
+    Raises:
+        GhidraMcpError: ``VALIDATION`` if the list is non-empty after parsing yet contains a value
+            outside the allow-list, or if it parses to nothing but was set.
+    """
+    raw = _read_str(src, _ENV_HTTP_OAUTH_ALGORITHMS, "", required=False)
+    if not raw:
+        return _DEFAULT_OAUTH_ALGORITHMS
+    algs: list[str] = []
+    for part in (p.strip() for p in raw.split(",")):
+        if not part:
+            continue
+        if part not in _VALID_OAUTH_ALGORITHMS:
+            # Reject the whole list on any unsafe/unknown alg (incl. ``none``/``HS*``); fail closed.
+            raise _startup_error(
+                f"environment variable {_ENV_HTTP_OAUTH_ALGORITHMS} has an unsupported algorithm"
+            )
+        if part not in algs:
+            algs.append(part)
+    if not algs:
+        raise _startup_error(
+            f"environment variable {_ENV_HTTP_OAUTH_ALGORITHMS} must list at least one algorithm"
+        )
+    return tuple(algs)
+
+
 def _load_http_config(src: dict[str, str]) -> HttpConfig:
     """Build + validate the HTTP config (fail-closed, secure-by-default — ADR-011 §2/§4/§5).
 
@@ -438,8 +517,9 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
     Raises:
         GhidraMcpError: ``VALIDATION`` if a non-loopback bind lacks TLS or an authenticator, if
             bearer auth lacks at least one sufficiently long token, if mTLS auth lacks a client-CA
-            bundle, if TLS cert/key are not both-or-neither, or if CORS contains ``*``. The process
-            must refuse to boot.
+            bundle or server TLS, if OAuth auth lacks an issuer/audience/JWKS URI or lists an
+            unsupported algorithm, if TLS cert/key are not both-or-neither, or if CORS contains
+            ``*``. The process must refuse to boot.
     """
     bind = _read_str(src, _ENV_HTTP_BIND, _DEFAULT_HTTP_BIND, required=False)
     is_unix_socket, is_network = _parse_bind(bind)
@@ -463,6 +543,20 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
         _DEFAULT_MTLS_PRINCIPAL_FIELD,
         _VALID_MTLS_PRINCIPAL_FIELDS,
     )
+    # OAuth (ADR-019 D3): issuer/audience/JWKS URI (required for oauth), the principal claim, the
+    # PINNED algorithm allow-list, and the clock-skew leeway. All non-secret config (the access
+    # token is per-request, never stored). issuer/audience/JWKS URI requiredness is enforced below.
+    oauth_issuer = _read_str(src, _ENV_HTTP_OAUTH_ISSUER, "", required=False) or None
+    oauth_audience = _read_str(src, _ENV_HTTP_OAUTH_AUDIENCE, "", required=False) or None
+    oauth_jwks_uri = _read_str(src, _ENV_HTTP_OAUTH_JWKS_URI, "", required=False) or None
+    oauth_principal_claim = _read_str(
+        src, _ENV_HTTP_OAUTH_PRINCIPAL_CLAIM, _DEFAULT_OAUTH_PRINCIPAL_CLAIM, required=False
+    )
+    if len(oauth_principal_claim) > _MAX_OAUTH_CLAIM_LEN:
+        raise _startup_error(f"environment variable {_ENV_HTTP_OAUTH_PRINCIPAL_CLAIM} is too long")
+    oauth_algorithms = _load_oauth_algorithms(src)
+    oauth_leeway_s = _read_positive_int(src, _ENV_HTTP_OAUTH_LEEWAY, _DEFAULT_OAUTH_LEEWAY_S)
+
     single_token = _read_str(src, _ENV_HTTP_BEARER_TOKEN, "", required=False) or None
     # Multi-principal bearer map (ADR-017): per-token validation (length floor) + id allow-listing +
     # ambiguity rejection happen inside the loader (fail closed). The single-token var is folded in
@@ -494,6 +588,14 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
         # uvicorn silently ignores CERT_REQUIRED / ssl_ca_certs (is_ssl is False) — the handshake
         # gate would not exist (CWE-1188). Refuse to boot (fail closed; covers loopback + UDS).
         raise _startup_error("mTLS auth requires server TLS (set cert and key)")
+    if auth_mode == "oauth" and (
+        oauth_issuer is None or oauth_audience is None or oauth_jwks_uri is None
+    ):
+        # OAuth validates the JWT's iss/aud against the configured values and fetches the issuer's
+        # JWKS — without all three the authenticator cannot validate anything. Refuse to boot rather
+        # than fall back to an unverified posture (fail closed). (Network-bind TLS is enforced by
+        # the generic is_network rule above; oauth is a network-class auth like bearer.)
+        raise _startup_error("oauth auth requires an issuer, an audience, and a JWKS URI")
     if "*" in cors_origins:
         raise _startup_error("HTTP CORS origins must be explicit; '*' is not allowed")
 
@@ -508,6 +610,12 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
         bearer_tokens=bearer_tokens,
         tls_client_ca=tls_client_ca,
         mtls_principal_field=mtls_principal_field,
+        oauth_issuer=oauth_issuer,
+        oauth_audience=oauth_audience,
+        oauth_jwks_uri=oauth_jwks_uri,
+        oauth_principal_claim=oauth_principal_claim,
+        oauth_algorithms=oauth_algorithms,
+        oauth_leeway_s=oauth_leeway_s,
         cors_origins=cors_origins,
         rate_per_second=rate_per_second,
         rate_burst=rate_burst,

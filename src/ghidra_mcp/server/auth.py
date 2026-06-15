@@ -21,9 +21,12 @@ The **imperative shell's** auth seam. Authentication is a small **strategy port*
   field (subject CN — default — / a SAN / the full subject DN) → :class:`Principal`, **failing
   closed** (generic reject, no oracle) on an absent peer cert or an empty mapped field, as
   defense-in-depth on top of the handshake gate (`std-zero-trust`, `topic-authn-authz`).
-- :class:`OAuthResourceAuthenticator` — **port-ready stub** (ADR-019 increment B, not built here):
-  satisfies the :class:`Authenticator` protocol so the shell + factory are complete, and raises on
-  use until built (OAuth 2.1 per the MCP remote-auth profile).
+- :class:`OAuthResourceAuthenticator` — BUILT now (ADR-019 increment B). OAuth resource server:
+  validates a ``Bearer`` **JWT** access token LOCALLY via the issuer's **JWKS** (fetched + cached,
+  no per-request IdP round-trip) with a **pinned** algorithm allow-list (no ``alg:none`` / RS-HS
+  confusion) and the registered claims (``iss``/``aud``/``exp``/``nbf``); the configured claim
+  (default ``sub``) → :class:`Principal`. Fails closed (generic reject, no oracle) on any failure;
+  the token is never logged (`std-zero-trust`, `topic-authn-authz`, `std-owasp-api`).
 
 Framework-agnostic by design: strategies operate on a minimal :class:`AuthContext` (the bits an
 authenticator needs), not on a web request object — so this module is pure and 100%-unit-testable,
@@ -35,6 +38,9 @@ from __future__ import annotations
 import hmac
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
+
+import jwt
+from jwt import PyJWKClient
 
 _BEARER_PREFIX = "bearer "  # scheme is case-insensitive (RFC 7235); compared lowercased
 
@@ -53,6 +59,25 @@ MTLS_PRINCIPAL_FIELD_DEFAULT = "cn"
 _DEFAULT_MTLS_PRINCIPAL_FIELD = MTLS_PRINCIPAL_FIELD_DEFAULT
 #: Map a ``san-*`` selector to the SAN entry tag :func:`ssl.getpeercert` uses (case as returned).
 _SAN_FIELD_TAGS = {"san-dns": "DNS", "san-uri": "URI", "san-email": "email"}
+
+#: OAuth (ADR-019 D3). The PINNED algorithm allow-list — only **asymmetric** JWS algorithms whose
+#: verification key is a *public* key (so a leaked/guessed JWKS key cannot be used to MINT tokens).
+#: ``alg:none`` and every symmetric (``HS*``) algorithm are excluded by construction, defeating the
+#: classic RS↔HS key-confusion attack (a server that accepted ``HS256`` could be tricked into
+#: verifying an attacker-forged token with the *public* key as the HMAC secret). Config validates
+#: any configured allow-list against this set, so an operator can never widen it to an unsafe alg.
+OAUTH_ALLOWED_ALGORITHMS = frozenset(
+    {"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512", "EdDSA"}
+)
+#: The default algorithm allow-list when none is configured (the two most common OIDC asymmetric
+#: algs — ADR-019 D3). Public so config shares the same default (no drift). Ordered for a stable
+#: repr; the set above is the validation gate.
+OAUTH_DEFAULT_ALGORITHMS = ("RS256", "ES256")
+#: The default JWT claim mapped to the principal id (subject — ADR-019 D3). Public so config shares
+#: the same default.
+OAUTH_PRINCIPAL_CLAIM_DEFAULT = "sub"
+#: Default leeway (seconds) for ``exp``/``nbf`` clock-skew tolerance — small, per ADR-019 D3.
+OAUTH_DEFAULT_LEEWAY_S = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,13 +319,118 @@ class MtlsAuthenticator:
 
 @dataclass(frozen=True, slots=True)
 class OAuthResourceAuthenticator:
-    """Port-ready OAuth 2.1 resource-server stub; satisfies the port, raises until built."""
+    """OAuth resource-server authenticator (ADR-019 D3): a Bearer **JWT** validated via JWKS.
+
+    The server acts as an OAuth 2.x **resource server**: it validates a ``Bearer`` access token
+    that is a **JWT** without a per-request IdP round-trip. The issuer's signing keys are fetched
+    from the configured **JWKS** endpoint and **cached** (PyJWT's :class:`~jwt.PyJWKClient`, stdlib
+    ``urllib`` under the hood — no new HTTP dependency; the worker stays no-network —
+    `std-zero-trust` TB6-D). Validation, in order, mirrors `topic-authn-authz`:
+
+    1. Extract the ``Bearer`` token from :attr:`AuthContext.authorization`; a missing header or a
+       wrong scheme returns ``None`` **before any crypto** (no work on an absent credential).
+    2. Resolve the JWS **signing key** for the token's ``kid`` from the JWKS (an unknown ``kid`` or
+       a JWKS-fetch failure → fail closed; bounded — no unbounded retry/egress).
+    3. Verify the signature with a **PINNED algorithm allow-list**
+       (:data:`OAUTH_ALLOWED_ALGORITHMS`, narrowed by ``algorithms``): the token's own ``alg`` is
+       **never trusted** — ``alg:none`` and any symmetric/confusion alg are impossible by
+       construction.
+    4. Enforce the **registered claims**: ``iss`` == configured issuer, ``aud`` == configured
+       audience, and ``exp``/``nbf`` (with a small ``leeway``); ``exp``/``iss``/``aud`` are
+       **required** (a token missing one is rejected, not silently accepted).
+    5. Map the configured ``principal_claim`` (default ``sub``) to :class:`Principal`; an
+       empty/missing/non-string value → ``None``.
+
+    **Fail closed, no oracle:** *any* failure — bad signature, wrong ``iss``/``aud``, expired or
+    not-yet-valid, unknown ``kid``, ``alg:none``, missing ``sub``, malformed token, or a JWKS-fetch
+    error — returns a generic ``None`` → the shell's uniform ``401``. The token is **never** logged
+    or echoed and the failure reason is not surfaced to the caller (TB6-I/R —
+    `topic-logging-observability`). Construction validates the allow-list (defense in depth; config
+    also checks).
+
+    All fields are **non-secret** config (issuer / audience / JWKS URI / claim / algs / leeway), so
+    the dataclass stays in ``repr`` — there is no secret to hide (the bearer token is per-request,
+    never stored here).
+    """
+
+    issuer: str
+    audience: str
+    jwks_uri: str
+    principal_claim: str = OAUTH_PRINCIPAL_CLAIM_DEFAULT
+    algorithms: tuple[str, ...] = OAUTH_DEFAULT_ALGORITHMS
+    leeway_s: int = OAUTH_DEFAULT_LEEWAY_S
+    #: The JWKS client (key fetch + cache). Excluded from ``repr`` (not a secret, but noisy) and
+    #: from equality (an internal cache handle, not identity). Built lazily on first use so the
+    #: dataclass stays cheap to build and the network-touching client is made only on first request.
+    _jwks_client: list[PyJWKClient] = field(
+        default_factory=list, repr=False, compare=False, hash=False
+    )
+
+    def __post_init__(self) -> None:
+        """Reject an empty or non-allow-listed algorithm list at construction (fail closed).
+
+        Defense in depth on top of the config gate: the only algorithms ever passed to PyJWT are
+        asymmetric, public-key-verified ones — ``alg:none``/``HS*`` can never reach the verifier.
+        """
+        if not self.algorithms:
+            raise ValueError("OAuth requires at least one allowed algorithm")
+        for alg in self.algorithms:
+            if alg not in OAUTH_ALLOWED_ALGORITHMS:
+                raise ValueError("unsupported OAuth algorithm")
+
+    def _client(self) -> PyJWKClient:
+        """Return the cached :class:`~jwt.PyJWKClient`, building it on first use (fetch + cache)."""
+        if not self._jwks_client:
+            # PyJWKClient caches fetched keys (lifespan-bounded); one instance is reused so the JWKS
+            # endpoint is hit at most on a cache miss, not per request (TB6-D, `std-zero-trust`).
+            self._jwks_client.append(PyJWKClient(self.jwks_uri))
+        return self._jwks_client[0]
 
     def authenticate(self, ctx: AuthContext) -> Principal | None:
-        """Not yet implemented — `auth=oauth` is a port; build before enabling."""
-        raise NotImplementedError(
-            "OAuth authentication is not implemented yet (ADR-011 port-ready)"
-        )
+        """Validate the Bearer JWT (sig via JWKS + iss/aud/exp/nbf), map ``sub`` to a principal.
+
+        Returns a :class:`Principal` only for a token that passes **every** check; any failure is a
+        uniform ``None`` (generic reject, no oracle). Never raises on a hostile/malformed token and
+        never logs the token (defense in depth — the shell turns ``None`` into a generic ``401``).
+        """
+        header = ctx.authorization
+        if header is None or header[: len(_BEARER_PREFIX)].lower() != _BEARER_PREFIX:
+            return None  # missing/wrong scheme — reject before any crypto (no token to verify)
+        token = header[len(_BEARER_PREFIX) :].strip()
+        if not token:
+            return None
+        try:
+            signing_key = self._client().get_signing_key_from_jwt(token)
+            claims = jwt.decode(
+                token,
+                signing_key.key,
+                # PINNED allow-list — the token's own ``alg`` is never trusted (no alg:none / HS
+                # confusion); PyJWT rejects a token whose alg is not in this list.
+                algorithms=list(self.algorithms),
+                issuer=self.issuer,
+                audience=self.audience,
+                leeway=self.leeway_s,
+                # Require the security-relevant registered claims to be PRESENT (a token lacking
+                # exp/iss/aud is rejected, not silently accepted) and verified.
+                options={
+                    "require": ["exp", "iss", "aud"],
+                    "verify_signature": True,
+                    "verify_exp": True,
+                    "verify_nbf": True,
+                    "verify_iss": True,
+                    "verify_aud": True,
+                },
+            )
+        except Exception:  # fail closed on ANY error (incl. JWKS fetch/network) — never re-raise
+            # Any validation/parse/JWKS-fetch error → generic reject. We deliberately catch broadly
+            # (a JWKS fetch may raise PyJWTError OR a network OSError/URLError) and discard the
+            # detail: the failure reason must NOT become a caller-visible oracle, and the token /
+            # exception text is never logged here (TB6-I/R, fail closed — `topic-error-handling`).
+            return None
+        principal_id = claims.get(self.principal_claim)
+        if not isinstance(principal_id, str) or not principal_id:
+            return None  # missing/empty/non-string subject → no anonymous principal (fail closed)
+        return Principal(id=principal_id)
 
 
 def build_authenticator(
@@ -309,6 +439,12 @@ def build_authenticator(
     bearer_token: str | None = None,
     bearer_tokens: dict[str, str] | None = None,
     mtls_principal_field: str = _DEFAULT_MTLS_PRINCIPAL_FIELD,
+    oauth_issuer: str | None = None,
+    oauth_audience: str | None = None,
+    oauth_jwks_uri: str | None = None,
+    oauth_principal_claim: str = OAUTH_PRINCIPAL_CLAIM_DEFAULT,
+    oauth_algorithms: tuple[str, ...] = OAUTH_DEFAULT_ALGORITHMS,
+    oauth_leeway_s: int = OAUTH_DEFAULT_LEEWAY_S,
 ) -> Authenticator:
     """Construct the :class:`Authenticator` for a validated ``auth_mode`` (the wiring seam).
 
@@ -318,7 +454,9 @@ def build_authenticator(
     principal, so a single configured token keeps working unchanged. For ``mtls`` (ADR-019 A) the
     :class:`MtlsAuthenticator` is built with the configured ``mtls_principal_field`` (the verified
     peer-cert field → principal id); the client-CA bundle that backs the handshake gate is wired in
-    the HTTP runner, not here.
+    the HTTP runner, not here. For ``oauth`` (ADR-019 B) the :class:`OAuthResourceAuthenticator` is
+    built with the configured issuer / audience / JWKS URI / principal-claim / alg allow-list /
+    leeway (config guarantees the three required values are present for ``auth_mode == "oauth"``).
 
     Args:
         auth_mode: One of ``"none"`` / ``"bearer"`` / ``"mtls"`` / ``"oauth"`` (already validated by
@@ -329,13 +467,21 @@ def build_authenticator(
         mtls_principal_field: The verified peer-cert field that maps to the principal id for
             ``mtls`` (one of :data:`MTLS_PRINCIPAL_FIELDS`; default subject CN). Ignored for other
             modes.
+        oauth_issuer: The expected JWT ``iss`` for ``oauth`` (required for that mode).
+        oauth_audience: The expected JWT ``aud`` for ``oauth`` (required for that mode).
+        oauth_jwks_uri: The issuer's JWKS endpoint for ``oauth`` (required for that mode).
+        oauth_principal_claim: The JWT claim mapped to the principal id (default ``sub``).
+        oauth_algorithms: The pinned algorithm allow-list (subset of
+            :data:`OAUTH_ALLOWED_ALGORITHMS`; default :data:`OAUTH_DEFAULT_ALGORITHMS`).
+        oauth_leeway_s: Clock-skew leeway in seconds for ``exp``/``nbf``.
 
     Returns:
-        The matching authenticator (OAuth returns a port-ready stub).
+        The matching authenticator.
 
     Raises:
-        ValueError: if ``auth_mode`` is unknown, ``bearer`` without any token, or ``mtls`` with an
-            unknown principal field (fail closed).
+        ValueError: if ``auth_mode`` is unknown, ``bearer`` without any token, ``mtls`` with an
+            unknown principal field, or ``oauth`` without issuer/audience/JWKS URI or with an
+            unsupported algorithm (fail closed).
     """
     if auth_mode == "none":
         return NullAuthenticator()
@@ -349,5 +495,16 @@ def build_authenticator(
     if auth_mode == "mtls":
         return MtlsAuthenticator(principal_field=mtls_principal_field)
     if auth_mode == "oauth":
-        return OAuthResourceAuthenticator()
+        if oauth_issuer is None or oauth_audience is None or oauth_jwks_uri is None:
+            # Config guarantees these for auth_mode=oauth; re-checked here so a programmatic caller
+            # cannot build a half-configured OAuth authenticator (fail closed — defense in depth).
+            raise ValueError("oauth auth requires issuer, audience, and a JWKS URI")
+        return OAuthResourceAuthenticator(
+            issuer=oauth_issuer,
+            audience=oauth_audience,
+            jwks_uri=oauth_jwks_uri,
+            principal_claim=oauth_principal_claim,
+            algorithms=oauth_algorithms,
+            leeway_s=oauth_leeway_s,
+        )
     raise ValueError(f"unknown auth mode: {auth_mode}")
