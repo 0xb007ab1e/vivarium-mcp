@@ -911,3 +911,24 @@ Verified live by `tests/integration/test_mtls_bridge.py` (real TLS, synthetic ce
 verify, `iss`/`aud`/`exp`/`nbf`, `sub`→principal, fail-closed) + config + `build_authenticator`
 wiring are built and unit-proven. The JWKS client is built lazily and reused (no per-request IdP
 round-trip — TB6-D); the only network touch is the cached JWKS fetch, integration-gated in tests.
+
+
+## 14. TB7 (delta) — Multi-type composite batch `define_types` (v1.2 — ADR-021, ACCEPTED design)
+
+Extends the write/agency boundary (**TB7**, no new boundary): a new gated `define_types` tool creates
+a **batch of interdependent new composites** in one transaction, where a field may reference **another
+new composite in the same batch**. Generalizes ADR-015's pre-registration (pre-register ALL empties in
+the batch → resolve → add → one transaction, rollback-all). The **load-bearing new control is a
+by-value cycle detector.**
+
+| STRIDE | Threat | Mitigation |
+|--------|--------|------------|
+| **D** | A **by-value cycle** (A embeds B embeds A, or self) → infinite-size type | a **real by-value graph cycle detector** (pure, boundary, `O(V+E)`) rejects any cycle over `pointer_levels==0` member edges (incl. self / array-of-self) → `VALIDATION`, no write. **Pointer edges create no cycle** (fixed-size) → mutually-recursive *pointer* structs allowed |
+| **D** | Oversized batch / fan-out | `_MAX_TYPES_PER_BATCH` + `_MAX_FIELDS`/type + **batch-total** size cap; one bounded transaction; per-tool timeout kills the worker |
+| **T** | Partial / corrupt batch | **one transaction, rollback-all** on any failure — no partial batch, no orphan type |
+| **I/E** | Injection / over-agency | structured `TypeRef` only (no C parser — ADR-014); name-collision (existing or intra-batch dup) fail-closed REJECT (ADR-015 §6); **structural** write-consent (ADR-012); owner-scoped (ADR-017); server never assembles (ADR-001) |
+
+The formal abuse-case list (by-value self-cycle, A↔B by-value cycle rejected, **A↔B pointer cycle
+allowed**, oversized batch/type/total, dup name in batch, collision with existing type,
+partial-failure rolls back the whole batch, no-C-parser, cross-owner, structural-consent-required)
+lands with the **implementation** PR.
