@@ -1446,3 +1446,235 @@ def test_cross_principal_isolation_end_to_end_over_http() -> None:
     A's session/worker/store are untouched. The manager-level + authenticator-level controls are
     proven hermetically above; the end-to-end wiring (per-request principal → ToolContext → manager)
     is promoted to WS5 (needs the live ASGI stack + worker)."""
+
+
+# ==============================================================================================
+# TB6 (delta) — OAuth identity-source abuse cases 72-82 (threat-model §13, ADR-019 increment B).
+# OAuth = JWT access tokens validated LOCALLY via JWKS (resource server). The PINNED algorithm
+# allow-list makes ``alg:none`` + RS/HS confusion impossible by construction; iss/aud/exp/nbf are
+# all verified; the configured claim (``sub``) → principal; ANY failure is a generic reject (no
+# oracle) and the token is never logged. These run against the REAL ``OAuthResourceAuthenticator``
+# with an in-test RSA/EC keypair minting JWTs via PyJWT and a MOCKED JWKS fetch (the cached client
+# is seeded directly) — hermetic, no live IdP / network / real secrets. Each FAILS the attack.
+# ==============================================================================================
+import time  # noqa: E402  # local to the TB6 OAuth block
+
+import jwt  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric import rsa as _rsa  # noqa: E402
+
+from ghidra_mcp.server.auth import OAuthResourceAuthenticator  # noqa: E402
+
+_OAUTH_ISS = "https://idp.example/realm"
+_OAUTH_AUD = "ghidra-mcp"
+_OAUTH_JWKS = "https://idp.example/realm/jwks"
+
+
+class _SeededSigningKey:
+    """Minimal PyJWK stand-in — ``jwt.decode`` only reads ``.key`` (the public key)."""
+
+    def __init__(self, key: object) -> None:
+        self.key = key
+
+
+class _SeededJWKClient:
+    """Fake JWKS client: returns a fixed signing key (or raises) — mocks the only network touch."""
+
+    def __init__(self, key: object, *, raises: Exception | None = None) -> None:
+        self._key = key
+        self._raises = raises
+
+    def get_signing_key_from_jwt(self, token: str) -> _SeededSigningKey:
+        if self._raises is not None:
+            raise self._raises
+        return _SeededSigningKey(self._key)
+
+
+def _oauth_auth(
+    pub: object, *, raises: Exception | None = None, **kw: object
+) -> OAuthResourceAuthenticator:
+    """Build an OAuth authenticator with its JWKS client seeded to a fake (hermetic, no network)."""
+    auth = OAuthResourceAuthenticator(
+        issuer=_OAUTH_ISS,
+        audience=_OAUTH_AUD,
+        jwks_uri=_OAUTH_JWKS,
+        **kw,  # type: ignore[arg-type]
+    )
+    auth._jwks_client.append(_SeededJWKClient(pub, raises=raises))  # type: ignore[arg-type]
+    return auth
+
+
+def _oauth_mint(
+    private_key: object,
+    *,
+    alg: str = "RS256",
+    sub: object = "alice",
+    iss: str | None = _OAUTH_ISS,
+    aud: str | None = _OAUTH_AUD,
+    exp_delta: int = 300,
+) -> str:
+    """Mint a signed JWT (hermetic). Defaults to a valid, current token for principal alice."""
+    now = int(time.time())
+    payload: dict[str, object] = {"exp": now + exp_delta}
+    if sub is not None:
+        payload["sub"] = sub
+    if iss is not None:
+        payload["iss"] = iss
+    if aud is not None:
+        payload["aud"] = aud
+    return jwt.encode(payload, private_key, algorithm=alg, headers={"kid": "k1"})  # type: ignore[arg-type]
+
+
+# --- Case 72 — valid token → Principal(sub) → distinct owner-scoped session (TB6-S/E, ADR-017) ---
+@pytest.mark.critical
+def test_oauth_valid_token_yields_owner_scoped_principal() -> None:
+    """A valid JWT maps ``sub`` → principal; distinct subjects own distinct, isolated sessions.
+
+    Composes ADR-017: the OAuth identity *source* yields distinct principal ids, and a real
+    :class:`SessionManager` scopes ownership by them (cross-principal access is the same
+    ``SESSION_INVALID`` as unknown — proven in cases 61-63).
+    """
+    key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    auth = _oauth_auth(key.public_key())
+    tok_a = _oauth_mint(key, sub="alice")
+    tok_b = _oauth_mint(key, sub="bob")
+    p_alice = auth.authenticate(AuthContext(authorization=f"Bearer {tok_a}"))
+    p_bob = auth.authenticate(AuthContext(authorization=f"Bearer {tok_b}"))
+    assert p_alice == Principal(id="alice")
+    assert p_bob == Principal(id="bob") and p_alice != p_bob
+    assert p_alice is not None and p_bob is not None  # narrow type for the manager below
+    mgr = _abuse_mgr()
+    a = mgr.create(owner=p_alice.id)
+    foreign = _invalid_fields(mgr.authorize, a.session_id, caller=p_bob.id)
+    unknown = _invalid_fields(mgr.authorize, "unknown-id", caller=p_bob.id)
+    assert foreign == unknown  # bob cannot distinguish alice's session from a non-existent one
+    assert mgr.authorize(a.session_id, caller=p_alice.id).session_id == a.session_id
+
+
+# --- Case 73 — alg:none (unsigned) rejected (TB6-T) -----------------------------------------
+@pytest.mark.critical
+def test_oauth_alg_none_rejected() -> None:
+    """An unsigned ``alg:none`` token is rejected — the pinned allow-list forbids it."""
+    key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    auth = _oauth_auth(key.public_key())
+    unsigned = jwt.encode({"sub": "mallory", "iss": _OAUTH_ISS, "aud": _OAUTH_AUD}, None, "none")  # type: ignore[arg-type]
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {unsigned}")) is None
+
+
+# --- Case 74 — alg-confusion (HS256 when RS256 expected) rejected (TB6-T) -------------------
+@pytest.mark.critical
+def test_oauth_alg_confusion_rejected() -> None:
+    """A forged HS256 token is rejected (the pinned allow-list is asymmetric-only).
+
+    The pinned asymmetric allow-list means PyJWT is never asked to try HS256, so an HS256 token is
+    rejected regardless of the HMAC secret used (the RS↔HS-confusion attack). Minted with the vetted
+    ``jwt.encode`` (a raw shared secret — PyJWT, not hand-rolled crypto).
+    """
+    key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    auth = _oauth_auth(key.public_key())
+    forged = jwt.encode(
+        {"sub": "mallory", "iss": _OAUTH_ISS, "aud": _OAUTH_AUD},
+        b"attacker-chosen-hmac-secret-32bytes!!",  # synthetic attacker secret, not real
+        algorithm="HS256",
+        headers={"kid": "k1"},
+    )
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {forged}")) is None
+
+
+# --- Case 75 — wrong issuer rejected (TB6-T) ------------------------------------------------
+@pytest.mark.critical
+def test_oauth_wrong_issuer_rejected() -> None:
+    key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    auth = _oauth_auth(key.public_key())
+    token = _oauth_mint(key, iss="https://evil.example")
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) is None
+
+
+# --- Case 76 — wrong audience rejected (TB6-T) ----------------------------------------------
+@pytest.mark.critical
+def test_oauth_wrong_audience_rejected() -> None:
+    key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    auth = _oauth_auth(key.public_key())
+    token = _oauth_mint(key, aud="another-api")
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) is None
+
+
+# --- Case 77 — expired token rejected (TB6-T) -----------------------------------------------
+@pytest.mark.critical
+def test_oauth_expired_token_rejected() -> None:
+    key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    auth = _oauth_auth(key.public_key(), leeway_s=0)
+    token = _oauth_mint(key, exp_delta=-60)  # expired a minute ago
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) is None
+
+
+# --- Case 78 — not-yet-valid (nbf in the future) rejected (TB6-T) ---------------------------
+@pytest.mark.critical
+def test_oauth_not_yet_valid_rejected() -> None:
+    key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    auth = _oauth_auth(key.public_key(), leeway_s=0)
+    now = int(time.time())
+    token = jwt.encode(
+        {"sub": "alice", "iss": _OAUTH_ISS, "aud": _OAUTH_AUD, "exp": now + 300, "nbf": now + 300},
+        key,
+        "RS256",
+        headers={"kid": "k1"},
+    )
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) is None
+
+
+# --- Case 79 — bad signature rejected (TB6-T) -----------------------------------------------
+@pytest.mark.critical
+def test_oauth_bad_signature_rejected() -> None:
+    signing = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    other = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    auth = _oauth_auth(other.public_key())  # verifier has the WRONG public key
+    token = _oauth_mint(signing)
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) is None
+
+
+# --- Case 80 — unknown kid (JWKS has no matching key) → fail closed (TB6-D/T) ----------------
+@pytest.mark.critical
+def test_oauth_unknown_kid_rejected() -> None:
+    key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    auth = _oauth_auth(key.public_key(), raises=jwt.exceptions.PyJWKClientError("unknown kid"))
+    token = _oauth_mint(key)
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) is None
+
+
+# --- Case 81 — missing sub rejected (TB6-S, no anonymous principal) -------------------------
+@pytest.mark.critical
+def test_oauth_missing_sub_rejected() -> None:
+    key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    auth = _oauth_auth(key.public_key())
+    token = _oauth_mint(key, sub=None)  # validly signed, but no subject
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) is None
+
+
+# --- Case 82 — the token / JWT is never logged (TB6-R/I) ------------------------------------
+@pytest.mark.critical
+def test_oauth_token_is_never_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """Authenticating an OAuth request must not emit the JWT into any log record (TB6-R/I).
+
+    The authenticator is pure (it logs nothing itself); this guards against a regression that would
+    log the token. We authenticate a valid token and assert it appears in NO captured log, and that
+    the authenticator's ``repr`` does not carry it (the token is per-request, never stored).
+    """
+    key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    auth = _oauth_auth(key.public_key())
+    token = _oauth_mint(key, sub="alice")
+    with caplog.at_level("DEBUG"):
+        principal = auth.authenticate(AuthContext(authorization=f"Bearer {token}"))
+    assert principal == Principal(id="alice")
+    assert all(token not in rec.getMessage() for rec in caplog.records)
+    assert token not in repr(auth)
+
+
+# --- Live OAuth case (control needs a live IdP/JWKS endpoint) — integration-gated -----------
+@pytest.mark.integration
+@pytest.mark.skip(reason=_INTEGRATION_REASON)
+def test_oauth_live_jwks_validation_end_to_end() -> None:
+    """OAuth (live): the real :class:`jwt.PyJWKClient` fetches a real issuer's JWKS over the network
+    and validates a real IdP-minted token end-to-end over the HTTP transport. The validation logic +
+    the pinned-alg / iss / aud / exp / nbf / sub controls are proven hermetically above (cases
+    72-82) with an in-test keypair + mocked JWKS; this live path (an actual IdP + network egress) is
+    promoted to WS5 — no live IdP / network / real secrets in the unit suite."""

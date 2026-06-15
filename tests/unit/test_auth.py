@@ -6,11 +6,19 @@ needed. Asserts default-deny, the generic (oracle-free) bearer reject, and the p
 
 from __future__ import annotations
 
+import time
+from typing import Any
+
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 from ghidra_mcp.server.auth import (
     MTLS_PRINCIPAL_FIELD_DEFAULT,
     MTLS_PRINCIPAL_FIELDS,
+    OAUTH_ALLOWED_ALGORITHMS,
+    OAUTH_DEFAULT_ALGORITHMS,
+    OAUTH_PRINCIPAL_CLAIM_DEFAULT,
     AuthContext,
     Authenticator,
     BearerAuthenticator,
@@ -70,10 +78,17 @@ def test_null_authenticator_accepts_everything_as_local() -> None:
     assert auth.authenticate(AuthContext(authorization="anything")) == Principal(id="local")
 
 
-def test_oauth_stub_raises_until_built() -> None:
-    """OAuth is the remaining port-ready stub (increment B); mTLS is now BUILT (increment A)."""
-    with pytest.raises(NotImplementedError):
-        OAuthResourceAuthenticator().authenticate(AuthContext())
+def test_oauth_is_built_not_a_stub() -> None:
+    """OAuth is now BUILT (ADR-019 increment B) — it no longer raises NotImplementedError.
+
+    A missing/wrong-scheme header is rejected generically (``None``) before any crypto/JWKS work,
+    so this needs no key material (the full JWT path is covered in the OAuth block below).
+    """
+    auth = OAuthResourceAuthenticator(
+        issuer="https://idp.example", audience="gmcp", jwks_uri="https://idp.example/jwks"
+    )
+    assert auth.authenticate(AuthContext(authorization=None)) is None
+    assert auth.authenticate(AuthContext(authorization="Basic xyz")) is None
 
 
 @pytest.mark.parametrize(
@@ -91,6 +106,8 @@ def test_all_strategies_satisfy_the_protocol(cls: type) -> None:
         inst: Authenticator = cls(expected_token=_TOKEN)
     elif cls is MultiTokenBearerAuthenticator:
         inst = cls(tokens={_TOKEN: "bearer"})
+    elif cls is OAuthResourceAuthenticator:
+        inst = cls(issuer="https://idp", audience="gmcp", jwks_uri="https://idp/jwks")
     else:
         inst = cls()
     assert isinstance(inst, Authenticator)  # runtime_checkable structural check
@@ -104,7 +121,16 @@ def test_build_authenticator_maps_modes() -> None:
         build_authenticator("bearer", bearer_token=_TOKEN), MultiTokenBearerAuthenticator
     )
     assert isinstance(build_authenticator("mtls", bearer_token=None), MtlsAuthenticator)
-    assert isinstance(build_authenticator("oauth", bearer_token=None), OAuthResourceAuthenticator)
+    # ADR-019 B: oauth builds the resource-server authenticator from the configured issuer/aud/JWKS.
+    assert isinstance(
+        build_authenticator(
+            "oauth",
+            oauth_issuer="https://idp",
+            oauth_audience="gmcp",
+            oauth_jwks_uri="https://idp/jwks",
+        ),
+        OAuthResourceAuthenticator,
+    )
 
 
 def test_build_authenticator_mtls_uses_configured_field() -> None:
@@ -447,3 +473,377 @@ def test_mtls_authenticator_satisfies_protocol() -> None:
 def test_mtls_principal_field_set_matches_default_membership() -> None:
     assert MTLS_PRINCIPAL_FIELD_DEFAULT in MTLS_PRINCIPAL_FIELDS
     assert frozenset({"cn", "san-dns", "san-uri", "san-email", "dn"}) == MTLS_PRINCIPAL_FIELDS
+
+
+# ==============================================================================================
+# OAuthResourceAuthenticator (ADR-019 increment B) — a Bearer JWT validated LOCALLY via JWKS.
+# HERMETIC: an in-test RSA (+ EC) keypair mints JWTs with PyJWT; the JWKS fetch is MOCKED by
+# monkeypatching the authenticator's cached client so ``get_signing_key_from_jwt`` returns our
+# public key (or raises, for the unknown-kid / fetch-failure paths). NO live IdP / network / real
+# secrets. The pinned-alg allow-list makes ``alg:none`` and RS/HS confusion impossible by
+# construction; iss/aud/exp/nbf are all validated; sub → Principal; any failure → generic None.
+# ==============================================================================================
+_ISS = "https://idp.example/realm"
+_AUD = "ghidra-mcp"
+_JWKS = "https://idp.example/realm/jwks"
+
+
+class _FakeSigningKey:
+    """A stand-in for PyJWT's ``PyJWK`` — only the ``.key`` attribute is used by ``jwt.decode``."""
+
+    def __init__(self, key: object) -> None:
+        self.key = key
+
+
+class _FakeJWKClient:
+    """A fake :class:`jwt.PyJWKClient`: returns a fixed signing key, or raises to simulate failure.
+
+    Mocks the ONLY network touch (JWKS fetch) so the JWT-validation path is fully hermetic. With
+    ``raises`` set it simulates an unknown ``kid`` / JWKS-fetch error (the authenticator must fail
+    closed). ``calls`` counts invocations so a test can assert the client is reused (cached), not
+    rebuilt per request (TB6-D — no per-request IdP round-trip).
+    """
+
+    def __init__(self, key: object, *, raises: Exception | None = None) -> None:
+        self._key = key
+        self._raises = raises
+        self.calls = 0
+
+    def get_signing_key_from_jwt(self, token: str) -> _FakeSigningKey:
+        self.calls += 1
+        if self._raises is not None:
+            raise self._raises
+        return _FakeSigningKey(self._key)
+
+
+def _rsa_keypair() -> rsa.RSAPrivateKey:
+    """A deterministic-enough in-test RSA keypair (2048-bit). Synthetic — never a real secret."""
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+def _ec_keypair() -> ec.EllipticCurvePrivateKey:
+    """An in-test EC (P-256) keypair for the ES256 path. Synthetic — never a real secret."""
+    return ec.generate_private_key(ec.SECP256R1())
+
+
+def _mint(
+    private_key: Any,  # an RSA/EC private key from cryptography (PyJWT's accepted signing key)
+    *,
+    alg: str,
+    sub: str | None = "alice",
+    iss: str | None = _ISS,
+    aud: str | None = _AUD,
+    exp_delta: int = 300,
+    nbf_delta: int | None = None,
+    extra: dict[str, Any] | None = None,
+) -> str:
+    """Mint a signed JWT with PyJWT (hermetic). Claims default to a valid, currently-valid token."""
+    now = int(time.time())
+    payload: dict[str, Any] = {"exp": now + exp_delta}
+    if sub is not None:
+        payload["sub"] = sub
+    if iss is not None:
+        payload["iss"] = iss
+    if aud is not None:
+        payload["aud"] = aud
+    if nbf_delta is not None:
+        payload["nbf"] = now + nbf_delta
+    if extra:
+        payload.update(extra)
+    return jwt.encode(payload, private_key, algorithm=alg, headers={"kid": "test-key-1"})
+
+
+def _oauth(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    public_key: object,
+    raises: Exception | None = None,
+    **kw: Any,
+) -> tuple[OAuthResourceAuthenticator, _FakeJWKClient]:
+    """Build an authenticator whose JWKS client is the fake (no network). Returns (auth, client).
+
+    The authenticator caches its JWKS client in a mutable ``_jwks_client`` list (a frozen-dataclass-
+    friendly lazy cache). We **pre-seed** that list with the fake so ``_client()`` finds it and
+    never constructs a real :class:`jwt.PyJWKClient` — fully hermetic, no network. ``monkeypatch``
+    is accepted for symmetry with the test signatures (and used by callers for ``caplog``).
+    """
+    _ = monkeypatch  # kept for signature symmetry; the cache is seeded directly below
+    auth = OAuthResourceAuthenticator(issuer=_ISS, audience=_AUD, jwks_uri=_JWKS, **kw)
+    fake = _FakeJWKClient(public_key, raises=raises)
+    # Seed the lazy cache → _client() returns the fake (no network). The fake is duck-typed to
+    # PyJWKClient.get_signing_key_from_jwt; mypy can't see the match on a concrete list.
+    auth._jwks_client.append(fake)  # type: ignore[arg-type]
+    return auth, fake
+
+
+def test_oauth_valid_rs256_token_maps_sub_to_principal(monkeypatch: pytest.MonkeyPatch) -> None:
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key())
+    token = _mint(key, alg="RS256", sub="alice")
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) == Principal(id="alice")
+
+
+def test_oauth_valid_es256_token_maps_sub_to_principal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The EC (ES256) signature path is in the default allow-list and verifies hermetically."""
+    key = _ec_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key())
+    token = _mint(key, alg="ES256", sub="svc-account")
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) == Principal(
+        id="svc-account"
+    )
+
+
+def test_oauth_scheme_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key())
+    token = _mint(key, alg="RS256")
+    assert auth.authenticate(AuthContext(authorization=f"bearer {token}")) == Principal(id="alice")
+
+
+@pytest.mark.parametrize(
+    "header",
+    [None, "", "Basic abc", "Bearer ", "abc.def.ghi"],  # missing/empty/wrong-scheme/no-scheme
+)
+def test_oauth_missing_or_wrong_scheme_rejected_before_crypto(
+    monkeypatch: pytest.MonkeyPatch, header: str | None
+) -> None:
+    """A missing/malformed scheme is rejected with NO JWKS call (no crypto on an absent token)."""
+    key = _rsa_keypair()
+    auth, fake = _oauth(monkeypatch, public_key=key.public_key())
+    assert auth.authenticate(AuthContext(authorization=header)) is None
+    assert fake.calls == 0  # short-circuited before any key fetch / verify
+
+
+def test_oauth_principal_claim_is_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key(), principal_claim="email")
+    token = _mint(key, alg="RS256", extra={"email": "alice@example.test"})
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) == Principal(
+        id="alice@example.test"
+    )
+
+
+def test_oauth_jwks_client_is_cached_not_per_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One JWKS client is reused across requests (no per-request IdP round-trip — TB6-D)."""
+    key = _rsa_keypair()
+    auth, fake = _oauth(monkeypatch, public_key=key.public_key())
+    token = _mint(key, alg="RS256")
+    for _ in range(3):
+        assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) == Principal(
+            id="alice"
+        )
+    assert fake.calls == 3  # 3 lookups on ONE reused client (the client itself caches keys)
+
+
+def test_oauth_real_client_built_lazily_and_cached() -> None:
+    """Without monkeypatching, ``_client()`` constructs a real PyJWKClient ONCE and reuses it.
+
+    This exercises the lazy-build/cache branch (no network: PyJWKClient does not fetch on
+    construction — the fetch happens on ``get_signing_key_from_jwt``, which we never call here).
+    """
+    auth = OAuthResourceAuthenticator(issuer=_ISS, audience=_AUD, jwks_uri=_JWKS)
+    first = auth._client()
+    second = auth._client()
+    assert first is second  # cached — same instance, not rebuilt
+
+
+# --- Fail-closed: every failure → generic None, no oracle, token never logged -----------------
+def test_oauth_alg_none_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A token with ``alg:none`` (unsigned) is rejected — the pinned allow-list forbids it."""
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key())
+    # PyJWT refuses to encode alg=none without allow_unsecured; craft the unsigned token directly.
+    unsigned = jwt.encode({"sub": "mallory", "iss": _ISS, "aud": _AUD}, key=None, algorithm="none")  # type: ignore[arg-type]
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {unsigned}")) is None
+
+
+def test_oauth_alg_confusion_hs256_when_rs256_expected_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An HS256 token (symmetric) is rejected when only RS256/ES256 are allowed (RS/HS confusion).
+
+    The classic RS↔HS confusion attack signs an HS256 token (which the verifier might be tricked
+    into checking with the RSA *public* key as the HMAC secret). With a pinned **asymmetric-only**
+    allow-list, PyJWT is never asked to try HS256, so the forged token is rejected regardless of the
+    HMAC secret. We mint the attacker token with the vetted ``jwt.encode`` (a raw shared-secret —
+    PyJWT, not hand-rolled crypto).
+    """
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key())  # verifier given the RSA public key
+    forged = jwt.encode(
+        {"sub": "mallory", "iss": _ISS, "aud": _AUD},
+        b"attacker-chosen-hmac-secret-32bytes!!",  # synthetic attacker secret, not real
+        algorithm="HS256",
+        headers={"kid": "test-key-1"},
+    )
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {forged}")) is None
+
+
+def test_oauth_wrong_issuer_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key())
+    token = _mint(key, alg="RS256", iss="https://evil.example")
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) is None
+
+
+def test_oauth_wrong_audience_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key())
+    token = _mint(key, alg="RS256", aud="some-other-api")
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) is None
+
+
+def test_oauth_expired_token_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key(), leeway_s=0)
+    token = _mint(key, alg="RS256", exp_delta=-60)  # expired a minute ago
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) is None
+
+
+def test_oauth_not_yet_valid_nbf_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key(), leeway_s=0)
+    token = _mint(key, alg="RS256", nbf_delta=300)  # nbf 5 min in the future
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) is None
+
+
+def test_oauth_bad_signature_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A token signed by a DIFFERENT key fails signature verification → reject."""
+    signing = _rsa_keypair()
+    other = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=other.public_key())  # verifier has the WRONG key
+    token = _mint(signing, alg="RS256")
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) is None
+
+
+def test_oauth_unknown_kid_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unknown ``kid`` (JWKS has no matching key) → the client raises → fail closed."""
+    key = _rsa_keypair()
+    auth, _ = _oauth(
+        monkeypatch,
+        public_key=key.public_key(),
+        raises=jwt.exceptions.PyJWKClientError("no key for kid"),
+    )
+    token = _mint(key, alg="RS256")
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) is None
+
+
+def test_oauth_jwks_fetch_failure_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A JWKS fetch error (network/timeout) → generic reject, bounded (no fail-open)."""
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key(), raises=OSError("jwks unreachable"))
+    token = _mint(key, alg="RS256")
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) is None
+
+
+def test_oauth_missing_sub_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A validly-signed token with no ``sub`` claim → reject (no anonymous principal)."""
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key())
+    token = _mint(key, alg="RS256", sub=None)
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) is None
+
+
+def test_oauth_empty_sub_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key())
+    token = _mint(key, alg="RS256", sub="")
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) is None
+
+
+def test_oauth_non_string_sub_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-string subject (e.g. a number) → reject (the principal id must be a safe string)."""
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key(), principal_claim="uid")
+    token = _mint(key, alg="RS256", extra={"uid": 12345})
+    assert auth.authenticate(AuthContext(authorization=f"Bearer {token}")) is None
+
+
+def test_oauth_malformed_token_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key())
+    assert auth.authenticate(AuthContext(authorization="Bearer not-a-jwt")) is None
+
+
+def test_oauth_two_distinct_subjects_yield_two_distinct_principals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distinct ``sub`` → distinct principals → distinct owner-scoped sessions (ADR-017)."""
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key())
+    tok_a = _mint(key, alg="RS256", sub="alice")
+    tok_b = _mint(key, alg="RS256", sub="bob")
+    alice = auth.authenticate(AuthContext(authorization=f"Bearer {tok_a}"))
+    bob = auth.authenticate(AuthContext(authorization=f"Bearer {tok_b}"))
+    assert alice == Principal(id="alice")
+    assert bob == Principal(id="bob")
+    assert alice != bob
+
+
+def test_oauth_rejects_empty_algorithm_list_at_construction() -> None:
+    with pytest.raises(ValueError, match="at least one allowed algorithm"):
+        OAuthResourceAuthenticator(issuer=_ISS, audience=_AUD, jwks_uri=_JWKS, algorithms=())
+
+
+@pytest.mark.parametrize("bad", ["none", "HS256", "HS512", "rs256", "made-up"])
+def test_oauth_rejects_unsafe_algorithm_at_construction(bad: str) -> None:
+    """``alg:none`` and symmetric ``HS*`` (and unknown) algs cannot be configured (fail closed)."""
+    with pytest.raises(ValueError, match="unsupported OAuth algorithm"):
+        OAuthResourceAuthenticator(
+            issuer=_ISS, audience=_AUD, jwks_uri=_JWKS, algorithms=("RS256", bad)
+        )
+
+
+def test_oauth_token_never_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Validating a token must emit NO log record containing the token (TB6-I/R)."""
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key())
+    token = _mint(key, alg="RS256", sub="alice")
+    with caplog.at_level("DEBUG"):
+        principal = auth.authenticate(AuthContext(authorization=f"Bearer {token}"))
+    assert principal == Principal(id="alice")
+    assert all(token not in rec.getMessage() for rec in caplog.records)
+    # AuthContext keeps no secret in repr either (authorization carries the token, but it is the
+    # per-request credential — defense in depth: assert the authenticator object never repr's it).
+    assert token not in repr(auth)
+
+
+def test_oauth_allow_list_excludes_symmetric_and_none() -> None:
+    """Structural guard: the pinned allow-list is asymmetric-only — no ``none`` / ``HS*``."""
+    assert "none" not in OAUTH_ALLOWED_ALGORITHMS
+    assert not any(a.startswith("HS") for a in OAUTH_ALLOWED_ALGORITHMS)
+    assert set(OAUTH_DEFAULT_ALGORITHMS) <= OAUTH_ALLOWED_ALGORITHMS
+    assert OAUTH_PRINCIPAL_CLAIM_DEFAULT == "sub"
+
+
+def test_oauth_authenticator_satisfies_protocol() -> None:
+    assert isinstance(
+        OAuthResourceAuthenticator(issuer=_ISS, audience=_AUD, jwks_uri=_JWKS), Authenticator
+    )
+
+
+def test_build_authenticator_oauth_threads_config() -> None:
+    """``build_authenticator`` threads issuer/aud/JWKS/claim/algs/leeway into the OAuth strategy."""
+    auth = build_authenticator(
+        "oauth",
+        oauth_issuer=_ISS,
+        oauth_audience=_AUD,
+        oauth_jwks_uri=_JWKS,
+        oauth_principal_claim="email",
+        oauth_algorithms=("ES256",),
+        oauth_leeway_s=5,
+    )
+    assert isinstance(auth, OAuthResourceAuthenticator)
+    assert auth.issuer == _ISS
+    assert auth.audience == _AUD
+    assert auth.jwks_uri == _JWKS
+    assert auth.principal_claim == "email"
+    assert auth.algorithms == ("ES256",)
+    assert auth.leeway_s == 5
+
+
+def test_build_authenticator_oauth_without_required_config_fails() -> None:
+    with pytest.raises(ValueError, match="requires issuer, audience, and a JWKS URI"):
+        build_authenticator("oauth", oauth_issuer=_ISS, oauth_audience=_AUD)  # missing jwks_uri

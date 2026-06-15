@@ -835,14 +835,15 @@ positive cases (68 export round-trip; 70 happy import) must SUCCEED:
     the worker (`_gh_export_annotations`); import re-validation + replay-orchestration are JVM-free
     server code over the existing write RPCs. (TB8-E — extends the prior ADR-001 invariant cases)
 
-## 13. TB6 (delta) — mTLS + OAuth identity sources (v1.2 — ADR-019; mTLS BUILT, OAuth design)
+## 13. TB6 (delta) — mTLS + OAuth identity sources (v1.2 — ADR-019; mTLS + OAuth BUILT)
 
 Builds out the two `Authenticator` stubs ADR-011 left port-ready, **hardening TB6 — no new boundary**.
 Both map a request to a `Principal(id)` that feeds the **ADR-017 ownership mechanism unchanged**
 (distinct identity = distinct owner-scoped sessions). Delivered as two increments: **mTLS first —
 BUILT (ADR-019 increment A)** (server-terminated, in-app uvicorn TLS + the `peer_certificate` seam —
-no new dep; abuse cases 67-71 added below), **OAuth second** (JWT validated locally via JWKS — adds a
-pinned, vetted PyJWT+cryptography dep, `std-supplychain`; still design-only, port stub).
+no new dep; abuse cases 67-71 added below), **OAuth second — BUILT (ADR-019 increment B)** (a Bearer
+**JWT** validated locally via JWKS — adds a pinned, vetted PyJWT+cryptography dep, `std-supplychain`;
+abuse cases 72-82 added below).
 
 | STRIDE | Threat | Mitigation |
 |--------|--------|------------|
@@ -874,12 +875,34 @@ JWT/JWKS local** (introspection deferred).
 Cert parsing is hermetic with **synthetic** parsed-cert dicts (the `ssl.getpeercert()` shape); the
 live uvicorn mTLS handshake (case 70) is integration-gated — no real keys/secrets.
 
-**OAuth abuse cases (increment B — not yet built):** `alg:none`, wrong `iss`/`aud`,
-expired/not-yet-valid, bad signature, unknown `kid`, missing `sub`. JWT validation hermetic with a
-test keypair; JWKS mocked.
+**OAuth abuse cases — ADDED (ADR-019 increment B), `tests/security/test_abuse_cases.py`:**
+- **Case 72** — a valid JWT → `Principal(sub)` → a distinct, owner-scoped session; cross-principal
+  access is the same `SESSION_INVALID` as unknown (composes ADR-017, cases 61-63). *(hermetic)*
+- **Case 73** — an unsigned **`alg:none`** token → generic reject (the pinned asymmetric allow-list
+  forbids it; the token's `alg` is never trusted). *(hermetic)*
+- **Case 74** — **alg-confusion** (an `HS256` token forged with the RSA *public* key as the HMAC
+  secret, when only `RS256`/`ES256` are allowed) → reject. *(hermetic)*
+- **Case 75 / 76** — wrong **`iss`** / wrong **`aud`** → reject. *(hermetic)*
+- **Case 77 / 78** — **expired (`exp`)** / **not-yet-valid (`nbf`)** → reject. *(hermetic)*
+- **Case 79** — **bad signature** (signed by a different key than the JWKS key) → reject. *(hermetic)*
+- **Case 80** — **unknown `kid`** / JWKS-fetch failure → fail closed (bounded; no fail-open).
+  *(hermetic — JWKS client mocked to raise)*
+- **Case 81** — **missing `sub`** (validly signed) → reject (no anonymous principal). *(hermetic)*
+- **Case 82** — the **token is never logged** (TB6-R/I); the authenticator's `repr` carries no token.
+  *(hermetic)*
+
+JWT validation is hermetic with an in-test **RSA/EC keypair** (PyJWT mints the tokens) and a
+**mocked JWKS fetch** (the cached client is seeded directly) — no live IdP / network / real secrets.
+The live IdP+JWKS path (real `PyJWKClient` fetch + a real IdP-minted token over the HTTP transport) is
+**integration-gated** with a tracked reason.
 
 **Live status (mTLS, increment A):** the authenticator + cert-field mapping + config + the
 `CERT_REQUIRED` transport gate are built and unit-proven, but the uvicorn transport→scope peer-cert
 **bridge is not yet wired** (uvicorn does not populate the ASGI TLS extension). Until that WS5
 integration step lands, `auth_mode=mtls` is **fail-closed but non-functional** (no peer cert reaches
 the authenticator → all requests rejected); startup requires server TLS and warns. No fail-open.
+
+**Live status (OAuth, increment B):** the authenticator (JWKS fetch+cache, pinned-alg signature
+verify, `iss`/`aud`/`exp`/`nbf`, `sub`→principal, fail-closed) + config + `build_authenticator`
+wiring are built and unit-proven. The JWKS client is built lazily and reused (no per-request IdP
+round-trip — TB6-D); the only network touch is the cached JWKS fetch, integration-gated in tests.

@@ -457,7 +457,9 @@ cryptography==48.0.0 \
     --hash=sha256:ecde28a596bead48b0cfd2a1b4416c3d43074c2d785e3a398d7ec1fc4d0f7fbb \
     --hash=sha256:f5333311663ea94f75dd408665686aaf426563556bb5283554a3539177e03b8c \
     --hash=sha256:fdfef35d751d510fcef5252703621574364fec16418c4a1e5e1055248401054b
-    # via pyjwt
+    # via
+    #   ghidra-mcp (pyproject.toml)
+    #   pyjwt
 cyclonedx-python-lib==11.8.0 \
     --hash=sha256:a326b575acbb3aa1040986307a4ae282ff27f99ffcbdfdaaf8de10ee85e97f01 \
     --hash=sha256:a8935b06dfe53d80efd47b5f6a202eb678cea00f2930e94e3710f2c1510166c9
@@ -916,7 +918,9 @@ pygments==2.20.0 \
 pyjwt[crypto]==2.13.0 \
     --hash=sha256:41571c89ca91598c79e8ef18a2d07367d4810fbbd6f637794879baf1b7703423 \
     --hash=sha256:66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728
-    # via mcp
+    # via
+    #   ghidra-mcp (pyproject.toml)
+    #   mcp
 pyparsing==3.3.2 \
     --hash=sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d \
     --hash=sha256:c777f4d763f140633dcb6d8a3eda953bf7a214dc4eff598413c070bcdc117cbc

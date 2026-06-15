@@ -35,6 +35,15 @@ classifiers = [
 dependencies = [
   "mcp>=1.2.0",        # official Model Context Protocol SDK (FastMCP). stdio transport in v1.
   "pydantic>=2.6",     # boundary validation: every tool input AND output schema (PLAN §3).
+  # OAuth identity source (v1.2 — ADR-019 increment B). JWT access tokens validated LOCALLY via
+  # JWKS (resource server): PyJWT[crypto] decodes/verifies with a PINNED alg allow-list; cryptography
+  # backs the asymmetric (RS*/ES*) signature verification + JWKS key parsing. PyJWT's PyJWKClient
+  # (stdlib urllib under the hood — NO new HTTP dep) fetches + caches the JWKS. Both are vetted,
+  # widely-used, OSI-licensed (PyJWT = MIT; cryptography = Apache-2.0 OR BSD-3-Clause) and were
+  # already present transitively via mcp — promoted to DIRECT, pinned-by-version deps here so the
+  # OAuth code owns its supply-chain surface; the lockfile is the source of truth for exact hashes.
+  "pyjwt[crypto]>=2.10",  # JWT decode/verify (signature + iss/aud/exp/nbf) — MIT.
+  "cryptography>=44",     # asymmetric signature verify + JWKS key parsing — Apache-2.0/BSD.
 ]
 
 [project.optional-dependencies]

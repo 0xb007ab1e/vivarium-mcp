@@ -345,3 +345,224 @@ def test_non_mtls_config_leaves_client_ca_none() -> None:
     assert cfg.http is not None
     assert cfg.http.tls_client_ca is None
     assert cfg.http.mtls_principal_field == "cn"  # default, harmless for bearer
+
+
+# ==============================================================================================
+# OAuth config (ADR-019 increment B): issuer/audience/JWKS URI (required for oauth) + principal
+# claim / PINNED algorithm allow-list / leeway. None is a secret (the access token is per-request).
+# Fail-closed startup: oauth without iss/aud/jwks, or an unsafe algorithm, must refuse to boot.
+# ==============================================================================================
+_ISS = "https://idp.example/realm"
+_AUD = "ghidra-mcp"
+_JWKS = "https://idp.example/realm/jwks"
+
+
+def _oauth_env(**extra: str) -> dict[str, str]:
+    """A loopback HTTP env with auth=oauth (no server TLS needed on loopback — like bearer)."""
+    return _env(
+        GHIDRA_MCP_TRANSPORT="http",
+        GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
+        GHIDRA_MCP_HTTP_AUTH="oauth",
+        **extra,
+    )
+
+
+def test_oauth_full_valid_config_defaults() -> None:
+    cfg = load_config(
+        _oauth_env(
+            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
+            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+        )
+    )
+    assert cfg.http is not None
+    h = cfg.http
+    assert h.auth_mode == "oauth"
+    assert h.oauth_issuer == _ISS and h.oauth_audience == _AUD and h.oauth_jwks_uri == _JWKS
+    assert h.oauth_principal_claim == "sub"  # secure default
+    assert h.oauth_algorithms == ("RS256", "ES256")  # secure default (asymmetric)
+    assert h.oauth_leeway_s == 30  # small default
+
+
+def test_oauth_without_issuer_fails_closed() -> None:
+    with pytest.raises(GhidraMcpError, match="oauth auth requires an issuer"):
+        load_config(
+            _oauth_env(
+                GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+                GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+            )
+        )
+
+
+def test_oauth_without_audience_fails_closed() -> None:
+    with pytest.raises(GhidraMcpError, match="oauth auth requires an issuer"):
+        load_config(
+            _oauth_env(
+                GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
+                GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+            )
+        )
+
+
+def test_oauth_without_jwks_uri_fails_closed() -> None:
+    with pytest.raises(GhidraMcpError, match="oauth auth requires an issuer"):
+        load_config(
+            _oauth_env(
+                GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
+                GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+            )
+        )
+
+
+def test_oauth_principal_claim_configurable() -> None:
+    cfg = load_config(
+        _oauth_env(
+            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
+            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+            GHIDRA_MCP_HTTP_OAUTH_PRINCIPAL_CLAIM="email",
+        )
+    )
+    assert cfg.http is not None
+    assert cfg.http.oauth_principal_claim == "email"
+
+
+def test_oauth_algorithms_parsed_and_deduped() -> None:
+    cfg = load_config(
+        _oauth_env(
+            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
+            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+            GHIDRA_MCP_HTTP_OAUTH_ALGORITHMS="ES256, RS256 , ES256",  # dup + spaces
+        )
+    )
+    assert cfg.http is not None
+    assert cfg.http.oauth_algorithms == ("ES256", "RS256")  # order-preserving, de-duped
+
+
+@pytest.mark.parametrize("bad", ["none", "HS256", "HS512", "made-up", "none,RS256", "RS256,HS256"])
+def test_oauth_unsafe_algorithm_fails_closed(bad: str) -> None:
+    """``none`` and symmetric ``HS*`` (and unknown) algs are rejected at startup (fail closed)."""
+    with pytest.raises(GhidraMcpError, match="unsupported algorithm"):
+        load_config(
+            _oauth_env(
+                GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
+                GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+                GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+                GHIDRA_MCP_HTTP_OAUTH_ALGORITHMS=bad,
+            )
+        )
+
+
+def test_oauth_empty_algorithm_list_after_parse_fails_closed() -> None:
+    """A set-but-content-free list (only separators) is rejected — not a silent fall-back."""
+    with pytest.raises(GhidraMcpError, match="at least one algorithm"):
+        load_config(
+            _oauth_env(
+                GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
+                GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+                GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+                GHIDRA_MCP_HTTP_OAUTH_ALGORITHMS=" , ,",
+            )
+        )
+
+
+def test_oauth_leeway_configurable() -> None:
+    cfg = load_config(
+        _oauth_env(
+            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
+            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+            GHIDRA_MCP_HTTP_OAUTH_LEEWAY_SECONDS="5",
+        )
+    )
+    assert cfg.http is not None
+    assert cfg.http.oauth_leeway_s == 5
+
+
+def test_oauth_leeway_non_positive_fails_closed() -> None:
+    with pytest.raises(GhidraMcpError, match="positive integer"):
+        load_config(
+            _oauth_env(
+                GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
+                GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+                GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+                GHIDRA_MCP_HTTP_OAUTH_LEEWAY_SECONDS="0",
+            )
+        )
+
+
+def test_oauth_principal_claim_too_long_fails_closed() -> None:
+    with pytest.raises(GhidraMcpError, match="too long"):
+        load_config(
+            _oauth_env(
+                GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
+                GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+                GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+                GHIDRA_MCP_HTTP_OAUTH_PRINCIPAL_CLAIM="c" * 65,
+            )
+        )
+
+
+def test_oauth_over_network_bind_requires_server_tls() -> None:
+    """A network oauth bind still needs server TLS (the generic is_network rule)."""
+    with pytest.raises(GhidraMcpError, match="requires TLS"):
+        load_config(
+            _env(
+                GHIDRA_MCP_TRANSPORT="http",
+                GHIDRA_MCP_HTTP_BIND="0.0.0.0:8765",
+                GHIDRA_MCP_HTTP_AUTH="oauth",
+                GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
+                GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+                GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+            )
+        )
+
+
+def test_oauth_network_bind_full_valid_config() -> None:
+    cfg = load_config(
+        _env(
+            GHIDRA_MCP_TRANSPORT="http",
+            GHIDRA_MCP_HTTP_BIND="0.0.0.0:8765",
+            GHIDRA_MCP_HTTP_AUTH="oauth",
+            GHIDRA_MCP_HTTP_TLS_CERT="/c.pem",
+            GHIDRA_MCP_HTTP_TLS_KEY="/k.pem",
+            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
+            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+        )
+    )
+    assert cfg.http is not None
+    h = cfg.http
+    assert h.is_network is True and h.auth_mode == "oauth"
+    assert h.oauth_issuer == _ISS and h.oauth_jwks_uri == _JWKS
+
+
+def test_non_oauth_config_leaves_oauth_fields_default() -> None:
+    """For bearer, the OAuth fields keep their (harmless) defaults — None issuer, default algs."""
+    cfg = load_config(
+        _env(
+            GHIDRA_MCP_TRANSPORT="http",
+            GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
+            GHIDRA_MCP_HTTP_AUTH="bearer",
+            GHIDRA_MCP_HTTP_BEARER_TOKEN=_TOKEN,
+        )
+    )
+    assert cfg.http is not None
+    assert cfg.http.oauth_issuer is None
+    assert cfg.http.oauth_algorithms == ("RS256", "ES256")
+    assert cfg.http.oauth_principal_claim == "sub"
+
+
+def test_oauth_token_not_present_in_repr() -> None:
+    """OAuth config is non-secret (no stored token) — but the repr must still be benign/loggable."""
+    cfg = load_config(
+        _oauth_env(
+            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
+            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+        )
+    )
+    assert cfg.http is not None
+    # issuer/audience/jwks are non-secret config and MAY appear (they are loggable); no token here.
+    assert _ISS in repr(cfg.http)
