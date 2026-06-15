@@ -17,6 +17,10 @@ from dataclasses import dataclass, field
 
 from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from ghidra_mcp.security.limits import Limits, resolve_limits
+from ghidra_mcp.server.auth import (
+    MTLS_PRINCIPAL_FIELD_DEFAULT,
+    MTLS_PRINCIPAL_FIELDS,
+)
 
 # Environment variable names (12-Factor; documented in .env.example). Centralized so the read set
 # is a single, auditable allow-list.
@@ -50,6 +54,10 @@ _ENV_HTTP_BEARER_TOKEN = "GHIDRA_MCP_HTTP_BEARER_TOKEN"  # noqa: S105  # nosec B
 # single-token var above stays valid (back-compat → the ``bearer`` principal). Env-var NAME, not a
 # secret; the VALUES it points at are secrets (kept out of repr/logs — workflow-secrets).
 _ENV_HTTP_BEARER_TOKENS = "GHIDRA_MCP_HTTP_BEARER_TOKENS"  # nosec B105 - env var name, not a secret
+# mTLS (v1.2 — ADR-019 increment A). Read only when auth_mode=mtls. Env-var NAMES, not secrets; the
+# CA bundle is a (loggable) path, not a secret.
+_ENV_HTTP_TLS_CLIENT_CA = "GHIDRA_MCP_HTTP_TLS_CLIENT_CA"
+_ENV_HTTP_MTLS_PRINCIPAL_FIELD = "GHIDRA_MCP_HTTP_MTLS_PRINCIPAL_FIELD"
 _ENV_HTTP_CORS_ORIGINS = "GHIDRA_MCP_HTTP_CORS_ORIGINS"
 _ENV_HTTP_RATE_PER_S = "GHIDRA_MCP_HTTP_RATE_PER_SECOND"
 _ENV_HTTP_RATE_BURST = "GHIDRA_MCP_HTTP_RATE_BURST"
@@ -71,6 +79,10 @@ _VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR"})
 _VALID_LOG_FORMATS = frozenset({"json", "text"})
 _VALID_TRANSPORTS = frozenset({"stdio", "http"})
 _VALID_HTTP_AUTH = frozenset({"none", "bearer", "mtls", "oauth"})
+# mTLS principal-field selectors (ADR-019 D2). Single source of truth in ``server.auth`` so the
+# config allow-list and the authenticator can never drift apart.
+_VALID_MTLS_PRINCIPAL_FIELDS = MTLS_PRINCIPAL_FIELDS
+_DEFAULT_MTLS_PRINCIPAL_FIELD = MTLS_PRINCIPAL_FIELD_DEFAULT
 
 # Cap on string-valued config to bound startup input (worker image refs, socket dirs).
 _MAX_CONFIG_STR_LEN = 512
@@ -111,6 +123,12 @@ class HttpConfig:
         is_unix_socket: True iff a UDS bind (same-host; filesystem-permission auth).
         tls_cert / tls_key: PEM paths for in-app TLS, or ``None`` (e.g. plaintext loopback or
             reverse-proxy-terminated TLS). Both-or-neither.
+        tls_client_ca: PEM path to the client-CA bundle the TLS handshake verifies client certs
+            against (mTLS — ADR-019 D2). Required when ``auth_mode == "mtls"``, else ``None``. Not a
+            secret (a public CA bundle path) — safe to log.
+        mtls_principal_field: The verified peer-cert field that maps to the principal id under mTLS
+            (one of :data:`_VALID_MTLS_PRINCIPAL_FIELDS`; default subject CN). Only meaningful when
+            ``auth_mode == "mtls"``.
         auth_mode: ``"none"`` (loopback/UDS only) / ``"bearer"`` (built) / ``"mtls"`` / ``"oauth"``.
         bearer_token: The first bearer secret when ``auth_mode == "bearer"`` (else ``None``) — NOT
             logged. Retained for back-compat / single-token construction; the authoritative source
@@ -137,6 +155,9 @@ class HttpConfig:
     max_body_bytes: int
     # Last (defaulted) so existing keyword constructions stay valid; secret KEYS kept out of repr.
     bearer_tokens: dict[str, str] = field(default_factory=dict, repr=False)
+    # mTLS (ADR-019 A). Defaulted so existing keyword constructions stay valid. Neither is a secret.
+    tls_client_ca: str | None = None
+    mtls_principal_field: str = MTLS_PRINCIPAL_FIELD_DEFAULT
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,8 +437,9 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
 
     Raises:
         GhidraMcpError: ``VALIDATION`` if a non-loopback bind lacks TLS or an authenticator, if
-            bearer auth lacks at least one sufficiently long token, if TLS cert/key are not
-            both-or-neither, or if CORS contains ``*``. The process must refuse to boot.
+            bearer auth lacks at least one sufficiently long token, if mTLS auth lacks a client-CA
+            bundle, if TLS cert/key are not both-or-neither, or if CORS contains ``*``. The process
+            must refuse to boot.
     """
     bind = _read_str(src, _ENV_HTTP_BIND, _DEFAULT_HTTP_BIND, required=False)
     is_unix_socket, is_network = _parse_bind(bind)
@@ -430,6 +452,16 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
     # Loopback/UDS may run unauthenticated (single trusted host); a network bind defaults to bearer.
     auth_mode = _read_choice(
         src, _ENV_HTTP_AUTH, "bearer" if is_network else "none", _VALID_HTTP_AUTH
+    )
+
+    # mTLS (ADR-019 D2): the client-CA bundle backs the handshake verify gate; the principal field
+    # selects which verified-cert field maps to the principal id (validated allow-list).
+    tls_client_ca = _read_str(src, _ENV_HTTP_TLS_CLIENT_CA, "", required=False) or None
+    mtls_principal_field = _read_choice(
+        src,
+        _ENV_HTTP_MTLS_PRINCIPAL_FIELD,
+        _DEFAULT_MTLS_PRINCIPAL_FIELD,
+        _VALID_MTLS_PRINCIPAL_FIELDS,
     )
     single_token = _read_str(src, _ENV_HTTP_BEARER_TOKEN, "", required=False) or None
     # Multi-principal bearer map (ADR-017): per-token validation (length floor) + id allow-listing +
@@ -453,6 +485,15 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
         )
     if auth_mode == "bearer" and not bearer_tokens:
         raise _startup_error("bearer auth requires at least one token of at least 16 characters")
+    if auth_mode == "mtls" and tls_client_ca is None:
+        # The handshake gate (uvicorn CERT_REQUIRED) cannot verify clients without a CA bundle —
+        # refuse to boot rather than fall back to an unverified/no-auth posture (fail closed).
+        raise _startup_error("mTLS auth requires a client-CA bundle (set the client CA path)")
+    if auth_mode == "mtls" and tls_cert is None:
+        # mTLS runs the client-cert handshake on the server's TLS listener; on a PLAINTEXT listener
+        # uvicorn silently ignores CERT_REQUIRED / ssl_ca_certs (is_ssl is False) — the handshake
+        # gate would not exist (CWE-1188). Refuse to boot (fail closed; covers loopback + UDS).
+        raise _startup_error("mTLS auth requires server TLS (set cert and key)")
     if "*" in cors_origins:
         raise _startup_error("HTTP CORS origins must be explicit; '*' is not allowed")
 
@@ -465,6 +506,8 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
         auth_mode=auth_mode,
         bearer_token=single_token,
         bearer_tokens=bearer_tokens,
+        tls_client_ca=tls_client_ca,
+        mtls_principal_field=mtls_principal_field,
         cors_origins=cors_origins,
         rate_per_second=rate_per_second,
         rate_burst=rate_burst,

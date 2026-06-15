@@ -13,7 +13,12 @@ from typing import Any
 import pytest
 
 from ghidra_mcp.server import http_middleware as _mw
-from ghidra_mcp.server.auth import BearerAuthenticator, NullAuthenticator, Principal
+from ghidra_mcp.server.auth import (
+    BearerAuthenticator,
+    MtlsAuthenticator,
+    NullAuthenticator,
+    Principal,
+)
 from ghidra_mcp.server.http_middleware import (
     _SCOPE_PRINCIPAL_KEY,
     AuthenticationMiddleware,
@@ -44,8 +49,17 @@ def _scope(
     headers: list[tuple[bytes, bytes]] | None = None,
     client: tuple[str, int] | None = ("1.2.3.4", 5555),
     kind: str = "http",
+    extensions: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {"type": kind, "method": method, "headers": headers or [], "client": client}
+    scope: dict[str, Any] = {
+        "type": kind,
+        "method": method,
+        "headers": headers or [],
+        "client": client,
+    }
+    if extensions is not None:
+        scope["extensions"] = extensions
+    return scope
 
 
 def _drive(mw: Any, scope: dict[str, Any]) -> tuple[int | None, bytes]:
@@ -187,3 +201,62 @@ def test_auth_null_authenticator_passes() -> None:
     status, _ = _drive(mw, _scope(headers=[]))
     assert status == 200 and app.called is True
     assert app.seen_scope["state"][_SCOPE_PRINCIPAL_KEY] == Principal(id="local")  # type: ignore[index]
+
+
+# --- mTLS peer-cert extraction (ADR-019 increment A) -------------------------------------------
+# The verified peer cert is read from the ASGI TLS extension (scope["extensions"]["tls"]["peercert"]
+# — the parsed ssl.getpeercert() dict). These assert the middleware surfaces it into AuthContext and
+# the wired MtlsAuthenticator maps it (or fails closed → 401 with no cert). SYNTHETIC certs only.
+
+
+def _tls_scope(peercert: Any, *, present: bool = True) -> dict[str, Any]:
+    """A scope with the ASGI TLS extension carrying ``peercert`` (or absent when present=False)."""
+    if not present:
+        return _scope(headers=[])
+    return _scope(headers=[], extensions={"tls": {"peercert": peercert}})
+
+
+def test_peer_certificate_extracted_from_tls_extension() -> None:
+    """The helper returns the parsed cert dict from scope["extensions"]["tls"]["peercert"]."""
+    cert = {"subject": ((("commonName", "alice"),),)}
+    assert _mw._peer_certificate(_tls_scope(cert)) == cert
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        _scope(headers=[]),  # no extensions key at all
+        _scope(headers=[], extensions={}),  # extensions present, no tls
+        _scope(headers=[], extensions={"tls": {}}),  # tls present, no peercert
+        {"type": "http", "extensions": "not-a-dict"},  # extensions wrong type
+        {"type": "http", "extensions": {"tls": "not-a-dict"}},  # tls wrong type
+    ],
+)
+def test_peer_certificate_absent_returns_none(scope: dict[str, Any]) -> None:
+    assert _mw._peer_certificate(scope) is None
+
+
+def test_auth_mtls_maps_verified_cert_to_principal() -> None:
+    """The middleware threads the verified peer cert → MtlsAuthenticator → stashed Principal."""
+    app = _App()
+    mw = AuthenticationMiddleware(app, authenticator=MtlsAuthenticator())  # default cn
+    cert = {"subject": ((("commonName", "carol"),),)}
+    status, _ = _drive(mw, _tls_scope(cert))
+    assert status == 200 and app.called is True
+    assert app.seen_scope["state"][_SCOPE_PRINCIPAL_KEY] == Principal(id="carol")  # type: ignore[index]
+
+
+def test_auth_mtls_no_client_cert_is_401() -> None:
+    """No verified peer cert in the scope → the authenticator fails closed → generic 401."""
+    app = _App()
+    mw = AuthenticationMiddleware(app, authenticator=MtlsAuthenticator())
+    status, _ = _drive(mw, _tls_scope(None, present=False))
+    assert status == 401 and app.called is False
+
+
+def test_auth_mtls_empty_cn_is_401() -> None:
+    """A verified cert whose mapped field is empty → fail closed → 401 (no anonymous principal)."""
+    app = _App()
+    mw = AuthenticationMiddleware(app, authenticator=MtlsAuthenticator())
+    status, _ = _drive(mw, _tls_scope({"subject": ((("commonName", ""),),)}))
+    assert status == 401 and app.called is False

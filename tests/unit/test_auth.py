@@ -9,6 +9,8 @@ from __future__ import annotations
 import pytest
 
 from ghidra_mcp.server.auth import (
+    MTLS_PRINCIPAL_FIELD_DEFAULT,
+    MTLS_PRINCIPAL_FIELDS,
     AuthContext,
     Authenticator,
     BearerAuthenticator,
@@ -68,10 +70,10 @@ def test_null_authenticator_accepts_everything_as_local() -> None:
     assert auth.authenticate(AuthContext(authorization="anything")) == Principal(id="local")
 
 
-@pytest.mark.parametrize("cls", [MtlsAuthenticator, OAuthResourceAuthenticator])
-def test_port_ready_stubs_raise_until_built(cls: type) -> None:
+def test_oauth_stub_raises_until_built() -> None:
+    """OAuth is the remaining port-ready stub (increment B); mTLS is now BUILT (increment A)."""
     with pytest.raises(NotImplementedError):
-        cls().authenticate(AuthContext())
+        OAuthResourceAuthenticator().authenticate(AuthContext())
 
 
 @pytest.mark.parametrize(
@@ -103,6 +105,24 @@ def test_build_authenticator_maps_modes() -> None:
     )
     assert isinstance(build_authenticator("mtls", bearer_token=None), MtlsAuthenticator)
     assert isinstance(build_authenticator("oauth", bearer_token=None), OAuthResourceAuthenticator)
+
+
+def test_build_authenticator_mtls_uses_configured_field() -> None:
+    """``build_authenticator`` threads the principal field into the mTLS authenticator."""
+    auth = build_authenticator("mtls", mtls_principal_field="san-dns")
+    assert isinstance(auth, MtlsAuthenticator)
+    assert auth.principal_field == "san-dns"
+
+
+def test_build_authenticator_mtls_default_field_is_cn() -> None:
+    auth = build_authenticator("mtls")
+    assert isinstance(auth, MtlsAuthenticator)
+    assert auth.principal_field == MTLS_PRINCIPAL_FIELD_DEFAULT == "cn"
+
+
+def test_build_authenticator_mtls_bad_field_fails() -> None:
+    with pytest.raises(ValueError, match="unknown mTLS principal field"):
+        build_authenticator("mtls", mtls_principal_field="serial")
 
 
 def test_build_authenticator_bearer_without_token_fails() -> None:
@@ -213,3 +233,217 @@ def test_build_authenticator_combines_single_token_and_map() -> None:
     assert auth.authenticate(AuthContext(authorization=f"Bearer {_TOKEN_A}")) == Principal(
         id="alice"
     )
+
+
+# ==============================================================================================
+# MtlsAuthenticator (ADR-019 increment A) — server-terminated, in-app mTLS: the VERIFIED peer cert
+# (the handshake already chain-verified it to the configured CA) maps via a configured field →
+# Principal; fail closed (generic None) on absent cert / empty field; no oracle. Hermetic — driven
+# with SYNTHETIC parsed-cert dicts in the exact shape ``ssl.getpeercert()`` returns; NO real keys
+# (the live uvicorn mTLS handshake is integration-gated, like other live edges).
+# ==============================================================================================
+
+
+def _cert(
+    *,
+    subject: tuple[object, ...] | None = ((("commonName", "alice"),),),
+    san: tuple[object, ...] | None = None,
+) -> dict[str, object]:
+    """Build a synthetic ``getpeercert()``-shaped dict (subject RDNs + optional subjectAltName)."""
+    cert: dict[str, object] = {}
+    if subject is not None:
+        cert["subject"] = subject
+    if san is not None:
+        cert["subjectAltName"] = san
+    return cert
+
+
+def test_mtls_default_field_is_cn() -> None:
+    assert MtlsAuthenticator().principal_field == "cn"
+
+
+def test_mtls_rejects_unknown_field_at_construction() -> None:
+    with pytest.raises(ValueError, match="unknown mTLS principal field"):
+        MtlsAuthenticator(principal_field="serial")
+
+
+def test_mtls_maps_subject_cn_to_principal() -> None:
+    auth = MtlsAuthenticator()  # default cn
+    assert auth.authenticate(AuthContext(peer_certificate=_cert())) == Principal(id="alice")
+
+
+def test_mtls_cn_picks_first_common_name_skipping_other_rdns() -> None:
+    """A multi-RDN subject: non-CN attributes are skipped; the first commonName wins."""
+    subject = ((("organizationName", "acme"),), (("commonName", "bob"),))
+    auth = MtlsAuthenticator(principal_field="cn")
+    assert auth.authenticate(AuthContext(peer_certificate=_cert(subject=subject))) == Principal(
+        id="bob"
+    )
+
+
+def test_mtls_dn_renders_full_subject() -> None:
+    subject = ((("organizationName", "acme"),), (("commonName", "carol"),))
+    auth = MtlsAuthenticator(principal_field="dn")
+    assert auth.authenticate(AuthContext(peer_certificate=_cert(subject=subject))) == Principal(
+        id="organizationName=acme,commonName=carol"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "tag"),
+    [("san-dns", "DNS"), ("san-uri", "URI"), ("san-email", "email")],
+)
+def test_mtls_maps_san_field(field_name: str, tag: str) -> None:
+    """Each SAN selector reads the first matching SAN entry of the right tag."""
+    san = (("othername", "ignored"), (tag, "svc.example.test"))
+    auth = MtlsAuthenticator(principal_field=field_name)
+    assert auth.authenticate(AuthContext(peer_certificate=_cert(san=san))) == Principal(
+        id="svc.example.test"
+    )
+
+
+def test_mtls_san_first_matching_entry_wins() -> None:
+    san = (("DNS", "first.example"), ("DNS", "second.example"))
+    auth = MtlsAuthenticator(principal_field="san-dns")
+    assert auth.authenticate(AuthContext(peer_certificate=_cert(san=san))) == Principal(
+        id="first.example"
+    )
+
+
+# --- Fail-closed (generic None, no oracle) ----------------------------------------------------
+def test_mtls_no_peer_cert_is_rejected() -> None:
+    """No verified peer cert (None) → fail closed (defense in depth atop the handshake gate)."""
+    assert MtlsAuthenticator().authenticate(AuthContext(peer_certificate=None)) is None
+    assert MtlsAuthenticator().authenticate(AuthContext()) is None  # default None
+
+
+@pytest.mark.parametrize(
+    "cert",
+    [
+        "not-a-dict",  # unexpected shape (non-mapping) → fail closed
+        b"\x00bytes",  # DER bytes, not the parsed dict → fail closed
+        12345,  # nonsense
+    ],
+)
+def test_mtls_non_mapping_cert_is_rejected(cert: object) -> None:
+    assert MtlsAuthenticator().authenticate(AuthContext(peer_certificate=cert)) is None
+
+
+def test_mtls_cn_missing_subject_is_rejected() -> None:
+    ctx = AuthContext(peer_certificate=_cert(subject=None))
+    assert MtlsAuthenticator().authenticate(ctx) is None
+
+
+def test_mtls_cn_no_common_name_in_subject_is_rejected() -> None:
+    subject = ((("organizationName", "acme"),),)  # only O=, no CN
+    assert (
+        MtlsAuthenticator().authenticate(AuthContext(peer_certificate=_cert(subject=subject)))
+        is None
+    )
+
+
+def test_mtls_empty_cn_value_is_rejected() -> None:
+    """An empty mapped field → fail closed (no empty/anonymous principal id)."""
+    subject = ((("commonName", ""),),)
+    assert (
+        MtlsAuthenticator().authenticate(AuthContext(peer_certificate=_cert(subject=subject)))
+        is None
+    )
+
+
+def test_mtls_dn_empty_subject_is_rejected() -> None:
+    assert (
+        MtlsAuthenticator(principal_field="dn").authenticate(
+            AuthContext(peer_certificate=_cert(subject=()))
+        )
+        is None
+    )
+
+
+def test_mtls_dn_only_malformed_rdns_is_rejected() -> None:
+    """A subject whose RDNs are all malformed yields no parts → None (fail closed)."""
+    subject = ("not-an-rdn", (("commonName", 123),))  # wrong types → skipped
+    assert (
+        MtlsAuthenticator(principal_field="dn").authenticate(
+            AuthContext(peer_certificate=_cert(subject=subject))
+        )
+        is None
+    )
+
+
+def test_mtls_san_field_missing_san_is_rejected() -> None:
+    assert (
+        MtlsAuthenticator(principal_field="san-dns").authenticate(
+            AuthContext(peer_certificate=_cert(san=None))
+        )
+        is None
+    )
+
+
+def test_mtls_san_field_wrong_tag_is_rejected() -> None:
+    """san-dns must not fall back to an email/URI SAN — only its tag counts."""
+    san = (("email", "x@example.test"), ("URI", "spiffe://x"))
+    assert (
+        MtlsAuthenticator(principal_field="san-dns").authenticate(
+            AuthContext(peer_certificate=_cert(san=san))
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "not-a-tuple",  # subject is not a sequence
+        ("malformed-rdn",),  # rdn is not a sequence
+        ((("commonName",),),),  # pair has wrong arity
+        (((123, "alice"),),),  # attr name not a str (dn skips it)
+        ((("commonName", 999),),),  # CN value not a str
+    ],
+)
+def test_mtls_cn_tolerates_malformed_shapes_failing_closed(subject: object) -> None:
+    """Hostile/odd cert shapes never raise — every extractor returns None (fail closed)."""
+    assert (
+        MtlsAuthenticator().authenticate(AuthContext(peer_certificate=_cert(subject=subject)))  # type: ignore[arg-type]
+        is None
+    )
+
+
+def test_mtls_san_tolerates_malformed_shapes_failing_closed() -> None:
+    san: tuple[object, ...] = ("not-a-pair", ("DNS",), ("DNS", 123))  # arity/type junk
+    assert (
+        MtlsAuthenticator(principal_field="san-dns").authenticate(
+            AuthContext(peer_certificate=_cert(san=san))
+        )
+        is None
+    )
+
+
+def test_mtls_san_non_sequence_is_rejected() -> None:
+    assert (
+        MtlsAuthenticator(principal_field="san-dns").authenticate(
+            AuthContext(peer_certificate={"subjectAltName": "not-a-tuple"})
+        )
+        is None
+    )
+
+
+def test_mtls_two_distinct_certs_yield_two_distinct_principals() -> None:
+    """Distinct certs → distinct principals → distinct owner-scoped sessions (composes ADR-017)."""
+    auth = MtlsAuthenticator()
+    alice = auth.authenticate(AuthContext(peer_certificate=_cert()))  # default CN = "alice"
+    bob = auth.authenticate(
+        AuthContext(peer_certificate=_cert(subject=((("commonName", "bob"),),)))
+    )
+    assert alice == Principal(id="alice")
+    assert bob == Principal(id="bob")
+    assert alice != bob
+
+
+def test_mtls_authenticator_satisfies_protocol() -> None:
+    assert isinstance(MtlsAuthenticator(), Authenticator)
+
+
+def test_mtls_principal_field_set_matches_default_membership() -> None:
+    assert MTLS_PRINCIPAL_FIELD_DEFAULT in MTLS_PRINCIPAL_FIELDS
+    assert frozenset({"cn", "san-dns", "san-uri", "san-email", "dn"}) == MTLS_PRINCIPAL_FIELDS

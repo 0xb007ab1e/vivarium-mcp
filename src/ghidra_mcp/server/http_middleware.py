@@ -10,7 +10,10 @@ The security edge of the HTTP shell, applied around FastMCP's Streamable-HTTP ap
 - :class:`AuthenticationMiddleware` — default-deny: runs the injected :class:`Authenticator`
   (`ghidra_mcp.server.auth`); a rejected request gets a generic ``401`` (no oracle), an accepted one
   has its :class:`~ghidra_mcp.server.auth.Principal` stashed on the ASGI scope for the per-request
-  authZ check (slice 4). CORS preflight (``OPTIONS``) is exempt (it carries no credentials).
+  authZ check (slice 4). It builds the :class:`~ghidra_mcp.server.auth.AuthContext` from the
+  request: the ``Authorization`` header (bearer) + the **verified** client cert from the TLS extn
+  (mTLS — ADR-019 D2; the "TLS-terminator wiring" ADR-011 deferred). CORS preflight (``OPTIONS``) is
+  exempt (it carries no credentials).
 
 Pure ASGI (operate on ``scope``/``receive``/``send``) so they are framework-light and
 100%-unit-testable with a tiny in-memory harness — no live server needed. Error responses reuse the
@@ -49,6 +52,29 @@ def _header(scope: Scope, name: bytes) -> bytes | None:
         if key == name:
             return cast("bytes", value)
     return None
+
+
+def _peer_certificate(scope: Scope) -> object | None:
+    """Extract the **verified** client cert from the ASGI scope's TLS extension, or ``None``.
+
+    Source: the ASGI **TLS extension** — ``scope["extensions"]["tls"]["peercert"]`` (mTLS, ADR-019
+    D2). The value is the parsed mapping :func:`ssl.SSLSocket.getpeercert` returns
+    (``{"subject": ..., "subjectAltName": ...}``); the TLS terminator (uvicorn, configured with
+    ``ssl_cert_reqs=CERT_REQUIRED`` + the client-CA bundle) only admits a CA-verified client, so a
+    cert present here has already been chain-verified at the handshake. This middleware merely
+    surfaces it for the in-app principal mapping (defense in depth). When the extension is absent or
+    carries no cert (e.g. bearer mode, plaintext loopback, or a terminator that does not populate
+    it), this returns ``None`` and the mTLS authenticator fails closed.
+
+    No new dependency: the value is the stdlib ``ssl`` parsed dict; this only reads ``scope``.
+    """
+    extensions = scope.get("extensions")
+    if not isinstance(extensions, dict):
+        return None
+    tls = extensions.get("tls")
+    if not isinstance(tls, dict):
+        return None
+    return tls.get("peercert")
 
 
 async def _send_error(send: Send, status: int, title: str, detail: str) -> None:
@@ -160,7 +186,11 @@ class AuthenticationMiddleware:
             return
         authorization = _header(scope, b"authorization")
         principal = self.authenticator.authenticate(
-            AuthContext(authorization=authorization.decode("latin-1") if authorization else None)
+            AuthContext(
+                authorization=authorization.decode("latin-1") if authorization else None,
+                # The verified peer cert (mTLS — ADR-019 D2), or None for non-mTLS / no client cert.
+                peer_certificate=_peer_certificate(scope),
+            )
         )
         if principal is None:
             await _send_error(send, 401, "Unauthorized", "Authentication required.")

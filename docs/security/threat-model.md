@@ -835,13 +835,14 @@ positive cases (68 export round-trip; 70 happy import) must SUCCEED:
     the worker (`_gh_export_annotations`); import re-validation + replay-orchestration are JVM-free
     server code over the existing write RPCs. (TB8-E — extends the prior ADR-001 invariant cases)
 
-## 13. TB6 (delta) — mTLS + OAuth identity sources (v1.2 — ADR-019, ACCEPTED design)
+## 13. TB6 (delta) — mTLS + OAuth identity sources (v1.2 — ADR-019; mTLS BUILT, OAuth design)
 
 Builds out the two `Authenticator` stubs ADR-011 left port-ready, **hardening TB6 — no new boundary**.
 Both map a request to a `Principal(id)` that feeds the **ADR-017 ownership mechanism unchanged**
-(distinct identity = distinct owner-scoped sessions). Delivered as two increments: **mTLS first**
-(server-terminated, in-app uvicorn TLS + the `peer_certificate` seam — no new dep), **OAuth second**
-(JWT validated locally via JWKS — adds a pinned, vetted PyJWT+cryptography dep, `std-supplychain`).
+(distinct identity = distinct owner-scoped sessions). Delivered as two increments: **mTLS first —
+BUILT (ADR-019 increment A)** (server-terminated, in-app uvicorn TLS + the `peer_certificate` seam —
+no new dep; abuse cases 67-71 added below), **OAuth second** (JWT validated locally via JWKS — adds a
+pinned, vetted PyJWT+cryptography dep, `std-supplychain`; still design-only, port stub).
 
 | STRIDE | Threat | Mitigation |
 |--------|--------|------------|
@@ -853,8 +854,32 @@ Both map a request to a `Principal(id)` that feeds the **ADR-017 ownership mecha
 | **E** | Mechanism grants extra capability | a valid identity gets only the read-only catalog + its **own** owner-scoped sessions (ADR-017); sub→principal only — per-scope/role authZ is out of scope |
 
 **mTLS = server-terminated, in-app** (reverse-proxy-header trust is a deferred footgun). **OAuth =
-JWT/JWKS local** (introspection deferred). The formal abuse-case lists land with each implementation
-PR: **mTLS** — no client cert / untrusted-CA cert / empty mapped field / two distinct certs → two
-distinct owner-scoped principals; **OAuth** — `alg:none`, wrong `iss`/`aud`, expired/not-yet-valid, bad
-signature, unknown `kid`, missing `sub`. No real secrets in tests (synthetic certs / a test keypair;
-JWKS mocked).
+JWT/JWKS local** (introspection deferred).
+
+**mTLS abuse cases — ADDED (ADR-019 increment A), `tests/security/test_abuse_cases.py`:**
+- **Case 67** — no client cert (None peer cert) → generic reject (fail closed, defense in depth atop
+  the handshake gate). *(hermetic)*
+- **Case 68** — empty / missing mapped field (empty CN, no CN) → generic reject (no anonymous
+  principal). *(hermetic)*
+- **Case 69** — two distinct verified certs → two distinct principals → two distinct owner-scoped
+  sessions; cross-principal access is the same `SESSION_INVALID` as unknown (composes ADR-017,
+  cases 61-63). *(hermetic)*
+- **Case 70** — a cert from an **untrusted CA** is rejected at the **TLS handshake**
+  (uvicorn `ssl_cert_reqs=CERT_REQUIRED` + `ssl_ca_certs` — the connection never reaches the app;
+  config guarantees the CA bundle is set for `auth_mode=mtls`). *(LIVE — integration-gated; needs the
+  uvicorn TLS listener + a synthetic untrusted-CA keypair)*
+- **Case 71** — the cert subject/SAN material is **never logged** (TB6-R/I); `AuthContext` keeps the
+  peer cert out of `repr`. *(hermetic)*
+
+Cert parsing is hermetic with **synthetic** parsed-cert dicts (the `ssl.getpeercert()` shape); the
+live uvicorn mTLS handshake (case 70) is integration-gated — no real keys/secrets.
+
+**OAuth abuse cases (increment B — not yet built):** `alg:none`, wrong `iss`/`aud`,
+expired/not-yet-valid, bad signature, unknown `kid`, missing `sub`. JWT validation hermetic with a
+test keypair; JWKS mocked.
+
+**Live status (mTLS, increment A):** the authenticator + cert-field mapping + config + the
+`CERT_REQUIRED` transport gate are built and unit-proven, but the uvicorn transport→scope peer-cert
+**bridge is not yet wired** (uvicorn does not populate the ASGI TLS extension). Until that WS5
+integration step lands, `auth_mode=mtls` is **fail-closed but non-functional** (no peer cert reaches
+the authenticator → all requests rejected); startup requires server TLS and warns. No fail-open.
