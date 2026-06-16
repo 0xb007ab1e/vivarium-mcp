@@ -333,22 +333,53 @@ def build_response(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
-def build_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
-    """Build a JSON-RPC 2.0 error response with a safe slug.
+def _redacted_detail(exc: BaseException) -> str:
+    """Build a redacted, log-only diagnostic summary for an unexpected worker exception.
+
+    STRICT SCRUB (ADR-024, master §5): the worker's exception *text* may be binary-derived (a JVM
+    message can echo a symbol name, an address, or decompiled content from a hostile input), so it
+    is treated as untrusted and is **never forwarded verbatim**. The summary is the exception
+    **class name** plus a fixed template — enough to diagnose *which* JVM/Python exception class
+    fired (e.g. ``NullPointerException``, ``ValidationError``) without leaking any value-bearing
+    message. This crosses the worker→server boundary on the JSON-RPC error object's optional
+    ``data.detail`` ONLY; it is log-only on the server and never reaches the client envelope.
+
+    Args:
+        exc: The unexpected exception caught at the dispatch boundary.
+
+    Returns:
+        A safe, fixed-template string: ``"<ExceptionClassName>: unhandled worker exception"``.
+    """
+    # type(exc).__name__ is the class name only (e.g. "NullPointerException") — no message, no
+    # module path, no host detail. The free-form str(exc) is deliberately dropped.
+    return f"{type(exc).__name__}: unhandled worker exception"
+
+
+def build_error(
+    request_id: Any, code: int, message: str, *, detail: str | None = None
+) -> dict[str, Any]:
+    """Build a JSON-RPC 2.0 error response with a safe slug and optional redacted detail.
 
     Args:
         request_id: The originating request id (may be ``None`` for unparseable requests).
         code: JSON-RPC numeric error code.
         message: Safe, boundary-crossing message (no host detail).
+        detail: Optional **redacted** log-only diagnostic (ADR-024). When present it is added to
+            the error object's ``data.detail`` for the server to log under a correlation id. It is
+            server-side-only — the client-facing :class:`ErrorEnvelope` never carries it. MUST
+            already be scrubbed of binary-derived content (see :func:`_redacted_detail`).
 
     Returns:
         A JSON-RPC error response dict.
     """
     slug = _SLUG_BY_CODE.get(code, "internal-error")
+    data: dict[str, Any] = {"type": slug}
+    if detail is not None:
+        data["detail"] = detail
     return {
         "jsonrpc": "2.0",
         "id": request_id,
-        "error": {"code": code, "message": message, "data": {"type": slug}},
+        "error": {"code": code, "message": message, "data": data},
     }
 
 
@@ -377,8 +408,14 @@ def handle_request(backend: GhidraBackend, obj: dict[str, Any]) -> dict[str, Any
         result = dispatch(backend, method, params)
     except WorkerError as exc:
         return build_error(request_id, exc.code, exc.safe_message)
-    except Exception:
-        return build_error(request_id, CODE_INTERNAL, "internal worker error")
+    except Exception as exc:
+        # The client-facing message stays generic (no host/JVM detail crosses to the client).
+        # The optional, redacted ``data.detail`` (class name + fixed template, NOT str(exc)) lets
+        # the SERVER log *which* exception class fired so a real worker fault is diagnosable
+        # (ADR-024 PR-1) — without forwarding any binary-derived exception text.
+        return build_error(
+            request_id, CODE_INTERNAL, "internal worker error", detail=_redacted_detail(exc)
+        )
     return build_response(request_id, result)
 
 

@@ -45,6 +45,12 @@ class RpcProtocolError(Exception):
     """
 
 
+#: Hard cap on the optional worker-supplied ``data.detail`` we will retain for server logs
+#: (ADR-024). The worker already scrubs it (class name + fixed template); this is a defensive
+#: outbound bound so a buggy/hostile worker cannot bloat a log line.
+_MAX_DETAIL_CHARS = 256
+
+
 @dataclass(frozen=True, slots=True)
 class RpcError:
     """A decoded JSON-RPC error object (``error`` member of a response).
@@ -53,11 +59,15 @@ class RpcError:
         code: Numeric JSON-RPC error code.
         message: Safe, human-readable message (no internals — rpc-protocol.md §5).
         type_slug: The ``data.type`` slug used to map to a public error type, or ``None``.
+        detail: Optional **redacted, log-only** diagnostic from ``data.detail`` (ADR-024) — the
+            worker exception's class name + a fixed template, NEVER the raw message. Used ONLY for
+            a redacted server-side log; it never reaches the client-facing error envelope.
     """
 
     code: int
     message: str
     type_slug: str | None
+    detail: str | None = None
 
 
 class RpcCallError(Exception):
@@ -205,9 +215,15 @@ def _parse_error(err: Any) -> RpcError:
     raw_msg = err.get("message")
     message = raw_msg if isinstance(raw_msg, str) else "worker error"
     type_slug: str | None = None
+    detail: str | None = None
     data = err.get("data")
     if isinstance(data, dict):
         slug = data.get("type")
         if isinstance(slug, str):
             type_slug = slug
-    return RpcError(code=code, message=message[:512], type_slug=type_slug)
+        # Optional redacted, log-only diagnostic (ADR-024). Capped defensively; only a str is
+        # accepted (a hostile worker sending a non-string is simply ignored — fail closed).
+        raw_detail = data.get("detail")
+        if isinstance(raw_detail, str):
+            detail = raw_detail[:_MAX_DETAIL_CHARS]
+    return RpcError(code=code, message=message[:512], type_slug=type_slug, detail=detail)

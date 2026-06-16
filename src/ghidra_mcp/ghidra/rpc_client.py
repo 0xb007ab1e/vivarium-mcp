@@ -1019,6 +1019,20 @@ class RpcGhidraAdapter:
             return rpc_framing.parse_response(response_obj, expected_id=request_id)
         except RpcCallError as exc:
             # A method-level failure: the worker is healthy; do NOT kill. Map the slug.
+            # Log the worker's redacted, log-only diagnostic (slug + optional class-name detail —
+            # ADR-024 PR-1) so a real worker fault (e.g. a JVM NullPointerException behind the
+            # generic "internal worker error") is diagnosable server-side. SAFE keys only
+            # (``method``/``slug``/``detail`` carry no sensitive substring); the value is the
+            # worker-scrubbed class-name template, never binary-derived text. The client envelope
+            # is UNCHANGED — detail is never placed on it.
+            _log.warning(
+                "worker.method_error",
+                extra={
+                    "method": method,
+                    "slug": exc.error.type_slug,
+                    "detail": exc.error.detail,
+                },
+            )
             etype = _errors.map_worker_slug(exc.error.type_slug)
             raise _errors.make_error(etype, exc.error.message) from exc
         except TimeoutError as exc:
