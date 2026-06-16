@@ -222,3 +222,134 @@ def test_configure_logging_rejects_bad_level() -> None:
 
 def test_get_logger_returns_named_logger() -> None:
     assert glog.get_logger("ghidra_mcp.x").name == "ghidra_mcp.x"
+
+
+# --- ADR-024 PR-1: traceback rendering + reserved-key guard ----------------------------------
+def _record_with_exc(exc: BaseException) -> logging.LogRecord:
+    """Build a log record carrying ``exc`` as ``exc_info`` (as ``_log.exception`` would)."""
+    try:
+        raise exc
+    except BaseException:  # test helper deliberately captures any exception
+        import sys
+
+        return logging.LogRecord(
+            "ghidra_mcp.test", logging.ERROR, "p.py", 10, "an.event", None, sys.exc_info()
+        )
+
+
+def test_json_formatter_renders_traceback_into_exc() -> None:
+    """A record with ``exc_info`` renders frames into ``payload['exc']`` (diagnosable)."""
+    out = glog._RedactingJsonFormatter().format(_record_with_exc(RuntimeError("boom")))
+    doc = json.loads(out)
+    assert "exc" in doc
+    assert "Traceback" in doc["exc"]
+    assert "RuntimeError" in doc["exc"]
+    assert "boom" in doc["exc"]  # a normal exception keeps its message line
+
+
+def test_json_formatter_without_exc_info_omits_exc() -> None:
+    """A record with no exception has no ``exc`` field."""
+    doc = json.loads(glog._RedactingJsonFormatter().format(_make_record(size=1)))
+    assert "exc" not in doc
+
+
+def test_json_formatter_strips_validation_error_message_line() -> None:
+    """A ValidationError-class message line is stripped (it can echo a binary-derived value)."""
+    from pydantic import BaseModel, ValidationError
+
+    class _M(BaseModel):
+        n: int
+
+    try:
+        _M(n="HOSTILE_SENTINEL_VALUE")  # type: ignore[arg-type]
+    except ValidationError as ve:
+        rec = _record_with_exc(ve)
+    out = glog._RedactingJsonFormatter().format(rec)
+    doc = json.loads(out)
+    assert "exc" in doc
+    assert "Traceback" in doc["exc"]  # frames retained for diagnosis
+    assert "HOSTILE_SENTINEL_VALUE" not in out  # value-echoing message line dropped
+
+
+def test_json_formatter_strips_chained_validation_error_message() -> None:
+    """A ValidationError WRAPPED in another exception is still scrubbed (chain-walked)."""
+    from pydantic import BaseModel, ValidationError
+
+    class _M(BaseModel):
+        n: int
+
+    try:
+        try:
+            _M(n="HOSTILE_SENTINEL_VALUE")  # type: ignore[arg-type]
+        except ValidationError as ve:
+            raise RuntimeError("wrapped worker fault") from ve
+    except RuntimeError as exc:
+        rec = _record_with_exc(exc)
+    out = glog._RedactingJsonFormatter().format(rec)
+    doc = json.loads(out)
+    assert "Traceback" in doc["exc"]  # frames retained for diagnosis
+    assert "HOSTILE_SENTINEL_VALUE" not in out  # inner ValidationError value still scrubbed
+
+
+def test_chain_has_value_echoing_detects_wrapped_and_cycles() -> None:
+    """The chain walker finds a wrapped value-echoer and is cycle-safe."""
+    assert glog._chain_has_value_echoing(None) is False
+    assert glog._chain_has_value_echoing(RuntimeError("plain")) is False
+    # a self-referential context must not loop forever
+    a = RuntimeError("a")
+    a.__context__ = a
+    assert glog._chain_has_value_echoing(a) is False
+
+
+def test_text_formatter_renders_traceback() -> None:
+    line = glog._RedactingTextFormatter().format(_record_with_exc(RuntimeError("kaboom")))
+    assert "Traceback" in line
+    assert "kaboom" in line
+
+
+def test_reserved_key_guard_renames_colliding_extra() -> None:
+    """A caller ``extra`` colliding with a reserved LogRecord name is renamed, not crashed."""
+    guarded = glog._guard_extra({"msg": "x", "args": "y", "name": "z", "method": "ok"})
+    assert guarded is not None
+    assert "msg" not in guarded
+    assert guarded["x_msg"] == "x"
+    assert guarded["x_args"] == "y"
+    assert guarded["x_name"] == "z"
+    assert guarded["method"] == "ok"  # non-reserved key untouched
+
+
+def test_reserved_key_guard_handles_empty_and_none() -> None:
+    assert glog._guard_extra(None) is None
+    assert glog._guard_extra({}) == {}
+
+
+def test_redacting_logger_does_not_crash_on_reserved_extra() -> None:
+    """End-to-end: a reserved ``extra`` key does NOT raise KeyError (the makeRecord guard)."""
+    glog.configure_logging(level="DEBUG", fmt="json")
+    log = glog.get_logger("ghidra_mcp.reserved_test")
+    handler = logging.getLogger().handlers[0]
+    captured: list[str] = []
+    orig_emit = handler.emit
+
+    def _capture(record: logging.LogRecord) -> None:
+        captured.append(handler.format(record))
+
+    handler.emit = _capture  # type: ignore[method-assign]
+    try:
+        # Without the guard this raises: KeyError: Attempt to overwrite 'msg' in LogRecord.
+        log.warning("worker.event", extra={"msg": "shadow", "session": "opaque"})
+    finally:
+        handler.emit = orig_emit  # type: ignore[method-assign]
+    assert captured, "log call must succeed and produce output"
+    doc = json.loads(captured[0])
+    assert doc["x_msg"] == "shadow"  # renamed safely
+    assert doc["session"] == "opaque"
+
+
+def test_redacting_logger_reserved_guard_still_redacts_sensitive() -> None:
+    """The reserved-key guard preserves the key so sensitive-substring redaction still fires."""
+    guarded = glog._guard_extra({"args": "SENSITIVE"})  # 'args' is reserved → renamed x_args
+    assert guarded == {"x_args": "SENSITIVE"}
+    # A sensitive non-reserved key is redacted at format time (existing behavior, unchanged).
+    out = glog._RedactingJsonFormatter().format(_make_record(decompiled="HOSTILE"))
+    assert json.loads(out)["decompiled"] == "[REDACTED]"
