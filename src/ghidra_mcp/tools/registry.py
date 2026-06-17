@@ -39,7 +39,7 @@ from ghidra_mcp.core import validation as v
 from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from ghidra_mcp.ghidra.port import GhidraPort, OnProgress
 from ghidra_mcp.logging import get_logger
-from ghidra_mcp.server.auth import Principal
+from ghidra_mcp.server.auth import CAP_READ, CAP_WRITE, Principal
 from ghidra_mcp.sessions.manager import SessionManager
 from ghidra_mcp.tools import schemas as s
 
@@ -181,6 +181,97 @@ class ToolContext:
         if self.resolve_principal is not None:
             return self.resolve_principal().id
         return self.principal.id
+
+    @property
+    def caller_capabilities(self) -> frozenset[str]:
+        """The current call's principal capabilities (ADR-033) — read/write per-tool authZ.
+
+        Mirrors :attr:`caller_id`: the per-request resolver's principal capabilities when wired
+        (HTTP), else the static principal's (stdio/tests — full). Server-derived, never client
+        input. The dispatch chokepoint denies a tool whose :func:`required_capability` is absent.
+        """
+        if self.resolve_principal is not None:
+            return self.resolve_principal().capabilities
+        return self.principal.capabilities
+
+
+# =====================================================================================
+# Per-tool capability authorization (ADR-033). A tool requires `write` iff it mutates the program/
+# session-write state; everything else requires `read`. WRITE_TOOLS is the single source of truth
+# (asserted complete vs. the catalog in tests). Enforced at the dispatch chokepoint, server-side,
+# every call — before any handler work (complete mediation; std-owasp-api API5).
+# =====================================================================================
+WRITE_TOOLS: frozenset[str] = frozenset(
+    {
+        # write-consent management + undo (ADR-012)
+        "session_enable_writes",
+        "session_disable_writes",
+        "session_undo",
+        # annotation writes (ADR-012)
+        "rename_function",
+        "rename_symbol",
+        "set_comment",
+        # structural writes (ADR-013/014/015/021)
+        "rename_local_variable",
+        "rename_parameter",
+        "set_function_signature",
+        "apply_data_type",
+        "define_struct",
+        "define_union",
+        "define_types",
+        # composite deletion (ADR-031)
+        "delete_type",
+        # annotation import = replay of gated writes (ADR-018)
+        "session_import_annotations",
+    }
+)
+
+
+def required_capability(tool_name: str) -> str:
+    """Return a tool's required capability: ``write`` for a mutator, else ``read`` (ADR-033)."""
+    return CAP_WRITE if tool_name in WRITE_TOOLS else CAP_READ
+
+
+def _authorize_capability(ctx: ToolContext, tool_name: str) -> None:
+    """Deny the call fail-closed if the principal lacks the tool's required capability (ADR-033).
+
+    The per-tool authZ chokepoint, evaluated server-side before any handler work (complete
+    mediation). On a stdio/bearer/mTLS principal — or an OAuth deployment that did not configure a
+    write-scope — every principal is full-capability, so this is a no-op (the pre-ADR-033 behavior).
+    A scope-narrowed OAuth read-only token is rejected here for any ``write`` tool, mapped to the
+    existing ``VALIDATION`` envelope (consistent with the write-consent denial — ADR-033 D4); the
+    denial is logged redacted (tool + principal + missing capability, never the token).
+
+    Args:
+        ctx: The injected collaborators (its per-request principal supplies the capabilities).
+        tool_name: The catalog tool name being invoked.
+
+    Raises:
+        GhidraMcpError: ``VALIDATION`` when the required capability is absent.
+    """
+    required = required_capability(tool_name)
+    if required in ctx.caller_capabilities:
+        return
+    _log.warning(
+        "tool.authz_denied",
+        extra={
+            "tool": tool_name,
+            "principal_id": ctx.caller_id,
+            "required_capability": required,
+        },
+    )
+    # Canonical VALIDATION envelope (status 400 / "Invalid arguments") — identical shape to the
+    # write-consent denial, per ADR-033 D4 (no new 403 / error-contract change); the specific reason
+    # rides in the value-free detail.
+    raise GhidraMcpError(
+        ErrorEnvelope(
+            type=ErrorType.VALIDATION,
+            title="Invalid arguments",
+            detail="The access token lacks the capability required for this tool.",
+            status=400,
+            retryable=False,
+        )
+    )
 
 
 # =====================================================================================
@@ -1352,7 +1443,7 @@ def build_handlers(ctx: ToolContext) -> dict[str, Callable[..., Any]]:
 
     bound: dict[str, Callable[..., Any]] = {}
     for name, (handler, in_schema) in _HANDLERS.items():
-        bound[name] = _bind(handler, ctx, in_schema)
+        bound[name] = _bind(handler, ctx, in_schema, name)
     # session_analyze is the ONE tool with a localized async binding (ADR-030 Phase 2): it accepts
     # the injected MCP Context and, when a progressToken is present, offloads the blocking analysis
     # to a worker thread and relays worker progress to the client. Every other tool keeps the
@@ -1413,6 +1504,8 @@ def _bind_analyze(ctx: ToolContext) -> Callable[..., Any]:
     in_schema = s.SessionAnalyzeIn
 
     async def _bound(*, context: Context[Any, Any, Any] | None = None, **kwargs: Any) -> Any:
+        # Per-tool capability authZ (ADR-033) — analyze requires `read`; checked before any work.
+        _authorize_capability(ctx, "session_analyze")
         model = in_schema(**kwargs)
         token = _progress_token(context)
         # In-flight liveness marker (ADR-025 / F4), same contract as _bind: refresh the idle clock
@@ -1458,6 +1551,7 @@ def _bind(
     handler: Callable[[ToolContext, Any], Any],
     ctx: ToolContext,
     in_schema: type[s._In],
+    tool_name: str,
 ) -> Callable[..., Any]:
     """Bind a ``(ctx, model)`` handler to a flat-kwargs tool callable that re-validates input.
 
@@ -1472,12 +1566,15 @@ def _bind(
         handler: The ``(ctx, model)`` handler operating on the validated input model.
         ctx: The context to close over.
         in_schema: The tool's frozen input model (its fields define the parameter signature).
+        tool_name: The catalog name; its :func:`required_capability` is enforced per call (ADR-033).
 
     Returns:
         A flat-kwargs callable suitable for FastMCP registration.
     """
 
     def _bound(**kwargs: Any) -> Any:
+        # Per-tool capability authZ (ADR-033) — server-side, before any work (complete mediation).
+        _authorize_capability(ctx, tool_name)
         # Reconstruct the frozen input model — re-applies all pydantic constraints and rejects any
         # unexpected field (extra="forbid"). A validation failure surfaces as a pydantic error the
         # server shell maps to a VALIDATION envelope (fail closed).

@@ -21,7 +21,7 @@ from ghidra_mcp.core.envelope import DataOrigin, Untrusted
 from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from ghidra_mcp.ghidra.port import GhidraPort
 from ghidra_mcp.security.limits import Limits
-from ghidra_mcp.server.auth import Principal
+from ghidra_mcp.server.auth import CAP_READ, CAP_WRITE, Principal
 from ghidra_mcp.sessions.manager import SessionManager
 from ghidra_mcp.tools import registry as reg
 from ghidra_mcp.tools import schemas as s
@@ -700,3 +700,255 @@ def test_each_worker_tool_authorizes_and_delegates(
     _invoke(handlers[tool], **kwargs)
     assert ctx.sessions.authorized == [_VALID_SID]  # type: ignore[attr-defined]
     assert (method, _VALID_SID) in ctx.port.calls  # type: ignore[attr-defined]
+
+
+# ==============================================================================================
+# ADR-033 — per-tool capability authorization. ``WRITE_TOOLS`` is the single source of truth; the
+# dispatch chokepoint (_bind / _bind_analyze) denies a tool whose required capability the principal
+# lacks, BEFORE any handler work (complete mediation — std-owasp-api API5). A read-only principal
+# (an OAuth token without the write-scope) can run reads + the session/analyze workflow but is
+# barred from every mutation tool, fail closed → VALIDATION envelope, with no session/port call.
+# ==============================================================================================
+
+#: The exact 15 mutation tools the ADR designates as ``write`` (asserted to catch drift).
+_EXPECTED_WRITE_TOOLS = frozenset(
+    {
+        "session_enable_writes",
+        "session_disable_writes",
+        "session_undo",
+        "rename_function",
+        "rename_symbol",
+        "set_comment",
+        "rename_local_variable",
+        "rename_parameter",
+        "set_function_signature",
+        "apply_data_type",
+        "define_struct",
+        "define_union",
+        "define_types",
+        "delete_type",
+        "session_import_annotations",
+    }
+)
+
+#: Representative read tools that MUST require ``read`` (lifecycle + query + read-only export).
+_REPRESENTATIVE_READ_TOOLS = (
+    "decompile_function",
+    "session_create",
+    "session_export_annotations",
+    "session_analyze",
+)
+
+
+# --- required_capability: writes → write, everything else → read ---------------------------------
+@pytest.mark.parametrize("tool", sorted(reg.WRITE_TOOLS))
+def test_required_capability_is_write_for_every_write_tool(tool: str) -> None:
+    assert reg.required_capability(tool) == CAP_WRITE
+
+
+@pytest.mark.parametrize("tool", _REPRESENTATIVE_READ_TOOLS)
+def test_required_capability_is_read_for_representative_read_tools(tool: str) -> None:
+    assert reg.required_capability(tool) == CAP_READ
+
+
+def test_required_capability_read_for_every_non_write_catalog_tool() -> None:
+    """Exhaustive: every catalog tool NOT in WRITE_TOOLS requires ``read`` (no third capability)."""
+    for tool in reg.TIER1_TOOL_NAMES:
+        expected = CAP_WRITE if tool in reg.WRITE_TOOLS else CAP_READ
+        assert reg.required_capability(tool) == expected
+
+
+# --- WRITE_TOOLS completeness / correctness vs. the catalog --------------------------------------
+def test_write_tools_is_subset_of_catalog() -> None:
+    assert set(reg.TIER1_TOOL_NAMES) >= reg.WRITE_TOOLS
+
+
+def test_write_tools_is_exactly_the_expected_set() -> None:
+    """Pin the exact write set so a new mutator (or a misclassified read tool) trips a test."""
+    assert reg.WRITE_TOOLS == _EXPECTED_WRITE_TOOLS
+    assert len(reg.WRITE_TOOLS) == 15
+
+
+@pytest.mark.parametrize(
+    "tool", ["session_export_annotations", "session_create", "session_analyze"]
+)
+def test_read_only_session_tools_are_not_write_tools(tool: str) -> None:
+    """The session lifecycle + read-only export must NOT be gated as writes (ADR-033 D1)."""
+    assert tool not in reg.WRITE_TOOLS
+
+
+# --- ToolContext.caller_capabilities mirrors caller_id -------------------------------------------
+def test_caller_capabilities_uses_static_principal_by_default() -> None:
+    c = reg.ToolContext(
+        config=_config(),
+        sessions=cast(SessionManager, FakeSessionManager()),
+        port=cast(GhidraPort, FakePort()),
+        principal=Principal(id="static-p"),  # default full capabilities
+    )
+    assert c.caller_capabilities == frozenset({CAP_READ, CAP_WRITE})
+
+
+def test_caller_capabilities_uses_resolver_when_wired() -> None:
+    """A per-request read-only resolver narrows the capabilities seen by the chokepoint (HTTP)."""
+    c = reg.ToolContext(
+        config=_config(),
+        sessions=cast(SessionManager, FakeSessionManager()),
+        port=cast(GhidraPort, FakePort()),
+        principal=Principal(id="ignored-static"),  # would be full
+        resolve_principal=lambda: Principal(id="reader", capabilities=frozenset({CAP_READ})),
+    )
+    assert c.caller_capabilities == frozenset({CAP_READ})
+
+
+# --- The gate (headline): a read-only principal is denied every write tool, no work done ---------
+class _RecordingSessionManager(FakeSessionManager):
+    """Records EVERY session-touching call so a denial test can assert none happened.
+
+    Extends the read-aware fake with the write-consent surface; if the gate ever let a write
+    handler run under a read-only principal, one of these would be recorded (and the test fails).
+    """
+
+    def __init__(self) -> None:
+        """Track write-consent + lifecycle calls beyond the base read fake."""
+        super().__init__()
+        self.consent_checks: list[str] = []
+        self.enabled: list[str] = []
+        self.disabled: list[str] = []
+
+    def require_write_consent(
+        self, session_id: str, *, structural: bool = False, caller: str = "local"
+    ) -> s.SessionInfo:
+        """Record + grant (the gate must prevent this from ever running for a read-only token)."""
+        self.consent_checks.append(session_id)
+        return s.SessionInfo(session_id=session_id, state="ready", created_at=0, expires_at=10)
+
+    def enable_writes(
+        self, session_id: str, *, allow_structural: bool = False, caller: str = "local"
+    ) -> s.SessionInfo:
+        """Record an enable-writes attempt (gated as a write tool)."""
+        self.enabled.append(session_id)
+        return s.SessionInfo(
+            session_id=session_id,
+            state="ready",
+            created_at=0,
+            expires_at=10,
+            writes_enabled=True,
+            allow_structural=allow_structural,
+        )
+
+    def disable_writes(self, session_id: str, *, caller: str = "local") -> s.SessionInfo:
+        """Record a disable-writes attempt (gated as a write tool)."""
+        self.disabled.append(session_id)
+        return s.SessionInfo(session_id=session_id, state="ready", created_at=0, expires_at=10)
+
+
+def _readonly_ctx(sessions: _RecordingSessionManager, port: FakePort) -> reg.ToolContext:
+    """A context whose per-request principal is read-only (no ``write`` capability)."""
+    return reg.ToolContext(
+        config=_config(),
+        sessions=cast(SessionManager, sessions),
+        port=cast(GhidraPort, port),
+        principal=Principal(id="ignored-static"),  # full — must be ignored in favor of resolver
+        resolve_principal=lambda: Principal(id="reader", capabilities=frozenset({CAP_READ})),
+    )
+
+
+# Write tools spanning the kinds: consent toggle, annotation write, structural, composite, delete,
+# and the import-replay. Minimal kwargs suffice: the gate fires BEFORE input model validation.
+_GATED_WRITE_CALLS = [
+    ("session_enable_writes", {"session_id": _VALID_SID}),
+    ("session_disable_writes", {"session_id": _VALID_SID}),
+    ("session_undo", {"session_id": _VALID_SID}),
+    ("rename_function", {"session_id": _VALID_SID, "function": "main", "new_name": "parse"}),
+    ("define_struct", {"session_id": _VALID_SID, "name": "S", "fields": []}),
+    ("delete_type", {"session_id": _VALID_SID, "name": "S"}),
+    ("session_import_annotations", {"session_id": _VALID_SID, "annotations": {}}),
+]
+
+
+@pytest.mark.parametrize(("tool", "kwargs"), _GATED_WRITE_CALLS)
+def test_read_only_principal_is_denied_every_write_tool(
+    tool: str, kwargs: dict[str, object]
+) -> None:
+    sessions = _RecordingSessionManager()
+    port = FakePort()
+    handlers = reg.build_handlers(_readonly_ctx(sessions, port))
+    with pytest.raises(GhidraMcpError) as exc:
+        _invoke(handlers[tool], **kwargs)
+    # Denial maps to the existing VALIDATION envelope (ADR-033 D4 — no new error type).
+    assert exc.value.envelope.type is ErrorType.VALIDATION
+    # Denied BEFORE any handler work: nothing authorized, no consent check, no port call, no
+    # enable/disable — the read-only token reached no mutation surface (complete mediation).
+    assert sessions.authorized == []
+    assert sessions.consent_checks == []
+    assert sessions.enabled == []
+    assert sessions.disabled == []
+    assert port.calls == []
+
+
+def test_read_only_principal_can_run_read_tool() -> None:
+    """A read tool succeeds for a read-only principal (it requires only ``read``)."""
+    sessions = _RecordingSessionManager()
+    port = FakePort()
+    handlers = reg.build_handlers(_readonly_ctx(sessions, port))
+    out = handlers["decompile_function"](session_id=_VALID_SID, function="main")
+    assert out.name.value == "main"
+    assert sessions.authorized == [_VALID_SID]  # the read handler ran (authorized) under reader
+    assert ("decompile_function", _VALID_SID) in port.calls
+
+
+def test_read_only_principal_can_create_session() -> None:
+    """``session_create`` is a read-capability tool — a read-only principal may open sessions."""
+    sessions = _RecordingSessionManager()
+    handlers = reg.build_handlers(_readonly_ctx(sessions, FakePort()))
+    info = handlers["session_create"](label="job")
+    assert info.session_id == _VALID_SID
+    assert sessions.created_owners == ["reader"]
+
+
+def test_read_only_principal_can_run_analyze() -> None:
+    """``session_analyze`` is a READ tool (ADR-033 D1) — the async binder permits a reader."""
+    sessions = _RecordingSessionManager()
+    port = FakePort()
+    handlers = reg.build_handlers(_readonly_ctx(sessions, port))
+    info = _invoke(handlers["session_analyze"], session_id=_VALID_SID)
+    assert info.session_id == _VALID_SID
+    assert ("analyze", _VALID_SID) in port.calls
+
+
+def test_read_only_principal_denied_analyze_is_not_the_outcome() -> None:
+    """Guard against a misclassification: analyze must NOT raise for a read-only principal."""
+    sessions = _RecordingSessionManager()
+    handlers = reg.build_handlers(_readonly_ctx(sessions, FakePort()))
+    # No exception — analyze is read-capability; a regression making it ``write`` would raise here.
+    _invoke(handlers["session_analyze"], session_id=_VALID_SID)
+
+
+# --- A full-capability principal is permitted every tool (the gate is a no-op for full) ----------
+def test_full_principal_passes_gate_for_a_write_tool() -> None:
+    """With a full principal the gate is a no-op — a write tool reaches its handler (consent check).
+
+    Uses the write-aware recording manager so the handler's ``require_write_consent`` runs (the
+    point is the *capability* gate let it through; the per-session consent gate is a separate
+    control, covered in test_mutation_registry).
+    """
+
+    class _UndoPort(FakePort):
+        def undo(self, sid: str, a: s.SessionUndoIn) -> s.SessionUndoOut:
+            self._rec("undo", sid)
+            return s.SessionUndoOut(session_id=sid, undone=True)
+
+    sessions = _RecordingSessionManager()
+    port = _UndoPort()
+    c = reg.ToolContext(
+        config=_config(),
+        sessions=cast(SessionManager, sessions),
+        port=cast(GhidraPort, port),
+        principal=Principal(id="full"),  # default ALL_CAPABILITIES
+    )
+    handlers = reg.build_handlers(c)
+    out = handlers["session_undo"](session_id=_VALID_SID)
+    # The capability gate passed → the handler ran (consent check + port delegate); not blocked.
+    assert out.undone is True
+    assert sessions.consent_checks == [_VALID_SID]
+    assert ("undo", _VALID_SID) in port.calls

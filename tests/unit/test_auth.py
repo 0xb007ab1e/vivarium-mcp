@@ -14,6 +14,9 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 from ghidra_mcp.server.auth import (
+    ALL_CAPABILITIES,
+    CAP_READ,
+    CAP_WRITE,
     MTLS_PRINCIPAL_FIELD_DEFAULT,
     MTLS_PRINCIPAL_FIELDS,
     OAUTH_ALLOWED_ALGORITHMS,
@@ -27,6 +30,7 @@ from ghidra_mcp.server.auth import (
     NullAuthenticator,
     OAuthResourceAuthenticator,
     Principal,
+    _token_scopes,
     build_authenticator,
 )
 
@@ -847,3 +851,193 @@ def test_build_authenticator_oauth_threads_config() -> None:
 def test_build_authenticator_oauth_without_required_config_fails() -> None:
     with pytest.raises(ValueError, match="requires issuer, audience, and a JWKS URI"):
         build_authenticator("oauth", oauth_issuer=_ISS, oauth_audience=_AUD)  # missing jwks_uri
+
+
+# ==============================================================================================
+# ADR-033 — OAuth scopes → per-tool capabilities (read/write). The authenticator derives a
+# principal's ``capabilities`` from the token's ``scope``/``scp`` claim ONLY when a write-scope is
+# configured; otherwise every principal stays full-capability (the pre-ADR-033, identity-only
+# behavior). The per-tool gate lives in the registry; here we cover scope parsing + capability
+# derivation + threading through ``build_authenticator``, fail-closed throughout.
+# ==============================================================================================
+_WRITE_SCOPE = "ghidra:write"
+
+
+# --- _token_scopes: parse standard ``scope`` (str) + the ``scp`` variant (str|list); fail empty ---
+def test_token_scopes_parses_space_delimited_scope_string() -> None:
+    assert _token_scopes({"scope": "read write ghidra:write"}) == frozenset(
+        {"read", "write", "ghidra:write"}
+    )
+
+
+def test_token_scopes_parses_scp_list() -> None:
+    assert _token_scopes({"scp": ["read", "ghidra:write"]}) == frozenset({"read", "ghidra:write"})
+
+
+def test_token_scopes_parses_scp_space_delimited_string() -> None:
+    """``scp`` may also be a single space-delimited string (some IdPs) — split like ``scope``."""
+    assert _token_scopes({"scp": "read ghidra:write"}) == frozenset({"read", "ghidra:write"})
+
+
+def test_token_scopes_unions_scope_and_scp() -> None:
+    """Both claims present → the union of their scopes (an IdP may populate either/both)."""
+    assert _token_scopes({"scope": "read", "scp": ["ghidra:write"]}) == frozenset(
+        {"read", "ghidra:write"}
+    )
+
+
+def test_token_scopes_empty_when_claims_absent() -> None:
+    assert _token_scopes({}) == frozenset()
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {"scope": None},  # explicit null
+        {"scope": 123},  # wrong type (int)
+        {"scope": {"read": True}},  # wrong type (dict)
+        {"scp": 123},  # wrong type (int)
+        {"scp": {"read": True}},  # wrong type (dict)
+        {"scp": None},  # explicit null
+    ],
+)
+def test_token_scopes_fail_closed_on_unexpected_shapes(claims: dict[str, object]) -> None:
+    """An unparsable/wrong-typed scopes claim grants NOTHING (fail closed — ADR-033)."""
+    assert _token_scopes(claims) == frozenset()
+
+
+def test_token_scopes_scp_list_ignores_non_string_entries() -> None:
+    """A mixed ``scp`` array keeps only the string entries (defensive — never trust the shape)."""
+    assert _token_scopes({"scp": ["read", 7, None, "write"]}) == frozenset({"read", "write"})
+
+
+# --- Principal default capabilities = full (only OAuth+write_scope ever narrows it) ---------------
+def test_principal_defaults_to_all_capabilities() -> None:
+    assert Principal(id="alice").capabilities == ALL_CAPABILITIES
+    assert frozenset({CAP_READ, CAP_WRITE}) == ALL_CAPABILITIES
+
+
+# --- _capabilities_from_claims: write_scope governs whether ``write`` is granted -----------------
+def _oauth_authenticator(**kw: Any) -> OAuthResourceAuthenticator:
+    """An OAuth authenticator (no JWKS client needed — we call ``_capabilities_from_claims``)."""
+    return OAuthResourceAuthenticator(issuer=_ISS, audience=_AUD, jwks_uri=_JWKS, **kw)
+
+
+def test_capabilities_no_write_scope_is_full_regardless_of_scopes() -> None:
+    """write_scope unset (default) ⇒ full capability for ANY token (identity-only, pre-ADR-033)."""
+    auth = _oauth_authenticator()  # write_scope=None
+    assert auth.write_scope is None
+    assert auth._capabilities_from_claims({}) == ALL_CAPABILITIES
+    # Even a token carrying scopes gets full capability when gating is off.
+    assert auth._capabilities_from_claims({"scope": "read"}) == ALL_CAPABILITIES
+    assert auth._capabilities_from_claims({"scope": _WRITE_SCOPE}) == ALL_CAPABILITIES
+
+
+def test_capabilities_write_scope_present_grants_full() -> None:
+    """write_scope set + token's scopes contain it ⇒ full (read + write)."""
+    auth = _oauth_authenticator(write_scope=_WRITE_SCOPE)
+    assert auth._capabilities_from_claims({"scope": f"read {_WRITE_SCOPE}"}) == ALL_CAPABILITIES
+    # Also via the ``scp`` array variant.
+    assert auth._capabilities_from_claims({"scp": ["read", _WRITE_SCOPE]}) == ALL_CAPABILITIES
+
+
+def test_capabilities_write_scope_absent_grants_read_only() -> None:
+    """write_scope set + token LACKS it ⇒ read-only (fail closed — no write capability)."""
+    auth = _oauth_authenticator(write_scope=_WRITE_SCOPE)
+    assert auth._capabilities_from_claims({"scope": "read"}) == frozenset({CAP_READ})
+    # No scopes at all → still read-only (a valid token always gets read).
+    assert auth._capabilities_from_claims({}) == frozenset({CAP_READ})
+
+
+# --- End-to-end: a decoded token's scopes drive the resulting Principal.capabilities -------------
+def test_authenticate_full_token_gets_all_capabilities_when_scope_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scope-gated deployment: a token carrying the write-scope authenticates full-capability."""
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key(), write_scope=_WRITE_SCOPE)
+    token = _mint(key, alg="RS256", sub="alice", extra={"scope": f"read {_WRITE_SCOPE}"})
+    principal = auth.authenticate(AuthContext(authorization=f"Bearer {token}"))
+    assert principal == Principal(id="alice", capabilities=ALL_CAPABILITIES)
+    assert principal is not None and principal.capabilities == ALL_CAPABILITIES
+
+
+def test_authenticate_token_without_write_scope_is_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scope-gated deployment: a token lacking the write-scope authenticates read-only."""
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key(), write_scope=_WRITE_SCOPE)
+    token = _mint(key, alg="RS256", sub="reader", extra={"scope": "read profile"})
+    principal = auth.authenticate(AuthContext(authorization=f"Bearer {token}"))
+    assert principal == Principal(id="reader", capabilities=frozenset({CAP_READ}))
+    assert principal is not None and principal.capabilities == frozenset({CAP_READ})
+    assert CAP_WRITE not in principal.capabilities
+
+
+def test_authenticate_no_write_scope_configured_is_full_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default (write_scope unset): authentication is identity-only — every token is full."""
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key())  # no write_scope
+    token = _mint(key, alg="RS256", sub="alice", extra={"scope": "read"})
+    principal = auth.authenticate(AuthContext(authorization=f"Bearer {token}"))
+    assert principal == Principal(id="alice", capabilities=ALL_CAPABILITIES)
+
+
+def test_authenticate_scp_array_variant_grants_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The common ``scp`` (array) claim variant also grants ``write`` end-to-end."""
+    key = _rsa_keypair()
+    auth, _ = _oauth(monkeypatch, public_key=key.public_key(), write_scope=_WRITE_SCOPE)
+    token = _mint(key, alg="RS256", sub="svc", extra={"scp": ["read", _WRITE_SCOPE]})
+    principal = auth.authenticate(AuthContext(authorization=f"Bearer {token}"))
+    assert principal is not None and principal.capabilities == ALL_CAPABILITIES
+
+
+# --- build_authenticator threads the write-scope into the OAuth strategy -------------------------
+def test_build_authenticator_oauth_threads_write_scope() -> None:
+    auth = build_authenticator(
+        "oauth",
+        oauth_issuer=_ISS,
+        oauth_audience=_AUD,
+        oauth_jwks_uri=_JWKS,
+        oauth_write_scope=_WRITE_SCOPE,
+    )
+    assert isinstance(auth, OAuthResourceAuthenticator)
+    assert auth.write_scope == _WRITE_SCOPE
+
+
+def test_build_authenticator_oauth_write_scope_defaults_none() -> None:
+    """Omitting ``oauth_write_scope`` leaves gating OFF (write_scope None) — backward-compatible."""
+    auth = build_authenticator(
+        "oauth", oauth_issuer=_ISS, oauth_audience=_AUD, oauth_jwks_uri=_JWKS
+    )
+    assert isinstance(auth, OAuthResourceAuthenticator)
+    assert auth.write_scope is None
+
+
+# --- Non-OAuth authenticators are unchanged: full-capability principals --------------------------
+def test_bearer_principal_is_full_capability() -> None:
+    """A bearer principal carries no scope concept → full capability (ADR-033 D2, unchanged)."""
+    auth = BearerAuthenticator(expected_token=_TOKEN)
+    principal = auth.authenticate(AuthContext(authorization=f"Bearer {_TOKEN}"))
+    assert principal is not None and principal.capabilities == ALL_CAPABILITIES
+
+
+def test_multi_token_principal_is_full_capability() -> None:
+    auth = MultiTokenBearerAuthenticator(tokens={_TOKEN_A: "alice"})
+    principal = auth.authenticate(AuthContext(authorization=f"Bearer {_TOKEN_A}"))
+    assert principal is not None and principal.capabilities == ALL_CAPABILITIES
+
+
+def test_null_principal_is_full_capability() -> None:
+    principal = NullAuthenticator().authenticate(AuthContext())
+    assert principal is not None and principal.capabilities == ALL_CAPABILITIES
+
+
+def test_mtls_principal_is_full_capability() -> None:
+    auth = MtlsAuthenticator()
+    cert = {"subject": ((("commonName", "client-a"),),)}
+    principal = auth.authenticate(AuthContext(peer_certificate=cert))
+    assert principal is not None and principal.capabilities == ALL_CAPABILITIES

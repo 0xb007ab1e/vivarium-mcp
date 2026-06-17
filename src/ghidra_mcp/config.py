@@ -88,6 +88,7 @@ _ENV_HTTP_OAUTH_JWKS_URI = "GHIDRA_MCP_HTTP_OAUTH_JWKS_URI"
 _ENV_HTTP_OAUTH_PRINCIPAL_CLAIM = "GHIDRA_MCP_HTTP_OAUTH_PRINCIPAL_CLAIM"
 _ENV_HTTP_OAUTH_ALGORITHMS = "GHIDRA_MCP_HTTP_OAUTH_ALGORITHMS"
 _ENV_HTTP_OAUTH_LEEWAY = "GHIDRA_MCP_HTTP_OAUTH_LEEWAY_SECONDS"
+_ENV_HTTP_OAUTH_WRITE_SCOPE = "GHIDRA_MCP_HTTP_OAUTH_WRITE_SCOPE"
 _ENV_HTTP_CORS_ORIGINS = "GHIDRA_MCP_HTTP_CORS_ORIGINS"
 _ENV_HTTP_RATE_PER_S = "GHIDRA_MCP_HTTP_RATE_PER_SECOND"
 _ENV_HTTP_RATE_BURST = "GHIDRA_MCP_HTTP_RATE_BURST"
@@ -219,6 +220,10 @@ class HttpConfig:
     oauth_principal_claim: str = OAUTH_PRINCIPAL_CLAIM_DEFAULT
     oauth_algorithms: tuple[str, ...] = OAUTH_DEFAULT_ALGORITHMS
     oauth_leeway_s: int = OAUTH_DEFAULT_LEEWAY_S
+    #: ADR-033: the OAuth scope that grants the ``write`` capability. ``None`` (default) ⇒ scope→
+    #: tool authZ is OFF (every valid token is full-capability — identity-only). When set, an OAuth
+    #: token gets ``write`` only if its ``scope``/``scp`` claim contains it (else read-only).
+    oauth_write_scope: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -587,6 +592,10 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
         raise _startup_error(f"environment variable {_ENV_HTTP_OAUTH_PRINCIPAL_CLAIM} is too long")
     oauth_algorithms = _load_oauth_algorithms(src)
     oauth_leeway_s = _read_positive_int(src, _ENV_HTTP_OAUTH_LEEWAY, _DEFAULT_OAUTH_LEEWAY_S)
+    # ADR-033: the scope granting the `write` capability. Unset ⇒ scope→tool authZ stays OFF.
+    oauth_write_scope = _read_str(src, _ENV_HTTP_OAUTH_WRITE_SCOPE, "", required=False) or None
+    if oauth_write_scope is not None and len(oauth_write_scope) > _MAX_OAUTH_CLAIM_LEN:
+        raise _startup_error(f"environment variable {_ENV_HTTP_OAUTH_WRITE_SCOPE} is too long")
 
     single_token = _read_str(src, _ENV_HTTP_BEARER_TOKEN, "", required=False) or None
     # Multi-principal bearer map (ADR-017): per-token validation (length floor) + id allow-listing +
@@ -644,6 +653,7 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
         oauth_issuer=oauth_issuer,
         oauth_audience=oauth_audience,
         oauth_jwks_uri=oauth_jwks_uri,
+        oauth_write_scope=oauth_write_scope,
         oauth_principal_claim=oauth_principal_claim,
         oauth_algorithms=oauth_algorithms,
         oauth_leeway_s=oauth_leeway_s,
