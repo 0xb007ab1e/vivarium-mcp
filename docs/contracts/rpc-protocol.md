@@ -103,6 +103,12 @@ OPT-IN):** during an opted-in `analyze` the worker MAY send zero or more `$/prog
   is computed once at call start; progress frames do not reset or push it, so a chatty or hung worker
   still hits the kill-on-timeout. Phase 1 relays each frame to the **server log only** (no MCP-client
   relay — that is Phase 2).
+- **Phase 2 (MCP client relay) — server-internal, worker protocol UNCHANGED.** The worker↔server
+  `$/progress` frame, its opt-in (`params.progress`), and all bounds above are identical in Phase 2;
+  the worker is unaware of any client. Phase 2 only adds a **server→client** hop: when the MCP client
+  supplied a `progressToken`, the server forwards each frame as a standard MCP `notifications/progress`
+  (percent out of 100; closed-vocab phase as the message). A `progressToken` makes the server set
+  `params.progress:true` automatically; with no token the server behaves byte-for-byte as Phase 1.
 
 ### RPC methods (worker-facing; one per Ghidra-touching operation)
 `import_binary`, `analyze`, `decompile_function`, `disassemble`, `list_functions`, `get_function`,

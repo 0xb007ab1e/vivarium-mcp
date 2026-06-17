@@ -351,6 +351,37 @@ with `params.progress: true`.
   caller — no cross-principal or cross-session leakage. The relay never reads another session's
   socket (one socket per session; TB2 §2).
 
+> **Implementation reconciliation (Phase 2, 2026-06-17).** Shipped, live-verified end-to-end
+> through the real FastMCP runtime (in-memory client/server, fake worker emitting the Phase-1
+> frame shape — the JVM→frame half was already verified in Phase 1):
+>
+> - **Material finding — sync tools block the loop.** FastMCP runs a *sync* tool fn **directly on
+>   the event loop** (`func_metadata.call_fn_with_arg_validation`: `return fn(**...)`, no thread
+>   offload). A 26-min sync `analyze` therefore freezes the loop and could not flush a single
+>   `notifications/progress`. So Phase 2 makes **`session_analyze` the one async tool**: with a
+>   `progressToken` present it offloads the blocking adapter call to `anyio.to_thread.run_sync`,
+>   keeping the loop free. **Human-ratified 2026-06-17: "async-offload, token-gated."**
+> - **The async bridge (the D6 REQUIRES-LIVE-VERIFICATION item) resolved cleanly.** Each worker
+>   frame is marshalled back onto the loop from the worker thread via
+>   `anyio.from_thread.run(report_progress, percent, 100.0, phase)`. anyio's thread portal is set up
+>   by `to_thread.run_sync`, so `from_thread.run` works from inside the offloaded handler with no
+>   `run_coroutine_threadsafe` plumbing. `total=100` (percent is already 0..100); the closed-vocab
+>   `phase` rides as the notification `message` (safe — D4). The relay is **best-effort**: a send
+>   failure (client gone) is swallowed and never aborts the analysis.
+> - **Wiring = (a)+(b) combined.** A dedicated async `registry._bind_analyze` (the (b) special-case
+>   wrapper) whose synthesized signature appends a bare-`Context` parameter via
+>   `_signature_from_model(..., with_context=True)` (the (a) mechanism) — FastMCP detects it by
+>   `issubclass` and **excludes it from the input JSON schema** (verified), so the client surface is
+>   unchanged. The generic `_bind` path (all 49 other tools) is byte-for-byte untouched.
+> - **Token-gating is explicit, not just the `report_progress` no-op.** `_progress_token` reads the
+>   request's `progressToken` (fails closed to `None`); **no token ⇒ the handler runs inline
+>   (sync, on the loop) exactly as pre-Phase-2** — no thread offload, no relay, no forced worker
+>   emission. A token ⇒ the server forces `params.progress:true` (D3) so the client need not also
+>   pass `progress`. The adapter ORs the Phase-1 `args.progress` flag with the Phase-2 callback.
+> - **Async error boundary.** `_with_error_boundary` now returns an async guard for the coroutine
+>   handler (same exception→safe-envelope mapping), so a failure inside the awaited body is still
+>   mapped to a frozen envelope (internals never leak — master §5).
+
 ### D7 — Correlation integrity
 
 - Progress frames carry **no top-level `id`** → `parse_response` (`rpc_framing.py:169-199`) can

@@ -856,3 +856,104 @@ def test_make_progress_emitter_swallows_bad_phase() -> None:
 def test_make_progress_emitter_swallows_send_error() -> None:
     emit = wd._make_progress_emitter(_RaisingConn(), "r", max_frame_bytes=4 * 1024 * 1024)
     emit(50, "analyzing")  # sendall raises OSError → swallowed (heartbeat must not crash analysis)
+
+
+# =====================================================================================
+# ADR-030 Phase 2 — adapter relays to an on_progress callback (in addition to the log) and
+# forces worker emission when a callback is wired. The MCP-client wiring lives in the registry/
+# server tests; here we prove the ADAPTER half: the callback fires per relayed frame, errors are
+# swallowed, and a callback alone turns worker emission on.
+# =====================================================================================
+def test_analyze_invokes_on_progress_per_relayed_frame() -> None:
+    """A wired on_progress callback receives (percent, phase) for each relayed frame."""
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+    seen: list[tuple[int | None, str]] = []
+
+    def _serve() -> None:
+        req = _read_request(wrk)
+        rid = req["id"]
+        _send_frame(wrk, f.build_progress(rid, 25, "analyzing"))
+        _send_frame(wrk, {"jsonrpc": "2.0", "id": rid, "result": dict(_ANALYZE_RESULT)})
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    info = adapter.analyze(
+        "s",
+        s.SessionAnalyzeIn(session_id="s"),
+        on_progress=lambda pct, phase: seen.append((pct, phase)),
+    )
+    t.join(timeout=3)
+    assert info.state == "ready"
+    assert worker.killed == 0
+    assert (25, "analyzing") in seen
+    wrk.close()
+
+
+def test_on_progress_forces_worker_emission_without_the_progress_flag() -> None:
+    """on_progress alone (args.progress=False) still sends ``progress: true`` to the worker."""
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+    captured: dict[str, Any] = {}
+
+    def _serve() -> None:
+        req = _read_request(wrk)
+        captured.update(req)
+        _send_frame(wrk, {"jsonrpc": "2.0", "id": req["id"], "result": dict(_ANALYZE_RESULT)})
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    adapter.analyze("s", s.SessionAnalyzeIn(session_id="s"), on_progress=lambda _p, _ph: None)
+    t.join(timeout=3)
+    assert captured["params"].get("progress") is True
+    wrk.close()
+
+
+def test_analyze_relay_callback_error_never_aborts_analysis(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A raising on_progress is swallowed: the analysis completes and the worker is not killed."""
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+
+    def _boom(_pct: int | None, _phase: str) -> None:
+        raise RuntimeError("client gone")
+
+    def _serve() -> None:
+        req = _read_request(wrk)
+        rid = req["id"]
+        _send_frame(wrk, f.build_progress(rid, 10, "analyzing"))
+        _send_frame(wrk, {"jsonrpc": "2.0", "id": rid, "result": dict(_ANALYZE_RESULT)})
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    with caplog.at_level(logging.WARNING):
+        info = adapter.analyze("s", s.SessionAnalyzeIn(session_id="s"), on_progress=_boom)
+    t.join(timeout=3)
+    assert info.state == "ready"
+    assert worker.killed == 0
+    assert any(r.message == "analyze.progress_relay_failed" for r in caplog.records)
+    wrk.close()
+
+
+def test_analyze_without_callback_or_flag_omits_progress_and_does_not_relay() -> None:
+    """No on_progress and no args.progress → unchanged single-frame path; ``progress`` omitted."""
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+    captured: dict[str, Any] = {}
+
+    def _serve() -> None:
+        req = _read_request(wrk)
+        captured.update(req)
+        _send_frame(wrk, {"jsonrpc": "2.0", "id": req["id"], "result": dict(_ANALYZE_RESULT)})
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    adapter.analyze("s", s.SessionAnalyzeIn(session_id="s"))
+    t.join(timeout=3)
+    assert "progress" not in captured["params"]
+    wrk.close()

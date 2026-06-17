@@ -183,7 +183,9 @@ class FakeGhidraPort:
             binary_sha256="a" * 64,
         )
 
-    def analyze(self, session_id: str, args: s.SessionAnalyzeIn) -> s.SessionInfo:
+    def analyze(
+        self, session_id: str, args: s.SessionAnalyzeIn, *, on_progress: object = None
+    ) -> s.SessionInfo:
         """Return a deterministic post-analysis :class:`SessionInfo` (or simulated failure)."""
         self._maybe_fail()
         self.events.append(("analyze", session_id))

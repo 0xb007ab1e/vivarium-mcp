@@ -14,9 +14,19 @@ WS0 freezes the interface; WS2 implements the adapter.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol
 
 from ghidra_mcp.tools import schemas as s
+
+#: Progress relay callback (ADR-030 Phase 2). The adapter invokes it for each (already coalesced +
+#: bounded) worker ``$/progress`` frame with the SAFE ``(percent, phase)`` only — percent is
+#: ``0..100`` or ``None`` (no estimate yet), phase is the closed vocabulary. It carries NO
+#: binary-derived text (structural redaction — master §5). The server wires it to
+#: ``Context.report_progress`` so a long ``analyze`` streams progress to the MCP client; ``None``
+#: (the default, and the only value on stdio / when no ``progressToken`` was sent) means no client
+#: relay — byte-for-byte the pre-Phase-2 path.
+type OnProgress = Callable[[int | None, str], None]
 
 
 class GhidraPort(Protocol):
@@ -36,13 +46,21 @@ class GhidraPort(Protocol):
         """Import the (size-checked) binary into the session's worker."""
         ...
 
-    def analyze(self, session_id: str, args: s.SessionAnalyzeIn) -> s.SessionInfo:
+    def analyze(
+        self, session_id: str, args: s.SessionAnalyzeIn, *, on_progress: OnProgress | None = None
+    ) -> s.SessionInfo:
         """Run Ghidra auto-analysis, bounded by the analysis timeout (kills worker on expiry).
 
         ``args.profile`` (ADR-029 B; additive) selects the analyzer-depth preset. The default
         (``"default"``) reproduces today's analysis byte-for-byte (the adapter omits the ``profile``
         RPC param entirely, so the worker takes the unchanged code path); ``"light"``/``"deep"``
         adjust depth. The profile only reduces/adjusts depth — no new capability (ADR-001 intact).
+
+        ``on_progress`` (ADR-030 Phase 2; additive) is the client-relay callback. When non-``None``
+        the adapter forces worker progress emission on and invokes the callback for each bounded,
+        coalesced ``$/progress`` frame (the server forwards it to ``Context.report_progress``). When
+        ``None`` (the default) the read path is byte-for-byte the pre-Phase-2 behaviour — the worker
+        emits frames only if the caller separately set ``args.progress`` (Phase-1 log-only).
         """
         ...
 
