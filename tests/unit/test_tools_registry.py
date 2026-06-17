@@ -60,6 +60,17 @@ class FakeSessionManager:
         self.ensured: list[str] = []
         self.recorded_hashes: list[tuple[str, str]] = []  # ADR-018: program-hash binding records
         self.created = 0
+        # ADR-025 / F4: in-flight markers the dispatch chokepoint wraps session-scoped calls with.
+        # ``events`` records the interleaving so tests can assert begin → handler → end ordering.
+        self.events: list[str] = []
+
+    def begin_call(self, session_id: str) -> None:
+        """Record the start-of-call in-flight mark (best-effort; no auth)."""
+        self.events.append(f"begin:{session_id}")
+
+    def end_call(self, session_id: str) -> None:
+        """Record the end-of-call clear (the dispatch ``finally`` counterpart)."""
+        self.events.append(f"end:{session_id}")
 
     def ensure_worker(self, session_id: str, *, caller: str = "local") -> None:
         """Record an idempotent worker-spawn request (the import handler calls this)."""
@@ -81,6 +92,7 @@ class FakeSessionManager:
             )
         self.authorized.append(session_id)
         self.callers.append(caller)
+        self.events.append(f"authorize:{session_id}")
         return s.SessionInfo(session_id=session_id, state="ready", created_at=0, expires_at=10)
 
     def evict(self, session_id: str, *, reason: str, caller: str | None = None) -> bool:
@@ -469,6 +481,36 @@ def test_handler_threads_resolved_principal_per_request() -> None:
     handlers["decompile_function"](session_id=_VALID_SID, function="main")
     assert sessions.created_owners == ["bob"]
     assert sessions.callers == ["bob"]
+
+
+# --- ADR-025 / F4: the dispatch chokepoint wraps session-scoped calls in begin_call/end_call -----
+def test_session_scoped_call_is_wrapped_in_begin_and_end_call(ctx: reg.ToolContext) -> None:
+    """A session-scoped tool marks the session in-flight around the handler (begin → … → end)."""
+    handlers = reg.build_handlers(ctx)
+    handlers["decompile_function"](session_id=_VALID_SID, function="main")
+    events = ctx.sessions.events  # type: ignore[attr-defined]
+    assert events[0] == f"begin:{_VALID_SID}"  # marked in-flight first
+    assert events[-1] == f"end:{_VALID_SID}"  # cleared last (the finally)
+    assert f"authorize:{_VALID_SID}" in events  # the handler's auth ran between
+
+
+def test_session_create_is_not_wrapped(ctx: reg.ToolContext) -> None:
+    """``session_create`` has no session_id → no begin/end_call (nothing to mark in-flight)."""
+    handlers = reg.build_handlers(ctx)
+    handlers["session_create"](label="j")
+    assert ctx.sessions.events == []  # type: ignore[attr-defined]
+
+
+def test_end_call_runs_even_when_handler_raises(ctx: reg.ToolContext) -> None:
+    """The in-flight mark is cleared in a ``finally`` even when the call fails (no leaked mark)."""
+    handlers = reg.build_handlers(ctx)
+    # An unknown session id makes the handler's authorize raise the BOLA-safe error; begin_call
+    # still ran (best-effort, keyed on the id) and end_call MUST still run despite the exception.
+    with pytest.raises(GhidraMcpError):
+        handlers["decompile_function"](session_id="not-the-valid-sid", function="main")
+    events = ctx.sessions.events  # type: ignore[attr-defined]
+    assert events[0] == "begin:not-the-valid-sid"
+    assert events[-1] == "end:not-the-valid-sid"
 
 
 def test_decompile_authorizes_then_calls_port(ctx: reg.ToolContext) -> None:

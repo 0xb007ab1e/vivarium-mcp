@@ -682,6 +682,20 @@ def load_config(env: dict[str, str] | None = None) -> Config:
             overrides[limit_key] = value
     limits = resolve_limits(overrides or None)
 
+    # Session-liveness invariant (ADR-025 / F4): the idle timeout MUST be at least the per-analysis
+    # wall-clock, so a single long ``analyze`` cannot run longer than the idle window and idle-evict
+    # its own session at the next call (``expired-on-authorize`` → aborted workflow). In-flight
+    # tracking (sessions/manager) makes a running call non-idle, but this fail-closed startup check
+    # guarantees a deployment cannot even be CONFIGURED into the broken regime (defense in depth —
+    # the config is the only one that boots is the safe one, master §2). ``analysis_timeout_s`` is
+    # the resolved/clamped value (security/limits). Checked AFTER limits resolution so it sees the
+    # effective ceiling, not the raw env. Defaults satisfy it (idle 900 >= analysis 600).
+    if session_idle_s < limits.analysis_timeout_s:
+        raise _startup_error(
+            "session idle timeout must be at least the analysis timeout "
+            "(a long analysis must not be able to idle-evict its own session)"
+        )
+
     return Config(
         log_level=log_level,
         log_format=log_format,

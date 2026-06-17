@@ -113,6 +113,12 @@ class _Session:
         created_at: Wall-clock epoch seconds at creation (for ``SessionInfo``; not used for TTL).
         created_mono: Monotonic timestamp at creation (TTL math — immune to clock jumps).
         last_used_mono: Monotonic timestamp of the last authorize (idle math).
+        in_flight: Count of currently-executing calls against this session (ADR-025 / F4). A
+            session with ``in_flight > 0`` has a call actively running (e.g. a long ``analyze``) and
+            is treated as **non-idle** so a legitimate long single operation cannot idle-evict
+            itself. Bounded in-flight by the existing per-call timeout-kill (rpc_client.py) — the
+            real in-flight DoS control — not by the idle clock. A non-negative counter (not a bool)
+            so re-entrant/overlapping calls on one session are tracked correctly.
         ttl_s: Absolute lifetime in seconds.
         idle_s: Idle timeout in seconds.
         binary_sha256: Server-computed digest once a binary is imported, else ``None``.
@@ -133,6 +139,7 @@ class _Session:
     last_used_mono: float
     ttl_s: int
     idle_s: int
+    in_flight: int = 0
     binary_sha256: str | None = None
     store_path: str | None = None
     worker_started: bool = False
@@ -284,6 +291,58 @@ class SessionManager:
         """
         with self._lock:
             return self._to_info(self._get_live_locked(session_id, caller=caller))
+
+    def begin_call(self, session_id: str) -> None:
+        """Mark a session in-flight for the duration of a tool call (ADR-025 / F4); refresh idle.
+
+        Called by the dispatch chokepoint as a session-scoped tool call begins, paired with
+        :meth:`end_call` in a ``finally``. Increments the session's in-flight counter and refreshes
+        ``last_used_mono`` so a long-running single operation (e.g. an 18-26 min ``analyze``) cannot
+        idle-evict itself: while in-flight the idle branch of :meth:`_is_expired` exempts it (F4).
+
+        This is a **best-effort marker**, not an authorization step: it is keyed only by
+        ``session_id`` (no owner/expiry check) and is a silent no-op for an unknown or already-
+        evicted id. Authorization stays the sole responsibility of :meth:`authorize` /
+        :meth:`_get_live_locked`, which the handler invokes itself — so marking in-flight never
+        grants access (a foreign caller is still denied the BOLA-safe ``SESSION_INVALID``) and never
+        resurrects an evicted session. Idempotent-safe under overlapping calls via the counter.
+
+        Lock-safe: all mutation happens under ``_lock``; no I/O is performed while holding it.
+
+        Args:
+            session_id: The opaque id of the session the call targets.
+        """
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if sess is None or sess.state == STATE_EVICTED:
+                # Unknown/evicted: nothing to mark. The handler's authorize fails closed regardless.
+                return
+            sess.in_flight += 1
+            sess.last_used_mono = self._clock()
+
+    def end_call(self, session_id: str) -> None:
+        """Clear a session's in-flight mark when a tool call ends (ADR-025 / F4); refresh idle.
+
+        The ``finally`` counterpart of :meth:`begin_call`. Decrements the in-flight counter (never
+        below zero — fail safe against an unmatched/spurious ``end_call``) and refreshes
+        ``last_used_mono`` again so the idle clock restarts **after** the long call completes, not
+        at its start: an abandoned session then idle-evicts from when its last call finished, while
+        a session whose call just ended is fresh.
+
+        A silent no-op for an unknown/evicted id (e.g. the session was evicted mid-call by the
+        timeout-kill path). Lock-safe: mutation under ``_lock``, no I/O held.
+
+        Args:
+            session_id: The opaque id of the session the finished call targeted.
+        """
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if sess is None or sess.state == STATE_EVICTED:
+                return
+            # Clamp at zero: an unmatched end_call must never drive the counter negative (which
+            # would leave a phantom-negative in-flight that under-counts a real concurrent call).
+            sess.in_flight = max(0, sess.in_flight - 1)
+            sess.last_used_mono = self._clock()
 
     def _get_live_locked(self, session_id: str, *, caller: str) -> _Session:
         """Look up a live, caller-owned session by id (caller holds ``_lock``); refresh idle clock.
@@ -531,6 +590,13 @@ class SessionManager:
     def reap_expired(self) -> int:
         """Evict all sessions past their TTL or idle timeout (called by a periodic sweeper).
 
+        In-flight sessions (``in_flight > 0``) are **skipped** (ADR-025 / F4): a session with a call
+        actively executing is never torn out from under it by the reaper — not for idle (it is
+        non-idle by definition) and not for TTL (a legitimate long single operation must run to
+        completion, bounded by the per-call timeout-kill in ``rpc_client.py``). The absolute TTL is
+        still enforced for such a session at its **next** call boundary (:meth:`_get_live_locked`),
+        so TTL caps standing lifetime without killing an in-progress operation.
+
         Returns:
             Number of sessions evicted.
         """
@@ -539,7 +605,9 @@ class SessionManager:
             expired = [
                 sid
                 for sid, sess in self._sessions.items()
-                if sess.state != STATE_EVICTED and self._is_expired(sess, now)
+                if sess.state != STATE_EVICTED
+                and sess.in_flight == 0
+                and self._is_expired(sess, now)
             ]
             for sid in expired:
                 reason = "ttl" if self._ttl_expired(self._sessions[sid], now) else "idle"
@@ -646,16 +714,34 @@ class SessionManager:
         return str(Path(self._store_root) / session_id)
 
     def _is_expired(self, sess: _Session, now: float) -> bool:
-        """Whether a session has hit either its absolute TTL or its idle timeout.
+        """Whether a session has hit its absolute TTL, or its idle timeout while NOT in-flight.
+
+        Idle exemption (ADR-025 / F4): a session with a call actively executing
+        (``in_flight > 0``) is **never idle-expired** — a long single operation (e.g. an
+        18-26 min ``analyze``) refreshes nothing mid-call, so without this the next call's
+        authorize would lazily idle-evict it (``expired-on-authorize``) and abort the workflow.
+        The in-flight call is instead bounded by the per-call timeout-kill in ``rpc_client.py``
+        (the real in-flight DoS control), not by the idle clock.
+
+        The **absolute TTL** still applies regardless of in-flight: it is re-checked at every call
+        boundary (via :meth:`_get_live_locked`), so a session that has exceeded ``ttl_s`` cannot
+        accept NEW work even if a prior long call kept it alive. (The periodic reaper additionally
+        declines to tear an in-flight session out mid-call for TTL — see :meth:`reap_expired` — so
+        TTL caps standing lifetime without killing a legitimate long operation.)
 
         Args:
             sess: The session.
             now: Current monotonic time.
 
         Returns:
-            ``True`` if TTL or idle has elapsed.
+            ``True`` if TTL has elapsed, or (only when not in-flight) idle has elapsed.
         """
-        return self._ttl_expired(sess, now) or (now - sess.last_used_mono) >= sess.idle_s
+        if self._ttl_expired(sess, now):
+            return True
+        if sess.in_flight > 0:
+            # In-flight: exempt from idle eviction (F4). TTL was already checked above.
+            return False
+        return (now - sess.last_used_mono) >= sess.idle_s
 
     @staticmethod
     def _ttl_expired(sess: _Session, now: float) -> bool:

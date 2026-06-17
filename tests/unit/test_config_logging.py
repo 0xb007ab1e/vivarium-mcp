@@ -125,6 +125,52 @@ def test_load_config_blank_values_treated_as_unset(
     assert cfg.session_ttl_s == 3600
 
 
+# --- session-liveness invariant: idle >= analysis_timeout (ADR-025 / F4) ----------------------
+# The fake resolve_limits returns default Limits (analysis_timeout_s == 600). The startup invariant
+# must reject a deployment whose idle window is shorter than the analysis timeout (a long analyze
+# could otherwise idle-evict its own session mid-call), and accept idle >= analysis_timeout.
+def test_load_config_rejects_idle_below_analysis_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """idle < analysis_timeout is a fatal misconfiguration (fail-closed VALIDATION)."""
+    # Force a known analysis_timeout via the limits fake (700) and set idle below it (650 < 700),
+    # keeping ttl >= idle so only the new invariant trips.
+    monkeypatch.setattr(
+        cfgmod, "resolve_limits", lambda overrides=None: Limits(analysis_timeout_s=700)
+    )
+    env = dict(_MINIMAL_ENV)
+    env["GHIDRA_MCP_SESSION_IDLE_SECONDS"] = "650"
+    env["GHIDRA_MCP_SESSION_TTL_SECONDS"] = "3600"
+    with pytest.raises(GhidraMcpError) as exc:
+        cfgmod.load_config(env)
+    assert exc.value.envelope.type is ErrorType.VALIDATION
+
+
+def test_load_config_accepts_idle_equal_to_analysis_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """idle == analysis_timeout is the boundary and is accepted (>=)."""
+    monkeypatch.setattr(
+        cfgmod, "resolve_limits", lambda overrides=None: Limits(analysis_timeout_s=700)
+    )
+    env = dict(_MINIMAL_ENV)
+    env["GHIDRA_MCP_SESSION_IDLE_SECONDS"] = "700"
+    env["GHIDRA_MCP_SESSION_TTL_SECONDS"] = "3600"
+    cfg = cfgmod.load_config(env)
+    assert cfg.session_idle_s == 700
+    assert cfg.limits.analysis_timeout_s == 700
+
+
+def test_load_config_defaults_satisfy_liveness_invariant(
+    fake_resolve_limits: list[dict[str, int] | None],
+) -> None:
+    """The shipped defaults (idle 900 >= analysis 600) boot cleanly — no value changes (ADR-025)."""
+    cfg = cfgmod.load_config(dict(_MINIMAL_ENV))
+    assert cfg.session_idle_s == 900
+    assert cfg.limits.analysis_timeout_s == 600
+    assert cfg.session_idle_s >= cfg.limits.analysis_timeout_s
+
+
 # --- logging -------------------------------------------------------------------------
 def _make_record(**extra: object) -> logging.LogRecord:
     rec = logging.LogRecord("ghidra_mcp.test", logging.INFO, "p.py", 10, "an.event", None, None)
