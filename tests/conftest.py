@@ -597,24 +597,30 @@ class FakeGhidraPort:
         *,
         targets: s.ExportTargets,
     ) -> s.SessionExportAnnotationsOut:
-        """Return a deterministic exported annotation document (untrusted-wrapped — ADR-018).
+        """Return a deterministic exported annotation document (untrusted-wrapped — ADR-018/032).
 
-        A small, dependency-ordered document (one struct, one signature referencing it, one
-        function rename, one comment) with binary-derived strings wrapped, mirroring the real
-        adapter contract. The server overlays the authoritative ``binary.sha256``.
+        A small, dependency-ordered v2 document: the session-authored composite(s) as ONE
+        ``define_types`` batch entry (ADR-032 — emitted first), then a function rename and a
+        comment, with binary-derived strings wrapped, mirroring the real adapter contract. The
+        server overlays the authoritative ``binary.sha256``.
         """
         self._maybe_fail()
         return s.SessionExportAnnotationsOut(
             document=s.ExportedAnnotationDocument(
-                schema_version=s.ANNOTATION_SCHEMA_VERSION,
+                schema_version=s.ANNOTATION_SCHEMA_VERSION,  # v2 (ADR-032)
                 binary=s.ExportedBinaryRef(sha256="a" * 64, name=_u("sample.bin"), size=4096),
                 entries=[
-                    s.ExportedDefineStructEntry(
-                        kind="define_struct",
-                        name=_u("cfg_t"),
-                        fields=[
-                            s.ExportedFieldSpec(
-                                name=_u("flags"), type=s.ExportedTypeRef(base="int")
+                    s.ExportedDefineTypesEntry(
+                        kind="define_types",
+                        types=[
+                            s.ExportedCompositeSpec(
+                                kind="struct",
+                                name=_u("cfg_t"),
+                                fields=[
+                                    s.ExportedFieldSpec(
+                                        name=_u("flags"), type=s.ExportedTypeRef(base="int")
+                                    )
+                                ],
                             )
                         ],
                     ),

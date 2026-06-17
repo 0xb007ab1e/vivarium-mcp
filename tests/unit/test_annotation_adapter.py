@@ -7,7 +7,9 @@ worker and a fake worker handle records kills. No real Ghidra, no JVM, no networ
 
 - a plain worker export result round-trips into the typed ``ExportedAnnotationDocument`` with every
   binary-derived value field ``Untrusted``-wrapped (ADR-005) and structured refs/addresses bare;
-- every entry ``kind`` shapes into its matching exported variant;
+- every entry ``kind`` shapes into its matching exported variant — incl. the ADR-032
+  ``define_types`` batch (schema v2): the session-authored composites arrive as ONE batch entry
+  whose per-composite name + field names are ``Untrusted``-wrapped (vs. legacy define_struct/union);
 - a structurally-malformed / unknown-kind worker result fails closed as ``WORKER_UNAVAILABLE`` (the
   ``_fail_closed`` builder), never surfacing the raw shaping error.
 """
@@ -93,31 +95,49 @@ def _run_export(result: dict[str, object]) -> tuple[s.SessionExportAnnotationsOu
     return out, worker
 
 
+# ADR-032 (schema v2): the worker emits ALL session-authored composites as ONE ``define_types``
+# batch entry (emitted FIRST), not N individual ``define_struct``/``define_union`` entries. Here the
+# batch carries one struct + one union to exercise both composite kinds through the batch builder.
 _FULL_RESULT: dict[str, object] = {
-    "schema_version": 1,
+    "schema_version": 2,
     "binary": {"sha256": "a" * 64, "name": "sample.bin", "size": 4096},
     "entries": [
         {
-            "kind": "define_struct",
-            "name": "cfg_t",
-            "fields": [
+            "kind": "define_types",
+            "types": [
                 {
-                    "name": "flags",
-                    "type": {"base": "int", "named": None, "pointer_levels": 0, "array_len": None},
-                    "offset": 0,
-                }
-            ],
-            "packed": False,
-        },
-        {
-            "kind": "define_union",
-            "name": "u_t",
-            "fields": [
+                    "kind": "struct",
+                    "name": "cfg_t",
+                    "fields": [
+                        {
+                            "name": "flags",
+                            "type": {
+                                "base": "int",
+                                "named": None,
+                                "pointer_levels": 0,
+                                "array_len": None,
+                            },
+                            "offset": 0,
+                        }
+                    ],
+                    "packed": False,
+                },
                 {
-                    "name": "m",
-                    "type": {"base": "int", "named": None, "pointer_levels": 0, "array_len": None},
-                    "offset": None,
-                }
+                    "kind": "union",
+                    "name": "u_t",
+                    "fields": [
+                        {
+                            "name": "m",
+                            "type": {
+                                "base": "int",
+                                "named": None,
+                                "pointer_levels": 0,
+                                "array_len": None,
+                            },
+                            "offset": None,
+                        }
+                    ],
+                },
             ],
         },
         {
@@ -159,16 +179,16 @@ _FULL_RESULT: dict[str, object] = {
 
 def test_export_round_trips_every_kind_with_untrusted_wrapping() -> None:
     # abuse case 70 (export analog) — every entry kind round-trips through the typed exported view.
+    # ADR-032 (v2): the composites arrive as ONE ``define_types`` batch (first), not N entries.
     out, worker = _run_export(_FULL_RESULT)
     doc = out.document
-    assert doc.schema_version == 1
+    assert doc.schema_version == 2  # ADR-032 — new exports are v2
     assert doc.binary.sha256 == "a" * 64  # server-relevant digest of input — bare/safe
     assert isinstance(doc.binary.name, Untrusted)  # advisory original name → binary-derived
-    assert len(doc.entries) == 9
+    assert len(doc.entries) == 8  # the two composites collapsed into one define_types batch
     kinds = [e.kind for e in doc.entries]
     assert kinds == [
-        "define_struct",
-        "define_union",
+        "define_types",
         "set_function_signature",
         "apply_data_type",
         "rename_function",
@@ -178,16 +198,16 @@ def test_export_round_trips_every_kind_with_untrusted_wrapping() -> None:
         "set_comment",
     ]
     # Binary-derived value fields are Untrusted-wrapped (ADR-005); structured refs/addresses bare.
-    rename_fn = doc.entries[4]
+    rename_fn = doc.entries[3]
     assert isinstance(rename_fn, s.ExportedRenameFunctionEntry)
     assert isinstance(rename_fn.new_name, Untrusted)
     assert rename_fn.new_name.origin is DataOrigin.BINARY
     assert rename_fn.function == "0x401000"  # address — server-safe, bare
-    comment = doc.entries[8]
+    comment = doc.entries[7]
     assert isinstance(comment, s.ExportedSetCommentEntry)
     assert isinstance(comment.text, Untrusted)
     assert comment.comment_type == "PLATE"  # closed vocab — bare
-    local = doc.entries[6]
+    local = doc.entries[5]
     assert isinstance(local, s.ExportedRenameLocalVariableEntry)
     assert isinstance(local.variable, Untrusted)  # decompiler selector — binary-derived
     assert worker.killed == 0
@@ -197,11 +217,16 @@ def test_export_wraps_composite_and_member_and_typeref_names() -> None:
     # abuse case 71 (export analog) — a composite name, a member/param name, and a TypeRef.named
     # are all read OUT of the hostile program (USER_DEFINED identifiers an injection-steered prior
     # write may control), so they MUST come back Untrusted-wrapped (ADR-005 / CWE-200), not bare.
+    # ADR-032: the composites live inside the single ``define_types`` batch entry now.
     out, _ = _run_export(_FULL_RESULT)
     doc = out.document
 
-    struct = doc.entries[0]
-    assert isinstance(struct, s.ExportedDefineStructEntry)
+    batch = doc.entries[0]
+    assert isinstance(batch, s.ExportedDefineTypesEntry)
+    assert [t.kind for t in batch.types] == ["struct", "union"]
+
+    struct = batch.types[0]
+    assert isinstance(struct, s.ExportedCompositeSpec)
     # composite name: Untrusted-wrapped, not a bare str.
     assert isinstance(struct.name, Untrusted)
     assert struct.name.origin is DataOrigin.BINARY
@@ -209,12 +234,12 @@ def test_export_wraps_composite_and_member_and_typeref_names() -> None:
     assert isinstance(struct.fields[0].name, Untrusted)
     assert struct.fields[0].name.origin is DataOrigin.BINARY
 
-    union = doc.entries[1]
-    assert isinstance(union, s.ExportedDefineUnionEntry)
+    union = batch.types[1]
+    assert isinstance(union, s.ExportedCompositeSpec)
     assert isinstance(union.name, Untrusted)
     assert isinstance(union.fields[0].name, Untrusted)
 
-    sig = doc.entries[2]
+    sig = doc.entries[1]
     assert isinstance(sig, s.ExportedSetFunctionSignatureEntry)
     # parameter name: Untrusted-wrapped (binary-derived on export).
     assert isinstance(sig.parameters[0].name, Untrusted)
@@ -251,6 +276,72 @@ def test_export_wraps_typeref_named_leaf() -> None:
     assert entry.type.named.value == "evil_t"
     assert entry.type.base is None  # closed vocab — bare
     assert entry.type.pointer_levels == 1  # server-safe scalar — bare
+
+
+def test_export_define_types_batch_wraps_every_composite_and_field_name() -> None:
+    # ADR-032 — a plain worker ``define_types`` dict (TWO mutually-recursive pointer composites)
+    # builds an ``ExportedDefineTypesEntry`` whose every composite name + field name is read OUT of
+    # the hostile program → Untrusted-wrapped (ADR-005). The pointer modifier + closed-vocab base
+    # stay bare/safe. This is the headline interdependent-graph carrier coming back out.
+    result = {
+        "schema_version": 2,
+        "binary": {"sha256": "a" * 64},
+        "entries": [
+            {
+                "kind": "define_types",
+                "types": [
+                    {
+                        "kind": "struct",
+                        "name": "node_a",
+                        "fields": [
+                            {
+                                "name": "to_b",
+                                "type": {
+                                    "base": None,
+                                    "named": "node_b",
+                                    "pointer_levels": 1,
+                                    "array_len": None,
+                                },
+                                "offset": None,
+                            }
+                        ],
+                    },
+                    {
+                        "kind": "struct",
+                        "name": "node_b",
+                        "fields": [
+                            {
+                                "name": "to_a",
+                                "type": {
+                                    "base": None,
+                                    "named": "node_a",
+                                    "pointer_levels": 1,
+                                    "array_len": None,
+                                },
+                                "offset": None,
+                            }
+                        ],
+                    },
+                ],
+            }
+        ],
+    }
+    out, _ = _run_export(result)
+    entry = out.document.entries[0]
+    assert isinstance(entry, s.ExportedDefineTypesEntry)
+    assert len(entry.types) == 2
+    for composite, expected_name in zip(entry.types, ("node_a", "node_b"), strict=True):
+        assert isinstance(composite, s.ExportedCompositeSpec)
+        assert isinstance(composite.name, Untrusted)  # composite name → binary-derived
+        assert composite.name.origin is DataOrigin.BINARY
+        assert composite.name.value == expected_name
+        field = composite.fields[0]
+        assert isinstance(field.name, Untrusted)  # member name → binary-derived
+        assert field.name.origin is DataOrigin.BINARY
+        # The TypeRef.named (the peer composite name read out) is Untrusted-wrapped; modifiers bare.
+        assert isinstance(field.type.named, Untrusted)
+        assert field.type.named.origin is DataOrigin.BINARY
+        assert field.type.pointer_levels == 1  # server-safe scalar — bare
 
 
 def test_export_neutralizes_injection_in_read_out_name() -> None:

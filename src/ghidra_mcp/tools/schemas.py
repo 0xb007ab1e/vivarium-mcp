@@ -1907,9 +1907,14 @@ class DefineTypesResult(_Out):
 # structural entries), re-validates EVERY entry via the live validators, and replays each in its own
 # Ghidra transaction. The server persists nothing (stateless — ADR-002 preserved).
 # =====================================================================================
-#: Supported annotation-document schema version. An unknown version fails closed (forward-compat is
+#: Current annotation-document schema version emitted by export. Bumped 1 → 2 in ADR-032 (composites
+#: now round-trip as a single ``define_types`` batch entry instead of N ``define_struct``/
+#: ``define_union`` entries). Import accepts :data:`SUPPORTED_ANNOTATION_SCHEMA_VERSIONS` (a v2
+#: importer still understands v1 entry kinds); an unknown version fails closed (forward-compat is
 #: opt-in, never silent) — :func:`ghidra_mcp.core.validation.validate_annotation_document`.
-ANNOTATION_SCHEMA_VERSION = 1
+ANNOTATION_SCHEMA_VERSION = 2
+#: The schema versions an import accepts (the current emitter version + the still-replayable v1).
+SUPPORTED_ANNOTATION_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2})
 
 #: Hard cap on entries in one imported/exported document (DoS — CWE-400; mirrored in
 #: ``core.validation``). A document over this is ``limit-exceeded`` (never a silent truncation).
@@ -2127,11 +2132,31 @@ class DefineUnionEntry(_Entry):
         return self
 
 
+class DefineTypesEntry(_Entry):
+    """A ``define_types`` batch replay entry (mirrors :class:`DefineTypesIn`) — ADR-032.
+
+    The round-trip carrier for an **interdependent composite graph**: export emits ALL of a
+    session's authored composites as one ``define_types`` batch so mutually-recursive pointer
+    composites (and any acyclic-but-misordered dependency) round-trip via the handler's
+    pre-registration. Structural entry. Re-validated via ``validate_types_batch`` on import (the
+    by-value cycle detector + per-type ``validate_composite`` + intra-batch unique names).
+
+    Attributes:
+        kind: Discriminator — always ``"define_types"``.
+        types: The batch of composites — ``1..64`` (``_MAX_TYPES_PER_BATCH``); a field of one may
+            reference another batch member (the pre-registration resolves it).
+    """
+
+    kind: Literal["define_types"]
+    types: list[CompositeSpec] = Field(min_length=1, max_length=_MAX_TYPES_PER_BATCH)
+
+
 #: The discriminated union of replay entries — pydantic selects the variant by the ``kind`` literal.
 #: An unknown/missing ``kind`` fails closed at construction (ADR-018 fail-closed). The order matches
 #: the document's dependency-safe emission order (types first, then refs, then renames, comments).
 Entry = (
-    DefineStructEntry
+    DefineTypesEntry
+    | DefineStructEntry
     | DefineUnionEntry
     | SetFunctionSignatureEntry
     | ApplyDataTypeEntry
@@ -2158,6 +2183,7 @@ STRUCTURAL_ENTRY_KINDS: frozenset[str] = frozenset(
         "apply_data_type",
         "define_struct",
         "define_union",
+        "define_types",
     }
 )
 
@@ -2395,9 +2421,43 @@ class ExportedDefineUnionEntry(_ExportEntry):
     fields: list[ExportedFieldSpec]
 
 
+class ExportedCompositeSpec(_Out):
+    """The exported view of a :class:`CompositeSpec` — name + field names Untrusted (ADR-032).
+
+    One member of an :class:`ExportedDefineTypesEntry` batch. Mirrors :class:`CompositeSpec`, but
+    the composite ``name`` and each field name are binary-derived (read out of the hostile program)
+    and so are ``Untrusted``-wrapped (ADR-005). The client extracts ``.value`` to rebuild a bare
+    :class:`CompositeSpec` for round-trip.
+
+    Attributes:
+        kind: ``"struct"`` or ``"union"`` — safe.
+        name: The composite's read-out name — binary-derived → untrusted.
+        fields: The member list (each member name is binary-derived → untrusted).
+        packed: Whether the struct is packed — safe (N/A for a union).
+    """
+
+    kind: Literal["struct", "union"]
+    name: Untrusted[str]
+    fields: list[ExportedFieldSpec]
+    packed: bool = False
+
+
+class ExportedDefineTypesEntry(_ExportEntry):
+    """Exported ``define_types`` batch entry (ADR-032) — the interdependent-composite round-trip.
+
+    Attributes:
+        kind: Discriminator — always ``"define_types"``.
+        types: The batch of exported composites (each name/field name binary-derived → untrusted).
+    """
+
+    kind: Literal["define_types"]
+    types: list[ExportedCompositeSpec]
+
+
 #: The discriminated union of EXPORTED entries (output view). Same dependency order as ``Entry``.
 ExportedEntry = (
-    ExportedDefineStructEntry
+    ExportedDefineTypesEntry
+    | ExportedDefineStructEntry
     | ExportedDefineUnionEntry
     | ExportedSetFunctionSignatureEntry
     | ExportedApplyDataTypeEntry

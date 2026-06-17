@@ -40,9 +40,13 @@ _DEFAULT_MAX_FRAME_BYTES = 4 * 1024 * 1024  # 4 MiB (mirrors security.limits def
 # total computed size of an assembled struct/union is bounded INSIDE the txn after each member's
 # DataType.getLength() is known (the running-sum backstop against the recursion/fan-out DoS).
 _MAX_COMPOSITE_SIZE = 1_048_576  # 1 MiB
-# Annotation-document schema version the worker emits on export (v1.2 — ADR-018; mirrors
-# schemas.ANNOTATION_SCHEMA_VERSION). The server overlays the authoritative binary hash.
-_ANNOTATION_SCHEMA_VERSION = 1
+# Max composites in one define_types batch (ADR-021/ADR-032; mirror schemas._MAX_TYPES_PER_BATCH).
+# Bounds the export round-trip batch — >64 session-authored composites fail closed (CWE-400).
+_MAX_TYPES_PER_BATCH = 64
+# Annotation-document schema version the worker emits on export (ADR-018; bumped 1 → 2 in ADR-032 —
+# composites round-trip as one define_types batch entry; mirrors schemas.ANNOTATION_SCHEMA_VERSION).
+# The server overlays the authoritative binary hash.
+_ANNOTATION_SCHEMA_VERSION = 2
 
 # Analyzer-depth profile presets (v1.4 — ADR-029 B). PURE data: a profile → {analyzer-option-name:
 # enabled} overlay applied to the program's analysis options BEFORE auto-analysis runs.
@@ -2511,12 +2515,15 @@ class PyGhidraBackend:
                 )
             entries.append(entry)
 
-        # 1) Composite types FIRST (define_struct/define_union) — dependency-safe so a later
-        #    signature/apply that references the composite has it available on replay. ADR-027:
-        #    look up ONLY the change-log's named composites (membership in the log IS the user-
-        #    authored signal — NOT the too-loose program-local-archive proxy that leaked auto
-        #    structs). REQUIRES LIVE VERIFICATION: getDataType(CategoryPath.ROOT, name).
+        # 1) Composite types FIRST, as ONE `define_types` batch entry (ADR-032) — so mutually-
+        #    recursive POINTER composites (and any acyclic-but-misordered dependency) round-trip via
+        #    the import handler's pre-registration, which individual define_struct/union entries
+        #    could not (no replay order resolves a pointer cycle). Emitted before the signatures/
+        #    applies that may reference the types. ADR-027: look up ONLY the change-log's named
+        #    composites (membership in the log IS the user-authored signal). REQUIRES LIVE
+        #    VERIFICATION: getDataType(CategoryPath.ROOT, name).
         manager = program.getDataTypeManager()
+        composite_specs: list[dict[str, Any]] = []
         for name in composite_targets:
             data_type = manager.getDataType(CategoryPath.ROOT, name)
             if data_type is None:
@@ -2526,8 +2533,20 @@ class PyGhidraBackend:
             fields = _composite_fields_export(data_type)
             if fields is None:
                 continue  # not field-reconstructable (e.g. derived/aliased) — skip, never guess
-            kind = "define_union" if isinstance(data_type, Union) else "define_struct"
-            _emit({"kind": kind, "name": _to_text(data_type.getName()), "fields": fields})
+            kind = "union" if isinstance(data_type, Union) else "struct"
+            composite_specs.append(
+                {"kind": kind, "name": _to_text(data_type.getName()), "fields": fields}
+            )
+        if composite_specs:
+            # ADR-032 D2: a define_types batch is bounded (CWE-400). >64 reconstructable session-
+            # authored composites cannot round-trip as one atomic batch → fail closed (the live
+            # writes that created them still succeeded; only the round-trip is refused).
+            if len(composite_specs) > _MAX_TYPES_PER_BATCH:
+                raise WorkerError(
+                    CODE_LIMIT_EXCEEDED,
+                    "session-authored composite count exceeds the round-trip batch maximum",
+                )
+            _emit({"kind": "define_types", "types": composite_specs})
 
         # 2) USER_DEFINED function signatures (set_function_signature) — after the types they use.
         listing = program.getListing()
