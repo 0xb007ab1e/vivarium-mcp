@@ -91,6 +91,26 @@ Likelihood × Impact → severity (master §7). "L/M/H".
 | **D** | Worker hangs holding the RPC, stalling the server | M×M=**Med** | per-call timeout that **kills the worker**; adapter never blocks unbounded (`topic-reliability`) |
 | **E** | Compromised worker pivots to the server via RPC | L×H=**Med** | server treats worker output as **untrusted** (TB4); strict frame schema; no code/paths from worker are executed/trusted |
 
+> **TB2 delta — v1.4 analyze `$/progress` notifications (ADR-030 Phase 1; no new boundary).** The
+> additive, **opt-in** worker→server `$/progress` notification rides the existing per-session socket
+> (no new channel/principal) and does **not** widen TB2. It is **additive** — when `params.progress`
+> is not `true` the worker emits no frames and the exchange is byte-for-byte today's; no existing
+> field is repurposed. **(I) Information disclosure:** a frame carries the SAFE `percent` (int
+> `0..100`/`null`) + a `phase` from the CLOSED `{importing, analyzing, finalizing}` vocabulary ONLY —
+> Ghidra's free-form `TaskMonitor` message (which embeds attacker-controlled symbol names) is never
+> on the wire; an out-of-range percent / out-of-vocabulary phase is rejected fail-closed; Phase 1
+> relays to the **server log only** (percent + phase), no binary-derived text (master §5). **(T/spoof
+> the response):** a notification carries **no top-level `id`** (the analyze id is only in
+> `params.id` for correlation), so it can never be confused with the request's correlated response —
+> the server treats a frame as progress *iff* `method == "$/progress"` AND no top-level `id`; a frame
+> with both falls through to response parsing and is rejected. No correlation desync. **(D) Denial of
+> service:** the per-analysis **deadline is NOT extended** by progress (computed once at call start —
+> a chatty/hung worker still hits the kill-on-timeout of ADR-002), the server caps progress frames
+> per call (flood → protocol violation → kill + evict), relayed frames are rate-limited (coalesced),
+> and the §3 per-frame size cap + one-at-a-time processing bound memory. Worker-side this is the
+> `TaskMonitorAdapter` JVM edge (live-verified before merge); the percent mapping and frame
+> parse/relay are pure, unit-tested logic.
+
 ### TB3 — Binary → Ghidra analyzer (**HOSTILE — primary boundary**)
 | STRIDE | Threat | L×I | Mitigation |
 |--------|--------|-----|------------|

@@ -67,6 +67,43 @@ Error response (worker → server):
   in the untrusted-data envelope; the worker returns plain structured data.
 - Every frame is validated against its schema on receipt; unknown methods/fields are rejected.
 
+**`$/progress` — additive analysis-progress NOTIFICATION (v1.4 — ADR-030 Phase 1; worker → server,
+OPT-IN):** during an opted-in `analyze` the worker MAY send zero or more `$/progress`
+**notifications** on the same socket BEFORE the single response:
+```json
+{ "jsonrpc": "2.0", "method": "$/progress",
+  "params": { "id": "<analyze-uuid>", "percent": <0..100|null>, "phase": "<closed-enum>" } }
+```
+- **A notification, not a response — NO top-level `id`.** Per JSON-RPC 2.0 a notification carries no
+  top-level `id`; the analyze request's `id` rides inside `params.id` purely to correlate the frame
+  to the in-flight call. The absence of a top-level `id` is the structural invariant that a progress
+  frame can **never** be confused with the request's correlated response (and vice-versa): the server
+  classifies a frame as progress **iff** `method == "$/progress"` AND it has no top-level `id`; a
+  frame carrying both is NOT treated as progress (it falls through to response parsing, which then
+  rejects it). No correlation desync is possible.
+- **Opt-in only.** The worker emits these **only** when the request's `params.progress` is `true`
+  (the additive `analyze` flag below). When progress is not requested the worker emits **no
+  `$/progress` frames** and the exchange is byte-for-byte today's single response — additive, no
+  existing field repurposed, tool count unchanged.
+- **Ordering.** Zero or more `$/progress` notifications, in order, then **exactly one** response
+  (`result` or `error`). Progress never replaces or follows the response.
+- **Redaction (master §5).** `params` carries the SAFE **`percent`** (int `0..100`, or `null` when
+  the monitor is indeterminate) and a **`phase`** from the CLOSED vocabulary
+  `{ "importing", "analyzing", "finalizing" }` ONLY. Ghidra's free-form `TaskMonitor` message
+  (which embeds attacker-controlled symbol/function names) is **never** placed on the wire; an
+  out-of-range `percent` or out-of-vocabulary `phase` is a protocol violation and is rejected
+  fail-closed.
+- **Flood bounds (TB2/TB3 — the worker is potentially hostile).** The server accepts at most
+  `_MAX_PROGRESS_FRAMES` (10 000) progress frames per opted-in call; exceeding the count is a
+  protocol violation → kill + evict (§6). Frames relayed to the server log are rate-limited (a frame
+  sooner than a min interval since the last relayed one is coalesced — counted but not logged). The
+  per-frame §3 size cap also applies; frames are processed and discarded one at a time (no unbounded
+  server-side buffering).
+- **The analysis deadline is NOT extended by progress** (see §6): the one-shot per-analysis deadline
+  is computed once at call start; progress frames do not reset or push it, so a chatty or hung worker
+  still hits the kill-on-timeout. Phase 1 relays each frame to the **server log only** (no MCP-client
+  relay — that is Phase 2).
+
 ### RPC methods (worker-facing; one per Ghidra-touching operation)
 `import_binary`, `analyze`, `decompile_function`, `disassemble`, `list_functions`, `get_function`,
 `xrefs_to`, `xrefs_from`, `list_strings`, `list_symbols`, `get_symbol`, `list_data`,
@@ -127,6 +164,17 @@ and worker-only**: no existing field is repurposed, the client-facing `session_a
 gains only the same additive optional field, and the **tool count is unchanged**. The profile only
 REDUCES/adjusts analysis depth — it grants no new capability/agency (ADR-001 intact).
 
+**`analyze` — additive `progress` param (v1.4 — ADR-030 Phase 1; server → worker, OPTIONAL):** the
+`analyze` RPC params MAY carry a boolean `progress`. **The default (`false`) omits the key
+entirely** — when progress is not requested the params are byte-for-byte identical to today's
+`{ "timeout_seconds": … }` (plus `profile` only when non-default), the worker emits no `$/progress`
+frames, and the server uses the unchanged single-frame read path. When `true` the worker streams the
+bounded, redacted `$/progress` notifications described in §4 BEFORE the single response. **Additive,
+opt-in, worker-only**: no existing field is repurposed, the client-facing `session_analyze` tool
+surface gains only this additive optional field, and the **tool count is unchanged**. The flag adds
+no capability/agency — it only emits progress (ADR-001 intact); the analysis deadline is unchanged
+(§6).
+
 ## 5. Error model (worker → server)
 
 The worker returns JSON-RPC errors with a `data.type` slug that the server maps to the public
@@ -167,6 +215,12 @@ no `data` field and forbids extras). Optional + ignorable; no existing field cha
   the engine query errors. No existing slug is repurposed.
 - Kill is the universal failure handler: timeout, protocol violation, oversized frame, OOM, or
   poisoning all resolve to **kill + evict** (ADR-002). Eviction then verified-wipes the store.
+- **`$/progress` does NOT extend the deadline (v1.4 — ADR-030 Phase 1):** for an opted-in `analyze`,
+  the one-shot per-analysis deadline is computed once at call start and bounds the whole
+  progress-read loop; arriving `$/progress` frames never reset or push it. A worker that streams
+  progress forever (or hangs after some progress) still hits the un-extended deadline → SIGKILL +
+  evict, and a `$/progress` flood beyond the per-call cap is itself a protocol violation → kill +
+  evict. The kill-on-timeout bound (above) is unchanged by the progress increment.
 
 ## 7. Security properties (summary)
 

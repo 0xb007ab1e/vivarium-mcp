@@ -20,7 +20,7 @@ import socket
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from worker import dispatch
@@ -1309,6 +1309,21 @@ class _FakeBackend:
             return {"method": name}
 
         return handler
+
+    def analyze(
+        self,
+        params: dict[str, Any],
+        *,
+        emit_progress: Callable[[int | None, str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Explicit ``analyze`` matching the ``GhidraBackend`` protocol (ADR-030 emit_progress kw).
+
+        The catch-all ``__getattr__`` cannot satisfy the protocol's keyword-only ``emit_progress``
+        signature, so ``analyze`` is declared explicitly. Records the call (with whether progress
+        was requested) and echoes, like every other faked method.
+        """
+        self.calls.append(("analyze", {**params, "_emit_progress": emit_progress is not None}))
+        return {"method": "analyze"}
 
 
 def test_dispatch_ping_and_shutdown_bypass_backend() -> None:
