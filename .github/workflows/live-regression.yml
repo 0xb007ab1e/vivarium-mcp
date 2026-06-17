@@ -1,0 +1,234 @@
+# =============================================================================
+# live-regression.yml — recurring real-worker regression gate (ADR-028; GATED by label/schedule)
+# =============================================================================
+# Catches JVM-edge (`# pragma: no cover`) regressions that hermetic unit tests CANNOT — the v1.3
+# F2/F7 class — by driving the REAL Ghidra worker end to end. Unit coverage stops at the TB3
+# PyGhidra boundary (ADR-001); only a live worker exercises the export-after-write enumeration.
+#
+# TWO HARD GATES (deterministic — a failure or a SKIP fails the job):
+#   * F2 — `session_export_annotations` succeeds on a real program after a rename
+#     (tests/integration/test_export_annotations_after_rename.py — scheduled, not rewritten).
+#   * F7 — a session making exactly 1 rename + 1 comment + 1 struct exports EXACTLY 3 entries and
+#     ZERO auto-generated content (tests/integration/test_export_known_count.py).
+# Naming-accuracy / behavioral-equivalence is ADVISORY (NOT a hard gate, NOT run with an LLM in CI)
+# and is deliberately NOT part of this job — see e2e-groundtruth.yml for the gated naming-eval e2e.
+#
+# FAIL-LOUD ON SKIP (workflow-cicd: a skipped/errored security stage counts as a FAILURE, not a
+# pass): if either hard-gate test is SKIPPED (broken harness / worker didn't come up) the job FAILS.
+# We assert post-run that both tests actually RAN (parse the JUnit XML).
+#
+# TEST WHAT YOU SHIP: by default this PULLS the cosign-SIGNED released worker image and
+# cosign-VERIFIES it before use; a `workflow_dispatch` input (or a pull failure) falls back to
+# building from the digest-pinned Containerfile.worker.
+#
+# CI ISOLATION RELAXATION (CI-only): GitHub runners lack gVisor/runsc (the prod strong-isolation
+# runtime, ADR-004), so the worker runs under crun. EVERY OTHER ADR-004 floor still holds (non-root,
+# read-only rootfs, dropped caps, `--network none`, seccomp) and the input is a BENIGN, locally-built
+# micro-binary (master §5 — no real malware). Production keeps runsc/gVisor (deploy/README.md).
+#
+# Cadence: nightly cron + manual dispatch + ONLY PRs carrying the `live-regression` label — NOT
+# every PR (the real-worker run is expensive). A failed scheduled run is the alert (GitHub notifies
+# the repo owner of default-branch scheduled-workflow failures), mirroring scheduled-rescan.yml.
+
+name: live-regression
+
+on:
+  schedule:
+    - cron: "41 4 * * *" # nightly 04:41 UTC (off-peak, off the top-of-hour load spike)
+  workflow_dispatch:
+    inputs:
+      build_image:
+        description: "Build the worker image from Containerfile.worker instead of pulling the signed release"
+        type: boolean
+        default: false
+        required: false
+  pull_request:
+    types: [labeled] # runs only when the `live-regression` label is applied (guarded below)
+
+permissions:
+  contents: read # least privilege; nothing is pushed
+
+concurrency:
+  group: live-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  live-regression:
+    # Run ONLY when: scheduled, manually dispatched, OR a PR that carries the `live-regression`
+    # label (the `labeled` event also fires for OTHER labels — gate on the specific label name).
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.label.name == 'live-regression')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read # pull the worker image from GHCR
+      id-token: write # cosign keyless verify of the pulled image
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # actions/checkout@v6.0.3
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # actions/setup-python@v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install toolchain + package (dev extras)
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # pip install --require-hashes -r requirements-dev.lock   # <- enable once the lock exists
+          pip install -e ".[dev]"
+
+      # --- Acquire the worker image: PULL+VERIFY the signed release, else BUILD from the pin -------
+      # `build_image` dispatch input forces a build; otherwise pull the signed digest + cosign-verify
+      # it ("test what you ship"); a pull failure falls back to a local build from the pinned
+      # Containerfile so the gate still runs (build is local-only — never pushed/signed here).
+      - name: Log in to GHCR
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.build_image) }}
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # docker/login-action@v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.build_image) }}
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # sigstore/cosign-installer@v4.1.2
+
+      - name: Acquire worker image (verify+pull signed release, else build from pin)
+        id: image
+        env:
+          FORCE_BUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.build_image }}
+          WORKER_IMAGE_DIGEST: ${{ vars.WORKER_IMAGE_DIGEST }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          GHIDRA_VERSION: ${{ vars.GHIDRA_VERSION }}
+          GHIDRA_RELEASE_TAG: ${{ vars.GHIDRA_RELEASE_TAG }}
+          GHIDRA_ZIP_URL: ${{ vars.GHIDRA_ZIP_URL }}
+          GHIDRA_ZIP_SHA256: ${{ vars.GHIDRA_ZIP_SHA256 }}
+        run: |
+          set -euo pipefail
+
+          build_local() {
+            echo "::notice::building worker image locally from the digest-pinned Containerfile.worker"
+            podman build \
+              --build-arg "GHIDRA_VERSION=${GHIDRA_VERSION:-}" \
+              --build-arg "GHIDRA_RELEASE_TAG=${GHIDRA_RELEASE_TAG:-}" \
+              --build-arg "GHIDRA_ZIP_URL=${GHIDRA_ZIP_URL:-}" \
+              --build-arg "GHIDRA_ZIP_SHA256=${GHIDRA_ZIP_SHA256:-}" \
+              -f Containerfile.worker -t "localhost/ghidra-mcp-worker:live-regression" .
+            echo "image=localhost/ghidra-mcp-worker:live-regression" >> "$GITHUB_OUTPUT"
+          }
+
+          if [ "${FORCE_BUILD}" = "true" ]; then
+            build_local
+            exit 0
+          fi
+
+          if [ -z "${WORKER_IMAGE_DIGEST}" ]; then
+            echo "::warning::vars.WORKER_IMAGE_DIGEST is unset — falling back to a local build"
+            build_local
+            exit 0
+          fi
+
+          WORKER_IMAGE="ghcr.io/${OWNER}/ghidra-mcp-worker@${WORKER_IMAGE_DIGEST}"
+          # Keyless cosign verify scoped to THIS repo's worker-image.yml OIDC identity before trust.
+          # A pinned digest is present, so the released artifact MUST verify: a verify FAILURE means a
+          # tampered/unsigned image (supply-chain integrity failure) and is FAILED LOUD — never masked
+          # by a silent local-build fallback (that fallback is only for the expected digest-unset /
+          # force-build paths handled above). "Test what you ship" — or fail.
+          if ! cosign verify \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --certificate-identity-regexp "^https://github.com/${REPO}/.github/workflows/worker-image.yml@" \
+              "${WORKER_IMAGE}"; then
+            echo "::error::cosign verify FAILED for the released worker image ${WORKER_IMAGE} —" \
+                 "refusing to fall back to a local build (possible supply-chain tampering)."
+            exit 1
+          fi
+          podman pull "${WORKER_IMAGE}"
+          echo "image=${WORKER_IMAGE}" >> "$GITHUB_OUTPUT"
+
+      # --- Run the F2 + F7 HARD GATES against the real worker --------------------------------------
+      - name: Run F2 + F7 live regression (real worker under crun)
+        env:
+          GHIDRA_MCP_INTEGRATION: "1"
+          GHIDRA_MCP_WORKER_IMAGE: ${{ steps.image.outputs.image }}
+          GHIDRA_MCP_CONTAINER_ENGINE: podman
+          # CI-only isolation relaxation: stock runners have no gVisor (runsc); run under crun and
+          # keep every other ADR-004 floor. Prod keeps runsc/gVisor (deploy/README.md). See header.
+          GHIDRA_MCP_WORKER_RUNTIME: crun
+          # Generous client read timeout (JVM boot + auto-analysis on a real binary).
+          GHIDRA_MCP_E2E_TIMEOUT: "900"
+          # Don't idle/TTL-evict the session mid-run on a slow runner.
+          GHIDRA_MCP_SESSION_TTL_SECONDS: "1800"
+          GHIDRA_MCP_SESSION_IDLE_SECONDS: "1800"
+        run: |
+          set -euo pipefail
+          # The harness drives a HOST-run server (the F7 test builds its own micro-binary into a
+          # tmp import root). Under rootless podman + --userns keep-id the worker must run as THIS
+          # runner's uid/gid to write the server-created per-session socket dir (0700), and the
+          # socket dir must be SHORT (the per-session UDS path must fit AF_UNIX ~107 bytes). In
+          # production the server is containerized as 65532 and these stay at hardened defaults
+          # (deploy/socket-dir.md, ADR-009).
+          export GHIDRA_MCP_RPC_SOCKET_DIR="/tmp/gmcp-run"
+          export GHIDRA_MCP_IMPORT_ROOT="/tmp/gmcp-imports"
+          export GHIDRA_MCP_WORKER_UID="$(id -u)"
+          export GHIDRA_MCP_WORKER_GID="$(id -g)"
+          mkdir -p "$GHIDRA_MCP_RPC_SOCKET_DIR" "$GHIDRA_MCP_IMPORT_ROOT"
+          pytest -m integration --no-cov -v \
+            --junit-xml=live-regression-junit.xml \
+            tests/integration/test_export_annotations_after_rename.py \
+            tests/integration/test_export_known_count.py
+
+      # --- FAIL-LOUD ON SKIP: a skipped hard gate is a FAILURE, not a silent pass ------------------
+      - name: Assert both hard gates actually RAN (fail-loud on skip)
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -f live-regression-junit.xml ]; then
+            echo "::error::no JUnit report — pytest did not run; the live-regression gate is BROKEN"
+            exit 1
+          fi
+          python - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          tree = ET.parse("live-regression-junit.xml")
+          root = tree.getroot()
+          suites = root.iter("testsuite") if root.tag == "testsuites" else [root]
+
+          tests = errors = failures = skipped = 0
+          for s in suites:
+              tests += int(s.get("tests", 0))
+              errors += int(s.get("errors", 0))
+              failures += int(s.get("failures", 0))
+              skipped += int(s.get("skipped", 0))
+
+          print(f"tests={tests} failures={failures} errors={errors} skipped={skipped}")
+          problems = []
+          # Expect EXACTLY the two hard-gate tests to have run.
+          if tests < 2:
+              problems.append(f"expected >=2 hard-gate tests to run, collected {tests}")
+          if skipped:
+              problems.append(f"{skipped} hard-gate test(s) SKIPPED — a skipped gate is a FAILURE")
+          if failures or errors:
+              problems.append(f"{failures} failure(s) + {errors} error(s) in the hard gates")
+          if problems:
+              for p in problems:
+                  print(f"::error::{p}")
+              sys.exit(1)
+          print("both hard gates ran and passed")
+          PY
+
+      - name: Upload JUnit report
+        if: always() # keep the report for triage even when the gate fails
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact@v7.0.1
+        with:
+          name: live-regression-junit
+          path: live-regression-junit.xml

@@ -36,6 +36,18 @@ Supporting config lives in `infra/`: `seccomp/` (profiles + verification note), 
 | minimal pinned base (ADR-003) | image | multi-stage; bases pinned by digest (placeholders, gated) |
 | one-worker-per-session + verified wipe (ADR-002) | run + helper | per-session container name + tmpfs store; `wipe-session.sh` |
 
+## CI isolation relaxation (live-regression / e2e jobs only)
+
+The gated CI jobs that drive a **real** worker (`.github/workflows/live-regression.yml`,
+`e2e-groundtruth.yml`) run the worker under **crun**, NOT gVisor (`runsc`): stock GitHub runners
+have no gVisor available. This is a **CI-only** relaxation of the single "strong tier" control —
+**every other ADR-004 floor still holds** (non-root, read-only rootfs, all caps dropped,
+no-new-privileges, seccomp RuntimeDefault, `--network none`, cgroup limits, tmpfs-only scratch).
+The OCI runtime does not change Ghidra's recovered output, so the correctness/regression gates are
+unaffected. The inputs are **benign, locally-built synthetic micro-binaries** (master §5 — no real
+malware). **Production keeps `runsc`/gVisor** (`--runtime runsc`, the table above); the gVisor tier
+is validated separately by `verify-isolation.sh` at deploy. See ADR-028 (live-regression harness).
+
 ## GATED commands a maintainer runs after approval
 
 > Each is a PLAN §6 gated action (image pull/build, dependency install, or a container run binding
