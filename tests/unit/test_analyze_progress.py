@@ -21,6 +21,7 @@ No real worker, no Ghidra, no network, no wall-clock dependence on the deadline 
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import socket
 import struct
@@ -29,6 +30,7 @@ from typing import Any
 
 import pytest
 from pydantic import ValidationError
+from worker import dispatch as wd
 
 from ghidra_mcp.core.errors import ErrorType, GhidraMcpError
 from ghidra_mcp.ghidra import rpc_client as rc
@@ -738,3 +740,119 @@ def test_schema_progress_rejects_non_bool_value() -> None:
         s.SessionAnalyzeIn(session_id="s", progress="maybe")  # type: ignore[arg-type]
     with pytest.raises(ValidationError):
         s.SessionAnalyzeIn(session_id="s", progress=2)  # type: ignore[arg-type]
+
+
+# --- worker-side: opt-in routing + the socket-bound emitter (ADR-030 Phase 1 / D9) -----------
+
+
+class _RecordingBackend:
+    """Backend fake recording whether ``analyze`` received an ``emit_progress`` (opt-in routing)."""
+
+    def __init__(self) -> None:
+        self.analyze_emit: list[bool] = []
+
+    def analyze(self, params: dict[str, Any], *, emit_progress: Any = None) -> dict[str, Any]:
+        self.analyze_emit.append(emit_progress is not None)
+        return {"state": "ready"}
+
+    def __getattr__(self, name: str) -> Any:
+        def _handler(params: dict[str, Any]) -> dict[str, Any]:
+            return {"method": name}
+
+        return _handler
+
+
+class _RecordingConn:
+    """A ``_Conn`` fake recording every frame sent (the worker's session socket)."""
+
+    def __init__(self) -> None:
+        self.sent: list[bytes] = []
+
+    def sendall(self, data: bytes) -> None:
+        self.sent.append(bytes(data))
+
+    def recv(self, _n: int) -> bytes:  # part of the _Conn protocol; unused by the emitter
+        return b""
+
+
+class _RaisingConn:
+    """A ``_Conn`` fake whose ``sendall`` always raises ``OSError`` (transient socket error)."""
+
+    def sendall(self, data: bytes) -> None:
+        raise OSError("broken pipe")
+
+    def recv(self, _n: int) -> bytes:  # part of the _Conn protocol; unused by the emitter
+        return b""
+
+
+@pytest.mark.parametrize(
+    ("params", "expected"),
+    [
+        ({"progress": True}, True),
+        ({"progress": False}, False),
+        ({}, False),
+        ({"progress": "true"}, False),  # only a literal True opts in (a string never does)
+        ({"progress": 1}, False),
+        ({"progress": None}, False),
+    ],
+)
+def test_progress_opted_in_truth_table(params: dict[str, Any], expected: bool) -> None:
+    assert wd._progress_opted_in(params) is expected
+
+
+def test_dispatch_threads_emitter_only_for_opted_in_analyze() -> None:
+    be = _RecordingBackend()
+
+    def _emitter(percent: int | None, phase: str) -> None:
+        return None
+
+    wd.dispatch(be, "analyze", {"progress": True}, emit_progress=_emitter)
+    wd.dispatch(be, "analyze", {"progress": False}, emit_progress=_emitter)  # opted out
+    wd.dispatch(be, "analyze", {}, emit_progress=_emitter)  # omitted
+    wd.dispatch(be, "analyze", {"progress": True}, emit_progress=None)  # no emitter built
+    assert be.analyze_emit == [True, False, False, False]
+
+
+def test_dispatch_non_analyze_never_uses_emitter() -> None:
+    be = _RecordingBackend()
+    called: list[tuple[int | None, str]] = []
+    out = wd.dispatch(
+        be, "list_functions", {"progress": True}, emit_progress=lambda p, ph: called.append((p, ph))
+    )
+    assert out == {"method": "list_functions"}
+    assert called == []  # a non-analyze method ignores the emitter entirely
+
+
+def test_make_progress_emitter_sends_a_valid_progress_frame() -> None:
+    conn = _RecordingConn()
+    emit = wd._make_progress_emitter(conn, "req-1", max_frame_bytes=4 * 1024 * 1024)
+    emit(42, "analyzing")
+    assert len(conn.sent) == 1
+    obj = json.loads(conn.sent[0][4:])  # strip the 4-byte length prefix
+    assert f.is_progress_notification(obj)
+    assert obj["params"] == {"id": "req-1", "percent": 42, "phase": "analyzing"}
+
+
+def test_make_progress_emitter_coalesces_sub_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = {"t": 100.0}
+    monkeypatch.setattr("worker.dispatch.time.monotonic", lambda: clock["t"])
+    conn = _RecordingConn()
+    emit = wd._make_progress_emitter(conn, "r", max_frame_bytes=4 * 1024 * 1024)
+    emit(1, "analyzing")  # t=100.0 → emitted
+    clock["t"] = 100.0 + (wd._WORKER_MIN_PROGRESS_INTERVAL_S / 2)
+    emit(2, "analyzing")  # too soon → coalesced (dropped)
+    clock["t"] = 100.0 + wd._WORKER_MIN_PROGRESS_INTERVAL_S + 0.01
+    emit(3, "analyzing")  # past the interval → emitted
+    assert len(conn.sent) == 2
+
+
+def test_make_progress_emitter_swallows_bad_phase() -> None:
+    conn = _RecordingConn()
+    emit = wd._make_progress_emitter(conn, "r", max_frame_bytes=4 * 1024 * 1024)
+    emit(50, "not-a-real-phase")  # build_progress raises ValueError → swallowed, nothing sent
+    assert conn.sent == []
+
+
+def test_make_progress_emitter_swallows_send_error() -> None:
+    emit = wd._make_progress_emitter(_RaisingConn(), "r", max_frame_bytes=4 * 1024 * 1024)
+    emit(50, "analyzing")  # sendall raises OSError → swallowed (heartbeat must not crash analysis)

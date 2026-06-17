@@ -176,6 +176,15 @@ worker→server progress frames.
   fail the analysis, and must never block the JVM thread on a slow reader → use a non-blocking /
   short-timeout send and drop on would-block).
 
+> **Implementation reconciliation (Phase 1, 2026-06-17).** The numbers above were illustrative; the
+> shipped values are: server-side `_MAX_PROGRESS_FRAMES = 10_000` (`rpc_client.py`) and worker-side
+> coalesce interval `_WORKER_MIN_PROGRESS_INTERVAL_S = 0.25` — both still bounded; the contract
+> (`rpc-protocol.md`) reflects 10 000. The worker emitter uses a **blocking** `conn.sendall` (matching
+> the pre-existing terminal-response write), **not** the non-blocking send suggested above: a slow/stuck
+> reader is bounded instead by the server's **one-shot deadline → SIGKILL** (D4/§6, ADR-002), which
+> governs the whole exchange regardless of the emitter — so the JVM thread can stall at most until that
+> kill. The send error / bad-phase swallow is implemented as specified.
+
 ### D3 — TB2 framing revision: additive `$/progress` JSON-RPC notification, opt-in per method
 
 Revise `rpc-protocol.md` §3/§4 **additively** so a long-running, **opt-in** method may interleave
