@@ -133,6 +133,13 @@ The worker returns JSON-RPC errors with a `data.type` slug that the server maps 
 Worker error `message` MUST be safe (no host paths/stack); full detail stays in worker logs. The
 server never forwards a worker stack trace to the client.
 
+**Optional `data.detail` (v1.3 — ADR-024 / F2-F3 PR-1; ADDITIVE, worker → server only):** the error
+object MAY carry an optional `data.detail` string, **redacted at the worker** to the *exception class
+name + a fixed template* (never the raw `str(exc)`, which can echo binary-derived text) and
+length-capped. The server logs it (redacted, under the correlation id) to make an otherwise-opaque
+`internal-error` diagnosable; it is **never** placed on the client-facing `ErrorEnvelope` (which has
+no `data` field and forbids extras). Optional + ignorable; no existing field changes.
+
 ## 6. Timeout & kill semantics (TB2/TB3 — DoS)
 
 - Every RPC call carries a **deadline** = the per-tool timeout (or per-analysis timeout for
@@ -141,7 +148,14 @@ server never forwards a worker stack trace to the client.
   socket, marks the session for eviction, and returns a `timeout` error envelope. There is **no
   "graceful" wait** for a hostile/hung JVM.
 - A worker that crashes/closes the socket mid-call → `worker-unavailable` + eviction.
-- Kill is the universal failure handler: timeout, protocol violation, oversized frame, or
+- **Worker-death classification (v1.3 — ADR-023 / F1):** on a transport failure (crash/closed
+  socket), before killing, the server queries the container engine's METADATA (`OOMKilled` flag /
+  exit 137 — NO binary parsing, ADR-001) to classify the death. An OOM-killed worker (it blew its
+  configured memory cap on a hostile input) is surfaced as the distinct, ADDITIVE
+  `resource-exhausted` (503, **not retryable** — see `error-envelope.md`); every other transport
+  failure stays `worker-unavailable`. The classification fails closed to `worker-unavailable` if
+  the engine query errors. No existing slug is repurposed.
+- Kill is the universal failure handler: timeout, protocol violation, oversized frame, OOM, or
   poisoning all resolve to **kill + evict** (ADR-002). Eviction then verified-wipes the store.
 
 ## 7. Security properties (summary)

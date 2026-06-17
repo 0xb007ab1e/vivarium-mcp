@@ -23,6 +23,7 @@ def test_error_type_slugs_are_stable() -> None:
     assert ErrorType.LIMIT_EXCEEDED.value == "limit-exceeded"
     assert ErrorType.TIMEOUT.value == "timeout"
     assert ErrorType.WORKER_UNAVAILABLE.value == "worker-unavailable"
+    assert ErrorType.RESOURCE_EXHAUSTED.value == "resource-exhausted"
     assert ErrorType.ANALYSIS_FAILED.value == "analysis-failed"
     assert ErrorType.INTERNAL.value == "internal-error"
 

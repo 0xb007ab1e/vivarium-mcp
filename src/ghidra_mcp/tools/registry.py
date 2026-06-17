@@ -1319,7 +1319,21 @@ def _bind(
         # unexpected field (extra="forbid"). A validation failure surfaces as a pydantic error the
         # server shell maps to a VALIDATION envelope (fail closed).
         model = in_schema(**kwargs)
-        return handler(ctx, model)
+        # In-flight liveness (ADR-025 / F4): mark a session-scoped call in-flight for its whole
+        # duration so a long single operation (e.g. an 18-26 min ``analyze``) cannot idle-evict
+        # itself. ``begin_call``/``end_call`` are best-effort markers keyed on the session id (the
+        # handler's own ``authorize`` remains the sole authorization gate — marking in-flight never
+        # grants access); they refresh the idle clock at call start AND end. ``session_create`` and
+        # any non-session tool have no ``session_id`` and are skipped. Paired in a ``finally`` so
+        # the mark is always cleared even on error (no leaked in-flight blocking future eviction).
+        session_id = getattr(model, "session_id", None)
+        if session_id is None:
+            return handler(ctx, model)
+        ctx.sessions.begin_call(session_id)
+        try:
+            return handler(ctx, model)
+        finally:
+            ctx.sessions.end_call(session_id)
 
     _bound.__signature__ = _signature_from_model(in_schema)  # type: ignore[attr-defined]
     _bound.__annotations__ = _annotations_from_model(in_schema)

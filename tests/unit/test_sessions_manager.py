@@ -762,8 +762,110 @@ def test_change_log_is_wiped_when_session_is_evicted() -> None:
     # The whole session record (with its change-log sets) is gone — no durable confidential state.
     assert info.session_id not in mgr._sessions
     # And a read-back now fails closed (BOLA-safe) — the log no longer exists.
-    with pytest.raises(GhidraMcpError) as ei:
+    with pytest.raises(GhidraMcpError):
         mgr.export_targets(info.session_id, caller=_A)
+
+
+# --- in-flight liveness during long calls (ADR-025 / F4) --------------------------------------
+# A long-running call (e.g. an 18-26 min ``analyze``) must not idle-evict its OWN session. The
+# mechanism: begin_call marks the session in-flight + refreshes the idle clock; _is_expired exempts
+# an in-flight session from idle eviction; end_call clears the mark + refreshes again so the idle
+# clock restarts AFTER the call. The absolute TTL is re-applied at the next call boundary. All time
+# is injected (no real sleeps). Marked ``critical`` — manager.py is a critical-path module.
+@pytest.mark.critical
+def test_in_flight_session_is_not_idle_evicted_on_authorize() -> None:
+    # F4 regression: a session whose call is actively executing survives a clock advance well past
+    # the idle window — the NEXT authorize must SUCCEED, not lazily idle-evict it.
+    mgr, clock = _mgr(idle_s=900, ttl_s=10_000, max_sessions=8)
+    info = mgr.create()
+    sid = info.session_id
+    mgr.begin_call(sid)  # the long analyze starts
+    clock.advance(1_500)  # 25 min elapse mid-analyze — past the 900s idle window
+    # A concurrent/next authorize against the in-flight session does NOT evict it.
+    assert mgr.authorize(sid).session_id == sid
+    mgr.end_call(sid)  # analyze completes
+
+
+@pytest.mark.critical
+def test_in_flight_session_is_not_idle_reaped() -> None:
+    # The periodic reaper must also skip an in-flight session (never tear a running call out).
+    port = _FakePort()
+    mgr, clock = _mgr(port=port, idle_s=900, ttl_s=10_000, max_sessions=8)
+    sid = mgr.create().session_id
+    mgr.begin_call(sid)
+    clock.advance(1_500)  # past idle
+    assert mgr.reap_expired() == 0  # not reaped while in-flight
+    assert mgr.authorize(sid).session_id == sid
+    assert port.killed == []
+    mgr.end_call(sid)
+
+
+@pytest.mark.critical
+def test_abandoned_idle_session_is_evicted_with_wipe(tmp_path: Path) -> None:
+    # The counterpart (ADR-002 preserved): a genuinely abandoned (NOT in-flight) idle session still
+    # evicts with the verified store-wipe and worker-kill. Eviction reason is unchanged ("idle").
+    port = _FakePort()
+    store_root = str(tmp_path / "stores")
+    mgr, clock = _mgr(port=port, store_root=store_root, idle_s=900, ttl_s=10_000, max_sessions=8)
+    sid = mgr.create().session_id
+    store_path = Path(store_root) / sid
+    store_path.mkdir(parents=True, exist_ok=True)
+    mgr._sessions[sid].worker_started = True
+    clock.advance(1_500)  # past idle, never in-flight
+    assert mgr.reap_expired() == 1
+    assert not store_path.exists()  # VERIFIED wipe preserved
+    assert port.killed == [sid]
+
+
+@pytest.mark.critical
+def test_abandoned_idle_session_lazily_evicts_on_authorize() -> None:
+    # Without a begin_call refresh, the existing lazy authorize path still idle-evicts an abandoned
+    # session (BOLA-safe SESSION_INVALID) — in-flight exemption does not weaken the default path.
+    port = _FakePort()
+    mgr, clock = _mgr(port=port, idle_s=900, ttl_s=10_000, max_sessions=8)
+    sid = mgr.create().session_id
+    clock.advance(1_500)  # past idle, never marked in-flight
+    with pytest.raises(GhidraMcpError) as ei:
+        mgr.authorize(sid)
+    assert ei.value.envelope.type is ErrorType.SESSION_INVALID
+    assert sid not in mgr._sessions  # evicted
+
+
+@pytest.mark.critical
+def test_ttl_reapplied_at_next_boundary_after_in_flight_finishes() -> None:
+    # TTL still caps standing lifetime: an in-flight call finishes, then the NEXT call on a session
+    # that has exceeded its absolute TTL is rejected (evicted on authorize) — begin_call refreshes
+    # only the idle clock (last_used_mono), never created_mono, so TTL fires.
+    port = _FakePort()
+    mgr, clock = _mgr(port=port, idle_s=900, ttl_s=1_000, max_sessions=8)
+    sid = mgr.create().session_id
+    mgr.begin_call(sid)
+    clock.advance(1_500)  # exceeds TTL during the long call — but in-flight is not torn out
+    assert mgr.reap_expired() == 0  # reaper leaves the in-flight session alone
+    mgr.end_call(sid)  # the long call completes
+    # The next call boundary re-applies the absolute TTL: NEW work is refused.
+    mgr.begin_call(sid)  # marker first (mirrors dispatch order), refreshes idle only
+    with pytest.raises(GhidraMcpError) as ei:
+        mgr.authorize(sid)
+    assert ei.value.envelope.type is ErrorType.SESSION_INVALID
+    mgr.end_call(sid)  # no-op on the now-evicted session
+    assert sid not in mgr._sessions
+
+
+@pytest.mark.critical
+def test_end_call_refreshes_idle_clock_so_window_restarts_after_call() -> None:
+    # end_call refreshes last_used_mono: the idle window restarts when the call FINISHES, not at its
+    # start. A short post-call idle then keeps the session alive; a long one idle-evicts it.
+    mgr, clock = _mgr(idle_s=100, ttl_s=10_000, max_sessions=8)
+    sid = mgr.create().session_id
+    mgr.begin_call(sid)
+    clock.advance(500)  # long call, far past idle (exempt while in-flight)
+    mgr.end_call(sid)  # refresh at t=500 → idle clock restarts here
+    clock.advance(50)  # only 50s since the call ended (< 100 idle)
+    assert mgr.authorize(sid).session_id == sid  # survives
+    clock.advance(120)  # now 170s since the call ended (> 100 idle), not in-flight
+    with pytest.raises(GhidraMcpError) as ei:
+        mgr.authorize(sid)
     assert ei.value.envelope.type is ErrorType.SESSION_INVALID
 
 
@@ -838,3 +940,45 @@ def test_a_fresh_session_has_an_empty_change_log() -> None:
     mgr, _ = _mgr(max_sessions=4)
     info = mgr.create(owner=_A)
     assert mgr.export_targets(info.session_id, caller=_A) == ([], [])
+
+
+def test_overlapping_calls_tracked_by_counter_not_a_bool() -> None:
+    # Two concurrent calls on one session: in-flight is a COUNTER, so the first end_call does not
+    # prematurely clear the in-flight mark while a second call is still running.
+    mgr, clock = _mgr(idle_s=100, ttl_s=10_000, max_sessions=8)
+    sid = mgr.create().session_id
+    mgr.begin_call(sid)  # call 1 starts
+    mgr.begin_call(sid)  # call 2 starts (overlap)
+    mgr.end_call(sid)  # call 1 ends — call 2 still in-flight
+    clock.advance(500)  # past idle, but call 2 keeps it non-idle
+    assert mgr.authorize(sid).session_id == sid
+    mgr.end_call(sid)  # call 2 ends
+
+
+@pytest.mark.critical
+def test_begin_and_end_call_on_unknown_or_evicted_session_are_noops() -> None:
+    # Best-effort markers: an unknown or already-evicted id is a silent no-op (the handler's
+    # authorize fails closed regardless — begin/end_call never raise and never resurrect a session).
+    mgr, _ = _mgr(max_sessions=8)
+    mgr.begin_call("never-existed")  # no raise
+    mgr.end_call("never-existed")  # no raise
+    sid = mgr.create().session_id
+    mgr.evict(sid, reason="close")
+    mgr.begin_call(sid)  # evicted → no-op, no resurrection
+    mgr.end_call(sid)
+    assert sid not in mgr._sessions
+
+
+@pytest.mark.critical
+def test_end_call_does_not_drive_counter_negative() -> None:
+    # An unmatched/spurious end_call clamps at zero — it must not leave a phantom-negative in-flight
+    # that would under-count a later real concurrent call (fail safe).
+    mgr, clock = _mgr(idle_s=100, ttl_s=10_000, max_sessions=8)
+    sid = mgr.create().session_id
+    mgr.end_call(sid)  # spurious (no matching begin_call) → counter clamped at 0
+    assert mgr._sessions[sid].in_flight == 0
+    # A subsequent real call still correctly marks the session in-flight.
+    mgr.begin_call(sid)
+    clock.advance(500)  # past idle
+    assert mgr.authorize(sid).session_id == sid
+    mgr.end_call(sid)

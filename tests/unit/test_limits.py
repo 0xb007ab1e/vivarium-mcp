@@ -20,12 +20,25 @@ from ghidra_mcp.security.limits import (
     DEFAULT_MAX_RESPONSE_BYTES,
     DEFAULT_MAX_SESSIONS,
     DEFAULT_TOOL_TIMEOUT_S,
+    DEFAULT_WORKER_CPUS,
+    DEFAULT_WORKER_MEM_MIB,
+    DEFAULT_WORKER_PIDS,
+    DEFAULT_WORKER_TMPFS_PROJECT_MIB,
+    DEFAULT_WORKER_TMPFS_SCRATCH_MIB,
     HARD_MAX_ANALYSIS_TIMEOUT_S,
     HARD_MAX_BINARY_BYTES,
     HARD_MAX_SESSIONS,
+    HARD_MAX_WORKER_CPUS,
+    HARD_MAX_WORKER_MEM_MIB,
+    HARD_MAX_WORKER_PIDS,
+    HARD_MAX_WORKER_TMPFS_PROJECT_MIB,
+    HARD_MAX_WORKER_TMPFS_SCRATCH_MIB,
     Limits,
+    WorkerResources,
     check_binary_size,
+    plausible_max_bytes,
     resolve_limits,
+    resolve_worker_resources,
 )
 
 pytestmark = pytest.mark.critical
@@ -214,3 +227,145 @@ def test_hard_ceilings_table_covers_all_limit_fields() -> None:
     from dataclasses import fields
 
     assert {f.name for f in fields(Limits)} == set(lim._HARD_CEILINGS)
+
+
+# ----------------------------------------------------------------------------------------------
+# resolve_worker_resources — defaults (ADR-023 / F1)
+# ----------------------------------------------------------------------------------------------
+def test_worker_frozen_default_and_hard_constants() -> None:
+    """The worker default + hard-ceiling constants match the ratified ADR-023 values."""
+    assert DEFAULT_WORKER_MEM_MIB == 4096
+    assert DEFAULT_WORKER_CPUS == 2
+    assert DEFAULT_WORKER_PIDS == 512
+    assert DEFAULT_WORKER_TMPFS_SCRATCH_MIB == 2048
+    assert DEFAULT_WORKER_TMPFS_PROJECT_MIB == 4096
+    assert HARD_MAX_WORKER_MEM_MIB == 32768
+    assert HARD_MAX_WORKER_CPUS == 16
+    assert HARD_MAX_WORKER_PIDS == 4096
+    assert HARD_MAX_WORKER_TMPFS_SCRATCH_MIB == 16384
+    assert HARD_MAX_WORKER_TMPFS_PROJECT_MIB == 32768
+
+
+def test_resolve_worker_none_returns_defaults() -> None:
+    """No overrides → the safe built-in worker defaults."""
+    assert resolve_worker_resources(None) == WorkerResources()
+
+
+def test_resolve_worker_empty_dict_returns_defaults() -> None:
+    """An empty override map is equivalent to no worker overrides."""
+    assert resolve_worker_resources({}) == WorkerResources()
+
+
+# ----------------------------------------------------------------------------------------------
+# resolve_worker_resources — clamping
+# ----------------------------------------------------------------------------------------------
+def test_worker_below_default_override_is_honored() -> None:
+    """A value below the default is accepted verbatim (an operator may run a smaller worker)."""
+    resolved = resolve_worker_resources({"mem_mib": 1024, "cpus": 1})
+    assert resolved.mem_mib == 1024
+    assert resolved.cpus == 1
+
+
+def test_worker_above_default_below_ceiling_override_is_honored() -> None:
+    """A value above the default but below the ceiling is accepted verbatim (tunable up)."""
+    resolved = resolve_worker_resources({"mem_mib": 8192})
+    assert resolved.mem_mib == 8192
+
+
+@pytest.mark.parametrize(
+    ("key", "ceiling"),
+    [
+        ("mem_mib", HARD_MAX_WORKER_MEM_MIB),
+        ("cpus", HARD_MAX_WORKER_CPUS),
+        ("pids", HARD_MAX_WORKER_PIDS),
+        ("tmpfs_scratch_mib", HARD_MAX_WORKER_TMPFS_SCRATCH_MIB),
+        ("tmpfs_project_mib", HARD_MAX_WORKER_TMPFS_PROJECT_MIB),
+    ],
+)
+def test_worker_widening_override_is_clamped_to_ceiling(key: str, ceiling: int) -> None:
+    """An attempt to widen a worker bound far past its ceiling is clamped DOWN (CWE-400)."""
+    assert getattr(resolve_worker_resources({key: ceiling * 1000}), key) == ceiling
+
+
+@pytest.mark.parametrize(
+    ("key", "ceiling"),
+    [
+        ("mem_mib", HARD_MAX_WORKER_MEM_MIB),
+        ("cpus", HARD_MAX_WORKER_CPUS),
+        ("pids", HARD_MAX_WORKER_PIDS),
+        ("tmpfs_scratch_mib", HARD_MAX_WORKER_TMPFS_SCRATCH_MIB),
+        ("tmpfs_project_mib", HARD_MAX_WORKER_TMPFS_PROJECT_MIB),
+    ],
+)
+def test_worker_exact_ceiling_is_allowed(key: str, ceiling: int) -> None:
+    """A worker value exactly at the ceiling is accepted (boundary)."""
+    assert getattr(resolve_worker_resources({key: ceiling}), key) == ceiling
+
+
+def test_worker_value_one_is_the_floor() -> None:
+    """The minimum accepted positive worker value is 1 (boundary)."""
+    assert resolve_worker_resources({"pids": 1}).pids == 1
+
+
+# ----------------------------------------------------------------------------------------------
+# resolve_worker_resources — fail-closed rejection
+# ----------------------------------------------------------------------------------------------
+def test_worker_unknown_key_rejected() -> None:
+    """An unknown worker-resource key fails closed (not silently ignored)."""
+    with pytest.raises(GhidraMcpError) as ei:
+        resolve_worker_resources({"gpus": 1})
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+    assert ei.value.envelope.status == 400
+
+
+@pytest.mark.parametrize("value", [0, -1, -4096])
+def test_worker_non_positive_value_rejected(value: int) -> None:
+    """Zero/negative worker bounds fail closed."""
+    with pytest.raises(GhidraMcpError) as ei:
+        resolve_worker_resources({"mem_mib": value})
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+
+
+@pytest.mark.parametrize("value", [True, False, 1.5, "4096", None])
+def test_worker_non_int_value_rejected(value: object) -> None:
+    """Non-int worker values (incl. ``bool``) fail closed."""
+    with pytest.raises(GhidraMcpError) as ei:
+        resolve_worker_resources({"mem_mib": value})  # type: ignore[dict-item]
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+
+
+def test_worker_error_detail_is_safe_and_names_only_the_key() -> None:
+    """The worker-resource validation detail is a safe summary — no internals/paths."""
+    with pytest.raises(GhidraMcpError) as ei:
+        resolve_worker_resources({"cpus": 0})
+    detail = ei.value.envelope.detail
+    assert "cpus" in detail
+    assert "Traceback" not in detail
+    assert "/" not in detail
+
+
+def test_worker_hard_ceilings_table_covers_all_fields() -> None:
+    """Every ``WorkerResources`` field has a worker-clamp-table entry (no un-clamped knob)."""
+    from dataclasses import fields
+
+    assert {f.name for f in fields(WorkerResources)} == set(lim._WORKER_HARD_CEILINGS)
+
+
+# ----------------------------------------------------------------------------------------------
+# plausible_max_bytes — warn-only pre-flight threshold (pure; 100%)
+# ----------------------------------------------------------------------------------------------
+def test_plausible_max_bytes_default_ratio() -> None:
+    """Default ratio is 2x worker memory, in bytes."""
+    assert plausible_max_bytes(4096) == 4096 * 1024 * 1024 * 2
+
+
+def test_plausible_max_bytes_custom_ratio() -> None:
+    """A custom ratio scales the threshold (fractional ratios truncate to int)."""
+    assert plausible_max_bytes(1024, ratio=1.5) == int(1024 * 1024 * 1024 * 1.5)
+
+
+def test_plausible_max_bytes_returns_int() -> None:
+    """The threshold is always a plain int (a float ratio is truncated)."""
+    result = plausible_max_bytes(100, ratio=2.5)
+    assert isinstance(result, int)
+    assert result == int(100 * 1024 * 1024 * 2.5)

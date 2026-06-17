@@ -74,6 +74,12 @@ class FakeSessionManager:
                 )
             )
 
+    def begin_call(self, session_id: str) -> None:
+        """In-flight marker (ADR-025 / F4) — no-op for these dispatch tests."""
+
+    def end_call(self, session_id: str) -> None:
+        """In-flight clear (ADR-025 / F4) — no-op for these dispatch tests."""
+
     def enable_writes(
         self, session_id: str, *, allow_structural: bool = False, caller: str = "local"
     ) -> s.SessionInfo:

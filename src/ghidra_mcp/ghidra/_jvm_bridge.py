@@ -2132,7 +2132,9 @@ class PyGhidraBackend:
 
         - **Symbols + signatures (steps 2-4):** enumerate the program filtered by
           ``SourceType.USER_DEFINED`` (``Symbol.getSource()`` / ``Function.getSignatureSource()``) —
-          Ghidra's authoritative provenance signal. **Unchanged** by ADR-027.
+          Ghidra's authoritative provenance signal. **Unchanged** by ADR-027. Step 4 additionally
+          skips address-less USER_DEFINED symbols via :func:`_is_address_keyable` (ADR-024 F2 — a
+          null ``getAddress()`` otherwise collapsed the whole export).
         - **Composites (step 1) + comments (step 5):** Ghidra exposes NO reliable user-vs-auto
           signal for these (program-local composites include auto-analysis structs; comments carry
           no source-type at all — the F7 leak). So they are read ONLY for the server-supplied
@@ -2219,10 +2221,17 @@ class PyGhidraBackend:
                 continue
             if symbol.getSymbolType() == SymbolType.FUNCTION:
                 continue  # function renames already emitted in step 3
+            # ADR-018 rename_symbol is ADDRESS-KEYED: a USER_DEFINED symbol with no concrete memory
+            # address (namespace/class/library/global/external) returns a null getAddress() and can
+            # never be a rename_symbol target — skip it rather than str(None-Java-ref) crashing the
+            # whole export into an opaque worker error (ADR-024 F2). The guard is fetched ONCE.
+            addr = symbol.getAddress()
+            if not _is_address_keyable(addr):
+                continue
             _emit(
                 {
                     "kind": "rename_symbol",
-                    "identifier": str(symbol.getAddress()),
+                    "identifier": str(addr),
                     "new_name": _to_text(symbol.getName()),
                 }
             )
@@ -2582,6 +2591,35 @@ def _to_text(value: object) -> str:
     # Round-trip through UTF-8 with replacement so any lone surrogate / undecodable unit from a
     # hostile binary becomes a safe replacement char rather than crossing the boundary raw.
     return text.encode("utf-8", "replace").decode("utf-8", "replace")
+
+
+def _is_address_keyable(addr: Any) -> bool:
+    """Return whether a symbol's address can key an address-based ``rename_symbol`` (ADR-018).
+
+    ADR-018's ``rename_symbol`` export entry is **address-keyed**: an entry's ``identifier`` is a
+    concrete memory address that import replays against. A USER_DEFINED symbol that is not bound to
+    a memory address (namespace/class/library/global/external symbols) has ``getAddress()`` return
+    a null Java reference (or a non-memory ``Address`` such as a register/stack/external slot),
+    which cannot be a ``rename_symbol`` target — so it is skipped, not crashed on (the prior code
+    passed such a null straight into ``str(...)``/downstream use, throwing and collapsing the whole
+    export into an opaque ``internal worker error`` — ADR-024 F2).
+
+    Pure + duck-typed so the guard logic is hermetically unit-testable without a JVM: ``addr`` only
+    needs to answer ``is None`` and (when present) expose ``isMemoryAddress()``.
+
+    Args:
+        addr: A Ghidra ``Address`` (or a null reference / ``None``) from ``Symbol.getAddress()``.
+
+    Returns:
+        ``True`` only when ``addr`` is a non-null memory address; ``False`` otherwise (fail closed).
+    """
+    if addr is None:
+        return False
+    try:
+        return bool(addr.isMemoryAddress())
+    except Exception:
+        # A malformed/foreign Address answers "not keyable" rather than crashing the export.
+        return False
 
 
 def _bytes_to_hex(raw: Any) -> str:
