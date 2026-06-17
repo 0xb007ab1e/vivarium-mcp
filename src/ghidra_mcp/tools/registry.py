@@ -114,6 +114,8 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "define_union",
     # multi-type composite batch (v1.2 — ADR-021; additionally GATED by allow_structural)
     "define_types",
+    # composite deletion (v1.4 — ADR-031; session-authored only; GATED by allow_structural)
+    "delete_type",
     # cross-session annotation persistence (v1.2 — ADR-018; export=read-only, import=GATED by
     # write-consent + allow_structural for structural entries)
     "session_export_annotations",
@@ -965,6 +967,50 @@ def _handle_define_types(ctx: ToolContext, args: s.DefineTypesIn) -> s.DefineTyp
     return result
 
 
+# --- composite deletion (v1.4 — ADR-031). Same structural gate as ADR-015 (write consent +
+# allow_structural). The load-bearing safety control is the SERVER-SIDE authority check: only a
+# composite THIS session created (recorded in the ADR-027 change-log) may be deleted, so an
+# injection can at worst delete the current session's own work — never a Ghidra-recovered/built-in
+# type (the redefine-in-use data-poisoning vector ADR-015 §6 rejected). Delete proceeds even if the
+# type is in use; dependents revert to undefined and the count is reported (ADR-031 D3).
+def _handle_delete_type(ctx: ToolContext, args: s.DeleteTypeIn) -> s.DeleteTypeResult:
+    """Delete a session-authored composite by name (structural; gated — ADR-031)."""
+    ctx.sessions.require_write_consent(args.session_id, structural=True, caller=ctx.caller_id)
+    v.validate_write_name(args.name)  # untrusted lookup key → strict allow-list/bounds
+    # Server-side authority (ADR-031 D2): a name that is not session-authored is rejected with NO
+    # worker call. NOT_FOUND (not VALIDATION): a value-free "no such session-authored type" that
+    # never reveals whether the name exists elsewhere in the program (no information disclosure).
+    if not ctx.sessions.is_composite_target(args.session_id, name=args.name, caller=ctx.caller_id):
+        raise GhidraMcpError(
+            ErrorEnvelope(
+                type=ErrorType.NOT_FOUND,
+                title="No such session-authored type",
+                detail="The named type was not created by this session and cannot be deleted.",
+                status=404,
+                retryable=False,
+            )
+        )
+    _log.info(
+        "tool.delete_type.intent",
+        extra={"tool": "delete_type", "session": args.session_id, "name_len": len(args.name)},
+    )
+    result = ctx.port.delete_type(args.session_id, args)
+    if result.deleted:
+        # Drop the name from the change-log so a later export never references a deleted type and
+        # the name is free to re-create (creation's collision check now passes) — ADR-031 D4.
+        ctx.sessions.forget_composite_target(args.session_id, name=args.name, caller=ctx.caller_id)
+    _log.info(
+        "tool.delete_type.outcome",
+        extra={
+            "tool": "delete_type",
+            "session": args.session_id,
+            "deleted": result.deleted,
+            "dependents_reverted": result.dependents_reverted,
+        },
+    )
+    return result
+
+
 # =====================================================================================
 # Cross-session annotation persistence (v1.2 — ADR-018; TB8). Export is READ-ONLY + owner-scoped;
 # import is the NEW trust boundary: a client-supplied, offline-tamperable document REPLAYED as
@@ -1263,6 +1309,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "define_struct": (_handle_define_struct, s.DefineStructIn),
     "define_union": (_handle_define_union, s.DefineUnionIn),
     "define_types": (_handle_define_types, s.DefineTypesIn),
+    "delete_type": (_handle_delete_type, s.DeleteTypeIn),
     # cross-session annotation persistence (v1.2 — ADR-018; export=read-only, import=gated)
     "session_export_annotations": (
         _handle_session_export_annotations,

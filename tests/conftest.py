@@ -581,6 +581,15 @@ class FakeGhidraPort:
             applied=True,
         )
 
+    def delete_type(self, sid: str, a: s.DeleteTypeIn) -> s.DeleteTypeResult:
+        """Return a deterministic delete result mirroring the real adapter contract (ADR-031).
+
+        Every field is a server/worker-controlled scalar (no Untrusted echo). The (optional)
+        injected failure is honored so error-path tests can drive it.
+        """
+        self._maybe_fail()
+        return s.DeleteTypeResult(name=a.name, deleted=True, dependents_reverted=0)
+
     def export_annotations(
         self,
         sid: str,

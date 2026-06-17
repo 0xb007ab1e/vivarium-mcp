@@ -6,7 +6,7 @@
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **50** tools (asserted in tests) —
+- **Allow-list only:** the catalog is fixed; there are exactly **51** tools (asserted in tests) —
   22 Tier-1 read-only (v1) + 5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
   reporting/metrics tools (ADR-008; all read-only) + **6 v1.1 mutation/write tools (ADR-012) + 6
   v1.1 structural-write tools (ADR-013 Phase A + ADR-014 Phase B + ADR-015 Phase C)** + **2 v1.2
@@ -142,6 +142,7 @@ identifier allow-list / `validate_comment_text` normalization — stored-injecti
 | `define_struct` | `DefineStructIn{name, fields: [FieldSpec], packed=false}` | `DefineStructResult{name, kind, size, field_count, applied}` | **structural** (ADR-015 Phase C); creates a NEW struct; gated by `allow_structural` |
 | `define_union` | `DefineUnionIn{name, fields: [FieldSpec]}` | `DefineUnionResult{name, kind, size, field_count, applied}` | **structural** (ADR-015 Phase C); creates a NEW union; gated by `allow_structural` |
 | `define_types` | `DefineTypesIn{types: [CompositeSpec]}` | `DefineTypesResult{types: [{name, kind, size, field_count}], applied}` | **structural** (ADR-021); creates a BATCH of interdependent NEW composites in ONE transaction (a field may reference another batch member); GATED by write-consent + `allow_structural`; **by-value cycles rejected, pointer cycles allowed** |
+| `delete_type` | `DeleteTypeIn{name}` | `DeleteTypeResult{name, deleted, dependents_reverted}` | **structural** (ADR-031); deletes a composite by name; GATED by write-consent + `allow_structural`; **session-authored ONLY** — only a composite THIS session created (change-log) is deletable, else `not-found` with no worker call (no data-poisoning of Ghidra-recovered/built-in types); deleting an in-use type reverts dependents to undefined and reports the count |
 
 > `CompositeSpec` = `{kind: "struct"\|"union", name, fields: [FieldSpec], packed=false}` (a struct
 > honors `offset`/`packed`; a union overlays all members at offset 0 and rejects a member `offset`).

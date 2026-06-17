@@ -1749,6 +1749,39 @@ class DefineUnionResult(_Out):
     applied: bool
 
 
+# --- composite deletion (v1.4 — ADR-031; GATED by allow_structural) ------------------------------
+class DeleteTypeIn(_SessionScopedIn):
+    """Arguments for ``delete_type`` — delete a SESSION-AUTHORED composite by name (ADR-031).
+
+    Gated (write consent + ``allow_structural``). The ``name`` is an attacker-influenced lookup key:
+    it is validated as a write-name at the boundary and then checked against THIS session's
+    change-log — only a composite this session created (``define_struct``/``define_union``/
+    ``define_types``) may be deleted (ADR-031 D2). A name that is not session-authored is rejected
+    server-side with no worker call (no data-poisoning of Ghidra-recovered/built-in types). No C is
+    parsed.
+
+    Attributes:
+        name: The composite's name — validated as a write-name; must be session-authored.
+    """
+
+    name: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class DeleteTypeResult(_Out):
+    """Result of ``delete_type`` (ADR-031) — all fields SAFE (no binary-derived echo).
+
+    Attributes:
+        name: The deleted type's name — the server-validated identity we were told to delete — SAFE.
+        deleted: Whether the type was removed (the transaction committed) — SAFE.
+        dependents_reverted: Count of dependents (typed data / signatures) Ghidra reverted to
+            undefined by the removal — a worker scalar, SAFE (ADR-031 D3).
+    """
+
+    name: str
+    deleted: bool
+    dependents_reverted: int
+
+
 # --- multi-type composite batch (v1.2 — ADR-021; GATED by allow_structural) ---------------------
 #
 # Generalizes the ADR-015 single-composite model to a BATCH of interdependent NEW composites created

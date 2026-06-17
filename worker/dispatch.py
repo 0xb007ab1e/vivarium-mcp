@@ -107,6 +107,9 @@ RPC_METHODS = frozenset(
         "define_union",
         # multi-type composite batch (v1.2 — ADR-021; pre-register ALL empties, one txn, rollback)
         "define_types",
+        # composite deletion (v1.4 — ADR-031; delete-by-name, one txn, rollback; server gates which
+        # names are session-authored — the worker only deletes the name the server authorized)
+        "delete_type",
         # annotation persistence (v1.2 — ADR-018; export read-out ONLY — import is server-side
         # orchestration that replays the EXISTING write methods above, NO new import RPC).
         "export_annotations",
@@ -299,6 +302,11 @@ class GhidraBackend(Protocol):
     # --- multi-type composite batch (v1.2 — ADR-021; pre-register all empties, one txn) ---
     def define_types(self, params: dict[str, Any]) -> dict[str, Any]:
         """Create a batch of interdependent composites inside ONE transaction — v1.2."""
+        ...
+
+    # --- composite deletion (v1.4 — ADR-031; delete-by-name, one txn, rollback) ---
+    def delete_type(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Delete a composite by name inside a transaction, reporting reverted dependents — v1.4."""
         ...
 
     # --- annotation persistence (v1.2 — ADR-018; export read-out ONLY) ---

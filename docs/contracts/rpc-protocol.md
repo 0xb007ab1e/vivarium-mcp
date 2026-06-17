@@ -136,6 +136,14 @@ an in-batch `named` ref resolves, resolves + adds each, batch-total size-caps, a
 WHOLE batch on any failure; the server runs a **by-value cycle detector** at the boundary — by-value
 cycles rejected, pointer cycles allowed — and name-collision/intra-batch-dup is fail-closed REJECT;
 structured `FieldSpec`s, no C parsed), the
+v1.4 **composite-deletion primitive** `delete_type` (ADR-031 — `params = {"name": str}`; deletes one
+composite by name in ONE transaction with rollback, returning `{"name", "deleted",
+"dependents_reverted"}`. The worker resolves the name read-only, rejects a non-composite/built-in
+(defense in depth), counts dependents read-only, then `DataTypeManager.remove`s it. **Authority is
+server-side:** the server only ever sends a name it has confirmed is **session-authored** (in the
+ADR-027 change-log) — the worker neither knows nor enforces that. A not-session-authored name is
+rejected by the server with **no `delete_type` RPC at all**; thus an injection can delete at most the
+current session's own created types, never a Ghidra-recovered/built-in type), the
 v1.2 **annotation-export read-out primitive** `export_annotations` (ADR-018/ADR-027 — read-only;
 returns an inert plain document, dependency-ordered + bounded; over the entry cap →
 `limit-exceeded`. **Symbols + signatures** are enumerated filtered by `SourceType.USER_DEFINED`
