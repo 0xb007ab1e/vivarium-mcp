@@ -57,6 +57,28 @@ def test_paged_defaults_are_safe() -> None:
 
 
 @pytest.mark.critical
+def test_session_analyze_profile_defaults_to_default() -> None:
+    """``session_analyze`` profile is additive and defaults to the no-op ``default`` (ADR-029 B)."""
+    a = s.SessionAnalyzeIn(session_id="s")
+    assert a.profile == "default"
+
+
+@pytest.mark.critical
+@pytest.mark.parametrize("profile", ["default", "light", "deep"])
+def test_session_analyze_accepts_each_profile(profile: str) -> None:
+    """Each of the three closed-set profiles is accepted (ADR-029 B)."""
+    a = s.SessionAnalyzeIn(session_id="s", profile=profile)  # type: ignore[arg-type]
+    assert a.profile == profile
+
+
+@pytest.mark.critical
+def test_session_analyze_rejects_unknown_profile() -> None:
+    """An out-of-set profile is rejected by the Literal (fail closed — ADR-029 B)."""
+    with pytest.raises(ValidationError):
+        s.SessionAnalyzeIn(session_id="s", profile="aggressive")  # type: ignore[arg-type]
+
+
+@pytest.mark.critical
 def test_read_bytes_requires_positive_length() -> None:
     with pytest.raises(ValidationError):
         s.ReadBytesIn(session_id="s", address="0x0", length=0)

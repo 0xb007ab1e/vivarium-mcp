@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 
 from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from ghidra_mcp.security.limits import (
+    DEFAULT_PREFLIGHT_MODE,
+    PREFLIGHT_MODES,
     Limits,
     WorkerResources,
     resolve_limits,
@@ -54,6 +56,9 @@ _ENV_WORKER_CPUS = "GHIDRA_MCP_WORKER_CPUS"
 _ENV_WORKER_PIDS = "GHIDRA_MCP_WORKER_PIDS"
 _ENV_WORKER_TMPFS_SCRATCH_MIB = "GHIDRA_MCP_WORKER_TMPFS_SCRATCH_MIB"
 _ENV_WORKER_TMPFS_PROJECT_MIB = "GHIDRA_MCP_WORKER_TMPFS_PROJECT_MIB"
+# Over-plausible-size pre-flight mode (v1.4 — ADR-029 C): warn (default, v1.3 behaviour) / reject
+# (fail closed with resource-exhausted before the worker is contacted) / off (skip the check).
+_ENV_WORKER_PREFLIGHT = "GHIDRA_MCP_WORKER_PREFLIGHT"
 _ENV_RPC_SOCKET_DIR = "GHIDRA_MCP_RPC_SOCKET_DIR"
 _ENV_IMPORT_ROOT = "GHIDRA_MCP_IMPORT_ROOT"
 
@@ -103,6 +108,10 @@ _DEFAULT_IMPORT_ROOT = "/work/imports"
 _VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR"})
 _VALID_LOG_FORMATS = frozenset({"json", "text"})
 _VALID_TRANSPORTS = frozenset({"stdio", "http"})
+# Over-plausible-size pre-flight mode (ADR-029 C). Single source of truth in ``security.limits`` so
+# the config allow-list and the adapter's fallback can never drift apart.
+_VALID_WORKER_PREFLIGHT = PREFLIGHT_MODES
+_DEFAULT_WORKER_PREFLIGHT = DEFAULT_PREFLIGHT_MODE
 _VALID_HTTP_AUTH = frozenset({"none", "bearer", "mtls", "oauth"})
 # mTLS principal-field selectors (ADR-019 D2). Single source of truth in ``server.auth`` so the
 # config allow-list and the authenticator can never drift apart.
@@ -235,6 +244,10 @@ class Config:
             ``source_ref`` resolver rejects refs outside it (CWE-22) — ADR-009.
         transport: ``"stdio"`` (default) or ``"http"`` (v1.1 — ADR-011).
         http: Validated :class:`HttpConfig` when ``transport == "http"``, else ``None``.
+        worker_preflight_mode: Over-plausible-size pre-flight behaviour (ADR-029 C; one of
+            :data:`_VALID_WORKER_PREFLIGHT`). ``warn`` (default — v1.3 behaviour) / ``reject``
+            (fail closed with ``resource-exhausted`` before the worker is contacted) / ``off``
+            (skip the check). Fail-closed at startup on an invalid value.
     """
 
     log_level: str
@@ -252,6 +265,7 @@ class Config:
     worker_resources: WorkerResources = field(default_factory=WorkerResources)
     transport: str = _DEFAULT_TRANSPORT
     http: HttpConfig | None = None
+    worker_preflight_mode: str = _DEFAULT_WORKER_PREFLIGHT
 
 
 def _startup_error(detail: str) -> GhidraMcpError:
@@ -677,6 +691,11 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     worker_gid = _read_positive_int(src, _ENV_WORKER_GID, _DEFAULT_WORKER_GID)
     rpc_socket_dir = _read_str(src, _ENV_RPC_SOCKET_DIR, _DEFAULT_RPC_SOCKET_DIR, required=False)
     import_root = _read_str(src, _ENV_IMPORT_ROOT, _DEFAULT_IMPORT_ROOT, required=False)
+    # Over-plausible-size pre-flight mode (v1.4 — ADR-029 C). Validated against the allow-list;
+    # fail-closed on an invalid value (the process refuses to boot — VALIDATION).
+    worker_preflight_mode = _read_choice(
+        src, _ENV_WORKER_PREFLIGHT, _DEFAULT_WORKER_PREFLIGHT, _VALID_WORKER_PREFLIGHT
+    )
 
     # Transport selection (v1.1 — ADR-011). HTTP config is built + validated (fail-closed) only when
     # transport=http; stdio remains the secure default and needs no network config.
@@ -744,4 +763,5 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         worker_resources=worker_resources,
         transport=transport,
         http=http,
+        worker_preflight_mode=worker_preflight_mode,
     )

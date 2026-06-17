@@ -37,7 +37,13 @@ class GhidraPort(Protocol):
         ...
 
     def analyze(self, session_id: str, args: s.SessionAnalyzeIn) -> s.SessionInfo:
-        """Run Ghidra auto-analysis, bounded by the analysis timeout (kills worker on expiry)."""
+        """Run Ghidra auto-analysis, bounded by the analysis timeout (kills worker on expiry).
+
+        ``args.profile`` (ADR-029 B; additive) selects the analyzer-depth preset. The default
+        (``"default"``) reproduces today's analysis byte-for-byte (the adapter omits the ``profile``
+        RPC param entirely, so the worker takes the unchanged code path); ``"light"``/``"deep"``
+        adjust depth. The profile only reduces/adjusts depth — no new capability (ADR-001 intact).
+        """
         ...
 
     def kill_worker(self, session_id: str) -> None:

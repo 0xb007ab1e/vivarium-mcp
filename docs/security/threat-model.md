@@ -111,6 +111,20 @@ Likelihood × Impact → severity (master §7). "L/M/H".
 > rules + master §5 redaction. The OOM classification is a server-side container-engine metadata
 > query, never binary parsing (ADR-001 preserved).
 
+> **TB3 delta — v1.4 analyzer profile + pre-flight reject (ADR-029 B/C; no new boundary).** The
+> additive `session_analyze` `profile` (`default`/`light`/`deep`) only **reduces or adjusts analysis
+> depth** — it adds **no new capability or agency** (the worker still runs Ghidra auto-analysis
+> worker-side per ADR-001, still bounded by the kill-on-timeout of ADR-002). `default` is a
+> byte-for-byte no-op (the analyze RPC omits the param and the worker touches no options object), so
+> the existing analysis path is unchanged when the profile is omitted; `light` is a DoS *mitigation*
+> (less time/heap on a huge binary). The pre-flight gains a **reject** mode
+> (`GHIDRA_MCP_WORKER_PREFLIGHT=reject`): an input over the OOM-plausible threshold is failed closed
+> with the existing non-retryable `resource-exhausted` **before** the worker is contacted — a
+> fail-closed resource-DoS guard (strictly stronger than the warn-only default), not a new surface.
+> The new `worker.preflight_rejected` log and the reject error carry **no binary content or host
+> paths** (size + configured-MiB integers only). The profile→analyzer-option mapping is pure data;
+> the JVM option-setting is the worker-only edge.
+
 ### TB4 — Worker → Server → LLM (untrusted output)
 | STRIDE | Threat | L×I | Mitigation |
 |--------|--------|-----|------------|

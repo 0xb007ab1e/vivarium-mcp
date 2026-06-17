@@ -52,7 +52,9 @@ from ghidra_mcp.ghidra.rpc_framing import (
 )
 from ghidra_mcp.logging import get_logger
 from ghidra_mcp.security.limits import (
+    DEFAULT_PREFLIGHT_MODE,
     DEFAULT_WORKER_MEM_MIB,
+    PREFLIGHT_MODES,
     Limits,
     check_binary_size,
     plausible_max_bytes,
@@ -116,6 +118,11 @@ _CONNECT_RETRY_INTERVAL_S = 0.1
 #: :meth:`RpcGhidraAdapter._socket_path`.
 _SOCKET_DIR_TOKEN_LEN = 16
 
+#: The analyzer profile that is a byte-for-byte no-op: when this is selected the analyze RPC carries
+#: NO ``profile`` param at all, so the worker takes the exact same code path as before ADR-029 B
+#: (the default-is-no-op guarantee — see :func:`_analyze_params`).
+_DEFAULT_PROFILE = "default"
+
 #: Module logger. RPC-layer failures are logged SERVER-SIDE with the underlying exception
 #: (socket/framing errors — no binary content or secrets) before being mapped to the
 #: boundary-safe public envelope, so operability does not depend on the client-facing message
@@ -150,6 +157,27 @@ def _default_source_size(source_ref: str) -> int:
         The size of the referenced input in bytes.
     """
     return Path(source_ref).stat().st_size
+
+
+def _analyze_params(timeout_seconds: int | None, profile: str) -> dict[str, Any]:
+    """Shape the ``analyze`` RPC params, preserving the default-is-no-op guarantee (ADR-029 B).
+
+    Pure (no I/O) so it is unit-testable. When ``profile`` is the default the returned params are
+    IDENTICAL to the pre-ADR-029 shape (``{"timeout_seconds": ...}`` only) — the additive
+    ``profile`` key is OMITTED, so an unchanged/omitted profile routes the worker down the exact
+    same code path as before this increment. ``light``/``deep`` add the explicit ``profile`` key.
+
+    Args:
+        timeout_seconds: The (already server-clamped) in-worker budget hint, or ``None``.
+        profile: The validated analyzer-depth preset (``default``/``light``/``deep``).
+
+    Returns:
+        The JSON-serializable params dict for the ``analyze`` RPC.
+    """
+    params: dict[str, Any] = {"timeout_seconds": timeout_seconds}
+    if profile != _DEFAULT_PROFILE:
+        params["profile"] = profile
+    return params
 
 
 class _Session:
@@ -195,6 +223,7 @@ class RpcGhidraAdapter:
         source_resolver: SourceResolver | None = None,
         connect_timeout_s: float = 30.0,
         worker_mem_mib: int = DEFAULT_WORKER_MEM_MIB,
+        preflight_mode: str = DEFAULT_PREFLIGHT_MODE,
     ) -> None:
         """Initialize the adapter with injected runtime collaborators.
 
@@ -209,9 +238,15 @@ class RpcGhidraAdapter:
             source_resolver: Maps a (confined) ``source_ref`` to its byte size for the pre-Ghidra
                 size check (defaults to :func:`_default_source_size`).
             connect_timeout_s: How long to wait for the worker to bind/accept on its socket.
-            worker_mem_mib: Configured worker memory (MiB) — used ONLY for the warn-only OOM
-                pre-flight (ADR-023 / F1, :func:`plausible_max_bytes`); defaults to the built-in
-                worker memory default.
+            worker_mem_mib: Configured worker memory (MiB) — used ONLY for the OOM pre-flight
+                (ADR-023 / F1, :func:`plausible_max_bytes`); defaults to the built-in worker memory
+                default.
+            preflight_mode: Over-plausible-size pre-flight behaviour (ADR-029 C; one of
+                :data:`PREFLIGHT_MODES`): ``warn`` (log + proceed — the v1.3 default), ``reject``
+                (fail closed with ``resource-exhausted`` before the worker is contacted), or ``off``
+                (skip the check). Defaults to :data:`DEFAULT_PREFLIGHT_MODE`. The caller (config) is
+                responsible for validating the value against the allow-list; an unrecognized value
+                is treated as ``warn`` here (fail safe — never silently disables the heads-up).
         """
         self._launcher = launcher
         self._socket_dir = socket_dir
@@ -222,6 +257,9 @@ class RpcGhidraAdapter:
         self._source_resolver = source_resolver or _default_source_size
         self._connect_timeout_s = connect_timeout_s
         self._worker_mem_mib = worker_mem_mib
+        # Defense in depth: config already allow-lists this, but if a bad value reaches us, fall
+        # back to the safe warn mode rather than the silent ``off`` (never weaken the guard).
+        self._preflight_mode = preflight_mode if preflight_mode in PREFLIGHT_MODES else "warn"
         self._sessions: dict[str, _Session] = {}
 
     # --- worker/session lifecycle -----------------------------------------------------------
@@ -259,12 +297,21 @@ class RpcGhidraAdapter:
         resolved by the injected confined resolver; an over-cap input raises ``LIMIT_EXCEEDED``
         before the worker is contacted, and an unresolvable ref fails closed as ``VALIDATION``.
 
+        After the hard cap, the configurable OOM pre-flight (ADR-029 C) runs: in ``reject`` mode an
+        input above the OOM-plausible threshold fails closed with ``resource-exhausted`` BEFORE the
+        worker is contacted; ``warn`` logs + proceeds (v1.3 behaviour); ``off`` skips the check.
+
         Args:
             session_id: The session.
             args: Import arguments (digest verification happens in the worker).
 
         Returns:
             Updated :class:`SessionInfo` (server-computed fields only — no binary-derived content).
+
+        Raises:
+            GhidraMcpError: ``VALIDATION`` if the ref cannot be resolved; ``LIMIT_EXCEEDED`` if over
+                the hard size cap; ``RESOURCE_EXHAUSTED`` if the pre-flight is in ``reject`` mode
+                and the input exceeds the OOM-plausible threshold.
         """
         try:
             size_bytes = self._source_resolver(args.source_ref)
@@ -274,15 +321,8 @@ class RpcGhidraAdapter:
             ) from exc
         # Fail closed BEFORE the worker: an over-cap binary is rejected pre-Ghidra (TB3 DoS).
         check_binary_size(size_bytes, self._limits)
-        # Warn-only OOM pre-flight (ADR-023 D3): an input plausibly too large for the worker's
-        # memory cap will likely OOM-kill it — emit a heads-up (size + configured memory ONLY; never
-        # content/path — error-envelope.md / master §5) and PROCEED. Not a reject gate; the hard
-        # size cap above and the worker's memory cgroup remain the enforcing controls.
-        if size_bytes > plausible_max_bytes(self._worker_mem_mib):
-            _log.warning(
-                "worker.preflight_oversized",
-                extra={"size_bytes": size_bytes, "worker_mem_mib": self._worker_mem_mib},
-            )
+        # OOM pre-flight (ADR-023 D3 + ADR-029 C): may warn, reject, or be skipped per the mode.
+        self._preflight_check(size_bytes)
         result = self._call(
             session_id,
             "import_binary",
@@ -291,12 +331,52 @@ class RpcGhidraAdapter:
         )
         return _validate(s.SessionInfo, result)
 
+    def _preflight_check(self, size_bytes: int) -> None:
+        """Apply the over-plausible-size pre-flight per the configured mode (ADR-029 C).
+
+        Runs AFTER the hard binary-size cap, BEFORE the worker is contacted. ``off`` skips entirely;
+        otherwise an input above :func:`plausible_max_bytes` either logs a heads-up and proceeds
+        (``warn``) or fails closed with ``resource-exhausted`` (``reject``). The log and error carry
+        ONLY the size + configured memory — never content/path (master §5 redaction; the error
+        detail is the fixed safe hint from :func:`_errors.resource_exhausted`).
+
+        Args:
+            size_bytes: The resolved candidate input size (already past the hard cap).
+
+        Raises:
+            GhidraMcpError: ``RESOURCE_EXHAUSTED`` when in ``reject`` mode and the input exceeds the
+                OOM-plausible threshold.
+        """
+        if self._preflight_mode == "off":
+            return
+        if size_bytes <= plausible_max_bytes(self._worker_mem_mib):
+            return
+        if self._preflight_mode == "reject":
+            # Fail closed pre-Ghidra: an input this large would very likely OOM-kill the worker;
+            # reject it now with the actionable, content-free hint rather than burn a worker on it.
+            _log.warning(
+                "worker.preflight_rejected",
+                extra={"size_bytes": size_bytes, "worker_mem_mib": self._worker_mem_mib},
+            )
+            raise _errors.resource_exhausted()
+        # warn: emit a heads-up (size + configured memory ONLY) and PROCEED — the hard size cap and
+        # the worker's memory cgroup remain the enforcing controls.
+        _log.warning(
+            "worker.preflight_oversized",
+            extra={"size_bytes": size_bytes, "worker_mem_mib": self._worker_mem_mib},
+        )
+
     def analyze(self, session_id: str, args: s.SessionAnalyzeIn) -> s.SessionInfo:
         """Run Ghidra auto-analysis, bounded by the analysis timeout (kills worker on expiry).
 
+        The additive ``profile`` (ADR-029 B) selects the analyzer-depth preset. When it is the
+        default the analyze RPC params are IDENTICAL to today's (no ``profile`` key — the worker
+        takes the unchanged code path); ``light``/``deep`` add the explicit preset.
+
         Args:
             session_id: The session.
-            args: Analysis arguments (optional timeout override, already clamped by the server).
+            args: Analysis arguments (optional timeout override, already clamped by the server; the
+                analyzer profile).
 
         Returns:
             Updated :class:`SessionInfo`.
@@ -312,7 +392,7 @@ class RpcGhidraAdapter:
         result = self._call(
             session_id,
             "analyze",
-            {"timeout_seconds": args.timeout_seconds},
+            _analyze_params(args.timeout_seconds, args.profile),
             timeout_s=deadline,
         )
         return _validate(s.SessionInfo, result)

@@ -44,6 +44,63 @@ _MAX_COMPOSITE_SIZE = 1_048_576  # 1 MiB
 # schemas.ANNOTATION_SCHEMA_VERSION). The server overlays the authoritative binary hash.
 _ANNOTATION_SCHEMA_VERSION = 1
 
+# Analyzer-depth profile presets (v1.4 — ADR-029 B). PURE data: a profile → {analyzer-option-name:
+# enabled} overlay applied to the program's analysis options BEFORE auto-analysis runs.
+#
+# DEFAULT-IS-NO-OP guarantee: the ``default`` profile maps to an EMPTY overlay, and the analyze path
+# only opens/touches the options object when the overlay is non-empty — so an omitted/``default``
+# profile runs the IDENTICAL code path (a bare ``pyghidra.analyze(program)``) as before this
+# increment, with Ghidra's stock per-format defaults untouched.
+#
+# ``light`` DISABLES the most expensive analyzers (the ones that dominate time/heap on a huge
+# binary): Decompiler Parameter ID (a full decompile of every function), and the aggressive
+# discovery passes (aggressive instruction finder, decompiler switch recovery, embedded-media/
+# data-reference scans). ``deep`` ENABLES the fuller set (param ID + the aggressive finders) on top
+# of the stock defaults.
+#
+# REQUIRES-LIVE-VERIFICATION: the exact option NAMES and their on/off semantics are Ghidra 12.1.2
+# analyzer labels and MUST be confirmed against the pinned image (the ADR-028 harness + a real-
+# worker run) before merge — the strings below are the documented Ghidra analyzer names but the JVM
+# is the authority. The option-SETTING call itself is a JVM edge (``# pragma: no cover``); this
+# table and its selector are pure and unit-tested.
+_PROFILE_DEFAULT = "default"
+_PROFILE_PRESETS: dict[str, dict[str, bool]] = {
+    # No overlay → stock Ghidra defaults, identical to pre-ADR-029 behaviour (no-op).
+    _PROFILE_DEFAULT: {},
+    # REQUIRES-LIVE-VERIFICATION (option names + semantics on 12.1.2).
+    "light": {
+        "Decompiler Parameter ID": False,
+        "Aggressive Instruction Finder": False,
+        "Decompiler Switch Analysis": False,
+        "Embedded Media": False,
+        "Create Address Tables": False,
+    },
+    # REQUIRES-LIVE-VERIFICATION (option names + semantics on 12.1.2).
+    "deep": {
+        "Decompiler Parameter ID": True,
+        "Aggressive Instruction Finder": True,
+        "Decompiler Switch Analysis": True,
+    },
+}
+
+
+def _analyzer_options_for_profile(profile: str | None) -> dict[str, bool]:
+    """Map an analyzer-depth ``profile`` to its option overlay (PURE — ADR-029 B; unit-tested).
+
+    Returns a COPY (callers must not mutate the shared preset). An unknown/``None`` profile falls
+    back to the ``default`` (empty) overlay — fail safe: a bad value can only ever yield the stock,
+    no-op analysis, never silently weaken or widen it. The default overlay is empty, which the
+    analyze path uses to take the byte-for-byte unchanged code path (no options object is touched).
+
+    Args:
+        profile: The profile name (``default``/``light``/``deep``), or ``None``.
+
+    Returns:
+        A fresh ``{analyzer-option-name: enabled}`` overlay (empty for ``default``/unknown).
+    """
+    preset = _PROFILE_PRESETS.get(profile or _PROFILE_DEFAULT, _PROFILE_PRESETS[_PROFILE_DEFAULT])
+    return dict(preset)
+
 
 def _require(params: dict[str, Any], key: str) -> Any:
     """Fetch a required param or raise a worker ``invalid-params`` error.
@@ -106,13 +163,14 @@ class PyGhidraBackend:
         """Run Ghidra auto-analysis on the imported program.
 
         Args:
-            params: ``{"timeout_seconds": int | None}`` (the server kills the worker on its own
-                deadline; this is the in-worker budget hint).
+            params: ``{"timeout_seconds": int | None, "profile"?: str}`` — the server kills the
+                worker on its own deadline (the timeout is an in-worker budget hint); ``profile``
+                (ADR-029 B; additive, absent for the default) selects the analyzer-depth preset.
 
         Returns:
             A plain ``SessionInfo``-shaped dict.
         """
-        return self._gh_analyze(params.get("timeout_seconds"))
+        return self._gh_analyze(params.get("timeout_seconds"), params.get("profile"))
 
     # --- read-only operations ----------------------------------------------------------------
     def decompile_function(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -506,12 +564,17 @@ class PyGhidraBackend:
         self._program = getattr(program, "getCurrentProgram", lambda: program)()
         return _session_info_dict("importing", self._sha256, analysis_complete=False)
 
-    def _gh_analyze(self, timeout_seconds: int | None) -> dict[str, Any]:  # pragma: no cover
+    def _gh_analyze(
+        self, timeout_seconds: int | None, profile: str | None = None
+    ) -> dict[str, Any]:  # pragma: no cover
         """Run Ghidra auto-analysis on the open program.
 
         Args:
             timeout_seconds: In-worker budget hint (the server enforces the hard deadline by
                 killing the worker; this is advisory).
+            profile: Analyzer-depth preset (ADR-029 B). The default/``None`` applies NO option
+                overlay — a byte-for-byte no-op: the same bare ``pyghidra.analyze(program)`` as
+                before this increment runs, with the options object never touched.
 
         Returns:
             A plain ``SessionInfo``-shaped dict reporting the ``ready`` state.
@@ -529,6 +592,19 @@ class PyGhidraBackend:
         # launcher supplies the wall-clock kill; this call runs synchronously to completion.
         import pyghidra
 
+        # ADR-029 B profile overlay. PURE selector → option map (unit-tested); the option-SETTING is
+        # the JVM edge below. DEFAULT-IS-NO-OP: an empty overlay skips the options block entirely,
+        # so the default path is the identical bare ``analyze`` call as before this increment.
+        overlay = _analyzer_options_for_profile(profile)
+        if overlay:
+            # REQUIRES-LIVE-VERIFICATION: the analysis-options accessor + the per-analyzer option
+            # names/semantics are Ghidra 12.1.2 JVM edges — confirm via the pinned image (ADR-028
+            # harness + real-worker run) before merge. ``Program.ANALYSIS_PROPERTIES`` is the
+            # documented options group auto-analysis reads; toggling a named analyzer there
+            # disables/enables it for the ``analyze`` run that follows.
+            options = self._program.getOptions(self._program.ANALYSIS_PROPERTIES)
+            for option_name, enabled in overlay.items():
+                options.setBoolean(option_name, enabled)
         pyghidra.analyze(self._program)
         self._analyzed = True
         return _session_info_dict("ready", self._sha256, analysis_complete=True)

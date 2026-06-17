@@ -71,6 +71,15 @@ _WORKER_HARD_CEILINGS: dict[str, int] = {
     "tmpfs_project_mib": HARD_MAX_WORKER_TMPFS_PROJECT_MIB,
 }
 
+# Over-plausible-size pre-flight modes (ADR-029 C). SINGLE SOURCE OF TRUTH — both the config
+# allow-list and the adapter's defense-in-depth fallback import these, so they can never drift:
+#   * ``warn``   — log a heads-up and proceed (the v1.3 / ADR-023 D3 behaviour; the default).
+#   * ``reject`` — fail closed with ``resource-exhausted`` BEFORE the worker is contacted.
+#   * ``off``    — skip the plausibility check entirely.
+PREFLIGHT_MODES = frozenset({"warn", "reject", "off"})
+#: Secure default pre-flight mode (preserves the v1.3 warn-only behaviour — fail safe).
+DEFAULT_PREFLIGHT_MODE = "warn"
+
 
 @dataclass(frozen=True, slots=True)
 class Limits:

@@ -68,9 +68,11 @@ def _default_port_factory(config: Config) -> GhidraPort:
         max_response_bytes=config.limits.max_response_bytes,
         limits=config.limits,
         source_resolver=make_confined_resolver(config.import_root),
-        # Drives the warn-only OOM pre-flight (ADR-023 / F1) — same configured worker memory the
-        # launcher caps the container at, so the heads-up threshold tracks the real cap.
+        # Drives the OOM pre-flight (ADR-023 / F1) — same configured worker memory the launcher caps
+        # the container at, so the plausibility threshold tracks the real cap.
         worker_mem_mib=config.worker_resources.mem_mib,
+        # Pre-flight behaviour (ADR-029 C): warn (default) / reject / off — validated at startup.
+        preflight_mode=config.worker_preflight_mode,
     )
 
 
