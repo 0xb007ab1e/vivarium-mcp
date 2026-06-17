@@ -36,12 +36,21 @@ _CAP = 4 * 1024 * 1024
 
 
 class _FakeWorker:
-    """A fake worker process handle that records whether it was killed."""
+    """A fake worker process handle that records whether it was killed.
 
-    def __init__(self) -> None:
-        """Initialize a live, un-killed fake worker."""
+    ``diagnosis`` is the value :meth:`exit_diagnosis` returns (ADR-023 / F1) — default ``"other"``
+    (a generic crash → ``worker-unavailable``); set ``"oom"`` to simulate a memory-cap OOM.
+    """
+
+    def __init__(self, diagnosis: str = "other") -> None:
+        """Initialize a live, un-killed fake worker.
+
+        Args:
+            diagnosis: The value :meth:`exit_diagnosis` returns.
+        """
         self.killed = 0
         self._alive = True
+        self._diagnosis = diagnosis
 
     def kill(self) -> None:
         """Record a kill and mark dead."""
@@ -51,6 +60,10 @@ class _FakeWorker:
     def is_alive(self) -> bool:
         """Whether the fake worker is still alive."""
         return self._alive
+
+    def exit_diagnosis(self) -> str:
+        """Return the canned exit diagnosis (ADR-023 / F1)."""
+        return self._diagnosis
 
 
 class _ConnectedAdapter(RpcGhidraAdapter):
@@ -275,6 +288,115 @@ def test_worker_crash_mid_call_is_unavailable_and_kills() -> None:
     t.join(timeout=2)
     assert ei.value.envelope.type is ErrorType.WORKER_UNAVAILABLE
     assert worker.killed == 1
+
+
+def test_resource_exhausted_factory_envelope() -> None:
+    """``_errors.resource_exhausted`` builds a 503, non-retryable, safe envelope (ADR-023)."""
+    from ghidra_mcp.ghidra import _errors
+
+    err = _errors.resource_exhausted(correlation_id="cid-1")
+    env = err.envelope
+    assert env.type is ErrorType.RESOURCE_EXHAUSTED
+    assert env.title == "Worker out of resources"
+    assert env.status == 503
+    assert env.retryable is False
+    assert env.correlation_id == "cid-1"
+    assert "Traceback" not in env.detail and "/" not in env.detail
+
+
+def test_resource_exhausted_via_make_error_maps() -> None:
+    """The generic factory also resolves RESOURCE_EXHAUSTED → 503 / non-retryable / titled."""
+    from ghidra_mcp.ghidra import _errors
+
+    env = _errors.make_error(ErrorType.RESOURCE_EXHAUSTED, "detail").envelope
+    assert env.status == 503
+    assert env.retryable is False
+    assert env.title == "Worker out of resources"
+
+
+def test_oom_worker_death_maps_to_resource_exhausted(tmp_path: Path) -> None:
+    """A transport failure on an OOM-killed worker → distinct, non-retryable resource-exhausted."""
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker(diagnosis="oom")
+    adapter = _make_adapter(srv, worker)
+
+    def _crash() -> None:
+        dispatch.read_frame(wrk, max_frame_bytes=_CAP)
+        wrk.close()  # close mid-call → EOF on the adapter's read
+
+    t = threading.Thread(target=_crash, daemon=True)
+    t.start()
+    with pytest.raises(GhidraMcpError) as ei:
+        adapter.list_functions("s", s.ListFunctionsIn(session_id="s"))
+    t.join(timeout=2)
+    assert ei.value.envelope.type is ErrorType.RESOURCE_EXHAUSTED
+    assert ei.value.envelope.status == 503
+    assert ei.value.envelope.retryable is False
+    # Detail is the fixed, safe, actionable hint (no binary content / host path).
+    detail = ei.value.envelope.detail
+    assert "memory" in detail
+    assert "Traceback" not in detail and "/" not in detail
+    assert worker.killed == 1
+
+
+def test_non_oom_worker_death_stays_unavailable(tmp_path: Path) -> None:
+    """A generic crash (diagnosis 'other') stays worker-unavailable (retryable)."""
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker(diagnosis="other")
+    adapter = _make_adapter(srv, worker)
+
+    def _crash() -> None:
+        dispatch.read_frame(wrk, max_frame_bytes=_CAP)
+        wrk.close()
+
+    t = threading.Thread(target=_crash, daemon=True)
+    t.start()
+    with pytest.raises(GhidraMcpError) as ei:
+        adapter.list_functions("s", s.ListFunctionsIn(session_id="s"))
+    t.join(timeout=2)
+    assert ei.value.envelope.type is ErrorType.WORKER_UNAVAILABLE
+    assert worker.killed == 1
+
+
+def test_unknown_diagnosis_fails_closed_to_unavailable(tmp_path: Path) -> None:
+    """An 'unknown' diagnosis (engine query unparseable) fails closed to worker-unavailable."""
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker(diagnosis="unknown")
+    adapter = _make_adapter(srv, worker)
+
+    def _crash() -> None:
+        dispatch.read_frame(wrk, max_frame_bytes=_CAP)
+        wrk.close()
+
+    t = threading.Thread(target=_crash, daemon=True)
+    t.start()
+    with pytest.raises(GhidraMcpError) as ei:
+        adapter.list_functions("s", s.ListFunctionsIn(session_id="s"))
+    t.join(timeout=2)
+    assert ei.value.envelope.type is ErrorType.WORKER_UNAVAILABLE
+
+
+def test_diagnosis_exception_fails_closed_to_unavailable(tmp_path: Path) -> None:
+    """If the diagnosis query itself raises, classification fails closed to worker-unavailable."""
+
+    class _RaisingWorker(_FakeWorker):
+        def exit_diagnosis(self) -> str:
+            raise RuntimeError("engine flaked")
+
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _RaisingWorker()
+    adapter = _make_adapter(srv, worker)
+
+    def _crash() -> None:
+        dispatch.read_frame(wrk, max_frame_bytes=_CAP)
+        wrk.close()
+
+    t = threading.Thread(target=_crash, daemon=True)
+    t.start()
+    with pytest.raises(GhidraMcpError) as ei:
+        adapter.list_functions("s", s.ListFunctionsIn(session_id="s"))
+    t.join(timeout=2)
+    assert ei.value.envelope.type is ErrorType.WORKER_UNAVAILABLE
 
 
 def test_call_without_worker_is_unavailable() -> None:
@@ -736,6 +858,82 @@ def test_import_within_cap_feeds_worker() -> None:
     t.join(timeout=2)
     assert info.state == "importing"
     assert worker.killed == 0
+    wrk.close()
+
+
+def _serve_import_ok(wrk: socket.socket) -> threading.Thread:
+    """Start a daemon thread that answers one import_binary RPC with a minimal SessionInfo."""
+    result = {
+        "session_id": "s",
+        "state": "importing",
+        "created_at": 1,
+        "expires_at": 2,
+        "binary_sha256": "b" * 64,
+    }
+    t = threading.Thread(
+        target=_serve_one, args=(wrk, {"jsonrpc": "2.0", "result": result}), daemon=True
+    )
+    t.start()
+    return t
+
+
+def test_preflight_oversized_warns_and_proceeds(caplog: pytest.LogCaptureFixture) -> None:
+    """An input above the OOM-plausible threshold logs a warn (size + mem only) and PROCEEDS."""
+    import logging
+
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    # Within the hard binary cap, but above plausible_max_bytes(64 MiB) = 128 MiB.
+    size = 200 * 1024 * 1024
+    adapter = _ConnectedAdapter(
+        server_sock=srv,
+        launcher=lambda sid, path: worker,
+        socket_dir="/tmp/ghidra-mcp-test",  # noqa: S108  # test-only path; no real socket bound
+        tool_timeout_s=1.0,
+        analysis_timeout_s=1.0,
+        max_response_bytes=_CAP,
+        limits=Limits(max_binary_bytes=1024 * 1024 * 1024),
+        source_resolver=lambda ref: size,
+        worker_mem_mib=64,
+    )
+    adapter.start_worker("s")
+    t = _serve_import_ok(wrk)
+    with caplog.at_level(logging.WARNING):
+        info = adapter.import_binary("s", s.SessionImportIn(session_id="s", source_ref="big-ok"))
+    t.join(timeout=2)
+    # Proceeded (not a reject): the RPC reached the worker and returned.
+    assert info.state == "importing"
+    assert worker.killed == 0
+    rec = next(r for r in caplog.records if r.message == "worker.preflight_oversized")
+    # The log carries ONLY size + configured memory (no content/path — master §5 redaction).
+    assert rec.size_bytes == size  # type: ignore[attr-defined]
+    assert rec.worker_mem_mib == 64  # type: ignore[attr-defined]
+    wrk.close()
+
+
+def test_preflight_not_emitted_for_normal_input(caplog: pytest.LogCaptureFixture) -> None:
+    """An input within the plausible threshold emits NO oversized pre-flight log."""
+    import logging
+
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _ConnectedAdapter(
+        server_sock=srv,
+        launcher=lambda sid, path: worker,
+        socket_dir="/tmp/ghidra-mcp-test",  # noqa: S108  # test-only path; no real socket bound
+        tool_timeout_s=1.0,
+        analysis_timeout_s=1.0,
+        max_response_bytes=_CAP,
+        limits=Limits(),
+        source_resolver=lambda ref: 1024,  # tiny — well under the threshold
+        worker_mem_mib=4096,
+    )
+    adapter.start_worker("s")
+    t = _serve_import_ok(wrk)
+    with caplog.at_level(logging.WARNING):
+        adapter.import_binary("s", s.SessionImportIn(session_id="s", source_ref="ok"))
+    t.join(timeout=2)
+    assert not any(r.message == "worker.preflight_oversized" for r in caplog.records)
     wrk.close()
 
 

@@ -16,7 +16,12 @@ import os
 from dataclasses import dataclass, field
 
 from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
-from ghidra_mcp.security.limits import Limits, resolve_limits
+from ghidra_mcp.security.limits import (
+    Limits,
+    WorkerResources,
+    resolve_limits,
+    resolve_worker_resources,
+)
 from ghidra_mcp.server.auth import (
     MTLS_PRINCIPAL_FIELD_DEFAULT,
     MTLS_PRINCIPAL_FIELDS,
@@ -42,6 +47,13 @@ _ENV_WORKER_IMAGE = "GHIDRA_MCP_WORKER_IMAGE"
 _ENV_WORKER_RUNTIME = "GHIDRA_MCP_WORKER_RUNTIME"
 _ENV_WORKER_UID = "GHIDRA_MCP_WORKER_UID"
 _ENV_WORKER_GID = "GHIDRA_MCP_WORKER_GID"
+# Worker resource bounds (v1.3 — ADR-023 / F1). Integer-MiB memory/tmpfs + whole-CPU + pid caps,
+# resolved + clamped by ``resolve_worker_resources`` (env can tune but never widen past a ceiling).
+_ENV_WORKER_MEM_MIB = "GHIDRA_MCP_WORKER_MEM_MIB"
+_ENV_WORKER_CPUS = "GHIDRA_MCP_WORKER_CPUS"
+_ENV_WORKER_PIDS = "GHIDRA_MCP_WORKER_PIDS"
+_ENV_WORKER_TMPFS_SCRATCH_MIB = "GHIDRA_MCP_WORKER_TMPFS_SCRATCH_MIB"
+_ENV_WORKER_TMPFS_PROJECT_MIB = "GHIDRA_MCP_WORKER_TMPFS_PROJECT_MIB"
 _ENV_RPC_SOCKET_DIR = "GHIDRA_MCP_RPC_SOCKET_DIR"
 _ENV_IMPORT_ROOT = "GHIDRA_MCP_IMPORT_ROOT"
 
@@ -210,6 +222,9 @@ class Config:
         session_ttl_s: Absolute session lifetime before eviction.
         session_idle_s: Idle timeout before eviction.
         limits: Resolved resource limits (see :class:`ghidra_mcp.security.limits.Limits`).
+        worker_resources: Resolved + clamped worker container resource bounds (ADR-023 / F1 — see
+            :class:`ghidra_mcp.security.limits.WorkerResources`). The env may tune them but never
+            widen past the hard ceilings.
         worker_image: Pinned-by-digest worker image reference (ADR-003).
         worker_runtime: Container runtime for the worker (e.g. ``runsc`` for gVisor — ADR-004).
         worker_uid: Worker container uid (default hardened ``65532``; must own the socket dir
@@ -233,6 +248,8 @@ class Config:
     worker_gid: int
     rpc_socket_dir: str
     import_root: str
+    # Defaulted so existing keyword constructions (tests) stay valid; resolved in ``load_config``.
+    worker_resources: WorkerResources = field(default_factory=WorkerResources)
     transport: str = _DEFAULT_TRANSPORT
     http: HttpConfig | None = None
 
@@ -687,14 +704,30 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     # its own session at the next call (``expired-on-authorize`` → aborted workflow). In-flight
     # tracking (sessions/manager) makes a running call non-idle, but this fail-closed startup check
     # guarantees a deployment cannot even be CONFIGURED into the broken regime (defense in depth —
-    # the config is the only one that boots is the safe one, master §2). ``analysis_timeout_s`` is
-    # the resolved/clamped value (security/limits). Checked AFTER limits resolution so it sees the
+    # the only config that boots is the safe one, master §2). ``analysis_timeout_s`` is the
+    # resolved/clamped value (security/limits). Checked AFTER limits resolution so it sees the
     # effective ceiling, not the raw env. Defaults satisfy it (idle 900 >= analysis 600).
     if session_idle_s < limits.analysis_timeout_s:
         raise _startup_error(
             "session idle timeout must be at least the analysis timeout "
             "(a long analysis must not be able to idle-evict its own session)"
         )
+
+    # Worker resource overrides (ADR-023 / F1): only include explicitly-set keys; let
+    # resolve_worker_resources apply its own defaults + hard clamps for the rest (fail-closed:
+    # bool/non-int/<1 rejected, above-ceiling clamped down).
+    worker_overrides: dict[str, int] = {}
+    for env_name, resource_key in (
+        (_ENV_WORKER_MEM_MIB, "mem_mib"),
+        (_ENV_WORKER_CPUS, "cpus"),
+        (_ENV_WORKER_PIDS, "pids"),
+        (_ENV_WORKER_TMPFS_SCRATCH_MIB, "tmpfs_scratch_mib"),
+        (_ENV_WORKER_TMPFS_PROJECT_MIB, "tmpfs_project_mib"),
+    ):
+        value = _read_int(src, env_name)
+        if value is not None:
+            worker_overrides[resource_key] = value
+    worker_resources = resolve_worker_resources(worker_overrides or None)
 
     return Config(
         log_level=log_level,
@@ -708,6 +741,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         worker_gid=worker_gid,
         rpc_socket_dir=rpc_socket_dir,
         import_root=import_root,
+        worker_resources=worker_resources,
         transport=transport,
         http=http,
     )

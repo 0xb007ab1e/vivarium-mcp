@@ -132,7 +132,14 @@ server never forwards a worker stack trace to the client.
   socket, marks the session for eviction, and returns a `timeout` error envelope. There is **no
   "graceful" wait** for a hostile/hung JVM.
 - A worker that crashes/closes the socket mid-call → `worker-unavailable` + eviction.
-- Kill is the universal failure handler: timeout, protocol violation, oversized frame, or
+- **Worker-death classification (v1.3 — ADR-023 / F1):** on a transport failure (crash/closed
+  socket), before killing, the server queries the container engine's METADATA (`OOMKilled` flag /
+  exit 137 — NO binary parsing, ADR-001) to classify the death. An OOM-killed worker (it blew its
+  configured memory cap on a hostile input) is surfaced as the distinct, ADDITIVE
+  `resource-exhausted` (503, **not retryable** — see `error-envelope.md`); every other transport
+  failure stays `worker-unavailable`. The classification fails closed to `worker-unavailable` if
+  the engine query errors. No existing slug is repurposed.
+- Kill is the universal failure handler: timeout, protocol violation, oversized frame, OOM, or
   poisoning all resolve to **kill + evict** (ADR-002). Eviction then verified-wipes the store.
 
 ## 7. Security properties (summary)
