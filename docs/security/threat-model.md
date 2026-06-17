@@ -1007,3 +1007,13 @@ continuing the numbering after the current last case 82):
     foreign/unknown session yields the same `SESSION_INVALID` envelope (BOLA, no oracle); on a
     session without `allow_structural`, it is denied (`require_write_consent(structural=True)`
     chokepoint). (TB7-E / gating / BOLA)
+
+## 15. Note — live-regression CI harness (v1.3 — ADR-028, ACCEPTED)
+
+The scheduled/labeled live-regression job (`.github/workflows/live-regression.yml`) drives the real
+worker end-to-end (F2 + F7 hard gates) on **benign, locally-built synthetic micro-binaries only**
+(master §5 — no real malware) under the **CI-relaxed crun** isolation (every other ADR-004 floor
+held; prod keeps runsc/gVisor — `deploy/README.md`). It introduces **no new trust boundary**: it
+exercises the EXISTING TB1–TB4 chain (client→server→worker→export) with trusted, in-repo fixtures —
+the supply-chain controls of §4 (digest-pinned actions, signed worker image cosign-verified before
+use, least-privilege OIDC) apply unchanged.
