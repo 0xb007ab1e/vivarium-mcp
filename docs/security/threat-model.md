@@ -1115,3 +1115,23 @@ perform), in a disposable, hash-bound, owner-scoped session. The worker export e
 (`_gh_export_annotations`) change is `# pragma: no cover` and **live-verified on a real worker**
 before merge (define A + B mutually pointer-recursive → export → re-import into a fresh session →
 both reconstructed) — the F2/F7/ADR-030 lesson.
+
+## 18. TB6 (delta) — OAuth scopes → per-tool authorization (v1.4 — ADR-033, ACCEPTED)
+
+Hardens the HTTP boundary (**TB6**, no new boundary): ADR-019 mapped an OAuth token's `sub` →
+`Principal` (identity only); every authenticated identity got the full catalog (§E deferred
+scope→authZ — `std-owasp-api` API5). ADR-033 adds two capabilities (`read`/`write`) and a per-tool
+gate. Server-only; no worker/JVM.
+
+| STRIDE | Threat | Mitigation |
+|--------|--------|------------|
+| **E** | **Function-level authZ bypass (API5)** — a read-only OAuth token drives a write tool (rename/define/delete/import) | each `Principal` carries `capabilities`; the dispatch chokepoint (`_bind`/`_bind_analyze`) denies a tool whose `required_capability` is absent, **server-side, before any handler work** (complete mediation); `WRITE_TOOLS` is the frozen source of truth. A scope-narrowed read-only token is rejected for every mutation tool. **Defense in depth:** a structural write still also needs the orthogonal `allow_structural` runtime consent (ADR-013/015) |
+| **T** | **Capability spoofing** — a client asserts its own capability | capabilities are derived **server-side** from the verified JWT `scope`/`scp` claim ONLY (never client-asserted); `ToolContext.caller_capabilities` reads the per-request resolver's principal (the auth middleware built it from the validated token), exactly like `caller_id` (ADR-017) |
+| **S/T** | **Scope-claim confusion / forgery** | scopes are read only from a token that already passed full JWKS signature + `iss`/`aud`/`exp`/`nbf` validation (ADR-019 unchanged); an unparsable `scope`/`scp` claim yields the empty set (fail closed → read-only when gating is on) |
+| **(compat / fail-safe)** | enforcement breaks existing deployments | **config-gated opt-in (D2):** with `oauth_write_scope` unset (default) every valid token is full-capability — identity-only, the pre-ADR-033 behavior. Non-OAuth principals (stdio/bearer/mTLS) are always full-capability (no scope concept). `Principal.capabilities` defaults to full; only OAuth-with-write-scope narrows it |
+| **I/R** | denial leaks / is unattributable | denial maps to the existing `VALIDATION` envelope (consistent with the write-consent denial — no error-contract change; value-free message) and is logged redacted (tool + principal id + missing capability — never the token) |
+
+**Residual risk.** Authorization is now per-capability, not all-or-nothing, for OAuth deployments
+that opt in. The gate is a pure server-side check (no worker, no JVM, no new boundary) and is fully
+unit-tested; there is no live-verification dependency. Finer granularity (per-tool scopes,
+structural-as-scope) remains a future increment.

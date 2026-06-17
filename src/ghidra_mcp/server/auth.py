@@ -79,12 +79,54 @@ OAUTH_PRINCIPAL_CLAIM_DEFAULT = "sub"
 #: Default leeway (seconds) for ``exp``/``nbf`` clock-skew tolerance — small, per ADR-019 D3.
 OAUTH_DEFAULT_LEEWAY_S = 30
 
+#: The two per-tool capabilities (ADR-033). ``write`` is required by the mutation tools; ``read`` by
+#: everything else (read/query tools, session lifecycle, the read-only annotation export).
+CAP_READ = "read"
+CAP_WRITE = "write"
+#: Full capability — the default for every principal. Only the OAuth authenticator, AND only when a
+#: write-scope is configured (ADR-033 D2), ever narrows a principal below this (to read-only).
+ALL_CAPABILITIES: frozenset[str] = frozenset({CAP_READ, CAP_WRITE})
+
+
+def _token_scopes(claims: dict[str, object]) -> frozenset[str]:
+    """Extract the granted OAuth scopes from a token's claims (ADR-033; fail closed/empty).
+
+    Accepts both the standard ``scope`` (a single space-delimited string — RFC 6749 §3.3 / RFC 8693)
+    and the common ``scp`` variant (a list of strings, or a space-delimited string). Anything of an
+    unexpected shape yields the empty set (fail closed — an unparsable scopes claim grants nothing).
+
+    Args:
+        claims: The verified JWT claims.
+
+    Returns:
+        The set of scope strings present on the token (possibly empty).
+    """
+    out: set[str] = set()
+    raw_scope = claims.get("scope")
+    if isinstance(raw_scope, str):
+        out.update(raw_scope.split())
+    raw_scp = claims.get("scp")
+    if isinstance(raw_scp, str):
+        out.update(raw_scp.split())
+    elif isinstance(raw_scp, (list, tuple)):
+        out.update(str(s) for s in raw_scp if isinstance(s, str))
+    return frozenset(out)
+
 
 @dataclass(frozen=True, slots=True)
 class Principal:
-    """The authenticated identity. Owns the sessions it creates (TB6-I / BOLA — `std-owasp-api`)."""
+    """The authenticated identity. Owns the sessions it creates (TB6-I / BOLA — `std-owasp-api`).
+
+    ``capabilities`` (ADR-033) is the principal's per-tool authorization set — ``read`` and/or
+    ``write``. It defaults to **full** (``ALL_CAPABILITIES``): stdio (the local operator), bearer,
+    and mTLS principals are full-capability (they have no scope concept — ADR-019). Only an OAuth
+    token,
+    and only when the deployment configures a write-scope, is narrowed (to read-only when the token
+    lacks that scope). The dispatch chokepoint denies a tool whose required capability is absent.
+    """
 
     id: str
+    capabilities: frozenset[str] = ALL_CAPABILITIES
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,6 +401,10 @@ class OAuthResourceAuthenticator:
     principal_claim: str = OAUTH_PRINCIPAL_CLAIM_DEFAULT
     algorithms: tuple[str, ...] = OAUTH_DEFAULT_ALGORITHMS
     leeway_s: int = OAUTH_DEFAULT_LEEWAY_S
+    #: The scope (ADR-033) granting the ``write`` capability. ``None`` (default) ⇒ scope-gating OFF:
+    #: every valid token is full-capability (identity-only, the pre-ADR-033 behavior). When set, a
+    #: token gets ``write`` iff its ``scope``/``scp`` claim contains this string (else read-only).
+    write_scope: str | None = None
     #: The JWKS client (key fetch + cache). Excluded from ``repr`` (not a secret, but noisy) and
     #: from equality (an internal cache handle, not identity). Built lazily on first use so the
     #: dataclass stays cheap to build and the network-touching client is made only on first request.
@@ -430,7 +476,26 @@ class OAuthResourceAuthenticator:
         principal_id = claims.get(self.principal_claim)
         if not isinstance(principal_id, str) or not principal_id:
             return None  # missing/empty/non-string subject → no anonymous principal (fail closed)
-        return Principal(id=principal_id)
+        return Principal(id=principal_id, capabilities=self._capabilities_from_claims(claims))
+
+    def _capabilities_from_claims(self, claims: dict[str, object]) -> frozenset[str]:
+        """Derive the principal's capabilities from the token scopes (ADR-033 D2; fail closed).
+
+        With no ``write_scope`` configured, scope-gating is OFF → full capability (identity-only,
+        the pre-ADR-033 behavior). With it set, a valid token always gets ``read``; it gets
+        ``write`` ONLY if its ``scope`` (space-delimited string — RFC 6749/8693) or ``scp`` (array —
+        a common IdP variant) claim contains the configured ``write_scope``.
+
+        Args:
+            claims: The verified JWT claims.
+
+        Returns:
+            The capability set granted to this token.
+        """
+        if self.write_scope is None:
+            return ALL_CAPABILITIES
+        scopes = _token_scopes(claims)
+        return ALL_CAPABILITIES if self.write_scope in scopes else frozenset({CAP_READ})
 
 
 def build_authenticator(
@@ -445,6 +510,7 @@ def build_authenticator(
     oauth_principal_claim: str = OAUTH_PRINCIPAL_CLAIM_DEFAULT,
     oauth_algorithms: tuple[str, ...] = OAUTH_DEFAULT_ALGORITHMS,
     oauth_leeway_s: int = OAUTH_DEFAULT_LEEWAY_S,
+    oauth_write_scope: str | None = None,
 ) -> Authenticator:
     """Construct the :class:`Authenticator` for a validated ``auth_mode`` (the wiring seam).
 
@@ -474,6 +540,8 @@ def build_authenticator(
         oauth_algorithms: The pinned algorithm allow-list (subset of
             :data:`OAUTH_ALLOWED_ALGORITHMS`; default :data:`OAUTH_DEFAULT_ALGORITHMS`).
         oauth_leeway_s: Clock-skew leeway in seconds for ``exp``/``nbf``.
+        oauth_write_scope: The scope granting the ``write`` capability (ADR-033); ``None`` ⇒
+            scope-gating off (every valid token is full-capability — identity-only).
 
     Returns:
         The matching authenticator.
@@ -506,5 +574,6 @@ def build_authenticator(
             principal_claim=oauth_principal_claim,
             algorithms=oauth_algorithms,
             leeway_s=oauth_leeway_s,
+            write_scope=oauth_write_scope,
         )
     raise ValueError(f"unknown auth mode: {auth_mode}")

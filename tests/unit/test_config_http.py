@@ -566,3 +566,76 @@ def test_oauth_token_not_present_in_repr() -> None:
     assert cfg.http is not None
     # issuer/audience/jwks are non-secret config and MAY appear (they are loggable); no token here.
     assert _ISS in repr(cfg.http)
+
+
+# ==============================================================================================
+# ADR-033 — OAuth write-scope config (opt-in per-tool authZ). ``GHIDRA_MCP_HTTP_OAUTH_WRITE_SCOPE``
+# is OPTIONAL and non-secret: unset ⇒ None (scope-gating off, identity-only — pre-ADR-033); set ⇒
+# the scope that grants the ``write`` capability. Over-length is rejected at startup like the
+# principal-claim (fail closed, same _MAX_OAUTH_CLAIM_LEN bound).
+# ==============================================================================================
+def test_oauth_write_scope_set_is_parsed() -> None:
+    cfg = load_config(
+        _oauth_env(
+            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
+            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+            GHIDRA_MCP_HTTP_OAUTH_WRITE_SCOPE="ghidra:write",
+        )
+    )
+    assert cfg.http is not None
+    assert cfg.http.oauth_write_scope == "ghidra:write"
+
+
+def test_oauth_write_scope_unset_defaults_none() -> None:
+    """Omitting the write-scope leaves gating OFF (``None``) — backward-compatible default."""
+    cfg = load_config(
+        _oauth_env(
+            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
+            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+        )
+    )
+    assert cfg.http is not None
+    assert cfg.http.oauth_write_scope is None
+
+
+def test_oauth_write_scope_too_long_fails_closed() -> None:
+    """An over-64-char write-scope is rejected at startup (mirrors the principal-claim bound)."""
+    with pytest.raises(GhidraMcpError, match="too long"):
+        load_config(
+            _oauth_env(
+                GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
+                GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+                GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+                GHIDRA_MCP_HTTP_OAUTH_WRITE_SCOPE="w" * 65,
+            )
+        )
+
+
+def test_oauth_write_scope_at_max_len_accepted() -> None:
+    """A boundary write-scope (exactly 64 chars) is accepted (off-by-one guard)."""
+    cfg = load_config(
+        _oauth_env(
+            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
+            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+            GHIDRA_MCP_HTTP_OAUTH_WRITE_SCOPE="w" * 64,
+        )
+    )
+    assert cfg.http is not None
+    assert cfg.http.oauth_write_scope == "w" * 64
+
+
+def test_non_oauth_config_leaves_write_scope_none() -> None:
+    """For bearer, the write-scope field keeps its harmless default (None)."""
+    cfg = load_config(
+        _env(
+            GHIDRA_MCP_TRANSPORT="http",
+            GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
+            GHIDRA_MCP_HTTP_AUTH="bearer",
+            GHIDRA_MCP_HTTP_BEARER_TOKEN=_TOKEN,
+        )
+    )
+    assert cfg.http is not None
+    assert cfg.http.oauth_write_scope is None
