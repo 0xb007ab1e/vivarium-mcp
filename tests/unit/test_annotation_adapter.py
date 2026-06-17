@@ -84,7 +84,9 @@ def _run_export(result: dict[str, object]) -> tuple[s.SessionExportAnnotationsOu
     )
     t.start()
     try:
-        out = adapter.export_annotations("s", s.SessionExportAnnotationsIn(session_id="s"))
+        out = adapter.export_annotations(
+            "s", s.SessionExportAnnotationsIn(session_id="s"), targets=s.ExportTargets()
+        )
     finally:
         t.join(timeout=2)
         wrk.close()
@@ -284,7 +286,9 @@ def test_export_malformed_result_fails_closed() -> None:
     t.start()
     try:
         with pytest.raises(GhidraMcpError) as ei:
-            adapter.export_annotations("s", s.SessionExportAnnotationsIn(session_id="s"))
+            adapter.export_annotations(
+                "s", s.SessionExportAnnotationsIn(session_id="s"), targets=s.ExportTargets()
+            )
     finally:
         t.join(timeout=2)
         wrk.close()
@@ -308,8 +312,54 @@ def test_export_unknown_entry_kind_fails_closed() -> None:
     t.start()
     try:
         with pytest.raises(GhidraMcpError) as ei:
-            adapter.export_annotations("s", s.SessionExportAnnotationsIn(session_id="s"))
+            adapter.export_annotations(
+                "s", s.SessionExportAnnotationsIn(session_id="s"), targets=s.ExportTargets()
+            )
     finally:
         t.join(timeout=2)
         wrk.close()
     assert ei.value.envelope.type is ErrorType.WORKER_UNAVAILABLE
+
+
+# --- ADR-027: the pure change-log → RPC params shaper (_export_annotations_params) -------------
+def test_export_annotations_params_shapes_targets() -> None:
+    from ghidra_mcp.ghidra.rpc_client import _export_annotations_params
+
+    targets = s.ExportTargets(
+        comments=[
+            s.ExportCommentTarget(address="0x401000", comment_type="PLATE"),
+            s.ExportCommentTarget(address="0x401004", comment_type="EOL"),
+        ],
+        composites=["cfg_t", "widget_t"],
+    )
+    params = _export_annotations_params(targets)
+    assert params == {
+        "targets": {
+            "comments": [
+                {"address": "0x401000", "comment_type": "PLATE"},
+                {"address": "0x401004", "comment_type": "EOL"},
+            ],
+            "composites": ["cfg_t", "widget_t"],
+        }
+    }
+
+
+def test_export_annotations_params_empty_is_empty_lists() -> None:
+    from ghidra_mcp.ghidra.rpc_client import _export_annotations_params
+
+    params = _export_annotations_params(s.ExportTargets())
+    assert params == {"targets": {"comments": [], "composites": []}}
+
+
+def test_export_annotations_params_emits_only_identity_keys_no_values() -> None:
+    # The shaper must NEVER carry a comment text / field value — only addresses, slots, names.
+    from ghidra_mcp.ghidra.rpc_client import _export_annotations_params
+
+    params = _export_annotations_params(
+        s.ExportTargets(
+            comments=[s.ExportCommentTarget(address="0xabc", comment_type="PRE")],
+            composites=["t"],
+        )
+    )
+    comment = params["targets"]["comments"][0]
+    assert set(comment.keys()) == {"address", "comment_type"}  # no "text" / value field

@@ -28,7 +28,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from ghidra_mcp.config import Config
 from ghidra_mcp.core import validation as v
@@ -716,6 +716,18 @@ def _handle_set_comment(ctx: ToolContext, args: s.SetCommentIn) -> s.SetCommentR
         },
     )
     result = ctx.port.set_comment(args.session_id, args)
+    if result.applied:
+        # Record (or, on a clear, drop) the comment TARGET in the session change-log so export reads
+        # only this session's authored comments — never auto-generated ones (ADR-027 D2). Identity
+        # key only: the worker-normalized address + the closed-vocabulary slot — NOT the text. A
+        # clear (text is None) drops the key. Only on applied=True (rejected writes are not logged).
+        ctx.sessions.record_comment_target(
+            args.session_id,
+            address=result.address,
+            comment_type=result.comment_type,
+            cleared=args.text is None,
+            caller=ctx.caller_id,
+        )
     _log.info(
         "tool.set_comment.outcome",
         extra={"tool": "set_comment", "session": args.session_id, "applied": result.applied},
@@ -855,6 +867,13 @@ def _handle_define_struct(ctx: ToolContext, args: s.DefineStructIn) -> s.DefineS
         },
     )
     result = ctx.port.define_struct(args.session_id, args)
+    if result.applied:
+        # Record the created composite NAME in the session change-log so export reads only this
+        # session's authored composites — never Ghidra auto-analysis structs (ADR-027 D1 option 2).
+        # Identity (the name we set + validated), not a binary-derived value. Only on applied=True.
+        ctx.sessions.record_composite_target(
+            args.session_id, name=result.name, caller=ctx.caller_id
+        )
     _log.info(
         "tool.define_struct.outcome",
         extra={"tool": "define_struct", "session": args.session_id, "applied": result.applied},
@@ -876,6 +895,12 @@ def _handle_define_union(ctx: ToolContext, args: s.DefineUnionIn) -> s.DefineUni
         },
     )
     result = ctx.port.define_union(args.session_id, args)
+    if result.applied:
+        # Record the created composite NAME in the session change-log (ADR-027 D1 option 2) — see
+        # _handle_define_struct. Identity only, applied=True only.
+        ctx.sessions.record_composite_target(
+            args.session_id, name=result.name, caller=ctx.caller_id
+        )
     _log.info(
         "tool.define_union.outcome",
         extra={"tool": "define_union", "session": args.session_id, "applied": result.applied},
@@ -907,6 +932,14 @@ def _handle_define_types(ctx: ToolContext, args: s.DefineTypesIn) -> s.DefineTyp
         },
     )
     result = ctx.port.define_types(args.session_id, args)
+    if result.applied:
+        # The batch commits atomically (applied reflects the whole transaction). Record EACH created
+        # composite NAME in the session change-log so export reads only this session's authored
+        # composites (ADR-027 D1 option 2). Identity (the names we set + validated), not values.
+        for defined in result.types:
+            ctx.sessions.record_composite_target(
+                args.session_id, name=defined.name, caller=ctx.caller_id
+            )
     _log.info(
         "tool.define_types.outcome",
         extra={
@@ -937,7 +970,27 @@ def _handle_session_export_annotations(
     document's ``binary.sha256`` binding (never trusting the worker for the binding key).
     """
     info = ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
-    result = ctx.port.export_annotations(args.session_id, args)
+    # Read the session's change-log (ADR-027 D4): comments + composites authored by THIS session's
+    # gated write tools. Export reads ONLY these targets (identity keys, no values) instead of
+    # blind-enumerating, which over-included Ghidra auto-analysis content (F7). Symbols/signatures
+    # stay source-type-enumerated worker-side (steps 2-4 unchanged). The targets are server-built;
+    # the client never influences which targets are read (owner-scoped via authorize above).
+    comment_targets, composite_targets = ctx.sessions.export_targets(
+        args.session_id, caller=ctx.caller_id
+    )
+    targets = s.ExportTargets(
+        comments=[
+            # The change-log only ever stores the closed comment-slot vocabulary (recorded from a
+            # validated SetCommentResult.comment_type); cast narrows str→Literal at this boundary.
+            s.ExportCommentTarget(
+                address=addr,
+                comment_type=cast(Literal["EOL", "PRE", "POST", "PLATE", "REPEATABLE"], ctype),
+            )
+            for addr, ctype in comment_targets
+        ],
+        composites=list(composite_targets),
+    )
+    result = ctx.port.export_annotations(args.session_id, args, targets=targets)
     # Overlay the server-authoritative binary hash (the session's recorded program identity) onto
     # the document binding — the worker contributes the annotations, never the binding key.
     document = result.document

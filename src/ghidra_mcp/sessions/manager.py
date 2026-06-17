@@ -66,6 +66,13 @@ _DEFAULT_MAX_SESSIONS_PER_OWNER: int | None = None
 #: here as a plain literal so the manager has no import dependency on the auth/server layer.
 _LOCAL_PRINCIPAL_ID = "local"
 
+#: Upper bound on the number of distinct targets the change-log will retain per session (ADR-027).
+#: Mirrors the worker's ``_MAX_RESULT_COUNT`` export cap so a session can never log more targets
+#: than the export read-out can return. Over the cap the *write* still succeeds, but a new target
+#: is dropped from the log so export fails closed at the worker's limit (``limit-exceeded``) rather
+#: than the log growing unbounded (DoS — CWE-400). Re-touching an already-logged target is free.
+_MAX_CHANGE_LOG_TARGETS = 10_000
+
 #: Lifecycle states surfaced via :class:`SessionInfo` (tool-catalog.md / schemas.SessionInfo).
 STATE_OPEN = "open"
 STATE_READY = "ready"
@@ -139,6 +146,16 @@ class _Session:
     writes_enabled: bool = False
     allow_structural: bool = False
     notes: list[str] = field(default_factory=list)
+    #: Session-scoped change-log of comment write TARGETS (ADR-027 D2). Identity keys ONLY —
+    #: ``(address, comment_type)`` pairs — NEVER the comment text/value (ADR-002/master §5). It is a
+    #: set; a clear (``set_comment`` with ``text is None``) removes the key, so an authored-then-
+    #: cleared comment is correctly absent from export. In-memory, wiped with the session on evict.
+    comment_targets: set[tuple[str, str]] = field(default_factory=set)
+    #: Session-scoped change-log of composite write TARGETS (ADR-027 D1 option 2). Composite NAMES
+    #: ONLY (server/worker-validated identity, not binary-derived field values). Export reads only
+    #: the named composites in this set instead of blind-enumerating program-local types (which
+    #: also include Ghidra auto-analysis structs). In-memory, wiped with the session on evict.
+    composite_targets: set[str] = field(default_factory=set)
 
 
 class SessionManager:
@@ -498,6 +515,112 @@ class SessionManager:
         with self._lock:
             sess = self._get_live_locked(session_id, caller=caller)
             sess.binary_sha256 = sha256
+
+    # --- session-scoped change-log (ADR-027 D2/D4; comments + composites export selection) -------
+    def record_comment_target(
+        self,
+        session_id: str,
+        *,
+        address: str,
+        comment_type: str,
+        cleared: bool,
+        caller: str = _LOCAL_PRINCIPAL_ID,
+    ) -> None:
+        """Record (or, on a clear, drop) one comment write TARGET in the change-log (ADR-027 D2).
+
+        Called from the ``set_comment`` write chokepoint AFTER the worker reports ``applied=True``.
+        Stores the **identity key only** — the ``(address, comment_type)`` pair — never the comment
+        text (ADR-002/master §5: no binary-derived value in the log; the value is re-read live at
+        export). A clear (``set_comment`` with ``text is None``) **removes** the key so an authored-
+        then-cleared comment is correctly absent from export. Owner-scoped via the shared chokepoint
+        (a foreign caller cannot mutate another principal's log — ADR-017). Mutates under ``_lock``;
+        holds no I/O (topic-concurrency).
+
+        Idempotent for a stable target (re-setting the same slot is a free set re-add). Over the
+        per-session cap a NEW set-target is dropped (the write itself already succeeded) so the log
+        stays bounded and export fails closed at the worker's ``limit-exceeded``; an already-logged
+        target and any clear are always honored regardless of the cap.
+
+        Args:
+            session_id: The opaque id of a live, caller-owned session.
+            address: The server-validated target address (closed-vocabulary identity, not a value).
+            comment_type: The closed comment-slot label (``"EOL"``/``"PRE"``/.../``"REPEATABLE"``).
+            cleared: ``True`` when the write cleared the slot (``text is None``) — drops the key.
+            caller: The authenticated, server-derived calling-principal id (ADR-017).
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` if unknown/expired/evicted/foreign (BOLA-safe).
+        """
+        key = (address, comment_type)
+        with self._lock:
+            sess = self._get_live_locked(session_id, caller=caller)
+            if cleared:
+                sess.comment_targets.discard(key)
+                return
+            if key in sess.comment_targets:
+                return  # already logged — free re-add, never counts against the cap
+            if len(sess.comment_targets) >= _MAX_CHANGE_LOG_TARGETS:
+                return  # bounded: write succeeded, but the log is full → export fails closed
+            sess.comment_targets.add(key)
+
+    def record_composite_target(
+        self, session_id: str, *, name: str, caller: str = _LOCAL_PRINCIPAL_ID
+    ) -> None:
+        """Record one composite write TARGET (its NAME) in the change-log (ADR-027 D1 option 2).
+
+        Called from the ``define_struct``/``define_union``/``define_types`` write chokepoint AFTER
+        the worker reports ``applied=True``. Stores the composite **name only** — a server/worker-
+        validated identity, not a binary-derived field value (ADR-002/master §5). Export looks up
+        ONLY these named composites instead of blind-enumerating program-local types (which also
+        include Ghidra auto-analysis structs — the F7 leak). Owner-scoped via the shared chokepoint;
+        mutates under ``_lock`` with no I/O held (topic-concurrency).
+
+        Idempotent (re-adding the same name is free). Over the per-session cap a NEW name is
+        dropped (the write itself succeeded) so the log stays bounded and export fails closed at the
+        worker's ``limit-exceeded``.
+
+        Args:
+            session_id: The opaque id of a live, caller-owned session.
+            name: The server-validated composite name (identity, not a binary-derived value).
+            caller: The authenticated, server-derived calling-principal id (ADR-017).
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` if unknown/expired/evicted/foreign (BOLA-safe).
+        """
+        with self._lock:
+            sess = self._get_live_locked(session_id, caller=caller)
+            if name in sess.composite_targets:
+                return  # already logged — free re-add
+            if len(sess.composite_targets) >= _MAX_CHANGE_LOG_TARGETS:
+                return  # bounded: write succeeded, but the log is full → export fails closed
+            sess.composite_targets.add(name)
+
+    def export_targets(
+        self, session_id: str, *, caller: str = _LOCAL_PRINCIPAL_ID
+    ) -> tuple[list[tuple[str, str]], list[str]]:
+        """Read back the change-log's comment + composite targets for export (ADR-027 D4).
+
+        The export handler calls this (owner-scoped) and hands the result to the port/worker as the
+        server-supplied ``targets`` so the worker reads ONLY this session's authored comments and
+        composites (steps 1 + 5) instead of blind-enumerating (steps 2-4 stay source-type-driven).
+        Returns sorted **copies** (snapshots, not the live sets) so the caller cannot mutate session
+        state and the ordering is deterministic (topic-testing: hermetic). Identity keys only — no
+        binary-derived value ever crosses this boundary.
+
+        Args:
+            session_id: The opaque id of a live, caller-owned session.
+            caller: The authenticated, server-derived calling-principal id (ADR-017).
+
+        Returns:
+            ``(comment_targets, composite_targets)`` — a sorted list of ``(address, comment_type)``
+            pairs and a sorted list of composite names (both possibly empty).
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` if unknown/expired/evicted/foreign (BOLA-safe).
+        """
+        with self._lock:
+            sess = self._get_live_locked(session_id, caller=caller)
+            return sorted(sess.comment_targets), sorted(sess.composite_targets)
 
     def evict(self, session_id: str, *, reason: str, caller: str | None = None) -> bool:
         """Evict a session: kill its worker and verified-wipe its store. Idempotent.

@@ -93,9 +93,18 @@ an in-batch `named` ref resolves, resolves + adds each, batch-total size-caps, a
 WHOLE batch on any failure; the server runs a **by-value cycle detector** at the boundary — by-value
 cycles rejected, pointer cycles allowed — and name-collision/intra-batch-dup is fail-closed REJECT;
 structured `FieldSpec`s, no C parsed), the
-v1.2 **annotation-export read-out primitive** `export_annotations` (ADR-018 — read-only; enumerates
-the program's `USER_DEFINED` annotations only, dependency-ordered + bounded, returns an inert plain
-document; over the entry cap → `limit-exceeded`), plus a `ping`/`shutdown` control pair.
+v1.2 **annotation-export read-out primitive** `export_annotations` (ADR-018/ADR-027 — read-only;
+returns an inert plain document, dependency-ordered + bounded; over the entry cap →
+`limit-exceeded`. **Symbols + signatures** are enumerated filtered by `SourceType.USER_DEFINED`
+(never auto-analysis). **Comments + composites** carry no reliable Ghidra provenance signal, so the
+worker reads ONLY a server-supplied **`targets`** selection — the session change-log of what THIS
+session's gated writes authored — instead of blind-enumerating, which over-included Ghidra
+auto-analysis content (F7). `params = {"targets": {"comments": [{"address", "comment_type"}],
+"composites": [name]}}` — an **additive, server→worker** param: identity keys ONLY (addresses,
+slots, composite names), never a binary-derived value; the **client-facing
+`session_export_annotations` tool surface is unchanged** (no client-supplied targets, no slug
+repurposed). An empty/missing `targets` emits no comments/composites), plus a `ping`/`shutdown`
+control pair.
 (Session create/status/close **and the write-consent grant/revoke** `session_enable_writes`/
 `session_disable_writes` are **server-side** lifecycle, not worker RPC methods. The derived
 tools compute server-side with **no dedicated worker method**: `callees`/`callers`/`analysis_order`/

@@ -68,6 +68,8 @@ class FakeSessionManager:
         self._structural = False
         self._hash: str | None = _SHA
         self.consent_checks: list[tuple[str, bool]] = []
+        self.comment_targets: set[tuple[str, str]] = set()
+        self.composite_targets: set[str] = set()
 
     def _check(self, sid: str, caller: str) -> None:
         if sid != _SID or caller != _OWNER:
@@ -121,18 +123,53 @@ class FakeSessionManager:
             )
         return self._info()
 
+    def record_comment_target(
+        self,
+        session_id: str,
+        *,
+        address: str,
+        comment_type: str,
+        cleared: bool,
+        caller: str = _OWNER,
+    ) -> None:
+        """Record (or, on a clear, drop) a comment write target in the change-log (ADR-027)."""
+        self._check(session_id, caller)
+        key = (address, comment_type)
+        if cleared:
+            self.comment_targets.discard(key)
+        else:
+            self.comment_targets.add(key)
+
+    def record_composite_target(self, session_id: str, *, name: str, caller: str = _OWNER) -> None:
+        """Record a composite write target (its name) in the change-log (ADR-027)."""
+        self._check(session_id, caller)
+        self.composite_targets.add(name)
+
+    def export_targets(
+        self, session_id: str, *, caller: str = _OWNER
+    ) -> tuple[list[tuple[str, str]], list[str]]:
+        """Read back the change-log's comment + composite targets for export (ADR-027)."""
+        self._check(session_id, caller)
+        return sorted(self.comment_targets), sorted(self.composite_targets)
+
 
 class FakePort:
     """In-test :class:`GhidraPort` recording write replays + returning valid results."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.export_targets_seen: s.ExportTargets | None = None
 
     # --- export read-out ---
     def export_annotations(
-        self, sid: str, a: s.SessionExportAnnotationsIn
+        self,
+        sid: str,
+        a: s.SessionExportAnnotationsIn,
+        *,
+        targets: s.ExportTargets,
     ) -> s.SessionExportAnnotationsOut:
         self.calls.append(("export_annotations", sid))
+        self.export_targets_seen = targets  # capture the server-supplied change-log selection
         return s.SessionExportAnnotationsOut(
             document=s.ExportedAnnotationDocument(
                 schema_version=s.ANNOTATION_SCHEMA_VERSION,
@@ -602,3 +639,48 @@ def test_import_into_session_with_no_recorded_hash_fails_closed() -> None:
         handlers["session_import_annotations"](session_id=_SID, document=_doc(_RENAME).model_dump())
     assert exc.value.envelope.type is ErrorType.VALIDATION
     assert _port(ctx).calls == []
+
+
+# =============================================================================================
+# ADR-027: export passes the session change-log to the worker as the server-supplied targets,
+# and import-replay records re-applied comments/composites back into the change-log.
+# =============================================================================================
+@pytest.mark.critical
+def test_export_passes_change_log_targets_to_port(ctx: reg.ToolContext) -> None:
+    # Seed the session change-log with one comment + one composite, then export.
+    sm = _sessions(ctx)
+    sm.comment_targets = {("0x401000", "PLATE")}
+    sm.composite_targets = {"cfg_t"}
+    handlers = reg.build_handlers(ctx)
+    handlers["session_export_annotations"](session_id=_SID)
+    seen = _port(ctx).export_targets_seen
+    assert seen is not None
+    assert [(c.address, c.comment_type) for c in seen.comments] == [("0x401000", "PLATE")]
+    assert seen.composites == ["cfg_t"]
+
+
+@pytest.mark.critical
+def test_export_with_empty_change_log_passes_empty_targets(ctx: reg.ToolContext) -> None:
+    # A session that authored no comments/composites supplies empty target lists (the F7 fix:
+    # the worker emits none rather than blind-enumerating auto-content).
+    handlers = reg.build_handlers(ctx)
+    handlers["session_export_annotations"](session_id=_SID)
+    seen = _port(ctx).export_targets_seen
+    assert seen is not None
+    assert seen.comments == []
+    assert seen.composites == []
+
+
+@pytest.mark.critical
+def test_import_replay_records_comment_and_composite_targets(ctx: reg.ToolContext) -> None:
+    # Import replays writes through the existing gated handlers, which record into the change-log —
+    # so a re-export in the same session preserves the imported comments/composites (ADR-027 D4).
+    handlers = reg.build_handlers(ctx)
+    handlers["session_enable_writes"](session_id=_SID, allow_structural=True)
+    handlers["session_import_annotations"](
+        session_id=_SID, document=_doc(_STRUCT, _COMMENT, _RENAME)
+    )
+    sm = _sessions(ctx)
+    # The replayed composite + comment were logged; the rename was NOT (renames stay source-typed).
+    assert sm.composite_targets == {"cfg_t"}
+    assert ("0x401000", "PLATE") in sm.comment_targets

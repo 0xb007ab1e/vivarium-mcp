@@ -253,14 +253,31 @@ class GhidraPort(Protocol):
     # EXISTING write methods above (rename_function/.../define_union). The adapter wraps every
     # binary-derived string in the exported document as Untrusted (ADR-005).
     def export_annotations(
-        self, sid: str, a: s.SessionExportAnnotationsIn
+        self,
+        sid: str,
+        a: s.SessionExportAnnotationsIn,
+        *,
+        targets: s.ExportTargets,
     ) -> s.SessionExportAnnotationsOut:
         """Read out the session's USER_DEFINED annotations as a versioned, hash-bound document.
 
-        Read-only (no write consent). The worker enumerates ONLY ``USER_DEFINED`` annotations
-        (never Ghidra auto-analysis output), dependency-ordered (composites/types before the
-        signatures/applies that reference them); over the entry cap → ``limit-exceeded`` (no
-        silent truncation). The adapter assembles the document, wrapping binary-derived strings as
-        ``Untrusted`` (ADR-005). The server overlays the authoritative ``binary.sha256`` binding.
+        Read-only (no write consent). For **symbols + function signatures** the worker enumerates
+        ONLY ``USER_DEFINED`` items (never Ghidra auto-analysis output). For **comments + composite
+        types** — which carry no reliable Ghidra provenance signal — the worker reads ONLY the
+        server-supplied ``targets`` (the session change-log of what this session authored — ADR-027
+        D4), never blind-enumerating (the F7 over-inclusion fix). Dependency-ordered (composites
+        first); over the entry cap → ``limit-exceeded`` (no silent truncation). The adapter
+        assembles the document, wrapping binary-derived strings as ``Untrusted`` (ADR-005). The
+        server overlays the authoritative ``binary.sha256`` binding.
+
+        Args:
+            sid: The session id.
+            a: The export tool arguments (session-scoped; no client-supplied targets).
+            targets: Server-supplied change-log selection — the comment + composite targets to read
+                (identity keys only, never values). Empty lists mean nothing of those kinds is
+                exported.
+
+        Returns:
+            The exported annotation document (untrusted-wrapped).
         """
         ...

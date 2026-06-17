@@ -434,7 +434,10 @@ class PyGhidraBackend:
         """Enumerate the program's USER_DEFINED annotations as a plain document (read-only — v1.2).
 
         Args:
-            params: ``{}`` (session-scoped; no parameters).
+            params: ``{"targets": {"comments": [{address, comment_type}], "composites": [name]}}``
+                (ADR-027 D4) — the server-supplied change-log selection of comment + composite
+                targets to read. Symbols/signatures take no targets (source-type-enumerated). A
+                missing/empty ``targets`` means no comments/composites are exported.
 
         Returns:
             ``{"schema_version", "binary": {"sha256", "size"}, "entries": [...]}`` — the program's
@@ -442,7 +445,8 @@ class PyGhidraBackend:
             ``limit-exceeded``). The server wraps binary-derived strings as untrusted + overlays the
             authoritative binary hash.
         """
-        return self._gh_export_annotations()
+        comment_targets, composite_targets = _parse_export_targets(params)
+        return self._gh_export_annotations(comment_targets, composite_targets)
 
     # --- JVM edge (PyGhidra calls live ONLY here; imported lazily) ---------------------------
     # NOTE: these helpers are the worker-only JVM boundary. They are excluded from server unit
@@ -2109,26 +2113,46 @@ class PyGhidraBackend:
         self._in_transaction("define_types", _write)
         return {"types": result_holder["types"], "applied": True}
 
-    # --- annotation-persistence JVM edge (ADR-018; export read-out, read-only) ----------------
-    def _gh_export_annotations(self) -> dict[str, Any]:  # pragma: no cover - JVM edge
-        """Enumerate ONLY ``USER_DEFINED`` annotations, dependency-ordered + bounded (ADR-018).
+    # --- annotation-persistence JVM edge (ADR-018/ADR-027; export read-out, read-only) ----------
+    def _gh_export_annotations(
+        self,
+        comment_targets: list[tuple[str, str]],
+        composite_targets: list[str],
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Export user-authored annotations, dependency-ordered + bounded (ADR-018/ADR-027 hybrid).
 
-        Reads (read-only, no transaction) the program's user-defined annotations — never Ghidra's
-        auto-analysis output — and emits them as plain entries in a **dependency-safe order**:
+        Reads (read-only, no transaction) and emits plain entries in a **dependency-safe order**:
         composites/types first (``define_struct``/``define_union``), then the signatures/applies
         that may reference them, then the renames, then comments (mirrors the document shape so
         import can replay in order). Bounded by ``_MAX_RESULT_COUNT`` — over the cap →
-        ``limit-exceeded`` (no silent truncation that would yield an incomplete-but-plausible
-        artifact). The values are plain; the server wraps each binary-derived string as untrusted
-        and overlays the authoritative ``binary.sha256``.
+        ``limit-exceeded`` (no silent truncation). The values are plain; the server wraps each
+        binary-derived string as untrusted and overlays the authoritative ``binary.sha256``.
 
-        ``USER_DEFINED`` discrimination: symbols via ``Symbol.getSource()`` equalling
-        ``SourceType.USER_DEFINED``;
-        comments are user content by construction (Ghidra does not auto-author EOL/PRE/etc. for the
-        plate slots we read); user-applied data types / signatures and user-defined composites via
-        the DataTypeManager's source archive / a function's ``getSignatureSource()``. The exact
-        PyGhidra bindings are confirmed at the WS3 image build (ADR-003 open item), like the other
-        ``_gh_*`` helpers.
+        **Provenance (ADR-027 hybrid):**
+
+        - **Symbols + signatures (steps 2-4):** enumerate the program filtered by
+          ``SourceType.USER_DEFINED`` (``Symbol.getSource()`` / ``Function.getSignatureSource()``) —
+          Ghidra's authoritative provenance signal. **Unchanged** by ADR-027.
+        - **Composites (step 1) + comments (step 5):** Ghidra exposes NO reliable user-vs-auto
+          signal for these (program-local composites include auto-analysis structs; comments carry
+          no source-type at all — the F7 leak). So they are read ONLY for the server-supplied
+          ``comment_targets`` / ``composite_targets`` — the session change-log of what THIS
+          session's gated writes authored (ADR-027 D2/D4). Empty lists ⇒ none emitted.
+
+        Every Ghidra binding below is REQUIRES-LIVE-VERIFICATION (the F2 lesson; confirmed at the WS
+        image build + the blind Mode-B known-count regression run):
+
+        - composite lookup-by-name: ``DataTypeManager.getDataType(CategoryPath.ROOT, name)`` returns
+          the user-created composite (user composites land under the root category — ADR-015 uses
+          ``CategoryPath.ROOT`` on create). A name not found / not a Structure|Union is skipped.
+        - targeted comment read: ``Listing.getComment(type_id, addr)`` for a server-supplied address
+          returns the slot's text or ``None`` (a cleared slot reads ``None`` and is skipped).
+        - ``Symbol.getSource()`` / ``Function.getSignatureSource()`` == ``SourceType.USER_DEFINED``
+          discriminate user from auto for symbols/signatures.
+
+        Args:
+            comment_targets: ``(address, comment_type)`` pairs from the session change-log to read.
+            composite_targets: composite NAMES from the session change-log to look up + export.
 
         Returns:
             ``{"schema_version", "binary": {"sha256", "size"}, "entries": [...]}`` (plain).
@@ -2136,6 +2160,7 @@ class PyGhidraBackend:
         Raises:
             WorkerError: ``limit-exceeded`` if the user-defined annotation count exceeds the cap.
         """
+        from ghidra.program.model.data import CategoryPath, Structure, Union
         from ghidra.program.model.listing import CodeUnit
         from ghidra.program.model.symbol import SourceType, SymbolType
         from worker.dispatch import CODE_LIMIT_EXCEEDED, WorkerError
@@ -2150,16 +2175,22 @@ class PyGhidraBackend:
                 )
             entries.append(entry)
 
-        # 1) USER_DEFINED composite types FIRST (define_struct/define_union) — dependency-safe so a
-        #    later signature/apply that references the composite has it available on replay.
+        # 1) Composite types FIRST (define_struct/define_union) — dependency-safe so a later
+        #    signature/apply that references the composite has it available on replay. ADR-027:
+        #    look up ONLY the change-log's named composites (membership in the log IS the user-
+        #    authored signal — NOT the too-loose program-local-archive proxy that leaked auto
+        #    structs). REQUIRES LIVE VERIFICATION: getDataType(CategoryPath.ROOT, name).
         manager = program.getDataTypeManager()
-        for data_type in manager.getAllDataTypes():
-            kind = _composite_export_kind(data_type)
-            if kind is None:
-                continue
+        for name in composite_targets:
+            data_type = manager.getDataType(CategoryPath.ROOT, name)
+            if data_type is None:
+                continue  # named composite not found (e.g. since removed) — skip, never guess
+            if not isinstance(data_type, (Structure, Union)):
+                continue  # name now resolves to a non-composite — skip
             fields = _composite_fields_export(data_type)
             if fields is None:
                 continue  # not field-reconstructable (e.g. derived/aliased) — skip, never guess
+            kind = "define_union" if isinstance(data_type, Union) else "define_struct"
             _emit({"kind": kind, "name": _to_text(data_type.getName()), "fields": fields})
 
         # 2) USER_DEFINED function signatures (set_function_signature) — after the types they use.
@@ -2196,27 +2227,37 @@ class PyGhidraBackend:
                 }
             )
 
-        # 5) Comments (set_comment) — the five user comment slots (plain text; user-authored).
-        comment_slots = (
-            (CodeUnit.EOL_COMMENT, "EOL"),
-            (CodeUnit.PRE_COMMENT, "PRE"),
-            (CodeUnit.POST_COMMENT, "POST"),
-            (CodeUnit.PLATE_COMMENT, "PLATE"),
-            (CodeUnit.REPEATABLE_COMMENT, "REPEATABLE"),
-        )
-        for comment_addr in listing.getCommentAddressIterator(program.getMemory(), True):
-            for type_id, label in comment_slots:
-                text = listing.getComment(type_id, comment_addr)
-                if text is None:
-                    continue
-                _emit(
-                    {
-                        "kind": "set_comment",
-                        "address": str(comment_addr),
-                        "comment_type": label,
-                        "text": _to_text(text),
-                    }
-                )
+        # 5) Comments (set_comment) — ADR-027: read ONLY the change-log's targeted slots (comments
+        #    carry NO source-type, so blind enumeration leaked 1138 auto-comments — F7). For each
+        #    logged (address, comment_type), re-read the CURRENT value live (ADR-001: value stays
+        #    worker-sourced; the change-log holds only the identity key). A cleared slot reads None
+        #    and is skipped. REQUIRES LIVE VERIFICATION: Listing.getComment(type_id, addr) for an
+        #    arbitrary supplied address.
+        slot_type_id = {
+            "EOL": CodeUnit.EOL_COMMENT,
+            "PRE": CodeUnit.PRE_COMMENT,
+            "POST": CodeUnit.POST_COMMENT,
+            "PLATE": CodeUnit.PLATE_COMMENT,
+            "REPEATABLE": CodeUnit.REPEATABLE_COMMENT,
+        }
+        for address, label in comment_targets:
+            type_id = slot_type_id.get(label)
+            if type_id is None:
+                continue  # unknown slot label (closed vocab upstream) — skip, fail-closed
+            comment_addr = self._try_parse_address(address)
+            if comment_addr is None:
+                continue  # unparsable address (should not happen — server-normalized) — skip
+            text = listing.getComment(type_id, comment_addr)
+            if text is None:
+                continue  # slot empty / since-cleared — nothing to export
+            _emit(
+                {
+                    "kind": "set_comment",
+                    "address": str(comment_addr),
+                    "comment_type": label,
+                    "text": _to_text(text),
+                }
+            )
 
         return {
             "schema_version": _ANNOTATION_SCHEMA_VERSION,
@@ -2676,30 +2717,37 @@ def _type_ref_export(data_type: Any) -> dict[str, Any] | None:  # pragma: no cov
     return ref
 
 
-def _composite_export_kind(data_type: Any) -> str | None:  # pragma: no cover - JVM edge
-    """Classify a USER_DEFINED composite for export, or ``None`` if it is not one (ADR-018).
+def _parse_export_targets(
+    params: dict[str, Any],
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Extract the server-supplied export selection from the RPC params (ADR-027 D4) — PURE.
 
-    Returns ``"define_struct"`` / ``"define_union"`` only for a user-defined ``Structure``/``Union``
-    in the program (root) category; ``None`` otherwise (built-ins, auto-applied library types, and
-    non-composites are NOT exported — only user-authored annotations cross the boundary).
+    No JVM, no I/O — unit-testable hermetically (unlike the ``_gh_*`` edge). Reads the additive
+    ``targets`` param shaped by the server (``rpc_client._export_annotations_params``): identity
+    keys only — comment ``(address, comment_type)`` pairs and composite names — never a value. A
+    missing or empty ``targets`` yields two empty lists (export emits no comments/composites — the
+    F7 fix; no blind enumeration). Defensive against absent keys (fail-closed to empty; no raise).
 
     Args:
-        data_type: A Ghidra ``DataType``.
+        params: The ``export_annotations`` RPC params dict.
 
     Returns:
-        The composite ``kind`` or ``None``.
+        ``(comment_targets, composite_targets)`` — a list of ``(address, comment_type)`` pairs and a
+        list of composite names.
     """
-    from ghidra.program.model.data import Structure, Union
+    raw_targets = params.get("targets") or {}
+    comment_targets = [
+        (str(c["address"]), str(c["comment_type"])) for c in (raw_targets.get("comments") or [])
+    ]
+    composite_targets = [str(name) for name in (raw_targets.get("composites") or [])]
+    return comment_targets, composite_targets
 
-    source = data_type.getSourceArchive()
-    # Only program-local (no external source archive) user composites are user-authored annotations.
-    if source is not None and not bool(source.getArchiveType().isProgramArchive()):
-        return None
-    if isinstance(data_type, Union):
-        return "define_union"
-    if isinstance(data_type, Structure):
-        return "define_struct"
-    return None
+
+# NOTE: the former ``_composite_export_kind`` (program-local-archive proxy) is REMOVED by ADR-027.
+# Program-local was too loose — Ghidra auto-analysis also creates program-local structs (switch
+# tables, RTTI), so it leaked 13 auto-structs (F7). Composite selection is now the session change-
+# log (membership IS the user-authored signal); ``_gh_export_annotations`` step 1 looks up the
+# named targets directly and inlines the Structure/Union → kind classification.
 
 
 def _composite_fields_export(data_type: Any) -> list[dict[str, Any]] | None:  # pragma: no cover
