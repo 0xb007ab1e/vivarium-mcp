@@ -51,6 +51,13 @@ def _default_port_factory(config: Config) -> GhidraPort:
         runtime=config.worker_runtime,
         run_as_uid=config.worker_uid,
         run_as_gid=config.worker_gid,
+        # Resolved + clamped worker resource bounds (ADR-023 / F1) rendered to engine spelling at
+        # argv build; defaults equal the historical hardcoded values when no env override is set.
+        mem_mib=config.worker_resources.mem_mib,
+        cpus=config.worker_resources.cpus,
+        pids=config.worker_resources.pids,
+        tmpfs_scratch_mib=config.worker_resources.tmpfs_scratch_mib,
+        tmpfs_project_mib=config.worker_resources.tmpfs_project_mib,
         analysis_timeout_s=config.limits.analysis_timeout_s,
     )
     return RpcGhidraAdapter(
@@ -61,6 +68,9 @@ def _default_port_factory(config: Config) -> GhidraPort:
         max_response_bytes=config.limits.max_response_bytes,
         limits=config.limits,
         source_resolver=make_confined_resolver(config.import_root),
+        # Drives the warn-only OOM pre-flight (ADR-023 / F1) — same configured worker memory the
+        # launcher caps the container at, so the heads-up threshold tracks the real cap.
+        worker_mem_mib=config.worker_resources.mem_mib,
     )
 
 

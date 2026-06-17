@@ -152,6 +152,100 @@ def test_worker_process_is_alive(rc: int, stdout: str, expected: bool) -> None:
     assert proc.is_alive() is expected
 
 
+# ----------------------------------------------------------------------------------------------
+# Resource-bound rendering (ADR-023 / F1): resolved ints → engine spelling at argv build.
+# ----------------------------------------------------------------------------------------------
+def test_default_resource_bounds_render_to_historical_values(tmp_path: Path) -> None:
+    """Default resolved ints render to the historical engine spelling (4096m mem, 2 cpus, ...)."""
+    runner = _Recorder()
+    _launcher(tmp_path, runner)("s", str(tmp_path / "s" / "s.sock"))
+    (argv,) = runner.calls
+    assert argv[argv.index("--memory") + 1] == "4096m"
+    assert argv[argv.index("--cpus") + 1] == "2"
+    assert argv[argv.index("--pids-limit") + 1] == "512"
+    joined = " ".join(argv)
+    assert "/tmp/ghidra:rw,noexec,nosuid,nodev,mode=1777,size=2048m" in joined  # noqa: S108
+    assert "/work/project:rw,noexec,nosuid,nodev,mode=1777,size=4096m" in joined
+
+
+def test_configured_resource_bounds_render_correctly(tmp_path: Path) -> None:
+    """Tuned resolved ints render to the corresponding engine spelling."""
+    runner = _Recorder()
+    _launcher(
+        tmp_path,
+        runner,
+        mem_mib=8192,
+        cpus=4,
+        pids=1024,
+        tmpfs_scratch_mib=512,
+        tmpfs_project_mib=1024,
+    )("s", str(tmp_path / "s" / "s.sock"))
+    (argv,) = runner.calls
+    assert argv[argv.index("--memory") + 1] == "8192m"
+    assert argv[argv.index("--cpus") + 1] == "4"
+    assert argv[argv.index("--pids-limit") + 1] == "1024"
+    joined = " ".join(argv)
+    assert "size=512m" in joined and "size=1024m" in joined
+
+
+def test_memory_swap_pinned_equal_to_memory(tmp_path: Path) -> None:
+    """``--memory-swap`` is pinned EQUAL to ``--memory`` (no swap — ADR-004 invariant)."""
+    runner = _Recorder()
+    _launcher(tmp_path, runner, mem_mib=8192)("s", str(tmp_path / "s" / "s.sock"))
+    (argv,) = runner.calls
+    mem = argv[argv.index("--memory") + 1]
+    swap = argv[argv.index("--memory-swap") + 1]
+    assert mem == swap == "8192m"
+
+
+def test_adr004_hardening_flags_unchanged_with_tuned_resources(tmp_path: Path) -> None:
+    """Tuning resource bounds leaves every other ADR-004 hardening flag intact (byte-for-byte)."""
+    runner = _Recorder()
+    _launcher(tmp_path, runner, mem_mib=1024, cpus=1)("s", str(tmp_path / "s" / "s.sock"))
+    (argv,) = runner.calls
+    for flag in ("--network", "none", "--read-only", "--cap-drop", "ALL", "--detach"):
+        assert flag in argv, flag
+    assert "--security-opt" in argv and "no-new-privileges" in argv
+    assert "65532:65532" in argv
+    assert "--oom-kill-disable=false" in argv
+    assert "--env-host=false" in argv
+
+
+# ----------------------------------------------------------------------------------------------
+# exit_diagnosis (ADR-023 / F1): OOM vs other vs unknown via fake engine runner.
+# ----------------------------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("rc", "stdout", "expected"),
+    [
+        (0, "true 137", "oom"),  # engine reports OOMKilled
+        (0, "false 137", "oom"),  # SIGKILL exit signature (128+9) even without the flag
+        (0, "false 1", "other"),  # confirmed non-OOM exit
+        (0, "false 0", "other"),  # clean exit
+        (1, "true 137", "unknown"),  # engine query failed → fail closed (never spurious oom)
+        (0, "true", "unknown"),  # unparseable output (one field) → unknown
+        (0, "", "unknown"),  # empty output → unknown
+        (0, "a b c", "unknown"),  # too many fields → unknown
+    ],
+)
+def test_exit_diagnosis_classification(rc: int, stdout: str, expected: str) -> None:
+    """``exit_diagnosis`` classifies via OOMKilled flag / exit 137, failing closed to unknown."""
+    proc = ContainerWorkerProcess(
+        container_name="w", engine="podman", runner=_Recorder(returncode=rc, stdout=stdout)
+    )
+    assert proc.exit_diagnosis() == expected
+
+
+def test_exit_diagnosis_queries_engine_metadata_only(tmp_path: Path) -> None:
+    """``exit_diagnosis`` issues an inspect of OOMKilled+ExitCode (engine metadata; no binary)."""
+    runner = _Recorder(returncode=0, stdout="false 1")
+    proc = ContainerWorkerProcess(container_name="w", engine="podman", runner=runner)
+    proc.exit_diagnosis()
+    argv = runner.calls[-1]
+    assert argv[0:3] == ["podman", "inspect", "-f"]
+    assert argv[3] == "{{.State.OOMKilled}} {{.State.ExitCode}}"
+    assert argv[4] == "w"
+
+
 def test_confined_resolver_accepts_in_root_and_returns_size(tmp_path: Path) -> None:
     """A real file under the import root resolves to its byte size."""
     root = tmp_path / "imports"

@@ -80,6 +80,41 @@ def test_load_config_collects_only_set_limit_overrides(
     assert fake_resolve_limits == [{"max_sessions": 2, "tool_timeout_s": 30}]
 
 
+def test_load_config_worker_resources_default(
+    fake_resolve_limits: list[dict[str, int] | None],
+) -> None:
+    """With no worker-resource env set, the resolved defaults are used (ADR-023 / F1)."""
+    cfg = cfgmod.load_config(dict(_MINIMAL_ENV))
+    assert cfg.worker_resources.mem_mib == 4096
+    assert cfg.worker_resources.cpus == 2
+    assert cfg.worker_resources.pids == 512
+    assert cfg.worker_resources.tmpfs_scratch_mib == 2048
+    assert cfg.worker_resources.tmpfs_project_mib == 4096
+
+
+def test_load_config_worker_resources_overrides_collected_and_clamped(
+    fake_resolve_limits: list[dict[str, int] | None],
+) -> None:
+    """Explicitly-set worker-resource env vars are collected, validated, and clamped (ADR-023)."""
+    env = dict(_MINIMAL_ENV)
+    env["GHIDRA_MCP_WORKER_MEM_MIB"] = "8192"  # tuned up, below ceiling → honored
+    env["GHIDRA_MCP_WORKER_CPUS"] = "99"  # above the cpu ceiling (16) → clamped DOWN
+    cfg = cfgmod.load_config(env)
+    assert cfg.worker_resources.mem_mib == 8192
+    assert cfg.worker_resources.cpus == 16  # clamped to HARD_MAX_WORKER_CPUS
+
+
+def test_load_config_worker_resources_reject_invalid(
+    fake_resolve_limits: list[dict[str, int] | None],
+) -> None:
+    """A non-integer worker-resource env value fails closed as VALIDATION (refuse to boot)."""
+    env = dict(_MINIMAL_ENV)
+    env["GHIDRA_MCP_WORKER_MEM_MIB"] = "lots"
+    with pytest.raises(GhidraMcpError) as exc:
+        cfgmod.load_config(env)
+    assert exc.value.envelope.type is ErrorType.VALIDATION
+
+
 def test_load_config_missing_required_worker_image_fails_closed(
     fake_resolve_limits: list[dict[str, int] | None],
 ) -> None:
