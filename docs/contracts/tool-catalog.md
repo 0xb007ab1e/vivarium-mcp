@@ -30,7 +30,7 @@
 |------|-------|--------|-------|
 | `session_create` | `SessionCreateIn{label?}` | `SessionInfo` | opaque CSPRNG id; no worker yet; cap-checked |
 | `session_import` | `SessionImportIn{source_ref, expected_sha256?}` | `SessionInfo` | size cap enforced **before** Ghidra; digest verified; path confined |
-| `session_analyze` | `SessionAnalyzeIn{timeout_seconds?}` | `SessionInfo` | bounded by analysis timeout → kills worker on expiry |
+| `session_analyze` | `SessionAnalyzeIn{timeout_seconds?, profile?}` | `SessionInfo` | bounded by analysis timeout → kills worker on expiry; `profile` (`default`/`light`/`deep`, ADR-029 B) is **additive** — `default` is a byte-for-byte no-op; `light` trades depth for speed/heap, `deep` adds depth; reduces/adjusts depth only (no new capability) |
 | `session_status` | `_SessionScopedIn{session_id}` | `SessionInfo` | state/TTL; no binary content |
 | `session_close` | `SessionCloseIn{session_id}` | `SessionCloseOut{store_wiped}` | kill worker + **verified wipe** (ADR-002) |
 

@@ -117,6 +117,16 @@ client document, then **replays each entry through the existing write RPCs above
 transaction). No `import_annotations` RPC exists; import's blast radius equals the existing gated
 writes', no more.)
 
+**`analyze` — additive `profile` param (v1.4 — ADR-029 B; server → worker, OPTIONAL):** the
+`analyze` RPC params MAY carry a `profile` string (`"light"` | `"deep"`) selecting an analyzer-depth
+preset. **The default (`"default"`) omits the key entirely** — when no/`default` profile is
+requested the params are byte-for-byte identical to today's `{ "timeout_seconds": … }`, so the worker
+takes the unchanged auto-analysis code path (the default-is-no-op guarantee). `light` disables the
+most expensive analyzers (faster / less heap, less depth); `deep` enables a fuller set. **Additive
+and worker-only**: no existing field is repurposed, the client-facing `session_analyze` tool surface
+gains only the same additive optional field, and the **tool count is unchanged**. The profile only
+REDUCES/adjusts analysis depth — it grants no new capability/agency (ADR-001 intact).
+
 ## 5. Error model (worker → server)
 
 The worker returns JSON-RPC errors with a `data.type` slug that the server maps to the public

@@ -937,6 +937,211 @@ def test_preflight_not_emitted_for_normal_input(caplog: pytest.LogCaptureFixture
     wrk.close()
 
 
+# --- pre-flight mode (ADR-029 C) --------------------------------------------------------------
+def _preflight_adapter(
+    server_sock: socket.socket,
+    worker: _FakeWorker,
+    *,
+    size: int,
+    mode: str,
+) -> _ConnectedAdapter:
+    """Build a connected adapter with a given pre-flight ``mode`` + a fixed resolved input size.
+
+    Memory is pinned at 64 MiB so the plausibility threshold is a known 128 MiB; the hard binary cap
+    is set to 1 GiB so it never fires before the pre-flight under test.
+    """
+    adapter = _ConnectedAdapter(
+        server_sock=server_sock,
+        launcher=lambda sid, path: worker,
+        socket_dir="/tmp/ghidra-mcp-test",  # noqa: S108  # test-only path; no real socket bound
+        tool_timeout_s=1.0,
+        analysis_timeout_s=1.0,
+        max_response_bytes=_CAP,
+        limits=Limits(max_binary_bytes=1024 * 1024 * 1024),
+        source_resolver=lambda ref: size,
+        worker_mem_mib=64,
+        preflight_mode=mode,
+    )
+    adapter.start_worker("s")
+    return adapter
+
+
+def test_preflight_reject_over_threshold_fails_closed_before_worker(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``reject`` mode raises ``resource-exhausted`` (503, non-retryable); never feeds the worker.
+
+    The error detail (and any log) must carry NO content/path sentinel — only size + memory may be
+    logged (master §5 redaction).
+    """
+    import logging
+
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    size = 200 * 1024 * 1024  # above plausible_max_bytes(64 MiB) = 128 MiB
+    adapter = _preflight_adapter(srv, worker, size=size, mode="reject")
+    sentinel = "/secret/host/binary-name"
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(GhidraMcpError) as ei,
+    ):
+        adapter.import_binary("s", s.SessionImportIn(session_id="s", source_ref=sentinel))
+    env = ei.value.envelope
+    assert env.type is ErrorType.RESOURCE_EXHAUSTED
+    assert env.status == 503
+    assert env.retryable is False
+    # The reject is pre-Ghidra: no RPC was sent, the worker was never contacted.
+    assert worker.killed == 0
+    # Redaction: neither the detail nor any log record leaks the source ref / content.
+    assert sentinel not in env.detail
+    assert all(sentinel not in str(getattr(r, "msg", "")) for r in caplog.records)
+    assert all(sentinel not in str(getattr(r, "args", "")) for r in caplog.records)
+    srv.close()
+    wrk.close()
+
+
+def test_preflight_warn_mode_logs_and_proceeds() -> None:
+    """``warn`` mode (the default) proceeds: the import RPC reaches the worker."""
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    size = 200 * 1024 * 1024
+    adapter = _preflight_adapter(srv, worker, size=size, mode="warn")
+    t = _serve_import_ok(wrk)
+    info = adapter.import_binary("s", s.SessionImportIn(session_id="s", source_ref="big-ok"))
+    t.join(timeout=2)
+    assert info.state == "importing"
+    assert worker.killed == 0
+    wrk.close()
+
+
+def test_preflight_off_mode_skips_check_and_proceeds() -> None:
+    """``off`` mode skips the plausibility check entirely: an oversized input still proceeds."""
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    size = 200 * 1024 * 1024  # over threshold, but off → no warn, no reject
+    adapter = _preflight_adapter(srv, worker, size=size, mode="off")
+    t = _serve_import_ok(wrk)
+    info = adapter.import_binary("s", s.SessionImportIn(session_id="s", source_ref="big-ok"))
+    t.join(timeout=2)
+    assert info.state == "importing"
+    assert worker.killed == 0
+    wrk.close()
+
+
+def test_preflight_under_threshold_untouched_in_every_mode() -> None:
+    """An under-threshold input proceeds untouched regardless of mode (warn/reject/off)."""
+    for mode in ("warn", "reject", "off"):
+        srv, wrk = socket.socketpair(socket.AF_UNIX)
+        worker = _FakeWorker()
+        adapter = _preflight_adapter(srv, worker, size=1024, mode=mode)  # tiny — under 128 MiB
+        t = _serve_import_ok(wrk)
+        info = adapter.import_binary("s", s.SessionImportIn(session_id="s", source_ref="ok"))
+        t.join(timeout=2)
+        assert info.state == "importing", mode
+        assert worker.killed == 0, mode
+        wrk.close()
+
+
+def test_preflight_unknown_mode_falls_back_to_warn(caplog: pytest.LogCaptureFixture) -> None:
+    """A bad mode reaching the adapter degrades to ``warn`` (fail safe — never silently ``off``)."""
+    import logging
+
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    size = 200 * 1024 * 1024
+    adapter = _preflight_adapter(srv, worker, size=size, mode="bogus")
+    t = _serve_import_ok(wrk)
+    with caplog.at_level(logging.WARNING):
+        adapter.import_binary("s", s.SessionImportIn(session_id="s", source_ref="big-ok"))
+    t.join(timeout=2)
+    # Degraded to warn: it logged the heads-up and proceeded (did not reject, did not skip).
+    assert any(r.message == "worker.preflight_oversized" for r in caplog.records)
+    assert worker.killed == 0
+    wrk.close()
+
+
+# --- analyze param-shaping (ADR-029 B; pure helper) -------------------------------------------
+def test_analyze_params_default_is_no_op() -> None:
+    """The default profile yields the PRE-ADR-029 param shape — no ``profile`` key (no-op)."""
+    from ghidra_mcp.ghidra.rpc_client import _analyze_params
+
+    assert _analyze_params(123, "default") == {"timeout_seconds": 123}
+    assert "profile" not in _analyze_params(None, "default")
+
+
+@pytest.mark.parametrize("profile", ["light", "deep"])
+def test_analyze_params_non_default_adds_profile(profile: str) -> None:
+    """A non-default profile adds the explicit ``profile`` key alongside the timeout."""
+    from ghidra_mcp.ghidra.rpc_client import _analyze_params
+
+    assert _analyze_params(None, profile) == {"timeout_seconds": None, "profile": profile}
+
+
+def test_analyze_threads_profile_into_rpc() -> None:
+    """``analyze`` sends the profile in the RPC params for a non-default profile (ADR-029 B)."""
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+    seen: dict[str, object] = {}
+
+    def _serve() -> None:
+        obj = dispatch.read_frame(wrk, max_frame_bytes=_CAP)
+        seen.update(obj["params"])
+        result = {
+            "session_id": "s",
+            "state": "ready",
+            "created_at": 1,
+            "expires_at": 2,
+            "binary_sha256": None,
+        }
+        wrk.sendall(
+            rpc_framing.encode_frame(
+                {"jsonrpc": "2.0", "id": obj["id"], "result": result}, max_frame_bytes=_CAP
+            )
+        )
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    adapter.analyze("s", s.SessionAnalyzeIn(session_id="s", profile="light"))
+    t.join(timeout=2)
+    assert seen.get("profile") == "light"
+    srv.close()
+    wrk.close()
+
+
+def test_analyze_default_profile_omits_profile_in_rpc() -> None:
+    """The default profile sends NO ``profile`` key — the worker takes the unchanged path."""
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+    seen: dict[str, object] = {}
+
+    def _serve() -> None:
+        obj = dispatch.read_frame(wrk, max_frame_bytes=_CAP)
+        seen.update(obj["params"])
+        result = {
+            "session_id": "s",
+            "state": "ready",
+            "created_at": 1,
+            "expires_at": 2,
+            "binary_sha256": None,
+        }
+        wrk.sendall(
+            rpc_framing.encode_frame(
+                {"jsonrpc": "2.0", "id": obj["id"], "result": result}, max_frame_bytes=_CAP
+            )
+        )
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    adapter.analyze("s", s.SessionAnalyzeIn(session_id="s"))
+    t.join(timeout=2)
+    assert "profile" not in seen
+    assert seen == {"timeout_seconds": None}
+    srv.close()
+    wrk.close()
+
+
 def test_default_source_resolver_stats_a_real_file(tmp_path: Path) -> None:
     """The built-in resolver returns the on-disk size (used when no confined resolver is wired)."""
     from ghidra_mcp.ghidra.rpc_client import _default_source_size

@@ -143,9 +143,16 @@ class SessionAnalyzeIn(_SessionScopedIn):
 
     Attributes:
         timeout_seconds: Optional override, clamped server-side to the configured maximum.
+        profile: Analyzer-depth preset (ADR-029 B; additive). ``"default"`` (the default) is a
+            byte-for-byte no-op — it reproduces today's auto-analysis exactly. ``"light"`` skips the
+            most expensive Ghidra analyzers so a huge binary finishes faster / in less heap (trading
+            depth); ``"deep"`` enables a fuller analysis set. The profile only ever REDUCES or
+            adjusts analysis depth — it grants no new capability/agency (ADR-001 intact). Closed set
+            (``Literal``); an unknown value is rejected by the schema (fail closed).
     """
 
     timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
+    profile: Literal["default", "light", "deep"] = "default"
 
 
 class SessionCloseIn(_SessionScopedIn):

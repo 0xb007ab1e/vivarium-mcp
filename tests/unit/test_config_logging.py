@@ -115,6 +115,39 @@ def test_load_config_worker_resources_reject_invalid(
     assert exc.value.envelope.type is ErrorType.VALIDATION
 
 
+def test_load_config_preflight_mode_defaults_to_warn(
+    fake_resolve_limits: list[dict[str, int] | None],
+) -> None:
+    """Unset GHIDRA_MCP_WORKER_PREFLIGHT → secure default ``warn`` (v1.3 behaviour — ADR-029)."""
+    cfg = cfgmod.load_config(dict(_MINIMAL_ENV))
+    assert cfg.worker_preflight_mode == "warn"
+
+
+@pytest.mark.parametrize("mode", ["warn", "reject", "off"])
+def test_load_config_preflight_mode_parses_each_valid_value(
+    mode: str,
+    fake_resolve_limits: list[dict[str, int] | None],
+) -> None:
+    """Each allow-listed pre-flight mode parses to itself (ADR-029 C)."""
+    env = dict(_MINIMAL_ENV)
+    env["GHIDRA_MCP_WORKER_PREFLIGHT"] = mode
+    cfg = cfgmod.load_config(env)
+    assert cfg.worker_preflight_mode == mode
+
+
+@pytest.mark.parametrize("bad", ["WARN", "drop", "true", "1", "rejectt", "warn off"])
+def test_load_config_preflight_mode_rejects_invalid_fails_closed(
+    bad: str,
+    fake_resolve_limits: list[dict[str, int] | None],
+) -> None:
+    """An invalid pre-flight mode → VALIDATION error; refuse to boot (fail closed, ADR-029 C)."""
+    env = dict(_MINIMAL_ENV)
+    env["GHIDRA_MCP_WORKER_PREFLIGHT"] = bad
+    with pytest.raises(GhidraMcpError) as exc:
+        cfgmod.load_config(env)
+    assert exc.value.envelope.type is ErrorType.VALIDATION
+
+
 def test_load_config_missing_required_worker_image_fails_closed(
     fake_resolve_limits: list[dict[str, int] | None],
 ) -> None:
