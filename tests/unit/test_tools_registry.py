@@ -9,6 +9,8 @@ worker, no JVM — ADR-001).
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -23,6 +25,18 @@ from ghidra_mcp.server.auth import Principal
 from ghidra_mcp.sessions.manager import SessionManager
 from ghidra_mcp.tools import registry as reg
 from ghidra_mcp.tools import schemas as s
+
+
+def _invoke(handler: Callable[..., Any], **kwargs: Any) -> Any:
+    """Call a bound tool handler, awaiting it if it is the async ``session_analyze`` binding.
+
+    Every tool is a synchronous flat-kwargs callable EXCEPT ``session_analyze``, which ADR-030
+    Phase 2 makes async (so the loop can stream progress). This shim lets the existing
+    authorize-then-delegate assertions drive either shape uniformly.
+    """
+    result = handler(**kwargs)
+    return asyncio.run(result) if inspect.iscoroutine(result) else result
+
 
 _VALID_SID = "sid1"
 
@@ -137,7 +151,9 @@ class FakePort:
             binary_sha256="a" * 64,
         )
 
-    def analyze(self, sid: str, a: s.SessionAnalyzeIn) -> s.SessionInfo:
+    def analyze(
+        self, sid: str, a: s.SessionAnalyzeIn, *, on_progress: object = None
+    ) -> s.SessionInfo:
         self._rec("analyze", sid)
         return s.SessionInfo(
             session_id="WORKER-FORGED",
@@ -616,7 +632,7 @@ def test_session_import_skips_hash_record_when_worker_returns_no_hash(
 def test_session_analyze_uses_manager_lifecycle_keeps_worker_sha256(ctx: reg.ToolContext) -> None:
     """#9 overlay for ``session_analyze`` — same authority split as import."""
     handlers = reg.build_handlers(ctx)
-    info = handlers["session_analyze"](session_id=_VALID_SID)
+    info = _invoke(handlers["session_analyze"], session_id=_VALID_SID)
     assert info.session_id == _VALID_SID
     assert info.state == "ready"
     assert info.created_at == 0
@@ -680,6 +696,6 @@ def test_each_worker_tool_authorizes_and_delegates(
     ctx: reg.ToolContext, tool: str, kwargs: dict[str, object], method: str
 ) -> None:
     handlers = reg.build_handlers(ctx)
-    handlers[tool](**kwargs)
+    _invoke(handlers[tool], **kwargs)
     assert ctx.sessions.authorized == [_VALID_SID]  # type: ignore[attr-defined]
     assert (method, _VALID_SID) in ctx.port.calls  # type: ignore[attr-defined]

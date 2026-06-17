@@ -44,7 +44,7 @@ from pydantic import BaseModel, ValidationError
 
 from ghidra_mcp.core.envelope import DataOrigin, Untrusted, wrap
 from ghidra_mcp.core.errors import ErrorType
-from ghidra_mcp.ghidra import _errors, rpc_framing
+from ghidra_mcp.ghidra import _errors, port, rpc_framing
 from ghidra_mcp.ghidra.rpc_framing import (
     FramingError,
     RpcCallError,
@@ -426,25 +426,34 @@ class RpcGhidraAdapter:
             extra={"size_bytes": size_bytes, "worker_mem_mib": self._worker_mem_mib},
         )
 
-    def analyze(self, session_id: str, args: s.SessionAnalyzeIn) -> s.SessionInfo:
+    def analyze(
+        self,
+        session_id: str,
+        args: s.SessionAnalyzeIn,
+        *,
+        on_progress: port.OnProgress | None = None,
+    ) -> s.SessionInfo:
         """Run Ghidra auto-analysis, bounded by the analysis timeout (kills worker on expiry).
 
         The additive ``profile`` (ADR-029 B) selects the analyzer-depth preset. When it is the
         default the analyze RPC params are IDENTICAL to today's (no ``profile`` key — the worker
         takes the unchanged code path); ``light``/``deep`` add the explicit preset.
 
-        The additive ``progress`` flag (ADR-030 Phase 1) opts into worker→server ``$/progress``
-        notification frames. When ``False`` (the default) the params and the read path are
-        byte-for-byte today's (a single response frame); when ``True`` the call enters a bounded
-        read-loop that relays each ``$/progress`` to the SERVER LOG (no MCP client relay — Phase 2)
-        and returns the final response. The deadline below is computed ONCE and bounds the WHOLE
-        loop — progress frames never extend it (ADR-002 SIGKILL still fires on a hung/chatty
+        Progress emission (ADR-030) is driven by two independent inputs, OR-ed into one decision:
+        ``args.progress`` (the Phase-1 explicit opt-in, log-only) and ``on_progress`` (the Phase-2
+        client relay). The worker is told to emit ``$/progress`` frames iff EITHER is set; when it
+        is, the call enters the bounded read-loop, which always relays each frame to the SERVER LOG
+        and — when ``on_progress`` is present — ALSO invokes it (the server forwards to the MCP
+        client via ``Context.report_progress``). When NEITHER is set the params and read path are
+        byte-for-byte today's single-frame call. The deadline below is computed ONCE and bounds the
+        WHOLE loop — progress frames never extend it (ADR-002 SIGKILL still fires on a hung/chatty
         worker).
 
         Args:
             session_id: The session.
             args: Analysis arguments (optional timeout override, already clamped by the server; the
-                analyzer profile; the progress opt-in).
+                analyzer profile; the Phase-1 progress opt-in).
+            on_progress: Optional Phase-2 client-relay callback (``None`` on stdio / no token).
 
         Returns:
             Updated :class:`SessionInfo`.
@@ -458,12 +467,17 @@ class RpcGhidraAdapter:
             if args.timeout_seconds
             else self._analysis_timeout_s
         )
+        # Emit iff EITHER the Phase-1 opt-in OR the Phase-2 client relay is requested. A client
+        # progressToken (→ on_progress) implies "I want progress", so we force worker emission on
+        # without requiring the caller to ALSO pass progress=true (ADR-030 Phase 2 D1).
+        emit_progress = bool(args.progress) or on_progress is not None
         result = self._call(
             session_id,
             "analyze",
-            _analyze_params(args.timeout_seconds, args.profile, progress=args.progress),
+            _analyze_params(args.timeout_seconds, args.profile, progress=emit_progress),
             timeout_s=deadline,
-            expect_progress=args.progress,
+            expect_progress=emit_progress,
+            on_progress=on_progress,
         )
         return _validate(s.SessionInfo, result)
 
@@ -1149,6 +1163,7 @@ class RpcGhidraAdapter:
         *,
         timeout_s: float,
         expect_progress: bool = False,
+        on_progress: port.OnProgress | None = None,
     ) -> dict[str, Any]:
         """Send one JSON-RPC request and read its response, enforcing kill-on-failure semantics.
 
@@ -1173,6 +1188,8 @@ class RpcGhidraAdapter:
             timeout_s: Wall-clock deadline for this call (and for the whole progress loop).
             expect_progress: Whether to run the progress-aware read-loop (opted-in ``analyze``
                 only).
+            on_progress: Optional Phase-2 client-relay callback forwarded to the read-loop (``None``
+                ⇒ log-only / unchanged path).
 
         Returns:
             The worker's ``result`` object.
@@ -1197,7 +1214,11 @@ class RpcGhidraAdapter:
                 # The deadline bounds the WHOLE loop and is NOT extended by progress frames (ADR-030
                 # / ADR-002): a worker emitting progress forever still hits the un-extended SIGKILL.
                 response_obj = self._read_response_with_progress(
-                    sock, expected_id=request_id, method=method, total_timeout_s=timeout_s
+                    sock,
+                    expected_id=request_id,
+                    method=method,
+                    total_timeout_s=timeout_s,
+                    on_progress=on_progress,
                 )
             else:
                 # Unchanged single-frame path — IDENTICAL to today for every non-opted-in call.
@@ -1332,7 +1353,13 @@ class RpcGhidraAdapter:
         sock.sendall(data)
 
     def _read_response_with_progress(
-        self, sock: socket.socket, *, expected_id: str, method: str, total_timeout_s: float
+        self,
+        sock: socket.socket,
+        *,
+        expected_id: str,
+        method: str,
+        total_timeout_s: float,
+        on_progress: port.OnProgress | None = None,
     ) -> dict[str, Any]:
         """Read frames until the final response, relaying ``$/progress`` to the log (ADR-030 §1).
 
@@ -1359,6 +1386,8 @@ class RpcGhidraAdapter:
             expected_id: The ``analyze`` request id progress + the response must correlate to.
             method: The RPC method name (for log context only — always ``"analyze"`` here).
             total_timeout_s: The one-shot deadline for the whole loop (from call start).
+            on_progress: Optional Phase-2 client-relay callback invoked (best-effort) for each
+                relayed frame, in addition to the log. ``None`` ⇒ log-only (Phase 1).
 
         Returns:
             The decoded final response frame (success or error envelope), for the caller to parse.
@@ -1391,11 +1420,22 @@ class RpcGhidraAdapter:
             if _should_relay_progress(last_relayed_at, now, _MIN_PROGRESS_INTERVAL_S):
                 last_relayed_at = now
                 # Redacted, log-only relay (percent + closed-vocabulary phase ONLY — master §5).
-                # Phase 1 is LOG-ONLY: NO MCP client relay / report_progress wiring (Phase 2).
                 _log.info(
                     "analyze.progress",
                     extra={"method": method, **_progress_log_payload(progress)},
                 )
+                # Phase 2: ALSO relay to the MCP client when a callback is wired (a progressToken
+                # was sent). SAFE fields only — percent + closed-vocabulary phase, never any
+                # binary-derived text (RpcProgress structurally cannot carry it). The callback is
+                # the SAME coalesced + bounded stream the log sees, so the client cadence is bounded
+                # too. It is best-effort: a relay failure (client gone, loop unavailable) must NEVER
+                # fail the analysis, so the server-side callback swallows its own errors; we still
+                # guard here as defense in depth so a buggy callback can't break the read-loop.
+                if on_progress is not None:
+                    try:
+                        on_progress(progress.percent, progress.phase)
+                    except Exception:
+                        _log.warning("analyze.progress_relay_failed", extra={"method": method})
             # else: coalesced (too-soon since the last relayed frame) — counted but not logged.
 
     def _read_frame(self, sock: socket.socket) -> dict[str, Any]:

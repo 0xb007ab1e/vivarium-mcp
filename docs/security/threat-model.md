@@ -110,6 +110,22 @@ Likelihood × Impact → severity (master §7). "L/M/H".
 > and the §3 per-frame size cap + one-at-a-time processing bound memory. Worker-side this is the
 > `TaskMonitorAdapter` JVM edge (live-verified before merge); the percent mapping and frame
 > parse/relay are pure, unit-tested logic.
+>
+> **TB2/TB1 delta — v1.4 analyze client progress relay (ADR-030 Phase 2; no new boundary).** Phase 2
+> forwards each (already bounded + redacted) `$/progress` frame outward to the MCP client as a
+> standard `notifications/progress`, gated on the client supplying a `progressToken`. **It adds no
+> new data class to TB1 (server→client):** only the SAME safe `percent` (0..100) + closed-vocab
+> `phase` (as the notification `message`) leave the server — never binary-derived `TaskMonitor` text
+> (structural redaction; the relay cannot carry it). **(I) Disclosure / cross-principal:** the
+> notification rides the **same MCP request context** as the in-flight `session_analyze` call, so it
+> reaches only that request's caller — no cross-principal/cross-session leakage (ADR-017/011); the
+> relay reads only this session's socket. **(D) DoS:** the analysis deadline is still computed once
+> and **not extended**; relayed frames inherit the Phase-1 coalesce + flood caps; the relay is
+> **best-effort** (a failed/gone client send is swallowed, never aborting the analysis) and cannot
+> backpressure the worker beyond the existing bounds. **Execution-model change:** `session_analyze`
+> becomes the one async, thread-offloaded tool (so the loop stays free to flush notifications); a
+> tokenless call runs inline exactly as before (no new concurrency surface). The server→client hop
+> was live-verified end-to-end through the real FastMCP runtime before merge.
 
 ### TB3 — Binary → Ghidra analyzer (**HOSTILE — primary boundary**)
 | STRIDE | Threat | L×I | Mitigation |

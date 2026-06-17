@@ -14,6 +14,7 @@ never leak (fail closed — topic-error-handling, master §5).
 
 from __future__ import annotations
 
+import inspect
 import secrets
 import signal
 import time
@@ -109,21 +110,21 @@ def _with_error_boundary(tool_name: str, handler: Callable[..., Any]) -> Callabl
     successful tool result is returned unchanged (FastMCP serializes the pydantic output model).
 
     The wrapper copies ``handler``'s ``__signature__``/``__annotations__`` so the MCP SDK can still
-    introspect the tool's typed input model after wrapping.
+    introspect the tool's typed input model after wrapping. An **async** handler (the
+    ``session_analyze`` Phase-2 binding — ADR-030) is wrapped by an async guard with identical
+    error mapping, so the boundary catches failures from the awaited body too.
 
     Args:
         tool_name: The tool's catalog name (safe to log).
         handler: The single-argument, context-bound tool handler (carrying a typed signature).
 
     Returns:
-        A wrapped handler that never raises out to the transport.
+        A wrapped handler that never raises out to the transport (sync or async to match input).
     """
 
-    def _guarded(*args: Any, **kwargs: Any) -> Any:
-        correlation_id = _correlation_id()
-        try:
-            return handler(*args, **kwargs)
-        except GhidraMcpError as exc:
+    def _to_envelope(exc: BaseException, correlation_id: str) -> ErrorEnvelope:
+        # Shared exception → safe-envelope mapping for both the sync and async guards (DRY).
+        if isinstance(exc, GhidraMcpError):
             env = exc.envelope
             if env.correlation_id is None:
                 env = env.model_copy(update={"correlation_id": correlation_id})
@@ -137,7 +138,7 @@ def _with_error_boundary(tool_name: str, handler: Callable[..., Any]) -> Callabl
                 },
             )
             return env
-        except PydanticValidationError:
+        if isinstance(exc, PydanticValidationError):
             # Boundary re-validation failed. Do NOT log the pydantic message (it may echo untrusted
             # values); record only the count under the correlation id.
             _log.warning(
@@ -145,20 +146,35 @@ def _with_error_boundary(tool_name: str, handler: Callable[..., Any]) -> Callabl
                 extra={"tool": tool_name, "correlation_id": correlation_id},
             )
             return _validation_envelope(correlation_id)
-        except Exception:
-            _log.exception(
-                "tool.internal_error",
-                extra={"tool": tool_name, "correlation_id": correlation_id},
-            )
-            return _internal_envelope(correlation_id)
+        _log.exception(
+            "tool.internal_error",
+            extra={"tool": tool_name, "correlation_id": correlation_id},
+            exc_info=exc,
+        )
+        return _internal_envelope(correlation_id)
 
+    def _guarded(*args: Any, **kwargs: Any) -> Any:
+        correlation_id = _correlation_id()
+        try:
+            return handler(*args, **kwargs)
+        except Exception as exc:
+            return _to_envelope(exc, correlation_id)
+
+    async def _guarded_async(*args: Any, **kwargs: Any) -> Any:
+        correlation_id = _correlation_id()
+        try:
+            return await handler(*args, **kwargs)
+        except Exception as exc:
+            return _to_envelope(exc, correlation_id)
+
+    guard: Callable[..., Any] = _guarded_async if inspect.iscoroutinefunction(handler) else _guarded
     # Preserve the typed signature so the SDK derives the same input JSON schema post-wrap.
     sig = getattr(handler, "__signature__", None)
     if sig is not None:
-        _guarded.__signature__ = sig  # type: ignore[attr-defined]
-    _guarded.__annotations__ = dict(getattr(handler, "__annotations__", {}))
-    _guarded.__name__ = getattr(handler, "__name__", "tool")
-    return _guarded
+        guard.__signature__ = sig  # type: ignore[attr-defined]
+    guard.__annotations__ = dict(getattr(handler, "__annotations__", {}))
+    guard.__name__ = getattr(handler, "__name__", "tool")
+    return guard
 
 
 def build_app(config: Config, *, session_manager: SessionManager, port: GhidraPort) -> FastMCP:

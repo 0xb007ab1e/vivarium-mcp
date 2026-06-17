@@ -25,15 +25,19 @@ No handler runs Ghidra in-process (ADR-001) and no handler logs binary-derived c
 
 from __future__ import annotations
 
+import functools
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, cast
 
+import anyio
+from mcp.server.fastmcp import Context
+
 from ghidra_mcp.config import Config
 from ghidra_mcp.core import validation as v
 from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
-from ghidra_mcp.ghidra.port import GhidraPort
+from ghidra_mcp.ghidra.port import GhidraPort, OnProgress
 from ghidra_mcp.logging import get_logger
 from ghidra_mcp.server.auth import Principal
 from ghidra_mcp.sessions.manager import SessionManager
@@ -238,7 +242,12 @@ def _handle_session_import(ctx: ToolContext, args: s.SessionImportIn) -> s.Sessi
     return _merge_session_info(authoritative, imported)
 
 
-def _handle_session_analyze(ctx: ToolContext, args: s.SessionAnalyzeIn) -> s.SessionInfo:
+def _handle_session_analyze(
+    ctx: ToolContext,
+    args: s.SessionAnalyzeIn,
+    *,
+    on_progress: OnProgress | None = None,
+) -> s.SessionInfo:
     """Run Ghidra auto-analysis, bounded by the analysis timeout (kills worker on expiry).
 
     As with import, the :class:`SessionManager` owns the session lifecycle: its authoritative
@@ -249,12 +258,16 @@ def _handle_session_analyze(ctx: ToolContext, args: s.SessionAnalyzeIn) -> s.Ses
     Args:
         ctx: Injected collaborators.
         args: Validated ``session_analyze`` arguments.
+        on_progress: Optional ADR-030 Phase-2 client-relay callback, threaded to the adapter. When
+            non-``None`` the worker emits ``$/progress`` frames and the adapter forwards each to
+            this callback (the async binding bridges it to ``Context.report_progress``); ``None``
+            (stdio / no ``progressToken``) is byte-for-byte the pre-Phase-2 path.
 
     Returns:
         Updated :class:`SessionInfo` after analysis, with authoritative lifecycle fields.
     """
     authoritative = ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
-    analyzed = ctx.port.analyze(args.session_id, args)
+    analyzed = ctx.port.analyze(args.session_id, args, on_progress=on_progress)
     return _merge_session_info(authoritative, analyzed)
 
 
@@ -1288,7 +1301,105 @@ def build_handlers(ctx: ToolContext) -> dict[str, Callable[..., Any]]:
     bound: dict[str, Callable[..., Any]] = {}
     for name, (handler, in_schema) in _HANDLERS.items():
         bound[name] = _bind(handler, ctx, in_schema)
+    # session_analyze is the ONE tool with a localized async binding (ADR-030 Phase 2): it accepts
+    # the injected MCP Context and, when a progressToken is present, offloads the blocking analysis
+    # to a worker thread and relays worker progress to the client. Every other tool keeps the
+    # uniform synchronous flat-kwargs binding above. Replacing it here keeps the special case in one
+    # place and out of the generic _bind.
+    bound["session_analyze"] = _bind_analyze(ctx)
     return bound
+
+
+def _progress_token(context: Context[Any, Any, Any] | None) -> Any | None:
+    """Return the current request's MCP ``progressToken`` if the client supplied one, else ``None``.
+
+    Reads it from the live FastMCP request context's ``_meta`` (mirrors ``Context.report_progress``
+    which no-ops without a token). Defensive: missing context / request-context / meta all fail
+    closed to ``None`` (no relay) so a non-FastMCP or token-less call takes the unchanged path.
+
+    Args:
+        context: The injected MCP :class:`Context`, or ``None`` (direct/test invocation).
+
+    Returns:
+        The opaque progress token, or ``None`` when no client progress was requested.
+    """
+    if context is None:
+        return None
+    try:
+        meta = context.request_context.meta
+    except (AttributeError, ValueError):
+        # ValueError: FastMCP raises it from request_context outside a request (defensive).
+        return None
+    return meta.progressToken if meta is not None else None
+
+
+def _bind_analyze(ctx: ToolContext) -> Callable[..., Any]:
+    """Bind ``session_analyze`` to an async, Context-aware tool callable (ADR-030 Phase 2).
+
+    Like :func:`_bind` it exposes the input model's fields as flat keyword parameters and
+    re-validates them into the frozen :class:`~ghidra_mcp.tools.schemas.SessionAnalyzeIn`. It adds
+    one injected parameter — ``context: Context`` — so FastMCP passes the live request context, and
+    the synthesized callable is **async** so the event loop stays free to deliver notifications.
+
+    Behaviour by activation (ratified: async-offload, token-gated):
+
+    - **No ``progressToken``** (stdio, or an HTTP client that didn't ask) → run the handler
+      **inline** (synchronously, on the loop) exactly as before Phase 2 — zero change to the
+      no-progress path (the loop-blocking analysis is the long-standing behaviour for analyze).
+    - **``progressToken`` present** → offload the blocking handler to a worker thread via
+      :func:`anyio.to_thread.run_sync` so the loop can flush notifications, and pass a relay that
+      bridges each worker progress frame back onto the loop via :func:`anyio.from_thread.run` →
+      :meth:`Context.report_progress`. SAFE fields only (percent + closed-vocabulary phase as the
+      message); the relay is best-effort (a send failure never aborts the analysis).
+
+    Args:
+        ctx: The injected collaborators to close over.
+
+    Returns:
+        An async flat-kwargs callable carrying a Context-augmented synthesized signature.
+    """
+    in_schema = s.SessionAnalyzeIn
+
+    async def _bound(*, context: Context[Any, Any, Any] | None = None, **kwargs: Any) -> Any:
+        model = in_schema(**kwargs)
+        token = _progress_token(context)
+        # In-flight liveness marker (ADR-025 / F4), same contract as _bind: refresh the idle clock
+        # for the whole (possibly 18-26 min) call so analyze cannot idle-evict itself. analyze
+        # always carries a session_id (required field), so this path always applies.
+        ctx.sessions.begin_call(model.session_id)
+        try:
+            if token is None or context is None:
+                # No client progress requested → byte-for-byte the pre-Phase-2 path (sync on loop;
+                # the worker still emits log-only frames iff args.progress was set — Phase 1).
+                return _handle_session_analyze(ctx, model)
+
+            # Bind the coroutine method here, where ``context`` is narrowed non-None (mypy does not
+            # propagate that narrowing into the nested closure below).
+            report = context.report_progress
+
+            def _relay(percent: int | None, phase: str) -> None:
+                # Bridge the worker-thread callback back onto the event loop to send the MCP
+                # notification. percent is None when the worker has no estimate yet → skip (cannot
+                # report a number); phase rides along as the (safe, closed-vocabulary) message.
+                if percent is None:
+                    return
+                try:
+                    anyio.from_thread.run(functools.partial(report, float(percent), 100.0, phase))
+                except Exception:
+                    _log.warning("analyze.progress_relay_failed", extra={"tool": "session_analyze"})
+
+            return await anyio.to_thread.run_sync(
+                functools.partial(_handle_session_analyze, ctx, model, on_progress=_relay)
+            )
+        finally:
+            ctx.sessions.end_call(model.session_id)
+
+    _bound.__signature__ = _signature_from_model(in_schema, with_context=True)  # type: ignore[attr-defined]
+    annotations = _annotations_from_model(in_schema)
+    annotations["context"] = Context
+    _bound.__annotations__ = annotations
+    _bound.__name__ = f"tool_{in_schema.__name__}"
+    return _bound
 
 
 def _bind(
@@ -1341,17 +1452,24 @@ def _bind(
     return _bound
 
 
-def _signature_from_model(model: type[s._In]) -> inspect.Signature:
+def _signature_from_model(model: type[s._In], *, with_context: bool = False) -> inspect.Signature:
     """Build a keyword-only signature exposing ``model``'s fields as parameters.
 
     Required fields (no default) become required keyword-only parameters; optional fields carry
     their default so the SDK marks them optional. Annotations come from the model's field types.
 
+    When ``with_context`` is set, a trailing ``context: Context`` keyword-only parameter is appended
+    (ADR-030 Phase 2). FastMCP detects it by annotation (``issubclass(ann, Context)``) and injects
+    the live request context while EXCLUDING it from the tool's input JSON schema — so the client
+    surface is unchanged. It defaults to ``None`` only to keep the callable directly invokable in
+    tests; at runtime FastMCP always supplies the real Context.
+
     Args:
         model: The pydantic input model.
+        with_context: Whether to append the injected ``context`` parameter.
 
     Returns:
-        An :class:`inspect.Signature` whose parameters mirror the model's fields.
+        An :class:`inspect.Signature` whose parameters mirror the model's fields (plus ``context``).
     """
     parameters: list[inspect.Parameter] = []
     for field_name, field in model.model_fields.items():
@@ -1363,6 +1481,15 @@ def _signature_from_model(model: type[s._In]) -> inspect.Signature:
                 inspect.Parameter.KEYWORD_ONLY,
                 default=default,
                 annotation=annotation,
+            )
+        )
+    if with_context:
+        parameters.append(
+            inspect.Parameter(
+                "context",
+                inspect.Parameter.KEYWORD_ONLY,
+                default=None,
+                annotation=Context,
             )
         )
     return inspect.Signature(parameters=parameters, return_annotation=inspect.Signature.empty)
