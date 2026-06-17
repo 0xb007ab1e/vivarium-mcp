@@ -1167,6 +1167,117 @@ def test_handle_request_success() -> None:
     assert resp["id"] == "9"
 
 
+# --- ADR-024 PR-1: redacted worker-error detail (worker→server only) --------------------------
+def test_handle_request_unexpected_exception_carries_redacted_detail() -> None:
+    """An unexpected worker exception → generic message + redacted class-name detail only."""
+
+    class _Boom:
+        def memory_map(self, params: dict[str, object]) -> dict[str, object]:
+            raise RuntimeError("SECRET /host/path 0xdeadbeef decompiled body")
+
+    resp = dispatch.handle_request(
+        cast("dispatch.GhidraBackend", _Boom()),
+        {"jsonrpc": "2.0", "id": "1", "method": "memory_map", "params": {}},
+    )
+    assert resp["error"]["code"] == dispatch.CODE_INTERNAL
+    assert resp["error"]["message"] == "internal worker error"  # client-facing message unchanged
+    detail = resp["error"]["data"]["detail"]
+    # The redacted detail is the class name + fixed template — NOT the raw exception text.
+    assert detail == "RuntimeError: unhandled worker exception"
+    assert "SECRET" not in detail  # binary-derived / host text must never be forwarded
+    assert "0xdeadbeef" not in detail
+    assert "/host/path" not in detail
+
+
+def test_handle_request_detail_uses_exception_class_name() -> None:
+    """The detail names *which* exception class fired (diagnosability) without its message."""
+
+    class _NpeError(Exception):
+        """Stand-in for a JVM NullPointerException whose str() echoes a value."""
+
+    class _Boom:
+        def exports(self, params: dict[str, object]) -> dict[str, object]:
+            raise _NpeError("at Symbol.getAddress(null) — SENTINEL_VALUE")
+
+    resp = dispatch.handle_request(
+        cast("dispatch.GhidraBackend", _Boom()),
+        {"jsonrpc": "2.0", "id": "7", "method": "exports", "params": {}},
+    )
+    assert resp["error"]["data"]["detail"] == "_NpeError: unhandled worker exception"
+    assert "SENTINEL_VALUE" not in resp["error"]["data"]["detail"]
+
+
+def test_build_error_without_detail_omits_data_detail() -> None:
+    """A mapped WorkerError (no detail) carries the slug only — no ``data.detail`` key."""
+    resp = dispatch.build_error("id", dispatch.CODE_NOT_FOUND, "missing")
+    assert resp["error"]["data"] == {"type": "not-found"}
+    assert "detail" not in resp["error"]["data"]
+
+
+def test_parse_error_reads_optional_detail() -> None:
+    """The framing parser threads the optional ``data.detail`` into the RpcError (capped)."""
+    err = {
+        "code": -32603,
+        "message": "internal worker error",
+        "data": {"type": "internal-error", "detail": "RuntimeError: unhandled worker exception"},
+    }
+    parsed = rpc_framing._parse_error(err)
+    assert parsed.type_slug == "internal-error"
+    assert parsed.detail == "RuntimeError: unhandled worker exception"
+
+
+def test_parse_error_detail_is_capped_and_string_only() -> None:
+    """A non-string or oversized worker ``data.detail`` is ignored / bounded (fail closed)."""
+    too_long = {
+        "code": -32603,
+        "message": "m",
+        "data": {"type": "internal-error", "detail": "z" * 9999},
+    }
+    assert len(rpc_framing._parse_error(too_long).detail or "") == rpc_framing._MAX_DETAIL_CHARS
+    non_str = {"code": -32603, "message": "m", "data": {"type": "internal-error", "detail": 123}}
+    assert rpc_framing._parse_error(non_str).detail is None
+
+
+def test_call_method_error_logs_redacted_detail_and_does_not_change_envelope(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A worker method error logs slug+detail via SAFE keys; client envelope is unchanged."""
+    import logging
+
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+
+    err = {
+        "jsonrpc": "2.0",
+        "error": {
+            "code": -32603,
+            "message": "internal worker error",
+            "data": {
+                "type": "internal-error",
+                "detail": "NullPointerException: unhandled worker exception",
+            },
+        },
+    }
+    t = threading.Thread(target=_serve_one, args=(wrk, err), daemon=True)
+    t.start()
+    with caplog.at_level(logging.WARNING), pytest.raises(GhidraMcpError) as ei:
+        adapter.list_exports("s", s.ListExportsIn(session_id="s"))
+    t.join(timeout=2)
+
+    # Client envelope: mapped to INTERNAL, generic message — detail is NOT on it.
+    assert ei.value.envelope.type is ErrorType.INTERNAL
+    assert "NullPointerException" not in ei.value.envelope.detail
+    assert worker.killed == 0  # a healthy worker returning a method error is NOT killed
+
+    rec = next(r for r in caplog.records if r.message == "worker.method_error")
+    # Safe extra keys carry the diagnostic for server-side logs.
+    assert rec.slug == "internal-error"  # type: ignore[attr-defined]
+    assert rec.detail == "NullPointerException: unhandled worker exception"  # type: ignore[attr-defined]
+    assert rec.method == "exports"  # type: ignore[attr-defined]  # RPC name (list_exports→"exports")
+    wrk.close()
+
+
 def test_serve_connection_round_trip_then_shutdown() -> None:
     a, b = socket.socketpair(socket.AF_UNIX)
     be = _FakeBackend()

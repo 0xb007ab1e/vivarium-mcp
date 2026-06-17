@@ -124,6 +124,13 @@ The worker returns JSON-RPC errors with a `data.type` slug that the server maps 
 Worker error `message` MUST be safe (no host paths/stack); full detail stays in worker logs. The
 server never forwards a worker stack trace to the client.
 
+**Optional `data.detail` (v1.3 — ADR-024 / F2-F3 PR-1; ADDITIVE, worker → server only):** the error
+object MAY carry an optional `data.detail` string, **redacted at the worker** to the *exception class
+name + a fixed template* (never the raw `str(exc)`, which can echo binary-derived text) and
+length-capped. The server logs it (redacted, under the correlation id) to make an otherwise-opaque
+`internal-error` diagnosable; it is **never** placed on the client-facing `ErrorEnvelope` (which has
+no `data` field and forbids extras). Optional + ignorable; no existing field changes.
+
 ## 6. Timeout & kill semantics (TB2/TB3 — DoS)
 
 - Every RPC call carries a **deadline** = the per-tool timeout (or per-analysis timeout for
