@@ -22,10 +22,23 @@ Security:
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from ghidra_mcp.ghidra import rpc_framing
 from ghidra_mcp.ghidra.rpc_framing import FramingError, RpcProtocolError
+
+#: A worker-side progress emitter: ``emit_progress(percent, phase)`` frames + sends one
+#: ``$/progress`` notification on the session socket (ADR-030 Phase 1). Threaded into ``analyze``
+#: ONLY when the request opted in; the default-path backend never receives one (byte-for-byte same).
+ProgressEmitter = Callable[[int | None, str], None]
+
+#: Worker-side minimum spacing between EMITTED progress frames (ADR-030 Phase 1). The worker
+#: coalesces (drops) progress callbacks arriving sooner than this so a Ghidra ``TaskMonitor`` that
+#: fires very frequently cannot flood the socket; the server ALSO bounds count/interval (defense in
+#: depth — TB2/TB3). Independent of analysis correctness — dropping a frame only drops a heartbeat.
+_WORKER_MIN_PROGRESS_INTERVAL_S = 0.25
 
 # JSON-RPC error codes (rpc-protocol.md §5). Public so the JVM backend can raise WorkerError with
 # the right code without importing private names.
@@ -136,8 +149,15 @@ class GhidraBackend(Protocol):
         """Import the binary into the worker's project."""
         ...
 
-    def analyze(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Run auto-analysis (bounded by the worker's own analysis budget)."""
+    def analyze(
+        self, params: dict[str, Any], *, emit_progress: ProgressEmitter | None = None
+    ) -> dict[str, Any]:
+        """Run auto-analysis (bounded by the worker's own analysis budget).
+
+        ``emit_progress`` is supplied by the dispatch ONLY when the request opted in (ADR-030
+        Phase 1; ``params["progress"]`` truthy). When ``None`` (the default, and for every
+        non-opted-in call) the backend runs the byte-for-byte unchanged analysis with no frames.
+        """
         ...
 
     def decompile_function(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -296,16 +316,28 @@ class GhidraBackend(Protocol):
         ...
 
 
-def dispatch(backend: GhidraBackend, method: str, params: dict[str, Any]) -> dict[str, Any]:
+def dispatch(
+    backend: GhidraBackend,
+    method: str,
+    params: dict[str, Any],
+    *,
+    emit_progress: ProgressEmitter | None = None,
+) -> dict[str, Any]:
     """Route one validated request to the backend; control methods are handled here.
 
     ``ping`` returns a liveness probe; ``shutdown`` is signaled to the loop by the server (not the
     backend). Both bypass the backend.
 
+    The ``emit_progress`` callable (built by the loop, bound to the session socket) is forwarded to
+    ``analyze`` ONLY when the request opted in (ADR-030 Phase 1: ``params["progress"]`` truthy). For
+    every other method — and for an ``analyze`` that did NOT opt in — the backend is called exactly
+    as before (no emitter), so the default path is byte-for-byte unchanged.
+
     Args:
         backend: The JVM-touching backend.
         method: The RPC method name (already known to be in :data:`RPC_METHODS`).
         params: The request parameters.
+        emit_progress: The socket-bound progress emitter from the loop, or ``None``.
 
     Returns:
         The backend's plain result dict (or ``{"ok": true}`` for ``ping``).
@@ -320,8 +352,30 @@ def dispatch(backend: GhidraBackend, method: str, params: dict[str, Any]) -> dic
     handler = getattr(backend, method, None)
     if handler is None:  # defensive: method in allow-list but backend lacks it
         raise WorkerError(CODE_METHOD_NOT_FOUND, "method not implemented")
+    if method == "analyze" and emit_progress is not None and _progress_opted_in(params):
+        # Opted-in analyze: thread the socket-bound emitter so the backend's TaskMonitor can stream
+        # bounded $/progress frames BEFORE the response (ADR-030 Phase 1). Keyword-only so a backend
+        # that ignores it (or a fake) still satisfies the contract.
+        analyzed: dict[str, Any] = backend.analyze(params, emit_progress=emit_progress)
+        return analyzed
     result: dict[str, Any] = handler(params)  # narrow the dynamic getattr result to the contract
     return result
+
+
+def _progress_opted_in(params: dict[str, Any]) -> bool:
+    """Return whether an ``analyze`` request opted into ``$/progress`` frames (ADR-030 Phase 1).
+
+    Strict truthiness on the additive ``progress`` key: ONLY a literal ``True`` opts in; a missing
+    key, ``False``, or any non-bool is treated as not-opted-in (fail safe — a malformed value can
+    only ever DISABLE progress, never silently enable it). Pure; unit-tested.
+
+    Args:
+        params: The ``analyze`` request params.
+
+    Returns:
+        ``True`` only when ``params["progress"]`` is the boolean ``True``.
+    """
+    return params.get("progress") is True
 
 
 def build_response(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
@@ -387,14 +441,24 @@ def build_error(
     }
 
 
-def handle_request(backend: GhidraBackend, obj: dict[str, Any]) -> dict[str, Any]:
+def handle_request(
+    backend: GhidraBackend,
+    obj: dict[str, Any],
+    *,
+    emit_progress: ProgressEmitter | None = None,
+) -> dict[str, Any]:
     """Validate one decoded request and produce its response (success or error).
 
-    Pure (no I/O): takes the decoded JSON object, returns the response object. The loop frames it.
+    Pure of socket I/O for the request/response itself (it returns the response object the loop
+    frames); the optional ``emit_progress`` (built by the loop, bound to the session socket) is the
+    only side-effecting collaborator — forwarded to :func:`dispatch` so an opted-in ``analyze`` can
+    stream bounded ``$/progress`` frames BEFORE this response (ADR-030 Phase 1). ``None`` (the
+    default, and every non-``analyze`` call) leaves the path byte-for-byte unchanged.
 
     Args:
         backend: The JVM-touching backend.
         obj: The decoded JSON-RPC request object.
+        emit_progress: The socket-bound progress emitter from the loop, or ``None``.
 
     Returns:
         The JSON-RPC response object to frame and send.
@@ -409,7 +473,7 @@ def handle_request(backend: GhidraBackend, obj: dict[str, Any]) -> dict[str, Any
     if not isinstance(params, dict):
         return build_error(request_id, CODE_INVALID_PARAMS, "params must be an object")
     try:
-        result = dispatch(backend, method, params)
+        result = dispatch(backend, method, params, emit_progress=emit_progress)
     except WorkerError as exc:
         return build_error(request_id, exc.code, exc.safe_message)
     except Exception as exc:
@@ -492,12 +556,62 @@ def read_frame(conn: _Conn, *, max_frame_bytes: int) -> dict[str, Any]:
     return rpc_framing.decode_body(body)
 
 
+def _make_progress_emitter(
+    conn: _Conn, request_id: str, *, max_frame_bytes: int
+) -> ProgressEmitter:
+    """Build a socket-bound ``$/progress`` emitter for one request (ADR-030 Phase 1).
+
+    The returned ``emit_progress(percent, phase)`` frames a ``$/progress`` notification (correlated
+    to ``request_id``) and sends it on ``conn``, BEFORE the request's eventual response. It is the
+    worker side of the additive protocol and carries the SAFE percent + closed-vocabulary phase ONLY
+    — the caller (the backend's ``TaskMonitor`` bridge) MUST already have mapped any Ghidra state to
+    a closed phase; no binary-derived ``TaskMonitor`` text is ever passed here (master §5).
+
+    Bounds (defense in depth — the server also bounds count/interval): the emitter COALESCES (drops)
+    a call arriving sooner than :data:`_WORKER_MIN_PROGRESS_INTERVAL_S` after the last EMITTED one,
+    and silently swallows a send error / an out-of-vocabulary phase (a progress heartbeat must never
+    crash analysis or leak — :func:`rpc_framing.build_progress` validates the phase and raises
+    ``ValueError`` on a bad one, which is caught here and dropped).
+
+    Args:
+        conn: The session connection to send frames on.
+        request_id: The id of the request these frames correlate to.
+        max_frame_bytes: Hard frame cap (shared §3 cap).
+
+    Returns:
+        A ``emit_progress(percent, phase)`` callable.
+    """
+    state = {"last_emit": None}  # type: dict[str, float | None]
+
+    def emit_progress(percent: int | None, phase: str) -> None:
+        now = time.monotonic()
+        last = state["last_emit"]
+        if last is not None and (now - last) < _WORKER_MIN_PROGRESS_INTERVAL_S:
+            return  # coalesce: too soon since the last emitted frame
+        try:
+            notification = rpc_framing.build_progress(request_id, percent, phase)
+            frame = rpc_framing.encode_frame(notification, max_frame_bytes=max_frame_bytes)
+            conn.sendall(frame)
+        except (ValueError, FramingError, OSError):
+            # A heartbeat must never crash analysis: an invalid phase (ValueError), an over-cap
+            # frame (FramingError — impossible for a tiny progress frame, but defensive), or a
+            # transient socket error are all swallowed (the response/EOF path still governs).
+            return
+        state["last_emit"] = now
+
+    return emit_progress
+
+
 def serve_connection(conn: _Conn, backend: GhidraBackend, *, max_frame_bytes: int) -> None:
     """Serve requests on one accepted connection until shutdown/EOF/protocol error.
 
     The server is the worker's sole client (one connection per session). On a framing/protocol
     violation or EOF the loop returns; the worker then exits (the server treats a closed socket as
     worker-unavailable and evicts — rpc-protocol.md §6).
+
+    For an opted-in ``analyze`` (ADR-030 Phase 1) a per-request, socket-bound progress emitter is
+    built and threaded through :func:`handle_request`; the backend's ``TaskMonitor`` calls it to
+    stream bounded ``$/progress`` frames BEFORE the response. Every other request path is unchanged.
 
     Args:
         conn: The accepted stream connection.
@@ -509,7 +623,14 @@ def serve_connection(conn: _Conn, backend: GhidraBackend, *, max_frame_bytes: in
             obj = read_frame(conn, max_frame_bytes=max_frame_bytes)
         except (FramingError, RpcProtocolError, EOFError, OSError):
             return  # close the connection; worker will exit and be evicted by the server
-        response = handle_request(backend, obj)
+        emitter: ProgressEmitter | None = None
+        request_id = obj.get("id")
+        if obj.get("method") == "analyze" and isinstance(request_id, str):
+            # Build the emitter for any analyze with a valid id; dispatch only USES it when the
+            # request actually opted in (_progress_opted_in), so building it unconditionally here is
+            # cheap and keeps the opt-in decision in one place.
+            emitter = _make_progress_emitter(conn, request_id, max_frame_bytes=max_frame_bytes)
+        response = handle_request(backend, obj, emit_progress=emitter)
         try:
             frame = rpc_framing.encode_frame(response, max_frame_bytes=max_frame_bytes)
             conn.sendall(frame)
