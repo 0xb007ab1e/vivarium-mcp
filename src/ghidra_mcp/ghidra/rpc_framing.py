@@ -50,6 +50,17 @@ class RpcProtocolError(Exception):
 #: outbound bound so a buggy/hostile worker cannot bloat a log line.
 _MAX_DETAIL_CHARS = 256
 
+#: JSON-RPC method name for the additive worker→server progress NOTIFICATION (ADR-030 Phase 1,
+#: rpc-protocol.md §4). A notification carries NO top-level ``id`` (per JSON-RPC 2.0), so it can
+#: never be mistaken for the request's correlated response.
+PROGRESS_METHOD = "$/progress"
+
+#: CLOSED phase vocabulary for a progress frame (ADR-030 Phase 1). The worker maps Ghidra's
+#: free-form ``TaskMonitor`` state onto exactly one of these — its raw message (which embeds
+#: attacker-controlled symbol/function names) NEVER crosses the boundary (master §5 redaction).
+#: ``analyzing`` is the safe catch-all when a cleaner phase mapping is unavailable.
+PROGRESS_PHASES: frozenset[str] = frozenset({"importing", "analyzing", "finalizing"})
+
 
 @dataclass(frozen=True, slots=True)
 class RpcError:
@@ -68,6 +79,28 @@ class RpcError:
     message: str
     type_slug: str | None
     detail: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RpcProgress:
+    """A decoded ``$/progress`` notification (ADR-030 Phase 1; rpc-protocol.md §4).
+
+    A notification, NOT a response: it carries no top-level ``id`` and is one of N frames the worker
+    may send (in order) BEFORE the final response for an opted-in ``analyze`` call. Its content is
+    deliberately minimal and SAFE — a percent and a closed-vocabulary phase only; NO binary-derived
+    ``TaskMonitor`` text ever reaches this type (master §5 redaction).
+
+    Attributes:
+        request_id: The id of the ``analyze`` request this progress pertains to (a ``params`` field,
+            not the JSON-RPC top-level ``id`` — notifications have none). Used to confirm the frame
+            correlates to the in-flight call.
+        percent: Completion estimate ``0..100``, or ``None`` when the worker has no estimate.
+        phase: A value from :data:`PROGRESS_PHASES` (closed vocabulary) — safe to log.
+    """
+
+    request_id: str
+    percent: int | None
+    phase: str
 
 
 class RpcCallError(Exception):
@@ -197,6 +230,116 @@ def parse_response(obj: dict[str, Any], *, expected_id: str) -> dict[str, Any]:
     if not isinstance(result, dict):
         raise RpcProtocolError("result is not a JSON object")
     return result
+
+
+def is_progress_notification(obj: dict[str, Any]) -> bool:
+    """Classify a decoded frame as a ``$/progress`` notification (ADR-030 Phase 1).
+
+    A frame is a progress notification iff it declares ``method == "$/progress"`` AND carries NO
+    top-level ``id`` (per JSON-RPC 2.0 a notification has no id). The id check is what guarantees a
+    notification can never be mistaken for the request's correlated response, even if a
+    buggy/hostile worker also set a ``method`` on a response-shaped frame (fail closed: a frame
+    with both a ``$/progress`` method AND an id is NOT treated as progress — it falls through to
+    response parsing, which then rejects it on the exactly-one-of-result/error rule).
+
+    Args:
+        obj: The decoded frame object.
+
+    Returns:
+        ``True`` only for a well-formed progress notification (method matches, no top-level id).
+    """
+    return obj.get("method") == PROGRESS_METHOD and "id" not in obj
+
+
+def parse_progress(obj: dict[str, Any], *, expected_id: str) -> RpcProgress:
+    """Validate a ``$/progress`` notification and return its safe payload (ADR-030 Phase 1).
+
+    Strict, fail-closed validation (the worker is potentially hostile — TB2/TB3): the method must be
+    ``$/progress`` with no top-level id; ``params`` must be an object whose ``id`` correlates to the
+    in-flight request, whose ``percent`` is an int in ``0..100`` or ``null``, and whose ``phase`` is
+    in the CLOSED :data:`PROGRESS_PHASES` vocabulary. Anything else raises — NO binary-derived text
+    is ever read from the frame (master §5).
+
+    Args:
+        obj: The decoded notification object (already classified by :func:`is_progress_notification`
+            in the loop, but re-checked here so the parser is safe to call standalone).
+        expected_id: The id of the ``analyze`` request the progress must correlate to.
+
+    Returns:
+        The validated, safe :class:`RpcProgress`.
+
+    Raises:
+        RpcProtocolError: If the notification is malformed, mis-correlated, or carries an
+            out-of-range percent / out-of-vocabulary phase.
+    """
+    if obj.get("jsonrpc") != "2.0":
+        raise RpcProtocolError("progress: missing or wrong jsonrpc version")
+    if obj.get("method") != PROGRESS_METHOD or "id" in obj:
+        raise RpcProtocolError("progress: not a $/progress notification")
+    params = obj.get("params")
+    if not isinstance(params, dict):
+        raise RpcProtocolError("progress: params is not a JSON object")
+    if params.get("id") != expected_id:
+        raise RpcProtocolError("progress: id does not correlate to request")
+    percent = _parse_percent(params.get("percent"))
+    phase = params.get("phase")
+    if not isinstance(phase, str) or phase not in PROGRESS_PHASES:
+        raise RpcProtocolError("progress: phase not in the closed vocabulary")
+    return RpcProgress(request_id=expected_id, percent=percent, phase=phase)
+
+
+def _parse_percent(raw: Any) -> int | None:
+    """Validate a progress ``percent``: an int in ``0..100`` or ``None`` (fail closed otherwise).
+
+    A ``bool`` is rejected even though it is an ``int`` subclass in Python — a hostile worker MUST
+    send a real integer, not ``true``/``false`` (defensive type-narrowing).
+
+    Args:
+        raw: The raw ``params.percent`` value.
+
+    Returns:
+        The validated percent, or ``None`` when the worker reported no estimate.
+
+    Raises:
+        RpcProtocolError: If ``raw`` is neither ``None`` nor an int in ``[0, 100]``.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise RpcProtocolError("progress: percent is not an integer or null")
+    if raw < 0 or raw > 100:
+        raise RpcProtocolError("progress: percent out of range 0..100")
+    return raw
+
+
+def build_progress(request_id: str, percent: int | None, phase: str) -> dict[str, Any]:
+    """Construct a ``$/progress`` JSON-RPC notification (worker → server; ADR-030 Phase 1).
+
+    Used by the worker side. The result carries NO top-level ``id`` (notification), and its content
+    is the safe percent + closed-vocabulary phase ONLY — callers MUST NOT pass any binary-derived
+    ``TaskMonitor`` message (master §5). The ``phase`` is asserted in-vocabulary so a coding mistake
+    fails loudly here rather than emitting an unparseable frame.
+
+    Args:
+        request_id: The ``analyze`` request id this progress pertains to (placed in ``params.id``).
+        percent: Completion estimate ``0..100`` or ``None``.
+        phase: A value from :data:`PROGRESS_PHASES`.
+
+    Returns:
+        A JSON-RPC 2.0 notification dict ready to encode + frame.
+
+    Raises:
+        ValueError: If ``phase`` is not in :data:`PROGRESS_PHASES` or ``percent`` is out of range.
+    """
+    if phase not in PROGRESS_PHASES:
+        raise ValueError("progress phase not in the closed vocabulary")
+    if percent is not None and (percent < 0 or percent > 100):
+        raise ValueError("progress percent out of range 0..100")
+    return {
+        "jsonrpc": "2.0",
+        "method": PROGRESS_METHOD,
+        "params": {"id": request_id, "percent": percent, "phase": phase},
+    }
 
 
 def _parse_error(err: Any) -> RpcError:

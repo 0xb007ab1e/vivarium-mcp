@@ -123,6 +123,19 @@ _SOCKET_DIR_TOKEN_LEN = 16
 #: (the default-is-no-op guarantee — see :func:`_analyze_params`).
 _DEFAULT_PROFILE = "default"
 
+# --- $/progress flood bounds (ADR-030 Phase 1; worker is potentially hostile — TB2/TB3) --------
+#: Hard cap on ``$/progress`` notification frames accepted per opted-in ``analyze`` call. Exceeding
+#: this is a protocol violation handled FAIL-CLOSED: the worker is killed + the session evicted (the
+#: same universal kill handler as any TB2 violation — rpc-protocol.md §6). A finite cap prevents a
+#: hostile worker from streaming progress forever to keep the read-loop busy (the un-extended
+#: deadline already bounds wall-clock; this bounds frame COUNT independently).
+_MAX_PROGRESS_FRAMES = 10_000
+#: Minimum spacing between progress frames the server will RELAY to the log; a frame arriving sooner
+#: than this after the last relayed one is COALESCED (dropped — not logged) but still counts toward
+#: :data:`_MAX_PROGRESS_FRAMES`. Bounds log volume from a chatty (or hostile) worker without killing
+#: it for mere chattiness; only exceeding the hard frame count is fatal.
+_MIN_PROGRESS_INTERVAL_S = 0.5
+
 #: Module logger. RPC-layer failures are logged SERVER-SIDE with the underlying exception
 #: (socket/framing errors — no binary content or secrets) before being mapped to the
 #: boundary-safe public envelope, so operability does not depend on the client-facing message
@@ -159,17 +172,22 @@ def _default_source_size(source_ref: str) -> int:
     return Path(source_ref).stat().st_size
 
 
-def _analyze_params(timeout_seconds: int | None, profile: str) -> dict[str, Any]:
-    """Shape the ``analyze`` RPC params, preserving the default-is-no-op guarantee (ADR-029 B).
+def _analyze_params(
+    timeout_seconds: int | None, profile: str, *, progress: bool = False
+) -> dict[str, Any]:
+    """Shape the ``analyze`` RPC params, preserving the default-is-no-op guarantee (ADR-029/030).
 
-    Pure (no I/O) so it is unit-testable. When ``profile`` is the default the returned params are
-    IDENTICAL to the pre-ADR-029 shape (``{"timeout_seconds": ...}`` only) — the additive
-    ``profile`` key is OMITTED, so an unchanged/omitted profile routes the worker down the exact
-    same code path as before this increment. ``light``/``deep`` add the explicit ``profile`` key.
+    Pure (no I/O) so it is unit-testable. When ``profile`` is the default AND ``progress`` is
+    ``False`` the returned params are IDENTICAL to the pre-ADR-029 shape
+    (``{"timeout_seconds": ...}`` only) — both additive keys are OMITTED, so the unchanged path
+    routes the worker down the exact same code as before these increments. ``light``/``deep`` add
+    the explicit ``profile`` key; ``progress=True`` adds the explicit ``progress`` key (opt-in to
+    ``$/progress`` frames, ADR-030).
 
     Args:
         timeout_seconds: The (already server-clamped) in-worker budget hint, or ``None``.
         profile: The validated analyzer-depth preset (``default``/``light``/``deep``).
+        progress: Whether the caller opted into worker→server progress frames (ADR-030 Phase 1).
 
     Returns:
         The JSON-serializable params dict for the ``analyze`` RPC.
@@ -177,7 +195,49 @@ def _analyze_params(timeout_seconds: int | None, profile: str) -> dict[str, Any]
     params: dict[str, Any] = {"timeout_seconds": timeout_seconds}
     if profile != _DEFAULT_PROFILE:
         params["profile"] = profile
+    if progress:
+        params["progress"] = True
     return params
+
+
+def _progress_log_payload(progress: rpc_framing.RpcProgress) -> dict[str, Any]:
+    """Build the redacted, log-only ``extra`` payload for a relayed progress frame (master §5).
+
+    Carries the SAFE percent + closed-vocabulary phase ONLY. There is no field here that could hold
+    binary-derived ``TaskMonitor`` text — :class:`rpc_framing.RpcProgress` cannot even represent
+    one, so the redaction is structural (the type, not a scrub pass). Keyed so it never trips the
+    logger's sensitive-key redactor.
+
+    Args:
+        progress: The validated progress notification.
+
+    Returns:
+        A dict of safe structured-log fields (``percent`` + ``phase`` only).
+    """
+    return {"percent": progress.percent, "phase": progress.phase}
+
+
+def _should_relay_progress(
+    last_relayed_at: float | None, now: float, min_interval_s: float
+) -> bool:
+    """Decide whether to RELAY (log) a progress frame given the last relayed time (pure; ADR-030).
+
+    Rate-limits log volume from a chatty/hostile worker: the first frame is always relayed; a later
+    frame is relayed only if at least ``min_interval_s`` has elapsed since the last RELAYED one,
+    otherwise it is coalesced (dropped from the log — but the caller still counts it toward the hard
+    frame cap). Pure (monotonic ``now`` passed in) so it is unit-testable without a clock.
+
+    Args:
+        last_relayed_at: Monotonic time of the last relayed frame, or ``None`` if none yet.
+        now: The current monotonic time.
+        min_interval_s: Minimum spacing between relayed frames.
+
+    Returns:
+        ``True`` to relay (log) this frame; ``False`` to coalesce it.
+    """
+    if last_relayed_at is None:
+        return True
+    return (now - last_relayed_at) >= min_interval_s
 
 
 class _Session:
@@ -373,10 +433,18 @@ class RpcGhidraAdapter:
         default the analyze RPC params are IDENTICAL to today's (no ``profile`` key — the worker
         takes the unchanged code path); ``light``/``deep`` add the explicit preset.
 
+        The additive ``progress`` flag (ADR-030 Phase 1) opts into worker→server ``$/progress``
+        notification frames. When ``False`` (the default) the params and the read path are
+        byte-for-byte today's (a single response frame); when ``True`` the call enters a bounded
+        read-loop that relays each ``$/progress`` to the SERVER LOG (no MCP client relay — Phase 2)
+        and returns the final response. The deadline below is computed ONCE and bounds the WHOLE
+        loop — progress frames never extend it (ADR-002 SIGKILL still fires on a hung/chatty
+        worker).
+
         Args:
             session_id: The session.
             args: Analysis arguments (optional timeout override, already clamped by the server; the
-                analyzer profile).
+                analyzer profile; the progress opt-in).
 
         Returns:
             Updated :class:`SessionInfo`.
@@ -384,6 +452,7 @@ class RpcGhidraAdapter:
         # Clamp the client override DOWN to the configured analysis ceiling (defense-in-depth DoS:
         # the schema bounds timeout_seconds to <=3600, but the deployment's configured max may be
         # lower — never let a per-call arg exceed it). No override → use the configured ceiling.
+        # NOTE: this deadline is the ONE-SHOT analysis deadline (ADR-030: NOT extended by progress).
         deadline = (
             min(float(args.timeout_seconds), self._analysis_timeout_s)
             if args.timeout_seconds
@@ -392,8 +461,9 @@ class RpcGhidraAdapter:
         result = self._call(
             session_id,
             "analyze",
-            _analyze_params(args.timeout_seconds, args.profile),
+            _analyze_params(args.timeout_seconds, args.profile, progress=args.progress),
             timeout_s=deadline,
+            expect_progress=args.progress,
         )
         return _validate(s.SessionInfo, result)
 
@@ -1072,7 +1142,13 @@ class RpcGhidraAdapter:
             return "unknown"
 
     def _call(
-        self, session_id: str, method: str, params: dict[str, Any], *, timeout_s: float
+        self,
+        session_id: str,
+        method: str,
+        params: dict[str, Any],
+        *,
+        timeout_s: float,
+        expect_progress: bool = False,
     ) -> dict[str, Any]:
         """Send one JSON-RPC request and read its response, enforcing kill-on-failure semantics.
 
@@ -1083,11 +1159,20 @@ class RpcGhidraAdapter:
         - worker crash / closed socket mid-call → SIGKILL worker, ``worker-unavailable``;
         - worker JSON-RPC ``error`` response → map ``data.type`` slug → public error type.
 
+        When ``expect_progress`` is set (only the opted-in ``analyze`` path — ADR-030 Phase 1) the
+        single read is replaced by a bounded read-loop (:meth:`_read_response_with_progress`) that
+        relays ``$/progress`` notifications to the log and returns the final response. ``timeout_s``
+        bounds the WHOLE loop (computed once by the caller; NOT extended per frame). When unset the
+        path is byte-for-byte today's single-frame read — IDENTICAL behaviour for every non-opted-in
+        call.
+
         Args:
             session_id: The session whose worker handles the call.
             method: The RPC method name.
             params: Method parameters.
-            timeout_s: Wall-clock deadline for this call.
+            timeout_s: Wall-clock deadline for this call (and for the whole progress loop).
+            expect_progress: Whether to run the progress-aware read-loop (opted-in ``analyze``
+                only).
 
         Returns:
             The worker's ``result`` object.
@@ -1106,9 +1191,18 @@ class RpcGhidraAdapter:
         )
         try:
             sock = self._ensure_connected(sess)
-            sock.settimeout(timeout_s)
-            self._send_all(sock, frame)
-            response_obj = self._read_frame(sock)
+            self._send_all_with_timeout(sock, frame, timeout_s)
+            if expect_progress:
+                # Bounded progress read-loop: relay $/progress to the log, return the response.
+                # The deadline bounds the WHOLE loop and is NOT extended by progress frames (ADR-030
+                # / ADR-002): a worker emitting progress forever still hits the un-extended SIGKILL.
+                response_obj = self._read_response_with_progress(
+                    sock, expected_id=request_id, method=method, total_timeout_s=timeout_s
+                )
+            else:
+                # Unchanged single-frame path — IDENTICAL to today for every non-opted-in call.
+                sock.settimeout(timeout_s)
+                response_obj = self._read_frame(sock)
             return rpc_framing.parse_response(response_obj, expected_id=request_id)
         except RpcCallError as exc:
             # A method-level failure: the worker is healthy; do NOT kill. Map the slug.
@@ -1221,6 +1315,88 @@ class RpcGhidraAdapter:
             data: The complete frame bytes.
         """
         sock.sendall(data)
+
+    @staticmethod
+    def _send_all_with_timeout(sock: socket.socket, data: bytes, timeout_s: float) -> None:
+        """Write a full frame under the call deadline (sets the socket timeout, then sends).
+
+        Factored out of :meth:`_call` so both the unchanged and the progress paths arm the write
+        with the same deadline before the read phase reuses/shrinks it.
+
+        Args:
+            sock: The connected stream socket.
+            data: The complete frame bytes.
+            timeout_s: The send deadline.
+        """
+        sock.settimeout(timeout_s)
+        sock.sendall(data)
+
+    def _read_response_with_progress(
+        self, sock: socket.socket, *, expected_id: str, method: str, total_timeout_s: float
+    ) -> dict[str, Any]:
+        """Read frames until the final response, relaying ``$/progress`` to the log (ADR-030 §1).
+
+        Bounded read-loop for an opted-in ``analyze`` call. Each iteration reads one frame within
+        the SHRINKING remaining time of the ONE-SHOT deadline (``total_timeout_s`` from call start —
+        progress frames NEVER extend it, ADR-002), then classifies it:
+
+        - ``$/progress`` notification → validate + bound (count + coalesce) + relay percent/phase to
+          the log, then continue waiting for the response;
+        - anything else → return it for :func:`rpc_framing.parse_response` to validate as the
+          response (a malformed/mis-correlated frame fails closed there → kill + evict).
+
+        Flood bounds (worker is potentially hostile — TB2/TB3): more than
+        :data:`_MAX_PROGRESS_FRAMES` progress frames is a protocol violation → raise
+        :class:`RpcProtocolError` (the caller maps it to kill + ``worker-unavailable``). A frame
+        arriving sooner than :data:`_MIN_PROGRESS_INTERVAL_S` after the last RELAYED one is
+        coalesced (not logged) but still counts toward the hard cap. The per-frame size cap is
+        enforced by
+        :meth:`_read_frame` (shared §3 cap). NO unbounded server-side buffering — frames are
+        processed and discarded one at a time.
+
+        Args:
+            sock: The connected stream socket.
+            expected_id: The ``analyze`` request id progress + the response must correlate to.
+            method: The RPC method name (for log context only — always ``"analyze"`` here).
+            total_timeout_s: The one-shot deadline for the whole loop (from call start).
+
+        Returns:
+            The decoded final response frame (success or error envelope), for the caller to parse.
+
+        Raises:
+            RpcProtocolError: On a progress flood (count cap) or a malformed progress notification.
+            FramingError: On a short/oversized frame (per-frame size cap).
+            TimeoutError: If the deadline elapses before the response arrives.
+            EOFError: If the worker closes the socket mid-stream.
+        """
+        deadline = time.monotonic() + total_timeout_s
+        progress_count = 0
+        last_relayed_at: float | None = None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Deadline elapsed inside the loop → behave exactly like a single-read timeout
+                # (caller kills the worker + returns the TIMEOUT envelope). Deadline NOT extended.
+                raise TimeoutError("analysis deadline elapsed during progress read-loop")
+            sock.settimeout(remaining)
+            frame = self._read_frame(sock)
+            if not rpc_framing.is_progress_notification(frame):
+                return frame  # the response (or error) frame — let the caller validate it
+            progress_count += 1
+            if progress_count > _MAX_PROGRESS_FRAMES:
+                # A worker streaming endless progress is a protocol violation (fail closed → kill).
+                raise RpcProtocolError("progress frame flood exceeded the per-call cap")
+            progress = rpc_framing.parse_progress(frame, expected_id=expected_id)
+            now = time.monotonic()
+            if _should_relay_progress(last_relayed_at, now, _MIN_PROGRESS_INTERVAL_S):
+                last_relayed_at = now
+                # Redacted, log-only relay (percent + closed-vocabulary phase ONLY — master §5).
+                # Phase 1 is LOG-ONLY: NO MCP client relay / report_progress wiring (Phase 2).
+                _log.info(
+                    "analyze.progress",
+                    extra={"method": method, **_progress_log_payload(progress)},
+                )
+            # else: coalesced (too-soon since the last relayed frame) — counted but not logged.
 
     def _read_frame(self, sock: socket.socket) -> dict[str, Any]:
         """Read exactly one length-prefixed JSON-RPC frame from the socket.

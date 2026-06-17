@@ -102,6 +102,29 @@ def _analyzer_options_for_profile(profile: str | None) -> dict[str, bool]:
     return dict(preset)
 
 
+def _monitor_percent(value: int, maximum: int) -> int | None:
+    """Map a Ghidra ``TaskMonitor`` (value, maximum) to a SAFE percent ``0..100`` (PURE; ADR-030).
+
+    Returns ``None`` when there is no usable denominator (an indeterminate monitor with
+    ``maximum <= 0``) so the progress frame honestly reports "no estimate" rather than a fake 0.
+    Otherwise clamps ``round(100 * value / maximum)`` into ``[0, 100]`` so a monitor that briefly
+    reports value > maximum (Ghidra does, transiently) can never emit an out-of-range percent the
+    server would reject (fail closed → never trip the per-frame validation). Pure + unit-tested; the
+    monitor object that calls it is the ``# pragma: no cover`` JVM edge.
+
+    Args:
+        value: The monitor's current progress value.
+        maximum: The monitor's maximum (``<= 0`` means indeterminate).
+
+    Returns:
+        A percent in ``0..100``, or ``None`` when no estimate is available.
+    """
+    if maximum <= 0:
+        return None
+    percent = round(100 * value / maximum)
+    return max(0, min(100, percent))
+
+
 def _require(params: dict[str, Any], key: str) -> Any:
     """Fetch a required param or raise a worker ``invalid-params`` error.
 
@@ -159,18 +182,30 @@ class PyGhidraBackend:
         source_ref = _require(params, "source_ref")
         return self._gh_import(str(source_ref))
 
-    def analyze(self, params: dict[str, Any]) -> dict[str, Any]:
+    def analyze(
+        self,
+        params: dict[str, Any],
+        *,
+        emit_progress: Callable[[int | None, str], None] | None = None,
+    ) -> dict[str, Any]:
         """Run Ghidra auto-analysis on the imported program.
 
         Args:
-            params: ``{"timeout_seconds": int | None, "profile"?: str}`` — the server kills the
-                worker on its own deadline (the timeout is an in-worker budget hint); ``profile``
-                (ADR-029 B; additive, absent for the default) selects the analyzer-depth preset.
+            params: ``{"timeout_seconds": int | None, "profile"?: str, "progress"?: bool}`` — the
+                server kills the worker on its own deadline (the timeout is an in-worker budget
+                hint); ``profile`` (ADR-029 B; additive, absent for the default) selects the
+                analyzer-depth preset; ``progress`` (ADR-030 Phase 1; additive) is the opt-in the
+                dispatch reads to decide whether to supply ``emit_progress``.
+            emit_progress: Supplied by the dispatch ONLY for an opted-in request (ADR-030 Phase 1).
+                When ``None`` (the default, and every non-opted-in call) analysis runs the
+                byte-for-byte unchanged bare ``pyghidra.analyze`` with NO progress monitor.
 
         Returns:
             A plain ``SessionInfo``-shaped dict.
         """
-        return self._gh_analyze(params.get("timeout_seconds"), params.get("profile"))
+        return self._gh_analyze(
+            params.get("timeout_seconds"), params.get("profile"), emit_progress=emit_progress
+        )
 
     # --- read-only operations ----------------------------------------------------------------
     def decompile_function(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -565,7 +600,11 @@ class PyGhidraBackend:
         return _session_info_dict("importing", self._sha256, analysis_complete=False)
 
     def _gh_analyze(
-        self, timeout_seconds: int | None, profile: str | None = None
+        self,
+        timeout_seconds: int | None,
+        profile: str | None = None,
+        *,
+        emit_progress: Callable[[int | None, str], None] | None = None,
     ) -> dict[str, Any]:  # pragma: no cover
         """Run Ghidra auto-analysis on the open program.
 
@@ -575,6 +614,11 @@ class PyGhidraBackend:
             profile: Analyzer-depth preset (ADR-029 B). The default/``None`` applies NO option
                 overlay — a byte-for-byte no-op: the same bare ``pyghidra.analyze(program)`` as
                 before this increment runs, with the options object never touched.
+            emit_progress: When supplied (ADR-030 Phase 1, opted-in request), analysis runs under a
+                custom :class:`TaskMonitor` that calls this with (percent, closed-phase) so the
+                dispatch streams ``$/progress`` frames. When ``None`` (default + non-opted-in) the
+                IDENTICAL bare ``pyghidra.analyze(program)`` as before this increment runs — no
+                monitor object is constructed (the default-is-no-op guarantee).
 
         Returns:
             A plain ``SessionInfo``-shaped dict reporting the ``ready`` state.
@@ -605,9 +649,143 @@ class PyGhidraBackend:
             options = self._program.getOptions(self._program.ANALYSIS_PROPERTIES)
             for option_name, enabled in overlay.items():
                 options.setBoolean(option_name, enabled)
-        pyghidra.analyze(self._program)
+        if emit_progress is None:
+            # DEFAULT / non-opted-in: byte-for-byte the same bare call as before ADR-030. No monitor
+            # object is constructed and no frame is emitted — identical RPC + analysis to today.
+            pyghidra.analyze(self._program)
+        else:
+            self._run_monitored_analysis(emit_progress)
         self._analyzed = True
         return _session_info_dict("ready", self._sha256, analysis_complete=True)
+
+    def _run_monitored_analysis(
+        self, emit_progress: Callable[[int | None, str], None]
+    ) -> None:  # pragma: no cover - JVM edge
+        """Run auto-analysis under a custom progress ``TaskMonitor`` (ADR-030 Phase 1, opted-in).
+
+        REQUIRES-LIVE-VERIFICATION (flag like F2/F7 — the PM live-verifies on a real worker before
+        merge): the exact way to run Ghidra 12.1.2 auto-analysis with a *caller-supplied*
+        ``TaskMonitor`` is a JVM binding the unit suite cannot exercise. The chosen,
+        most-likely-real binding (and its documented fallback) is:
+
+          1. Build a custom ``ghidra.util.task.TaskMonitorAdapter`` subclass whose ``setProgress`` /
+             ``setMaximum`` / ``setMessage`` overrides compute a percent and emit a SAFE phase —
+             NEVER forwarding the free-form ``setMessage`` text (it embeds attacker-controlled
+             symbol names — master §5). Phase 1 maps to a single closed ``analyzing`` phase +
+             percent (a clean importing/finalizing split is not reliably exposed by the analysis
+             monitor, so the safe catch-all is used; the percent still gives real liveness).
+          2. Drive a *monitored* analysis. ``pyghidra.analyze(program)`` does NOT accept a monitor
+             on 12.1.2, so this drops to the manager path inside a started transaction:
+             ``AutoAnalysisManager.getAnalysisManager(program)`` →
+             ``mgr.reAnalyzeAll(None)`` / ``mgr.startAnalysis(monitor)`` (CONFIRM the exact
+             monitored entrypoint + whether a transaction wrap is required against the pinned
+             javadoc).
+
+        If live verification shows the manager path differs, ONLY this method changes — the framing,
+        the dispatch threading, the bounds, and the redaction (all unit-tested) are unaffected. The
+        default (no-opt-in) path in :meth:`_gh_analyze` does NOT touch any of this.
+
+        Args:
+            emit_progress: The dispatch-supplied emitter (percent, closed-phase) → ``$/progress``.
+        """
+        import jpype
+        from ghidra.app.plugin.core.analysis import (  # type: ignore[import-not-found]
+            AutoAnalysisManager,
+        )
+        from ghidra.util.task import TaskMonitor  # type: ignore[import-not-found]
+
+        program = self._require_program()
+
+        # JPype CANNOT subclass a Java CLASS (e.g. TaskMonitorAdapter) — "Java classes cannot be
+        # extended in Python". So we implement the TaskMonitor INTERFACE via ``jpype.JProxy`` over a
+        # plain Python object: Java dispatches each monitor call to the matching method below. Only
+        # the methods Ghidra's analysis actually invokes need to exist; the rest are safe no-ops.
+        class _MonitorImpl:
+            """Plain Python impl of the ``TaskMonitor`` interface → SAFE (percent, phase) emit."""
+
+            def __init__(self) -> None:
+                self._maximum = 0
+                self._progress = 0
+
+            def _emit(self) -> None:
+                # CLOSED phase + percent ONLY — the free-form ``setMessage`` text is NEVER read here
+                # (it embeds attacker-controlled symbol names — master §5 redaction).
+                emit_progress(_monitor_percent(self._progress, self._maximum), "analyzing")
+
+            def initialize(self, maximum: Any, *_: Any) -> None:
+                self._maximum = int(maximum) if maximum else 0
+                self._progress = 0
+
+            def setMaximum(self, maximum: Any) -> None:  # noqa: N802
+                self._maximum = int(maximum) if maximum else 0
+
+            def getMaximum(self) -> int:  # noqa: N802
+                return self._maximum
+
+            def setProgress(self, value: Any) -> None:  # noqa: N802
+                self._progress = int(value) if value else 0
+                self._emit()
+
+            def incrementProgress(self, n: Any = 1) -> None:  # noqa: N802
+                self._progress += int(n) if n else 0
+                self._emit()
+
+            def getProgress(self) -> int:  # noqa: N802
+                return self._progress
+
+            def setMessage(self, _message: Any) -> None:  # noqa: N802
+                self._emit()  # phase heartbeat only — message text dropped
+
+            def getMessage(self) -> str:  # noqa: N802
+                return ""
+
+            def isCancelled(self) -> bool:  # noqa: N802
+                return False
+
+            def checkCancelled(self) -> None:  # noqa: N802
+                return None
+
+            def checkCanceled(self) -> None:  # noqa: N802 - older Ghidra spelling
+                return None
+
+            def setIndeterminate(self, _flag: Any) -> None:  # noqa: N802
+                return None
+
+            def isIndeterminate(self) -> bool:  # noqa: N802
+                return self._maximum <= 0
+
+            def cancel(self) -> None:
+                return None
+
+            def clearCancelled(self) -> None:  # noqa: N802
+                return None
+
+            def clearCanceled(self) -> None:  # noqa: N802 - older Ghidra spelling
+                return None
+
+            def setCancelEnabled(self, _flag: Any) -> None:  # noqa: N802
+                return None
+
+            def isCancelEnabled(self) -> bool:  # noqa: N802
+                return True
+
+            def setShowProgressValue(self, _flag: Any) -> None:  # noqa: N802
+                return None
+
+            def addCancelledListener(self, _listener: Any) -> None:  # noqa: N802
+                return None
+
+            def removeCancelledListener(self, _listener: Any) -> None:  # noqa: N802
+                return None
+
+        monitor = jpype.JProxy(TaskMonitor, inst=_MonitorImpl())
+        manager = AutoAnalysisManager.getAnalysisManager(program)
+        transaction = program.startTransaction("auto-analysis (monitored)")
+        try:
+            manager.reAnalyzeAll(program.getMemory())
+            manager.startAnalysis(monitor)
+        finally:
+            program.endTransaction(transaction, True)
 
     def _gh_decompile(self, function: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Decompile a function with the Ghidra DecompInterface.
@@ -623,7 +801,11 @@ class PyGhidraBackend:
                 decompiler returns no result.
         """
         from ghidra.app.decompiler import DecompInterface  # type: ignore[import-not-found]
-        from ghidra.util.task import ConsoleTaskMonitor  # type: ignore[import-not-found]
+
+        # NOTE: no per-line ignore on ghidra.util.task here — mypy already records it as
+        # missing-ignored at its first import (in _run_monitored_analysis, above), so a second
+        # ignore on the same module is "unused" (same rule as _gh_search_bytes).
+        from ghidra.util.task import ConsoleTaskMonitor
         from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
 
         program = self._require_program()

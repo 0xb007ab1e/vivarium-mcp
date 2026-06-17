@@ -149,10 +149,20 @@ class SessionAnalyzeIn(_SessionScopedIn):
             depth); ``"deep"`` enables a fuller analysis set. The profile only ever REDUCES or
             adjusts analysis depth — it grants no new capability/agency (ADR-001 intact). Closed set
             (``Literal``); an unknown value is rejected by the schema (fail closed).
+        progress: Opt-in to worker→server ``$/progress`` notification frames during analysis
+            (ADR-030 Phase 1; additive). The default ``False`` is a byte-for-byte no-op — the RPC
+            params and analysis are IDENTICAL to today's (no ``progress`` key crosses the wire, the
+            worker emits no frames, the server uses the unchanged single-frame read path). When
+            ``True`` the worker emits length-prefixed ``$/progress`` notifications (percent + a
+            CLOSED phase enum ONLY — never binary-derived TaskMonitor text — master §5) on the same
+            socket, in order, BEFORE the final response. Phase 1 relays them to the SERVER LOG only
+            (no MCP client relay — that is Phase 2). The per-analysis deadline is NOT extended by
+            progress frames (ADR-002 SIGKILL still bounds a forever-emitting worker).
     """
 
     timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
     profile: Literal["default", "light", "deep"] = "default"
+    progress: bool = False
 
 
 class SessionCloseIn(_SessionScopedIn):
