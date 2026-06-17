@@ -195,6 +195,15 @@ identifier allow-list / `validate_comment_text` normalization — stored-injecti
 > RPC (`export_annotations`); import reuses the existing write RPCs (no new import RPC). See
 > `docs/adr/ADR-018-annotation-persistence.md`.
 
+> **Rename name-collisions (documenting existing behavior — ADR-026 / F5).** `rename_function`
+> **duplicate names are permitted and apply** — Ghidra keys functions by entry address, so two
+> functions may legitimately share a name (real binaries do — e.g. multiple table-builders). A
+> `rename_symbol` colliding with an existing same-namespace symbol **fails closed** (Ghidra
+> `DuplicateNameException` → transaction rollback → `analysis-failed`). The server does **not**
+> auto-suffix or reject function-name duplicates; **clients that drive many renames should
+> de-duplicate/disambiguate proposed names client-side** (the acceptance harness does). No result
+> field signals a collision (out of scope — ADR-026 option (a)).
+
 > `*` marks an `Untrusted[...]`-wrapped (binary-derived) field.
 
 ## Deferred (NOT yet built — gated, reviewed catalog additions)
