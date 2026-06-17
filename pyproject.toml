@@ -43,7 +43,12 @@ dependencies = [
   # already present transitively via mcp — promoted to DIRECT, pinned-by-version deps here so the
   # OAuth code owns its supply-chain surface; the lockfile is the source of truth for exact hashes.
   "pyjwt[crypto]>=2.10",  # JWT decode/verify (signature + iss/aud/exp/nbf) — MIT.
-  "cryptography>=44",     # asymmetric signature verify + JWKS key parsing — Apache-2.0/BSD.
+  "cryptography>=48.0.1",  # asymmetric signature verify + JWKS key parsing — Apache-2.0/BSD.
+                           # floor raised to 48.0.1: GHSA-537c-gmf6-5ccf affects 48.0.0 (SCA gate).
+  # Transitive via mcp/sse-starlette (the HTTP transport — ADR-011), promoted to a DIRECT security
+  # FLOOR: starlette <1.3.1 carries CVE-2026-54282 (fixed 1.3.0) + CVE-2026-54283 (fixed 1.3.1).
+  # No upper pin — the lock moves forward under review (SCA gate). BSD-3-Clause.
+  "starlette>=1.3.1",
 ]
 
 [project.optional-dependencies]
