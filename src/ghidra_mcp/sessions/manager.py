@@ -654,6 +654,52 @@ class SessionManager:
                 return  # bounded: write succeeded, but the log is full → export fails closed
             sess.composite_targets.add(name)
 
+    def is_composite_target(
+        self, session_id: str, *, name: str, caller: str = _LOCAL_PRINCIPAL_ID
+    ) -> bool:
+        """Return whether ``name`` is a composite THIS session authored (ADR-031 D2 authority).
+
+        The server-side gate for ``delete_type``: only a composite recorded in this session's
+        change-log (created via ``define_struct``/``define_union``/``define_types``) may be deleted.
+        Owner-scoped — a foreign/expired session id is the BOLA-safe ``SESSION_INVALID``.
+
+        Args:
+            session_id: The opaque id of a live, caller-owned session.
+            name: The server-validated composite name to check.
+            caller: The authenticated, server-derived calling-principal id (ADR-017).
+
+        Returns:
+            ``True`` iff this session created a composite of that name.
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` if unknown/expired/evicted/foreign (BOLA-safe).
+        """
+        with self._lock:
+            sess = self._get_live_locked(session_id, caller=caller)
+            return name in sess.composite_targets
+
+    def forget_composite_target(
+        self, session_id: str, *, name: str, caller: str = _LOCAL_PRINCIPAL_ID
+    ) -> None:
+        """Drop a composite NAME from the change-log after it was deleted (ADR-031 D4).
+
+        Called from the ``delete_type`` chokepoint AFTER the worker reports the type removed, so a
+        later export never references a deleted type and the name is free to re-create (creation's
+        collision check now passes). Idempotent (dropping an absent name is free). Owner-scoped;
+        mutates under ``_lock`` with no I/O held (topic-concurrency).
+
+        Args:
+            session_id: The opaque id of a live, caller-owned session.
+            name: The server-validated composite name to forget.
+            caller: The authenticated, server-derived calling-principal id (ADR-017).
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` if unknown/expired/evicted/foreign (BOLA-safe).
+        """
+        with self._lock:
+            sess = self._get_live_locked(session_id, caller=caller)
+            sess.composite_targets.discard(name)
+
     def export_targets(
         self, session_id: str, *, caller: str = _LOCAL_PRINCIPAL_ID
     ) -> tuple[list[tuple[str, str]], list[str]]:

@@ -1067,3 +1067,29 @@ held; prod keeps runsc/gVisor — `deploy/README.md`). It introduces **no new tr
 exercises the EXISTING TB1–TB4 chain (client→server→worker→export) with trusted, in-repo fixtures —
 the supply-chain controls of §4 (digest-pinned actions, signed worker image cosign-verified before
 use, least-privilege OIDC) apply unchanged.
+
+## 16. TB7 (delta) — Composite deletion `delete_type` (v1.4 — ADR-031, ACCEPTED)
+
+Extends the write/agency boundary (**TB7**, no new boundary): a new gated `delete_type` tool removes
+a composite by name. ADR-015 §6 rejected redefine-in-use precisely because deleting/redefining an
+**in-use** type has a wide re-render blast radius and is a **data-poisoning vector** (delete a
+recovered struct → corrupt every dependent decompilation). The load-bearing control is therefore not
+in-use detection but **bounding *which* types are deletable**: **session-authored composites ONLY**.
+
+| STRIDE | Threat | Mitigation |
+|--------|--------|------------|
+| **T/E** | **Data-poisoning — delete/redefine a Ghidra-recovered or built-in type** to corrupt dependents | **server-side authority (ADR-031 D2):** `delete_type` deletes a name **iff it is in THIS session's change-log `composite_targets`** (a composite this session created via `define_*`). A non-session-authored name is rejected `NOT_FOUND` with **no `delete_type` RPC** — a recovered/built-in/other-session type is **never** deletable. The worst an injection achieves is deleting the current session's **own** created type |
+| **T** | **Re-render blast radius** of deleting an in-use type (dependents revert to undefined) | bounded by D2 to the caller's **own** prior applications (their own `apply_data_type`/signature uses); deletion is the user's explicit intent and `dependents_reverted` is reported (D3). Backstops: one-transaction rollback, `session_undo`, ADR-002 ephemerality (worst case = a disposable session) |
+| **T** | **Stored-injection via the `name`** (markup/path/zero-width/RTL/control in the lookup key) | **`validate_write_name`** at the boundary BEFORE the change-log check (same allow-list as the `define_*` names); the name is only ever a lookup key + an audited length, never echoed |
+| **E** | **Over-agency / escalation beyond the create set** — the LLM autonomously deletes a type | **same two-level default-deny:** `session_enable_writes{allow_structural:true}` + `require_write_consent(structural=True)` (the existing chokepoint — **no new gate**); fixed allow-list (only `delete_type`; no redefine/batch-delete this increment; `runScript` forbidden) |
+| **T** | **Partial / corrupt delete** | the worker resolves + composite-guards + counts dependents **read-only before** the transaction; only `DataTypeManager.remove` is transacted → rollback-on-failure `analysis-failed`, no partial state |
+| **E** | A delete bypasses the server to reach the JVM directly | **ADR-001 unchanged** — the lookup, the dependent count, and the `remove` execute only in the worker via a typed RPC; the architecture-invariant scan covers the new `_handle_delete_type` handler |
+| **R** | Unattributable deletion | **per-write audit: intent + outcome** (tool, session id (opaque), name **length** only, `deleted`, `dependents_reverted` — never the name verbatim or any binary-derived content; redacted — `topic-logging-observability`) |
+
+**Residual risk (added to §5).** `delete_type` raises LLM08 agency once more, but the deletable-set
+bound (D2) keeps the blast radius at the current session's own created types — never recovered/durable
+analysis. The JVM edge (`_gh_delete_type`: `getParents()` dependent count + `DataTypeManager.remove`)
+is `# pragma: no cover` and **live-verified on a real worker before merge** (the F2/F7/ADR-030 lesson —
+unit tests structurally cannot exercise it). **Still out of scope:** atomic redefine/replace, batch
+delete, deleting non-composite types, and deleting a non-session-authored type (each its own future
+gated increment with its own re-render threat model).

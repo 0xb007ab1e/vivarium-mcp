@@ -270,6 +270,16 @@ class GhidraPort(Protocol):
         """Create a batch of interdependent composites in one transaction (ADR-021)."""
         ...
 
+    # --- composite deletion (v1.4 — ADR-031; GATED by allow_structural) ---
+    # The server validates the name AND confirms it is session-authored (ADR-031 D2 — only a
+    # composite THIS session created may be deleted; the change-log authority is server-side) BEFORE
+    # calling this. The worker looks the name up, rejects a non-composite/built-in (defense in
+    # depth), counts dependents read-only, and removes it inside ONE transaction (rollback on
+    # failure). Every result field is a server/worker-controlled scalar (no binary-derived echo).
+    def delete_type(self, sid: str, a: s.DeleteTypeIn) -> s.DeleteTypeResult:
+        """Delete a session-authored composite by name, reporting reverted dependents (ADR-031)."""
+        ...
+
     # --- cross-session annotation persistence (v1.2 — ADR-018; TB8) ---
     # ONE new worker method (`export_annotations`): the worker enumerates the program's
     # USER_DEFINED annotations only, dependency-ordered, bounded. IMPORT adds NO new port/worker

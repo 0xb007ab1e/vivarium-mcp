@@ -1080,6 +1080,14 @@ class RpcGhidraAdapter:
             )
         )
 
+    def delete_type(self, sid: str, a: s.DeleteTypeIn) -> s.DeleteTypeResult:
+        """Delete a session-authored composite by name (one transaction — ADR-031).
+
+        The server has already validated the name and confirmed it is session-authored (ADR-031 D2);
+        the adapter only forwards the name. Every result field is a server/worker-controlled scalar.
+        """
+        return _build_delete_type_result(self._tool_call(sid, "delete_type", {"name": a.name}))
+
     # --- multi-type composite batch (v1.2 — ADR-021; structured FieldSpec params) ---
     # The server has already checked structural consent and validated the batch
     # (validate_types_batch: per-type validate_composite, intra-batch dup-name, and the by-value
@@ -2238,6 +2246,15 @@ def _build_define_union_result(r: dict[str, Any]) -> s.DefineUnionResult:
         size=int(r["size"]),
         field_count=int(r["field_count"]),
         applied=bool(r["applied"]),
+    )
+
+
+def _build_delete_type_result(r: dict[str, Any]) -> s.DeleteTypeResult:
+    """Build a ``DeleteTypeResult`` — all fields are server/worker scalars, SAFE (ADR-031)."""
+    return s.DeleteTypeResult(
+        name=str(r["name"]),
+        deleted=bool(r["deleted"]),
+        dependents_reverted=int(r["dependents_reverted"]),
     )
 
 

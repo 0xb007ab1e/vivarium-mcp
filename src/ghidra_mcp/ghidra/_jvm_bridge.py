@@ -522,6 +522,22 @@ class PyGhidraBackend:
         types = _require(params, "types")
         return self._gh_define_types(types)
 
+    def delete_type(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Delete a composite by name in one transaction, reporting reverted dependents (ADR-031).
+
+        Args:
+            params: ``{"name": str}``. The server has already validated the name AND confirmed it is
+                session-authored (ADR-031 D2) — the worker only ever receives a name the server
+                authorized. The worker resolves it (read-only), rejects a non-composite/built-in
+                (defense in depth), counts dependents (read-only, before the write), and removes it
+                inside one transaction (rollback on failure).
+
+        Returns:
+            ``{"name", "deleted", "dependents_reverted"}`` (plain server/worker scalars).
+        """
+        name = str(_require(params, "name"))
+        return self._gh_delete_type(name)
+
     # --- annotation persistence (v1.2 — ADR-018; export read-out ONLY) -----------------------
     def export_annotations(self, params: dict[str, Any]) -> dict[str, Any]:
         """Enumerate the program's USER_DEFINED annotations as a plain document (read-only — v1.2).
@@ -2260,6 +2276,66 @@ class PyGhidraBackend:
             "size": result_holder["size"],
             "field_count": result_holder["field_count"],
             "applied": True,
+        }
+
+    def _gh_delete_type(self, name: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Delete a composite by name inside one transaction, reporting dependents (ADR-031).
+
+        The server has already validated the name AND confirmed it is session-authored (ADR-031 D2);
+        this is the JVM edge that performs the removal. Resolution, the composite/built-in guard,
+        and the read-only dependent count all happen BEFORE the transaction (fail closed, no partial
+        state); only ``DataTypeManager.remove`` is transacted (rollback on failure).
+
+        ``dependents_reverted`` is a **best-effort** count of the data types that directly reference
+        the target (``DataType.getParents()``) — the read-only signal available pre-removal.
+        REQUIRES-LIVE-VERIFICATION of ``getParents()`` + ``DataTypeManager.remove(dt, monitor)`` on
+        Ghidra 12.1.2 (a JVM edge unit tests cannot exercise — the F2/F7/ADR-030 lesson).
+
+        Args:
+            name: The server-validated, session-authored composite name to delete.
+
+        Returns:
+            ``{"name", "deleted", "dependents_reverted"}`` (plain server/worker scalars).
+
+        Raises:
+            WorkerError: ``not-found`` if no type of that name exists; ``analysis-failed`` if the
+                resolved type is not a composite (defense in depth) or the removal rolled back.
+        """
+        from ghidra.program.model.data import Structure, Union
+        from ghidra.util.task import TaskMonitor
+        from worker.dispatch import CODE_ANALYSIS_FAILED, CODE_NOT_FOUND, WorkerError
+
+        program = self._require_program()
+        manager = program.getDataTypeManager()
+
+        # Resolve by a full `getAllDataTypes()` name scan — mirroring `_reject_type_collision`
+        # (robust across categories), NOT the illustrative `getDataType(ROOT, name)` of ADR-031 D5.
+        # Session-authored composites are created at ROOT, so both find them; the scan is the
+        # conservative choice and keeps the two type-name lookups consistent.
+        target = None
+        for data_type in manager.getAllDataTypes():
+            if str(data_type.getName()) == name:
+                target = data_type
+                break
+        if target is None:
+            raise WorkerError(CODE_NOT_FOUND, "no type of that name exists")
+        # Defense in depth: the server only authorizes session-authored composites, but never trust
+        # a desync — refuse anything that is not a struct/union (no built-in/pointer/array/typedef).
+        if not isinstance(target, (Structure, Union)):
+            raise WorkerError(CODE_ANALYSIS_FAILED, "not a composite type")
+        # Read-only dependent count BEFORE the write (best-effort: parent data types using it).
+        dependents = len(list(target.getParents()))
+
+        removed_holder: dict[str, bool] = {}
+
+        def _write() -> None:
+            removed_holder["removed"] = bool(manager.remove(target, TaskMonitor.DUMMY))
+
+        self._in_transaction("delete_type", _write)
+        return {
+            "name": name,
+            "deleted": removed_holder.get("removed", False),
+            "dependents_reverted": dependents,
         }
 
     def _gh_define_types(
