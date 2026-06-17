@@ -98,8 +98,18 @@ Likelihood × Impact → severity (master §7). "L/M/H".
 | **T** | Malicious binary corrupts analyzer state / poisons results | M×M=**Med** | one worker per session, disposable; **kill + verified-wipe on evict** (ADR-002); poisoned-worker rotation runbook |
 | **R** | — | — | per-session worker lifetime logged |
 | **I** | Binary exfiltrates data or reads host | M×H=**High** | **no network/egress**; read-only rootfs; dropped caps; gVisor; tmpfs scratch (ADR-004) |
-| **D** | **Decompile bomb / pathological input** hangs or OOMs the analyzer | H×M=**High** | wall-clock timeout **kills the worker**; memory/pids limits; max input size enforced **before** Ghidra; fuzz/abuse tests (F7, WS4) |
+| **D** | **Decompile bomb / pathological input** hangs or OOMs the analyzer | H×M=**High** | wall-clock timeout **kills the worker**; memory/pids/cpu/tmpfs limits; max input size enforced **before** Ghidra; fuzz/abuse tests (F7, WS4). **v1.3 (ADR-023 / F1):** those bounds are now **operator-tunable but CLAMPED to a hard ceiling** — the env can lower OR raise within bounds; an above-ceiling/bool/non-int/`<1` value fails closed (clamp-down / VALIDATION), so **CWE-400 is preserved** (the cap can never be widened past the safe ceiling). On a memory-cap OOM the death is classified server-side (engine metadata: `OOMKilled`/exit 137 — **no binary parsing**, ADR-001) and surfaced as the distinct, non-retryable `resource-exhausted` (clearer signal than `worker-unavailable`); a warn-only pre-flight logs an oversized input (size + configured memory only — **no content/path**) and proceeds. |
 | **E** | **Loader/analyzer RCE** (memory-safety/deserialization in Ghidra parsing hostile bytes) | M×H=**High** | out-of-process (ADR-001) + full isolation stack (ADR-004) contains it to a disposable, network-less worker; CVE-track + patch Ghidra/JDK by digest |
+
+> **TB3 delta — v1.3 worker-resource tunability (ADR-023 / F1; no new boundary).** Making the five
+> worker bounds (mem/cpus/pids/scratch+project tmpfs) env-configurable does **not** widen TB3: every
+> override is clamped DOWN to a hard ceiling and validated fail-closed, so the DoS surface (CWE-400)
+> is at most what it was and the `--memory-swap == --memory` (no swap) and all other ADR-004
+> hardening flags are unchanged byte-for-byte. The new `resource-exhausted` error detail and the
+> `worker.preflight_oversized` / `worker.rpc_failed` logs carry **no binary content and no host
+> paths** (size + configured-MiB integers only) — confirmed against the error-envelope disclosure
+> rules + master §5 redaction. The OOM classification is a server-side container-engine metadata
+> query, never binary parsing (ADR-001 preserved).
 
 ### TB4 — Worker → Server → LLM (untrusted output)
 | STRIDE | Threat | L×I | Mitigation |

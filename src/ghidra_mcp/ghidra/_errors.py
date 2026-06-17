@@ -28,6 +28,7 @@ _STATUS: dict[ErrorType, int] = {
     ErrorType.LIMIT_EXCEEDED: 413,
     ErrorType.TIMEOUT: 504,
     ErrorType.WORKER_UNAVAILABLE: 503,
+    ErrorType.RESOURCE_EXHAUSTED: 503,
     ErrorType.ANALYSIS_FAILED: 422,
     ErrorType.INTERNAL: 500,
 }
@@ -39,11 +40,14 @@ _TITLE: dict[ErrorType, str] = {
     ErrorType.LIMIT_EXCEEDED: "Limit exceeded",
     ErrorType.TIMEOUT: "Operation timed out",
     ErrorType.WORKER_UNAVAILABLE: "Worker unavailable",
+    ErrorType.RESOURCE_EXHAUSTED: "Worker out of resources",
     ErrorType.ANALYSIS_FAILED: "Analysis failed",
     ErrorType.INTERNAL: "Internal error",
 }
 
-# Retryable per the error-envelope contract.
+# Retryable per the error-envelope contract. RESOURCE_EXHAUSTED is deliberately NOT retryable: the
+# same input against the same memory cap would OOM again (ADR-023 D2) — the operator must increase
+# worker memory or the client must reduce the input.
 _RETRYABLE: dict[ErrorType, bool] = {
     ErrorType.LIMIT_EXCEEDED: True,
     ErrorType.TIMEOUT: True,
@@ -94,6 +98,26 @@ def session_invalid(correlation_id: str | None = None) -> GhidraMcpError:
     return make_error(
         ErrorType.SESSION_INVALID,
         "session is unknown, expired, or no longer available",
+        correlation_id=correlation_id,
+    )
+
+
+def resource_exhausted(correlation_id: str | None = None) -> GhidraMcpError:
+    """Build the ``resource-exhausted`` error for a worker OOM/resource-pressure exit (ADR-023).
+
+    The detail is a fixed, safe, actionable hint (no host paths, binary content, or engine
+    internals — error-envelope.md disclosure rules); 503, not retryable (the same input against the
+    same memory cap would OOM again — the operator must raise the cap or the client shrink input).
+
+    Args:
+        correlation_id: Optional id tying the error to redacted server-side logs.
+
+    Returns:
+        A ``RESOURCE_EXHAUSTED`` :class:`GhidraMcpError`.
+    """
+    return make_error(
+        ErrorType.RESOURCE_EXHAUSTED,
+        "worker exhausted its memory limit; increase worker memory or reduce input size",
         correlation_id=correlation_id,
     )
 

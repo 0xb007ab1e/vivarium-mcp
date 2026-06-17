@@ -45,6 +45,12 @@ class ErrorType(StrEnum):
     WORKER_UNAVAILABLE = "worker-unavailable"
     """The Ghidra worker could not be reached, crashed, or was evicted mid-call."""
 
+    RESOURCE_EXHAUSTED = "resource-exhausted"
+    """The worker exceeded its memory cap (OOM-killed) or exited unexpectedly from resource
+    pressure (ADR-023 / F1). Distinct from ``worker-unavailable`` so a client can surface a precise
+    'increase worker memory or reduce input size' hint. Not retryable (the same input would OOM
+    again)."""
+
     ANALYSIS_FAILED = "analysis-failed"
     """Ghidra could not analyze the input (e.g. unrecognized/corrupt format) — not a server bug."""
 

@@ -392,6 +392,8 @@ def test_failed_write_rolls_back_to_analysis_failed() -> None:
     from ghidra_mcp.ghidra import _errors
 
     assert _errors.map_worker_slug("analysis-failed") is ErrorType.ANALYSIS_FAILED
+    # Fail-closed: an absent slug must not leak as something specific — it maps to INTERNAL.
+    assert _errors.map_worker_slug(None) is ErrorType.INTERNAL
     err = _errors.make_error(ErrorType.ANALYSIS_FAILED, "the write was rolled back")
     assert err.envelope.type is ErrorType.ANALYSIS_FAILED
     assert err.envelope.status == 422

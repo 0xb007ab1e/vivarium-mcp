@@ -40,6 +40,10 @@ class _DeadWorker:
         """Report not alive."""
         return False
 
+    def exit_diagnosis(self) -> str:
+        """Report an unknown exit (inert worker; never queried in these tests)."""
+        return "unknown"
+
 
 class _FakeAdapter(rc.RpcGhidraAdapter):
     """Adapter whose ``_tool_call`` returns canned per-method responses (no worker)."""
