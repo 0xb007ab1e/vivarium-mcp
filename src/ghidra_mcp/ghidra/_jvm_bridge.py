@@ -2122,6 +2122,14 @@ class PyGhidraBackend:
         artifact). The values are plain; the server wraps each binary-derived string as untrusted
         and overlays the authoritative ``binary.sha256``.
 
+        Null-address safety (ADR-024 F2): every address rendered here is guarded. Step 4 skips
+        address-less USER_DEFINED symbols via :func:`_is_address_keyable` (the bug that collapsed
+        the export). Steps 2/3 stringify ``Function.getEntryPoint()``, which is always non-null for
+        a function yielded by the listing iterator (a function is address-bound by construction);
+        step 5 iterates concrete comment addresses from ``getCommentAddressIterator`` (never null);
+        and all name/text fields go through the null-safe :func:`_to_text`. So step 4 was the only
+        plausible null-deref, and it is now fixed.
+
         ``USER_DEFINED`` discrimination: symbols via ``Symbol.getSource()`` equalling
         ``SourceType.USER_DEFINED``;
         comments are user content by construction (Ghidra does not auto-author EOL/PRE/etc. for the
@@ -2188,10 +2196,17 @@ class PyGhidraBackend:
                 continue
             if symbol.getSymbolType() == SymbolType.FUNCTION:
                 continue  # function renames already emitted in step 3
+            # ADR-018 rename_symbol is ADDRESS-KEYED: a USER_DEFINED symbol with no concrete memory
+            # address (namespace/class/library/global/external) returns a null getAddress() and can
+            # never be a rename_symbol target — skip it rather than str(None-Java-ref) crashing the
+            # whole export into an opaque worker error (ADR-024 F2). The guard is fetched ONCE.
+            addr = symbol.getAddress()
+            if not _is_address_keyable(addr):
+                continue
             _emit(
                 {
                     "kind": "rename_symbol",
-                    "identifier": str(symbol.getAddress()),
+                    "identifier": str(addr),
                     "new_name": _to_text(symbol.getName()),
                 }
             )
@@ -2543,6 +2558,35 @@ def _to_text(value: object) -> str:
     return text.encode("utf-8", "replace").decode("utf-8", "replace")
 
 
+def _is_address_keyable(addr: Any) -> bool:
+    """Return whether a symbol's address can key an address-based ``rename_symbol`` (ADR-018).
+
+    ADR-018's ``rename_symbol`` export entry is **address-keyed**: an entry's ``identifier`` is a
+    concrete memory address that import replays against. A USER_DEFINED symbol that is not bound to
+    a memory address (namespace/class/library/global/external symbols) has ``getAddress()`` return
+    a null Java reference (or a non-memory ``Address`` such as a register/stack/external slot),
+    which cannot be a ``rename_symbol`` target — so it is skipped, not crashed on (the prior code
+    passed such a null straight into ``str(...)``/downstream use, throwing and collapsing the whole
+    export into an opaque ``internal worker error`` — ADR-024 F2).
+
+    Pure + duck-typed so the guard logic is hermetically unit-testable without a JVM: ``addr`` only
+    needs to answer ``is None`` and (when present) expose ``isMemoryAddress()``.
+
+    Args:
+        addr: A Ghidra ``Address`` (or a null reference / ``None``) from ``Symbol.getAddress()``.
+
+    Returns:
+        ``True`` only when ``addr`` is a non-null memory address; ``False`` otherwise (fail closed).
+    """
+    if addr is None:
+        return False
+    try:
+        return bool(addr.isMemoryAddress())
+    except Exception:
+        # A malformed/foreign Address answers "not keyable" rather than crashing the export.
+        return False
+
+
 def _bytes_to_hex(raw: Any) -> str:
     """Convert a Java/Python byte array to lowercase hex.
 
@@ -2689,11 +2733,14 @@ def _composite_export_kind(data_type: Any) -> str | None:  # pragma: no cover - 
     Returns:
         The composite ``kind`` or ``None``.
     """
-    from ghidra.program.model.data import Structure, Union
+    from ghidra.program.model.data import ArchiveType, Structure, Union
 
     source = data_type.getSourceArchive()
-    # Only program-local (no external source archive) user composites are user-authored annotations.
-    if source is not None and not bool(source.getArchiveType().isProgramArchive()):
+    # Only program-local user composites are user-authored annotations. ``ArchiveType`` is an enum
+    # with NO ``isProgramArchive()`` method — calling it AttributeError'd and crashed the entire
+    # export on every real program (caught by the blind acceptance run, ADR-024 F2). Compare the
+    # source archive's type to ``ArchiveType.PROGRAM`` via str() (bridge-safe, matching this file).
+    if source is not None and str(source.getArchiveType()) != str(ArchiveType.PROGRAM):
         return None
     if isinstance(data_type, Union):
         return "define_union"
