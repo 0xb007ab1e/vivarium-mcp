@@ -50,6 +50,8 @@ class FakeSessionManager:
         self._writes: dict[str, bool] = {_VALID_SID: False}
         self._structural: dict[str, bool] = {_VALID_SID: False}
         self.consent_checks: list[str] = []
+        self.comment_targets: list[tuple[str, str, bool]] = []
+        self.composite_targets: list[str] = []
 
     def _info(self, sid: str) -> s.SessionInfo:
         return s.SessionInfo(
@@ -120,6 +122,24 @@ class FakeSessionManager:
             )
         return self._info(session_id)
 
+    def record_comment_target(
+        self,
+        session_id: str,
+        *,
+        address: str,
+        comment_type: str,
+        cleared: bool,
+        caller: str = "local",
+    ) -> None:
+        """Record a comment write target in the change-log (ADR-027) — records the call."""
+        self._require_live(session_id)
+        self.comment_targets.append((address, comment_type, cleared))
+
+    def record_composite_target(self, session_id: str, *, name: str, caller: str = "local") -> None:
+        """Record a composite write target in the change-log (ADR-027) — records the call."""
+        self._require_live(session_id)
+        self.composite_targets.append(name)
+
 
 class FakePort:
     """In-test :class:`GhidraPort` recording write calls and returning minimal valid results."""
@@ -153,6 +173,12 @@ class FakePort:
     def undo(self, sid: str, a: s.SessionUndoIn) -> s.SessionUndoOut:
         self.calls.append(("undo", sid))
         return s.SessionUndoOut(session_id=sid, undone=True)
+
+    def define_struct(self, sid: str, a: s.DefineStructIn) -> s.DefineStructResult:
+        self.calls.append(("define_struct", sid))
+        return s.DefineStructResult(
+            name=a.name, kind="struct", size=4, field_count=len(a.fields), applied=True
+        )
 
 
 def _ctx() -> reg.ToolContext:
@@ -404,3 +430,87 @@ def test_write_on_unknown_session_is_session_invalid_before_port(ctx: reg.ToolCo
         handlers["rename_function"](session_id="someone-elses-id", function="f", new_name="x")
     assert exc.value.envelope.type is ErrorType.SESSION_INVALID
     assert _port(ctx).calls == []
+
+
+# --- ADR-027: gated writes record their target into the session change-log (applied-only) ------
+class _RejectingPort(FakePort):
+    """A port whose comment/composite writes report ``applied=False`` (rejected/rolled-back)."""
+
+    def set_comment(self, sid: str, a: s.SetCommentIn) -> s.SetCommentResult:
+        self.calls.append(("set_comment", sid))
+        return s.SetCommentResult(address="0x403000", comment_type=a.comment_type, applied=False)
+
+    def define_struct(self, sid: str, a: s.DefineStructIn) -> s.DefineStructResult:
+        self.calls.append(("define_struct", sid))
+        return s.DefineStructResult(
+            name=a.name, kind="struct", size=0, field_count=0, applied=False
+        )
+
+
+def _struct_in(name: str = "cfg_t") -> dict[str, object]:
+    """A minimal valid define_struct payload (one primitive field)."""
+    return {
+        "session_id": _VALID_SID,
+        "name": name,
+        "fields": [{"name": "a", "type": {"base": "int32", "pointer_levels": 0}}],
+    }
+
+
+@pytest.mark.critical
+def test_set_comment_applied_records_target_in_change_log(ctx: reg.ToolContext) -> None:
+    handlers = reg.build_handlers(ctx)
+    handlers["session_enable_writes"](session_id=_VALID_SID)
+    handlers["set_comment"](
+        session_id=_VALID_SID, address="0x403000", comment_type="PRE", text="hi"
+    )
+    # The change-log captured the (worker-normalized address, slot) identity key — set (not clear).
+    assert _sessions(ctx).comment_targets == [("0x403000", "PRE", False)]
+
+
+@pytest.mark.critical
+def test_set_comment_clear_records_a_clear_in_change_log(ctx: reg.ToolContext) -> None:
+    handlers = reg.build_handlers(ctx)
+    handlers["session_enable_writes"](session_id=_VALID_SID)
+    handlers["set_comment"](
+        session_id=_VALID_SID, address="0x403000", comment_type="EOL", text=None
+    )
+    # A clear (text=None) is recorded as cleared=True so the change-log drops the target.
+    assert _sessions(ctx).comment_targets == [("0x403000", "EOL", True)]
+
+
+@pytest.mark.critical
+def test_rejected_set_comment_does_not_record() -> None:
+    # applied=False (rejected/rolled-back) MUST NOT touch the change-log (record on success only).
+    ctx = reg.ToolContext(
+        config=_ctx().config,
+        sessions=cast(SessionManager, FakeSessionManager()),
+        port=cast(GhidraPort, _RejectingPort()),
+    )
+    handlers = reg.build_handlers(ctx)
+    handlers["session_enable_writes"](session_id=_VALID_SID)
+    handlers["set_comment"](
+        session_id=_VALID_SID, address="0x403000", comment_type="PRE", text="hi"
+    )
+    assert _sessions(ctx).comment_targets == []
+
+
+@pytest.mark.critical
+def test_define_struct_applied_records_composite_name() -> None:
+    ctx = _ctx()
+    handlers = reg.build_handlers(ctx)
+    handlers["session_enable_writes"](session_id=_VALID_SID, allow_structural=True)
+    handlers["define_struct"](**_struct_in("widget_t"))
+    assert _sessions(ctx).composite_targets == ["widget_t"]
+
+
+@pytest.mark.critical
+def test_rejected_define_struct_does_not_record() -> None:
+    ctx = reg.ToolContext(
+        config=_ctx().config,
+        sessions=cast(SessionManager, FakeSessionManager()),
+        port=cast(GhidraPort, _RejectingPort()),
+    )
+    handlers = reg.build_handlers(ctx)
+    handlers["session_enable_writes"](session_id=_VALID_SID, allow_structural=True)
+    handlers["define_struct"](**_struct_in("widget_t"))
+    assert _sessions(ctx).composite_targets == []

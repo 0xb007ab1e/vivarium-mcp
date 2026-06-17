@@ -2392,11 +2392,48 @@ class ExportedAnnotationDocument(_Out):
     entries: list[ExportedEntry]
 
 
+# --- session change-log export selection (ADR-027 D4) -------------------------------------------
+# The SERVER supplies these to the worker on export: the comment + composite TARGETS this session's
+# gated write tools actually authored (read from the session change-log). They are IDENTITY KEYS
+# ONLY — an address + closed comment-slot, a composite name — NEVER a binary-derived value (ADR-002/
+# master §5). The worker reads exactly these targets (steps 1 + 5) instead of blind-enumerating,
+# which over-included Ghidra auto-analysis content (F7). They are server-constructed (never client-
+# supplied), so they are not part of the client-facing ``session_export_annotations`` tool surface;
+# they ride the worker RPC as an additive, server→worker parameter (rpc-protocol.md).
+class ExportCommentTarget(_In):
+    """One comment-slot target to read at export — identity key only (ADR-027 D2).
+
+    Attributes:
+        address: The server-normalized target address (hex) — identity, not a value.
+        comment_type: The closed comment slot to read (``"EOL"``/.../``"REPEATABLE"``).
+    """
+
+    address: str = Field(min_length=1, max_length=_MAX_NAME)
+    comment_type: Literal["EOL", "PRE", "POST", "PLATE", "REPEATABLE"]
+
+
+class ExportTargets(_In):
+    """Server-supplied export selection — which comments + composites the worker reads (ADR-027).
+
+    Built from the session change-log (identity keys only). Empty lists mean "this session authored
+    no comments/composites" — the worker emits none (the F7 fix: no blind enumeration).
+
+    Attributes:
+        comments: The ``(address, comment_type)`` comment targets to read (step 5).
+        composites: The composite NAMES to look up and export (step 1).
+    """
+
+    comments: list[ExportCommentTarget] = Field(default_factory=list)
+    composites: list[str] = Field(default_factory=list)
+
+
 class SessionExportAnnotationsIn(_SessionScopedIn):
     """Arguments for ``session_export_annotations`` — read out the session's annotation document.
 
     Read-only + owner-scoped (ADR-018): no write consent; only the caller's own session. Bounded:
-    over ``_MAX_ENTRIES`` USER_DEFINED annotations → ``limit-exceeded`` (no silent truncation).
+    over ``_MAX_ENTRIES`` USER_DEFINED annotations → ``limit-exceeded`` (no silent truncation). The
+    server supplements the worker RPC with change-log :class:`ExportTargets` (comments + composites
+    to read — ADR-027 D4); the client-facing tool surface is unchanged (no client-supplied targets).
     """
 
 

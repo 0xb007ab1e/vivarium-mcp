@@ -635,6 +635,137 @@ def test_record_binary_hash_evicted_session_is_session_invalid() -> None:
     assert ei.value.envelope.type is ErrorType.SESSION_INVALID
 
 
+# =====================================================================================
+# Session-scoped change-log (ADR-027 D2/D4) — comment + composite export-target tracking.
+# Critical-path: the change-log is the load-bearing provenance signal for the F7 fix, lives on the
+# session, and is wiped with it on evict. Identity keys ONLY — never a binary-derived value.
+# =====================================================================================
+_ADDR_1 = "0x401000"
+_ADDR_2 = "0x402000"
+# An auto-comment / value-ish (binary-derived) string that must NEVER reach the change-log, which
+# stores identity keys only (ADR-002/master §5). Used to assert no value leaks into the log.
+_VALUE_LIKE = "WARNING: do not call this; decompiled secret material"
+
+
+@pytest.mark.critical
+def test_record_comment_target_then_read_back() -> None:
+    # A recorded comment target round-trips through export_targets (identity key only).
+    mgr, _ = _mgr(max_sessions=4)
+    info = mgr.create(owner=_A)
+    mgr.record_comment_target(
+        info.session_id, address=_ADDR_1, comment_type="PLATE", cleared=False, caller=_A
+    )
+    comments, composites = mgr.export_targets(info.session_id, caller=_A)
+    assert comments == [(_ADDR_1, "PLATE")]
+    assert composites == []
+
+
+@pytest.mark.critical
+def test_record_composite_target_then_read_back() -> None:
+    # A recorded composite NAME round-trips through export_targets.
+    mgr, _ = _mgr(max_sessions=4)
+    info = mgr.create(owner=_A)
+    mgr.record_composite_target(info.session_id, name="my_struct", caller=_A)
+    comments, composites = mgr.export_targets(info.session_id, caller=_A)
+    assert comments == []
+    assert composites == ["my_struct"]
+
+
+@pytest.mark.critical
+def test_change_log_records_are_identity_keys_only_no_values() -> None:
+    # The log NEVER stores a comment text / field value — only (address, type) + name (ADR-002/§5).
+    mgr, _ = _mgr(max_sessions=4)
+    info = mgr.create(owner=_A)
+    # The handler records identity keys; a value-ish string is NOT part of the recording API and
+    # must never reach the log. Record a target whose address is benign and assert no value leaks.
+    mgr.record_comment_target(
+        info.session_id, address=_ADDR_1, comment_type="EOL", cleared=False, caller=_A
+    )
+    mgr.record_composite_target(info.session_id, name="cfg_t", caller=_A)
+    sess = mgr._sessions[info.session_id]  # introspect the raw log (test-only)
+    # The log holds ONLY identity keys; no stored element contains the binary-ish/secret value.
+    for addr, ctype in sess.comment_targets:
+        assert _VALUE_LIKE not in addr
+        assert _VALUE_LIKE not in ctype
+    assert sess.comment_targets == {(_ADDR_1, "EOL")}
+    assert sess.composite_targets == {"cfg_t"}
+    assert all(_VALUE_LIKE not in name for name in sess.composite_targets)
+
+
+@pytest.mark.critical
+def test_comment_clear_removes_the_logged_target() -> None:
+    # set_comment(text=None) is a CLEAR — it drops the key so export does NOT emit it (ADR-027 D2).
+    mgr, _ = _mgr(max_sessions=4)
+    info = mgr.create(owner=_A)
+    mgr.record_comment_target(
+        info.session_id, address=_ADDR_1, comment_type="PRE", cleared=False, caller=_A
+    )
+    assert mgr.export_targets(info.session_id, caller=_A)[0] == [(_ADDR_1, "PRE")]
+    # Now clear the same slot — the target is removed (authored-then-cleared ⇒ absent from export).
+    mgr.record_comment_target(
+        info.session_id, address=_ADDR_1, comment_type="PRE", cleared=True, caller=_A
+    )
+    assert mgr.export_targets(info.session_id, caller=_A)[0] == []
+
+
+@pytest.mark.critical
+def test_clearing_an_unlogged_target_is_a_safe_noop() -> None:
+    # Clearing a never-set slot must not raise and leaves the log empty (discard is idempotent).
+    mgr, _ = _mgr(max_sessions=4)
+    info = mgr.create(owner=_A)
+    mgr.record_comment_target(
+        info.session_id, address=_ADDR_2, comment_type="POST", cleared=True, caller=_A
+    )
+    assert mgr.export_targets(info.session_id, caller=_A) == ([], [])
+
+
+@pytest.mark.critical
+def test_change_log_records_are_deduplicated() -> None:
+    # Re-touching the same target is a free re-add (a set, not a list) — no duplicate export entry.
+    mgr, _ = _mgr(max_sessions=4)
+    info = mgr.create(owner=_A)
+    for _ in range(3):
+        mgr.record_comment_target(
+            info.session_id, address=_ADDR_1, comment_type="EOL", cleared=False, caller=_A
+        )
+        mgr.record_composite_target(info.session_id, name="dup_t", caller=_A)
+    comments, composites = mgr.export_targets(info.session_id, caller=_A)
+    assert comments == [(_ADDR_1, "EOL")]
+    assert composites == ["dup_t"]
+
+
+@pytest.mark.critical
+def test_export_targets_returns_sorted_snapshot_not_live_set() -> None:
+    # The read-back is a sorted COPY; mutating it cannot corrupt session state (hermetic).
+    mgr, _ = _mgr(max_sessions=4)
+    info = mgr.create(owner=_A)
+    mgr.record_composite_target(info.session_id, name="zeta", caller=_A)
+    mgr.record_composite_target(info.session_id, name="alpha", caller=_A)
+    _, composites = mgr.export_targets(info.session_id, caller=_A)
+    assert composites == ["alpha", "zeta"]  # deterministic order
+    composites.append("INJECTED")  # mutate the returned list
+    # The session's real log is unaffected by mutating the returned snapshot.
+    assert mgr._sessions[info.session_id].composite_targets == {"alpha", "zeta"}
+
+
+@pytest.mark.critical
+def test_change_log_is_wiped_when_session_is_evicted() -> None:
+    # The log is session-lifetime state — eviction drops the session record entirely (ADR-002).
+    mgr, _ = _mgr(max_sessions=4)
+    info = mgr.create(owner=_A)
+    mgr.record_comment_target(
+        info.session_id, address=_ADDR_1, comment_type="EOL", cleared=False, caller=_A
+    )
+    mgr.record_composite_target(info.session_id, name="t", caller=_A)
+    assert info.session_id in mgr._sessions
+    mgr.evict(info.session_id, reason="close")
+    # The whole session record (with its change-log sets) is gone — no durable confidential state.
+    assert info.session_id not in mgr._sessions
+    # And a read-back now fails closed (BOLA-safe) — the log no longer exists.
+    with pytest.raises(GhidraMcpError):
+        mgr.export_targets(info.session_id, caller=_A)
+
+
 # --- in-flight liveness during long calls (ADR-025 / F4) --------------------------------------
 # A long-running call (e.g. an 18-26 min ``analyze``) must not idle-evict its OWN session. The
 # mechanism: begin_call marks the session in-flight + refreshes the idle clock; _is_expired exempts
@@ -739,6 +870,78 @@ def test_end_call_refreshes_idle_clock_so_window_restarts_after_call() -> None:
 
 
 @pytest.mark.critical
+def test_change_log_is_owner_scoped_record_and_read() -> None:
+    # A foreign caller can neither record into nor read another principal's log (ADR-017; BOLA).
+    mgr, _ = _mgr(max_sessions=4)
+    info = mgr.create(owner=_A)
+    for op in (
+        lambda: mgr.record_comment_target(
+            info.session_id, address=_ADDR_1, comment_type="EOL", cleared=False, caller=_B
+        ),
+        lambda: mgr.record_composite_target(info.session_id, name="t", caller=_B),
+        lambda: mgr.export_targets(info.session_id, caller=_B),
+    ):
+        with pytest.raises(GhidraMcpError) as ei:
+            op()
+        assert ei.value.envelope.type is ErrorType.SESSION_INVALID
+    # The owner's log is untouched by the foreign attempts.
+    assert mgr.export_targets(info.session_id, caller=_A) == ([], [])
+
+
+@pytest.mark.critical
+def test_change_log_is_bounded_per_session() -> None:
+    # Over the per-session cap a NEW target is dropped so the log can't grow unbounded (CWE-400).
+    from ghidra_mcp.sessions.manager import _MAX_CHANGE_LOG_TARGETS
+
+    mgr, _ = _mgr(max_sessions=4)
+    info = mgr.create(owner=_A)
+    sess = mgr._sessions[info.session_id]
+    # Pre-fill the composite log to the cap directly (avoid N record calls), then attempt one more.
+    sess.composite_targets = {f"t{i}" for i in range(_MAX_CHANGE_LOG_TARGETS)}
+    mgr.record_composite_target(info.session_id, name="overflow", caller=_A)
+    assert "overflow" not in sess.composite_targets
+    assert len(sess.composite_targets) == _MAX_CHANGE_LOG_TARGETS
+    # An already-logged name is still a free re-add at the cap (idempotent).
+    mgr.record_composite_target(info.session_id, name="t0", caller=_A)
+    assert len(sess.composite_targets) == _MAX_CHANGE_LOG_TARGETS
+    # The same bound applies to NEW comment targets.
+    sess.comment_targets = {(f"0x{i:x}", "EOL") for i in range(_MAX_CHANGE_LOG_TARGETS)}
+    mgr.record_comment_target(
+        info.session_id, address="0xdead", comment_type="EOL", cleared=False, caller=_A
+    )
+    assert ("0xdead", "EOL") not in sess.comment_targets
+    # A clear at the cap is always honored (it shrinks the log, never grows it).
+    a_key = next(iter(sess.comment_targets))
+    mgr.record_comment_target(
+        info.session_id, address=a_key[0], comment_type=a_key[1], cleared=True, caller=_A
+    )
+    assert a_key not in sess.comment_targets
+
+
+@pytest.mark.critical
+def test_change_log_unknown_session_is_session_invalid() -> None:
+    # Every change-log method fails closed with SESSION_INVALID on an unknown id (no oracle).
+    mgr, _ = _mgr(max_sessions=4)
+    for op in (
+        lambda: mgr.record_comment_target(
+            "no-such", address=_ADDR_1, comment_type="EOL", cleared=False, caller=_A
+        ),
+        lambda: mgr.record_composite_target("no-such", name="t", caller=_A),
+        lambda: mgr.export_targets("no-such", caller=_A),
+    ):
+        with pytest.raises(GhidraMcpError) as ei:
+            op()
+        assert ei.value.envelope.type is ErrorType.SESSION_INVALID
+
+
+@pytest.mark.critical
+def test_a_fresh_session_has_an_empty_change_log() -> None:
+    # Default-empty: a session that performed no comment/composite writes exports no such targets.
+    mgr, _ = _mgr(max_sessions=4)
+    info = mgr.create(owner=_A)
+    assert mgr.export_targets(info.session_id, caller=_A) == ([], [])
+
+
 def test_overlapping_calls_tracked_by_counter_not_a_bool() -> None:
     # Two concurrent calls on one session: in-flight is a COUNTER, so the first end_call does not
     # prematurely clear the in-flight mark while a second call is still running.

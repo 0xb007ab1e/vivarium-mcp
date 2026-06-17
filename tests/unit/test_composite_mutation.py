@@ -50,6 +50,7 @@ class _FakeSessions:
         self._writes = {_VALID_SID: False}
         self._structural = {_VALID_SID: False}
         self.consent_checks: list[tuple[str, bool]] = []
+        self.composite_targets: list[str] = []
 
     def _live(self, sid: str) -> None:
         if sid not in self._writes:
@@ -114,6 +115,11 @@ class _FakeSessions:
             writes_enabled=True,
             allow_structural=self._structural[session_id],
         )
+
+    def record_composite_target(self, session_id: str, *, name: str, caller: str = "local") -> None:
+        """Record a composite write target in the change-log (ADR-027) — records the name."""
+        self._live(session_id)
+        self.composite_targets.append(name)
 
 
 class _FakePort:
@@ -550,3 +556,76 @@ def test_adapter_define_types_builds_typed_result() -> None:
     }
     assert isinstance(out, s.DefineTypesResult)
     assert {t.name for t in out.types} == {"A", "B"} and out.applied is True
+
+
+# --- ADR-027: applied composite writes record their NAME(s) into the session change-log ---------
+class _RejectingPort(_FakePort):
+    """Composite writes report ``applied=False`` (rejected/rolled-back) — must NOT be recorded."""
+
+    def define_struct(self, sid: str, a: s.DefineStructIn) -> s.DefineStructResult:
+        self.calls.append(("define_struct", sid))
+        return s.DefineStructResult(
+            name=a.name, kind="struct", size=0, field_count=0, applied=False
+        )
+
+    def define_union(self, sid: str, a: s.DefineUnionIn) -> s.DefineUnionResult:
+        self.calls.append(("define_union", sid))
+        return s.DefineUnionResult(name=a.name, kind="union", size=0, field_count=0, applied=False)
+
+    def define_types(self, sid: str, a: s.DefineTypesIn) -> s.DefineTypesResult:
+        self.calls.append(("define_types", sid))
+        return s.DefineTypesResult(types=[], applied=False)
+
+
+def _rejecting_ctx() -> reg.ToolContext:
+    return reg.ToolContext(
+        config=_ctx().config,
+        sessions=cast(SessionManager, _FakeSessions()),
+        port=cast(GhidraPort, _RejectingPort()),
+    )
+
+
+def _log(ctx: reg.ToolContext) -> list[str]:
+    return cast(_FakeSessions, ctx.sessions).composite_targets
+
+
+@pytest.mark.critical
+def test_define_struct_applied_records_name(ctx: reg.ToolContext) -> None:
+    handlers = reg.build_handlers(ctx)
+    handlers["session_enable_writes"](session_id=_VALID_SID, allow_structural=True)
+    handlers["define_struct"](session_id=_VALID_SID, **_struct_kwargs())
+    assert _log(ctx) == ["Packet"]
+
+
+@pytest.mark.critical
+def test_define_union_applied_records_name(ctx: reg.ToolContext) -> None:
+    handlers = reg.build_handlers(ctx)
+    handlers["session_enable_writes"](session_id=_VALID_SID, allow_structural=True)
+    handlers["define_union"](session_id=_VALID_SID, **_union_kwargs())
+    assert _log(ctx) == ["Variant"]
+
+
+@pytest.mark.critical
+def test_define_types_applied_records_every_name(ctx: reg.ToolContext) -> None:
+    handlers = reg.build_handlers(ctx)
+    handlers["session_enable_writes"](session_id=_VALID_SID, allow_structural=True)
+    handlers["define_types"](session_id=_VALID_SID, **_batch_kwargs())
+    assert sorted(_log(ctx)) == ["A", "B"]  # every created composite in the batch is logged
+
+
+@pytest.mark.critical
+@pytest.mark.parametrize(
+    ("tool", "kwargs_fn"),
+    [
+        ("define_struct", _struct_kwargs),
+        ("define_union", _union_kwargs),
+        ("define_types", _batch_kwargs),
+    ],
+)
+def test_rejected_composite_write_does_not_record(tool: str, kwargs_fn: object) -> None:
+    # applied=False MUST NOT touch the change-log (record on success only — ADR-027).
+    ctx = _rejecting_ctx()
+    handlers = reg.build_handlers(ctx)
+    handlers["session_enable_writes"](session_id=_VALID_SID, allow_structural=True)
+    handlers[tool](session_id=_VALID_SID, **cast("dict[str, object]", kwargs_fn()))  # type: ignore[operator]
+    assert _log(ctx) == []

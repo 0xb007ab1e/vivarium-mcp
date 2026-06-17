@@ -283,11 +283,15 @@ class GhidraBackend(Protocol):
 
     # --- annotation persistence (v1.2 — ADR-018; export read-out ONLY) ---
     def export_annotations(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Enumerate the program's USER_DEFINED annotations, dependency-ordered, bounded — v1.2.
+        """Export user-authored annotations, dependency-ordered, bounded — v1.2 / ADR-027.
 
-        Read-only. Returns a plain ``{"schema_version", "binary": {...}, "entries": [...]}`` of the
-        program's user-defined annotations only (never auto-analysis output); over the entry cap →
-        ``limit-exceeded``. Import adds NO worker method — it replays the existing write RPCs.
+        Read-only. Returns a plain ``{"schema_version", "binary": {...}, "entries": [...]}``.
+        Symbols and signatures are enumerated by ``SourceType.USER_DEFINED`` (never auto-analysis).
+        Comments and composites — which lack a reliable Ghidra provenance signal — are read ONLY for
+        the server-supplied change-log selection (ADR-027 D4):
+        ``params = {"targets": {"comments": [{address, comment_type}], "composites": [name]}}``.
+        Over the entry cap → ``limit-exceeded``. Import adds NO worker method — it replays the
+        existing write RPCs.
         """
         ...
 

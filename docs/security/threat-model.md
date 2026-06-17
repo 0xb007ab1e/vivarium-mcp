@@ -829,9 +829,18 @@ positive cases (68 export round-trip; 70 happy import) must SUCCEED:
 
 68. **Export is read-only, owner-scoped, Untrusted-wrapped (POSITIVE)** — `session_export_annotations`
     requires **no** write consent, is denied the BOLA-safe `SESSION_INVALID` for a foreign/unknown id,
-    enumerates only `USER_DEFINED` annotations dependency-ordered, wraps binary-derived strings
+    emits only user-authored annotations dependency-ordered, wraps binary-derived strings
     `Untrusted` (ADR-005), and the **server overlays the authoritative `binary.sha256`** (not the
     worker's). The server persists nothing. (TB8-I/E)
+    - **ADR-027 (v1.3, F7 narrowing — no new boundary):** export is now scoped to **session-authored
+      targets**, fixing F7 over-inclusion (a 39-rename session leaked 13 auto-structs + 1138
+      auto-comments). **Symbols + signatures** stay `USER_DEFINED`-enumerated (Ghidra's authoritative
+      provenance). **Comments + composites** lack a reliable provenance signal, so the worker reads
+      ONLY a server-supplied **change-log** selection — the comment/composite targets THIS session's
+      gated writes actually applied. The change-log is **in-memory, session-lifetime, wiped on evict**
+      and holds **identity keys only** (`(address, comment_type)` pairs + composite names) — **never a
+      binary-derived value** (ADR-002/master §5). No trust boundary changes: TB8's import side is
+      untouched; this is a correctness narrowing of the existing read-out. (TB8-I, ADR-018/ADR-027)
 69. **Wrong-binary hash → fail closed** — `session_import_annotations` of a document whose
     `binary.sha256` ≠ the session's recorded program hash (or a session with no recorded hash) is
     rejected `VALIDATION` **before any write**; applying one binary's addresses/types to another is

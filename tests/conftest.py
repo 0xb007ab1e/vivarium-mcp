@@ -580,7 +580,11 @@ class FakeGhidraPort:
         )
 
     def export_annotations(
-        self, sid: str, a: s.SessionExportAnnotationsIn
+        self,
+        sid: str,
+        a: s.SessionExportAnnotationsIn,
+        *,
+        targets: s.ExportTargets,
     ) -> s.SessionExportAnnotationsOut:
         """Return a deterministic exported annotation document (untrusted-wrapped — ADR-018).
 

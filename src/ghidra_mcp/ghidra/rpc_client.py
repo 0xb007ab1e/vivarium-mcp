@@ -938,10 +938,23 @@ class RpcGhidraAdapter:
     # at the ADR-005 chokepoint. The server overlays the authoritative binary.sha256. IMPORT is NOT
     # here — it is server-side orchestration (registry) replaying the existing write methods above.
     def export_annotations(
-        self, sid: str, a: s.SessionExportAnnotationsIn
+        self,
+        sid: str,
+        a: s.SessionExportAnnotationsIn,
+        *,
+        targets: s.ExportTargets,
     ) -> s.SessionExportAnnotationsOut:
-        """Read out the session's USER_DEFINED annotations (read-only — ADR-018)."""
-        return _build_exported_annotation_document(self._tool_call(sid, "export_annotations", {}))
+        """Read out the session's USER_DEFINED annotations (read-only — ADR-018/ADR-027).
+
+        The server-supplied ``targets`` (the session change-log: comments + composites this session
+        authored) ride the worker RPC as an additive ``targets`` parameter so the worker reads ONLY
+        those for comments/composites instead of blind-enumerating (the F7 fix). Symbols/signatures
+        stay source-type-enumerated worker-side.
+        """
+        params = _export_annotations_params(targets)
+        return _build_exported_annotation_document(
+            self._tool_call(sid, "export_annotations", params)
+        )
 
     # --- internal: call orchestration -------------------------------------------------------
     def _tool_call(self, sid: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -2098,6 +2111,31 @@ def _build_exported_entry(r: dict[str, Any]) -> s.ExportedEntry:
             fields=[_exported_field_spec_from_plain(f) for f in r["fields"]],
         )
     raise ValueError("unknown exported annotation entry kind")
+
+
+def _export_annotations_params(targets: s.ExportTargets) -> dict[str, Any]:
+    """Shape the change-log selection into the ``export_annotations`` RPC params (ADR-027 D4).
+
+    Pure (no I/O, no JVM) so it is unit-testable hermetically (the worker ``_gh_*`` edge is not).
+    Emits ONLY identity keys — comment ``(address, comment_type)`` pairs and composite names — never
+    a binary-derived value (ADR-002/master §5). The shape matches the worker's expectation in
+    ``rpc-protocol.md``:
+    ``{"targets": {"comments": [{address, comment_type}], "composites": [name]}}``.
+
+    Args:
+        targets: The server-built export selection from the session change-log.
+
+    Returns:
+        The plain JSON-RPC params dict for the ``export_annotations`` method.
+    """
+    return {
+        "targets": {
+            "comments": [
+                {"address": c.address, "comment_type": c.comment_type} for c in targets.comments
+            ],
+            "composites": list(targets.composites),
+        }
+    }
 
 
 @_fail_closed
