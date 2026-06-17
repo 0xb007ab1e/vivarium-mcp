@@ -6,6 +6,62 @@ All notable changes to `ghidra-mcp` are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-17
+
+The **v1.3** increment — hardening and correctness driven by a **blind real-world acceptance run**
+(a stripped binary analyzed end-to-end on the real worker; 33/39 blind function names verified
+functionally-correct against debuginfod ground truth). Backward-compatible: no client-facing tool /
+RPC / envelope contract changed; the tool catalog stays **50**. Two never-run JVM-edge bugs that unit
+tests structurally cannot catch (F2, F7) were found and fixed via the live run, then re-verified live.
+
+> **Pre-1.0 / private:** the tool catalog, RPC, and envelope contracts may still evolve before 1.0.
+
+### Added
+- **Configurable worker resources (ADR-023, F1)** — worker memory / cpus / pids / tmpfs are now set
+  via `GHIDRA_MCP_WORKER_*` env (integer MiB / whole CPUs), each with a safe default + hard ceiling,
+  so large binaries can run on bigger hosts without a rebuild. All ADR-004 hardening (non-root,
+  ro-rootfs, dropped caps, no-network, **no-swap**, seccomp) is unchanged.
+- **`resource-exhausted` error (ADR-023, F1)** — a worker OOM / abnormal exit is now a distinct,
+  non-retryable `503` (classified from the container engine's OOM/exit signal) instead of masquerading
+  as a generic retryable `worker-unavailable`. Plus a warn-only pre-flight when an input is implausibly
+  large for the configured memory.
+- **Worker-error observability (ADR-024, F2/F3)** — the worker now attaches a **redacted** `data.detail`
+  (exception class + fixed template, never raw text) to its JSON-RPC errors; the server log renders
+  `exc_info` tracebacks (frames-only, value-echoing `ValidationError` lines stripped); a reserved
+  `LogRecord`-key guard stops `extra={"msg": …}`-style collisions from crashing a handler.
+- **Blind acceptance harness + v1.4 backlog (tooling/docs)** — `scripts/acceptance_run.py` (Mode A
+  analyze→select→dump, Mode B apply→export→measure, with progress) + `docs/roadmap-v1.3-findings.md`
+  and `docs/roadmap-v1.4.md`.
+
+### Changed
+- **Export only user-authored annotations (ADR-027, F7)** — `session_export_annotations` previously
+  leaked Ghidra **auto-generated** content (a 39-rename session exported 39 renames **+ 13 auto structs
+  + 1138 auto comments**). Comments carry no source-type and auto structs are program-local, so a
+  **session-scoped, in-memory, evict-wiped change-log** (identity keys only — ADR-002-compatible) now
+  gates comments + composites; symbols/signatures stay `USER_DEFINED`-enumerated. The `export_annotations`
+  worker RPC gains an **additive, server-supplied `targets`** field (server→worker only; client tool +
+  envelope unchanged). Live-verified: a 1-rename/1-comment/1-struct session exports exactly 3 entries.
+- **Session liveness during long calls (ADR-025, F4)** — a long `analyze` no longer idle-evicts its
+  own session: in-flight calls are exempt from the idle timeout (the per-call timeout-kill remains the
+  in-flight DoS bound); the absolute TTL is re-applied at the next call boundary. Adds a fail-closed
+  startup invariant `session_idle_s ≥ analysis_timeout_s`. Defaults unchanged.
+
+### Fixed
+- **`session_export_annotations` crashed on every real program (ADR-024, F2)** — step 1 called a
+  non-existent `ArchiveType.isProgramArchive()` (an `AttributeError` that collapsed the whole export);
+  fixed to compare against `ArchiveType.PROGRAM`. Also guards address-less `USER_DEFINED` symbols in
+  the symbol-rename enumeration.
+
+### Security
+- **Dependency CVE bumps** — `starlette` ≥ 1.3.1 (CVE-2026-54282 / CVE-2026-54283) and `cryptography`
+  ≥ 48.0.1 (GHSA-537c-gmf6-5ccf); the hashed lock resolves to starlette 1.3.1 + cryptography 49.0.0.
+  `pip-audit` on the lock: no known vulnerabilities.
+
+### Docs
+- **Rename name-collision behavior documented (ADR-026, F5)** — duplicate function names apply
+  (Ghidra keys functions by address); duplicate same-namespace symbol names already fail closed;
+  client-side de-duplication is the recommended practice. No server change.
+
 ## [0.4.0] — 2026-06-15
 
 Composite-batch type creation + a deeper naming-eval. The tool catalog grows **49 → 50**.
@@ -345,7 +401,8 @@ analyzer is the central security control.
   off-by-default and fail-closed. See `docs/security/threat-model.md` and `SECURITY.md` for the
   reporting channel.
 
-[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.2.1...v0.3.0
