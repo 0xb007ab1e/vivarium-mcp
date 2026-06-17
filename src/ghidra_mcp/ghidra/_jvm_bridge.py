@@ -688,43 +688,101 @@ class PyGhidraBackend:
         Args:
             emit_progress: The dispatch-supplied emitter (percent, closed-phase) → ``$/progress``.
         """
+        import jpype
         from ghidra.app.plugin.core.analysis import (  # type: ignore[import-not-found]
             AutoAnalysisManager,
         )
-        from ghidra.util.task import TaskMonitorAdapter  # type: ignore[import-not-found]
+        from ghidra.util.task import TaskMonitor  # type: ignore[import-not-found]
 
         program = self._require_program()
 
-        class _ProgressMonitor(TaskMonitorAdapter):  # type: ignore[misc]
-            """A ``TaskMonitor`` that maps Ghidra progress to a SAFE (percent, phase) emit."""
+        # JPype CANNOT subclass a Java CLASS (e.g. TaskMonitorAdapter) — "Java classes cannot be
+        # extended in Python". So we implement the TaskMonitor INTERFACE via ``jpype.JProxy`` over a
+        # plain Python object: Java dispatches each monitor call to the matching method below. Only
+        # the methods Ghidra's analysis actually invokes need to exist; the rest are safe no-ops.
+        class _MonitorImpl:
+            """Plain Python impl of the ``TaskMonitor`` interface → SAFE (percent, phase) emit."""
 
             def __init__(self) -> None:
-                super().__init__()
                 self._maximum = 0
-                self.setIndeterminate(False)
+                self._progress = 0
 
-            def setMaximum(self, maximum: Any) -> None:  # noqa: N802 - Ghidra API name
+            def _emit(self) -> None:
+                # CLOSED phase + percent ONLY — the free-form ``setMessage`` text is NEVER read here
+                # (it embeds attacker-controlled symbol names — master §5 redaction).
+                emit_progress(_monitor_percent(self._progress, self._maximum), "analyzing")
+
+            def initialize(self, maximum: Any, *_: Any) -> None:
                 self._maximum = int(maximum) if maximum else 0
-                super().setMaximum(maximum)
+                self._progress = 0
 
-            def setProgress(self, value: Any) -> None:  # noqa: N802 - Ghidra API name
-                super().setProgress(value)
-                percent = _monitor_percent(int(value) if value else 0, self._maximum)
-                # CLOSED phase + percent ONLY — the free-form setMessage text is deliberately NEVER
-                # read here (it can echo attacker-controlled symbol names — master §5 redaction).
-                emit_progress(percent, "analyzing")
+            def setMaximum(self, maximum: Any) -> None:  # noqa: N802
+                self._maximum = int(maximum) if maximum else 0
 
-            def setMessage(self, message: Any) -> None:  # noqa: N802 - Ghidra API name
-                # Intentionally DROP the message text (binary-derived). Keep the call so Ghidra's
-                # monitor contract is satisfied, but emit only the safe phase heartbeat.
-                del message
-                emit_progress(None, "analyzing")
+            def getMaximum(self) -> int:  # noqa: N802
+                return self._maximum
 
-        monitor = _ProgressMonitor()
+            def setProgress(self, value: Any) -> None:  # noqa: N802
+                self._progress = int(value) if value else 0
+                self._emit()
+
+            def incrementProgress(self, n: Any = 1) -> None:  # noqa: N802
+                self._progress += int(n) if n else 0
+                self._emit()
+
+            def getProgress(self) -> int:  # noqa: N802
+                return self._progress
+
+            def setMessage(self, _message: Any) -> None:  # noqa: N802
+                self._emit()  # phase heartbeat only — message text dropped
+
+            def getMessage(self) -> str:  # noqa: N802
+                return ""
+
+            def isCancelled(self) -> bool:  # noqa: N802
+                return False
+
+            def checkCancelled(self) -> None:  # noqa: N802
+                return None
+
+            def checkCanceled(self) -> None:  # noqa: N802 - older Ghidra spelling
+                return None
+
+            def setIndeterminate(self, _flag: Any) -> None:  # noqa: N802
+                return None
+
+            def isIndeterminate(self) -> bool:  # noqa: N802
+                return self._maximum <= 0
+
+            def cancel(self) -> None:
+                return None
+
+            def clearCancelled(self) -> None:  # noqa: N802
+                return None
+
+            def clearCanceled(self) -> None:  # noqa: N802 - older Ghidra spelling
+                return None
+
+            def setCancelEnabled(self, _flag: Any) -> None:  # noqa: N802
+                return None
+
+            def isCancelEnabled(self) -> bool:  # noqa: N802
+                return True
+
+            def setShowProgressValue(self, _flag: Any) -> None:  # noqa: N802
+                return None
+
+            def addCancelledListener(self, _listener: Any) -> None:  # noqa: N802
+                return None
+
+            def removeCancelledListener(self, _listener: Any) -> None:  # noqa: N802
+                return None
+
+        monitor = jpype.JProxy(TaskMonitor, inst=_MonitorImpl())
         manager = AutoAnalysisManager.getAnalysisManager(program)
         transaction = program.startTransaction("auto-analysis (monitored)")
         try:
-            manager.reAnalyzeAll(None)
+            manager.reAnalyzeAll(program.getMemory())
             manager.startAnalysis(monitor)
         finally:
             program.endTransaction(transaction, True)
