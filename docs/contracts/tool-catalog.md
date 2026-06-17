@@ -154,8 +154,10 @@ identifier allow-list / `validate_comment_text` normalization — stored-injecti
 > **no edge** → mutually-recursive *pointer* structs are allowed. The worker pre-registers ALL empty
 > composites in the batch, resolves + adds each, batch-total size-caps, and rolls back the WHOLE batch
 > on any failure (no partial type). Name collision (existing or intra-batch dup) → fail-closed REJECT.
-> `define_types` is NOT (yet) an annotation-persistence entry variant — round-trip of mutually-
-> recursive pointer composites is a tracked follow-up (ADR-021 §Persistence interaction).
+> `define_types` **is** the annotation-persistence carrier for composites (ADR-032): export emits ALL
+> session-authored composites as ONE `define_types` batch entry (schema v2), so mutually-recursive
+> pointer composites round-trip via the import handler's pre-registration. >64 composites →
+> `limit-exceeded` on export (the round-trippable graph is bounded).
 >
 > `TypeRef` = `{base: BaseType|null, named: str|null, pointer_levels: 0..8, array_len: 1..65536|null}`
 > (exactly one of `base`/`named`); `ParamSpec` = `{name, type: TypeRef}`; `FieldSpec` =
@@ -180,14 +182,15 @@ identifier allow-list / `validate_comment_text` normalization — stored-injecti
 ### Cross-session annotation persistence (v1.2 — ADR-018; TB8)
 | Tool | Input | Output | Notes |
 |---|---|---|---|
-| `session_export_annotations` | `SessionExportAnnotationsIn{session_id}` | `SessionExportAnnotationsOut{document}` | **read-only** (no consent); owner-scoped; worker enumerates `USER_DEFINED` annotations only, dependency-ordered, bounded (over the cap → `limit-exceeded`); binary-derived strings `Untrusted`-wrapped; server overlays the authoritative `binary.sha256` |
+| `session_export_annotations` | `SessionExportAnnotationsIn{session_id}` | `SessionExportAnnotationsOut{document}` | **read-only** (no consent); owner-scoped; worker enumerates `USER_DEFINED` annotations only, dependency-ordered, bounded (over the cap → `limit-exceeded`); **session-authored composites emit as ONE `define_types` batch entry** so interdependent types round-trip (ADR-032; >64 → `limit-exceeded`); binary-derived strings `Untrusted`-wrapped; server overlays the authoritative `binary.sha256` |
 | `session_import_annotations` | `SessionImportAnnotationsIn{session_id, document}` | `SessionImportAnnotationsOut{session_id, total, applied, rejected, outcomes[{index, kind, applied, reason?}]}` | **GATED** (write-consent; `allow_structural` if any entry is structural); document **fully untrusted** → schema-validate → **binary-hash binding verified** → consent → **per-entry re-validate + replay via the EXISTING gated write path** (no new write primitive); per-entry outcome report; server persists nothing |
 
 > The annotation **document** = `{schema_version, binary:{sha256, name?, size?}, entries:[Entry]}`,
-> a versioned, **binary-hash-bound**, dependency-ordered (composites/types first, then refs, renames,
-> comments) list of typed `Entry` variants — one per existing write tool
-> (`rename_function`/`rename_symbol`/`rename_local_variable`/`rename_parameter`/`set_comment`/
-> `set_function_signature`/`apply_data_type`/`define_struct`/`define_union`). It is **inert structured
+> a versioned (**v2**; import accepts {1, 2} — ADR-032), **binary-hash-bound**, dependency-ordered
+> (composites/types first, then refs, renames, comments) list of typed `Entry` variants — one per
+> existing write tool (`rename_function`/`rename_symbol`/`rename_local_variable`/`rename_parameter`/
+> `set_comment`/`set_function_signature`/`apply_data_type`/**`define_types`** (the composite carrier,
+> ADR-032)/`define_struct`/`define_union` (the latter two still import for v1 docs)). It is **inert structured
 > JSON** (never Ghidra-native — ADR-018 D3). **Export** is the read-out (read-only). **Import** is the
 > new trust boundary (TB8): it adds **no new write primitive** — it is a schema-validated, hash-bound,
 > consent-gated **batch replay of the existing v1.1 gated writes**, each re-validated through the live

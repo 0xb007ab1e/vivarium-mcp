@@ -38,7 +38,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from pydantic import BaseModel, ValidationError
 
@@ -2410,6 +2410,13 @@ def _build_exported_entry(r: dict[str, Any]) -> s.ExportedEntry:
             type=_exported_type_ref_from_plain(r["type"]),
             clear_existing=bool(r.get("clear_existing", False)),
         )
+    if kind == "define_types":
+        # ADR-032: the interdependent-composite round-trip batch. Each member's name + field names
+        # are binary-derived (read out of the hostile program) → Untrusted-wrapped (ADR-005).
+        return s.ExportedDefineTypesEntry(
+            kind="define_types",
+            types=[_exported_composite_spec_from_plain(t) for t in r["types"]],
+        )
     if kind == "define_struct":
         return s.ExportedDefineStructEntry(
             kind="define_struct",
@@ -2424,6 +2431,23 @@ def _build_exported_entry(r: dict[str, Any]) -> s.ExportedEntry:
             fields=[_exported_field_spec_from_plain(f) for f in r["fields"]],
         )
     raise ValueError("unknown exported annotation entry kind")
+
+
+def _exported_composite_spec_from_plain(t: dict[str, Any]) -> s.ExportedCompositeSpec:
+    """Build an exported composite spec (one define_types batch member) — names Untrusted (ADR-032).
+
+    Args:
+        t: The plain ``{"kind", "name", "fields", "packed"?}`` composite dict from the worker.
+
+    Returns:
+        The typed :class:`ExportedCompositeSpec` (``name`` + each field name Untrusted-wrapped).
+    """
+    return s.ExportedCompositeSpec(
+        kind=cast(Literal["struct", "union"], str(t["kind"])),
+        name=_w(t["name"], DataOrigin.BINARY),
+        fields=[_exported_field_spec_from_plain(f) for f in t["fields"]],
+        packed=bool(t.get("packed", False)),
+    )
 
 
 def _export_annotations_params(targets: s.ExportTargets) -> dict[str, Any]:

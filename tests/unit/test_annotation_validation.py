@@ -56,10 +56,24 @@ def test_well_formed_document_validates() -> None:
     v.validate_annotation_document(doc)  # must not raise
 
 
-# --- schema_version: only the supported version is accepted (fail closed) ----------------------
+# --- schema_version: only the SUPPORTED versions are accepted (fail closed) — ADR-032 -----------
 @pytest.mark.critical
-def test_unsupported_schema_version_rejected() -> None:
-    doc = _doc(version=2)
+@pytest.mark.parametrize("version", [1, 2])
+def test_supported_schema_versions_accepted(version: int) -> None:
+    # ADR-032 D3: import accepts {1, 2}. A v1 document (the legacy define_struct/define_union shape)
+    # and a v2 document both validate — a v2 importer still understands v1 (backward-compat).
+    assert version in s.SUPPORTED_ANNOTATION_SCHEMA_VERSIONS
+    v.validate_annotation_document(_doc(version=version))  # must not raise
+
+
+@pytest.mark.critical
+@pytest.mark.parametrize("version", [0, 3, 999])
+def test_unsupported_schema_version_rejected(version: int) -> None:
+    # An unknown version (below or above the supported window) fails closed — forward-compat is
+    # opt-in, never silent (ADR-032 D3). model_construct bypasses the ge=1 field bound (version 0).
+    doc = s.AnnotationDocument.model_construct(
+        schema_version=version, binary=s.AnnotationBinaryRef(sha256=_SHA), entries=[]
+    )
     with pytest.raises(GhidraMcpError) as exc:
         v.validate_annotation_document(doc)
     assert exc.value.envelope.type is ErrorType.VALIDATION
@@ -206,6 +220,16 @@ def test_validate_entry_accepts_every_clean_kind() -> None:
             kind="define_union",
             name="un",
             fields=[s.FieldSpec(name="m", type=s.TypeRef(base="int"))],
+        ),
+        s.DefineTypesEntry(  # ADR-032 — the interdependent-composite batch entry
+            kind="define_types",
+            types=[
+                s.CompositeSpec(
+                    kind="struct",
+                    name="ba",
+                    fields=[s.FieldSpec(name="m", type=s.TypeRef(base="int"))],
+                )
+            ],
         ),
     ]
     for entry in clean:

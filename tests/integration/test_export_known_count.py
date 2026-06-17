@@ -60,10 +60,12 @@ pytestmark = pytest.mark.integration
 # --- known-count constants -----------------------------------------------------------------------
 #: Exactly the user-authored writes this session makes. The export must carry EXACTLY this multiset
 #: of entry kinds (total 3) and ZERO auto-generated content — the crux of the F7 regression.
+#: ADR-032: session-authored composites now export as ONE ``define_types`` batch entry (schema
+#: v2), not an individual ``define_struct`` — the single struct below counts as ``define_types``.
 _EXPECTED_COUNTS: dict[str, int] = {
     "rename_function": 1,
     "set_comment": 1,
-    "define_struct": 1,
+    "define_types": 1,
 }
 _EXPECTED_TOTAL = sum(_EXPECTED_COUNTS.values())
 
@@ -198,8 +200,9 @@ async def _drive_known_count(binary: Path, import_root: Path) -> dict[str, int]:
     Steps: ``session_create`` → ``session_import`` (the micro-binary) → ``session_analyze`` →
     ``session_enable_writes{allow_structural: true}`` → exactly 1 ``rename_function`` (the first
     listed function) + 1 ``set_comment`` (EOL at that function's address) + 1 ``define_struct``
-    (a 1-field struct) → ``session_export_annotations``. Returns the multiset of exported entry
-    ``kind`` values for the caller to assert against :data:`_EXPECTED_COUNTS`.
+    (a 1-field struct) → ``session_export_annotations``. The struct exports as ONE ``define_types``
+    batch entry (ADR-032, schema v2). Returns the multiset of exported entry ``kind`` values for the
+    caller to assert against :data:`_EXPECTED_COUNTS`.
 
     Args:
         binary: The compiled micro-binary to import.

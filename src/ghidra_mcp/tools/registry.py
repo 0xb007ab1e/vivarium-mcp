@@ -1164,6 +1164,11 @@ def _replay_entry(ctx: ToolContext, sid: str, entry: s.Entry) -> None:
                 clear_existing=entry.clear_existing,
             ),
         )
+    elif isinstance(entry, s.DefineTypesEntry):
+        # ADR-032: replay the interdependent-composite batch via the existing define_types handler
+        # (pre-registration resolves mutually-recursive pointers + any ordering). The live handler
+        # re-checks structural consent + validate_types_batch + one worker transaction.
+        _handle_define_types(ctx, s.DefineTypesIn(session_id=sid, types=entry.types))
     elif isinstance(entry, s.DefineStructEntry):
         _handle_define_struct(
             ctx,

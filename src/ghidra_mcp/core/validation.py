@@ -50,8 +50,12 @@ MAX_RESULT_COUNT = 10_000
 # --- annotation-persistence bounds (ADR-018 §schema; mirror schemas.ANNOTATION_SCHEMA_VERSION /
 # schemas._MAX_ENTRIES). The imported document is fully untrusted: only this version is supported
 # (unknown → fail closed) and the entry count is bounded (DoS — CWE-400). ---
-ANNOTATION_SCHEMA_VERSION = 1
-"""The single supported annotation-document schema version (an unknown version fails closed)."""
+ANNOTATION_SCHEMA_VERSION = 2
+"""The current annotation-document schema version emitted by export (ADR-032 bumped 1 → 2)."""
+
+SUPPORTED_ANNOTATION_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2})
+"""The schema versions an import accepts — the current emitter version plus the still-replayable v1
+(a v2 importer understands v1 entry kinds; ADR-032 D3). An unknown version fails closed."""
 
 MAX_ANNOTATION_ENTRIES = 50_000
 """Maximum entries accepted in one imported annotation document (DoS guard — CWE-400)."""
@@ -803,6 +807,8 @@ def validate_entry(entry: Entry) -> None:
         ApplyDataTypeEntry,
         DefineStructEntry,
         DefineStructIn,
+        DefineTypesEntry,
+        DefineTypesIn,
         DefineUnionEntry,
         DefineUnionIn,
         RenameFunctionEntry,
@@ -845,6 +851,11 @@ def validate_entry(entry: Entry) -> None:
     elif isinstance(entry, ApplyDataTypeEntry):
         parse_address(entry.address)
         validate_type_ref(entry.type)
+    elif isinstance(entry, DefineTypesEntry):
+        # ADR-032: re-validate the batch exactly like the live tool — the by-value cycle detector +
+        # per-type validate_composite + intra-batch unique names. A tampered/cyclic batch fails
+        # closed here, before any worker replay.
+        validate_types_batch(DefineTypesIn(session_id="x", types=entry.types))
     elif isinstance(entry, DefineStructEntry):
         validate_composite(
             DefineStructIn(
@@ -883,7 +894,7 @@ def validate_annotation_document(document: AnnotationDocument) -> None:
             ``LIMIT_EXCEEDED`` when the entry count exceeds the maximum. The detail names the
             condition, never an (untrusted) value.
     """
-    if document.schema_version != ANNOTATION_SCHEMA_VERSION:
+    if document.schema_version not in SUPPORTED_ANNOTATION_SCHEMA_VERSIONS:
         raise _validation_error("unsupported annotation document schema version")
     # Defense in depth: the schema pattern already constrains the hash, but re-assert presence +
     # well-formedness here (the binding is security-critical and must never be trusted blindly).

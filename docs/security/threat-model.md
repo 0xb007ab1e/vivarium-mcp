@@ -1093,3 +1093,25 @@ is `# pragma: no cover` and **live-verified on a real worker before merge** (the
 unit tests structurally cannot exercise it). **Still out of scope:** atomic redefine/replace, batch
 delete, deleting non-composite types, and deleting a non-session-authored type (each its own future
 gated increment with its own re-render threat model).
+
+## 17. TB8 (delta) — `define_types` annotation round-trip (v1.4 — ADR-032, ACCEPTED)
+
+Extends the annotation-persistence boundary (**TB8**, no new boundary): export now emits all
+session-authored composites as ONE `define_types` batch entry (schema v2) so mutually-recursive
+pointer composites round-trip; import replays it through the EXISTING gated `define_types` handler.
+This adds **no new write primitive** and changes neither the import trust model (schema-validate →
+hash-bind → consent-gate → per-entry re-validate → replay) nor what leaves the server.
+
+| STRIDE | Threat | Mitigation |
+|--------|--------|------------|
+| **T/E** | A tampered `define_types` entry in an imported document creates a malicious/cyclic type graph | the entry is **re-validated on import via `validate_types_batch`** (the by-value cycle detector + per-type `validate_composite` + intra-batch unique names) — identical to the live tool — before any replay; then replayed through the gated `define_types` handler (`require_write_consent(structural=True)` + ONE worker transaction, rollback-all). `define_types` is in `STRUCTURAL_ENTRY_KINDS` → import requires `allow_structural` (LLM08 gate not bypassed) |
+| **I** | Disclosure via the exported batch | the exported `define_types` entry carries ONLY what the individual composite entries did — each composite/field **name is `Untrusted`-wrapped** (ADR-005, binary-derived); no new data class leaves the server. The server still overlays the authoritative `binary.sha256` and persists nothing (ADR-002) |
+| **D** | Oversized round-trip batch (fan-out) | export fails closed `limit-exceeded` at **>64** composites (`_MAX_TYPES_PER_BATCH`); import re-bounds via the same per-batch + per-type + batch-total caps (CWE-400) |
+| **S** | Version confusion | `schema_version` bumps 1 → 2; import accepts `{1, 2}` (a v2 importer understands v1 entry kinds); an unknown version fails closed "unsupported version" — never a silent forward-compat |
+
+**Residual risk.** Unchanged from TB8 (ADR-018): the worst an imported document achieves is the
+existing gated writes' blast radius (here, a `define_types` batch the live tool could already
+perform), in a disposable, hash-bound, owner-scoped session. The worker export edge
+(`_gh_export_annotations`) change is `# pragma: no cover` and **live-verified on a real worker**
+before merge (define A + B mutually pointer-recursive → export → re-import into a fresh session →
+both reconstructed) — the F2/F7/ADR-030 lesson.

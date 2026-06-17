@@ -154,8 +154,10 @@ auto-analysis content (F7). `params = {"targets": {"comments": [{"address", "com
 "composites": [name]}}` — an **additive, server→worker** param: identity keys ONLY (addresses,
 slots, composite names), never a binary-derived value; the **client-facing
 `session_export_annotations` tool surface is unchanged** (no client-supplied targets, no slug
-repurposed). An empty/missing `targets` emits no comments/composites), plus a `ping`/`shutdown`
-control pair.
+repurposed). An empty/missing `targets` emits no comments/composites. **ADR-032:** the worker emits
+all reconstructable session-authored composites as ONE `define_types` batch entry (schema_version
+**2**) so mutually-recursive pointer composites round-trip; >`_MAX_TYPES_PER_BATCH` (64) →
+`limit-exceeded`), plus a `ping`/`shutdown` control pair.
 (Session create/status/close **and the write-consent grant/revoke** `session_enable_writes`/
 `session_disable_writes` are **server-side** lifecycle, not worker RPC methods. The derived
 tools compute server-side with **no dedicated worker method**: `callees`/`callers`/`analysis_order`/
