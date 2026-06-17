@@ -84,6 +84,12 @@ class FakeSessionManager:
             allow_structural=self._structural,
         )
 
+    def begin_call(self, session_id: str) -> None:
+        """In-flight marker (ADR-025 / F4) — no-op for these dispatch tests."""
+
+    def end_call(self, session_id: str) -> None:
+        """In-flight clear (ADR-025 / F4) — no-op for these dispatch tests."""
+
     def authorize(self, session_id: str, *, caller: str = _OWNER) -> s.SessionInfo:
         self._check(session_id, caller)
         return self._info()
