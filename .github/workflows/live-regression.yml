@@ -83,12 +83,14 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install toolchain + package (dev extras)
+      - name: Install toolchain (hash-pinned dev lockfile only — no unpinned fetch)
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          # pip install --require-hashes -r requirements-dev.lock   # <- enable once the lock exists
-          pip install -e ".[dev]"
+          # Hash-pinned dev deps ONLY; the package runs from `src/` via PYTHONPATH (set on the run
+          # step below), inherited by the spawned `python -m ghidra_mcp`. No editable install → no
+          # unpinned build-backend fetch. requirements-dev.lock = pip-compile --extra=dev --generate-hashes.
+          pip install --require-hashes -r requirements-dev.lock
 
       # --- Acquire the worker image: PULL+VERIFY the signed release, else BUILD from the pin -------
       # `build_image` dispatch input forces a build; otherwise pull the signed digest + cosign-verify
@@ -162,6 +164,9 @@ jobs:
       # --- Run the F2 + F7 + profile HARD GATES against the real worker ---------------------------
       - name: Run F2 + F7 + analyzer-profile live regression (real worker under crun)
         env:
+          # Run the package from src/ (no editable install — nothing unpinned fetched); inherited by
+          # the spawned `python -m ghidra_mcp` server via os.environ.
+          PYTHONPATH: src
           GHIDRA_MCP_INTEGRATION: "1"
           GHIDRA_MCP_WORKER_IMAGE: ${{ steps.image.outputs.image }}
           GHIDRA_MCP_CONTAINER_ENGINE: podman
