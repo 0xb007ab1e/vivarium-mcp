@@ -5,7 +5,7 @@ read-only until ``enable_writes`` is called; the mutation handlers call ``requir
 as the chokepoint before any write reaches the worker. Covered here against a real
 :class:`SessionManager` with a fake worker port (no JVM, no I/O — ADR-001):
 
-- default-deny: ``require_write_consent`` raises ``VALIDATION`` on a fresh session;
+- default-deny: ``require_write_consent`` raises ``FORBIDDEN`` (ADR-036) on a fresh session;
 - after ``enable_writes`` it passes; ``allow_structural`` gates the (deferred) structural set;
 - ``disable_writes`` returns the session to read-only (and clears ``allow_structural``);
 - ``SessionInfo`` reports ``writes_enabled`` / ``allow_structural``;
@@ -83,7 +83,8 @@ def test_fresh_session_is_read_only_by_default() -> None:
     assert info.allow_structural is False
     with pytest.raises(GhidraMcpError) as exc:
         mgr.require_write_consent(info.session_id)
-    assert exc.value.envelope.type is ErrorType.VALIDATION
+    # ADR-036: an owned session lacking write consent is a permission denial → FORBIDDEN (403).
+    assert exc.value.envelope.type is ErrorType.FORBIDDEN
     assert "read-only" in exc.value.envelope.detail
 
 
@@ -107,7 +108,8 @@ def test_structural_write_requires_allow_structural_opt_in() -> None:
     # Annotation consent is NOT enough for a structural write.
     with pytest.raises(GhidraMcpError) as exc:
         mgr.require_write_consent(sid, structural=True)
-    assert exc.value.envelope.type is ErrorType.VALIDATION
+    # ADR-036: structural write without the opt-in is a permission denial → FORBIDDEN (403).
+    assert exc.value.envelope.type is ErrorType.FORBIDDEN
     assert "structural" in exc.value.envelope.detail
 
 
@@ -131,7 +133,8 @@ def test_disable_writes_returns_to_read_only() -> None:
     assert revoked.allow_structural is False  # structural opt-in is cleared on revoke
     with pytest.raises(GhidraMcpError) as exc:
         mgr.require_write_consent(sid)
-    assert exc.value.envelope.type is ErrorType.VALIDATION
+    # ADR-036: consent revoked → back to read-only → permission denial → FORBIDDEN (403).
+    assert exc.value.envelope.type is ErrorType.FORBIDDEN
 
 
 def test_enable_then_revoke_then_reenable_roundtrip() -> None:
@@ -200,5 +203,27 @@ def test_require_write_consent_evicts_expired_session_bola_safe() -> None:
     clock.advance(20)
     with pytest.raises(GhidraMcpError) as exc:
         mgr.require_write_consent(sid)
-    # Expiry beats consent: the live-session check fails first → SESSION_INVALID, not VALIDATION.
+    # Expiry beats consent: the live-session check fails first → SESSION_INVALID, not FORBIDDEN.
+    assert exc.value.envelope.type is ErrorType.SESSION_INVALID
+
+
+@pytest.mark.parametrize("structural", [False, True])
+def test_foreign_caller_write_is_session_invalid_not_forbidden(structural: bool) -> None:
+    """ADR-036 D3 invariant: a non-owner's write attempt is SESSION_INVALID, never FORBIDDEN.
+
+    The owner check (_get_live_locked) fires BEFORE the consent/capability check, so a foreign
+    caller is denied the BOLA-safe SESSION_INVALID — a 403 here would confirm the session exists
+    (an existence oracle). FORBIDDEN may only ever surface AFTER ownership is established.
+
+    Parametrized over both the annotation and structural gates: the owner grants FULL consent
+    (incl. ``allow_structural``) first, so if the owner check did NOT fire first, the consent gate
+    would PASS and nothing would raise — the test only sees an error because ownership is checked
+    first. This guards against a future refactor that splits the owner check per write-branch.
+    """
+    mgr, _ = _mgr()
+    sid = mgr.create(owner="alice").session_id
+    # Owner grants full consent, so a 403 leak would reveal "exists + consented" (worse).
+    mgr.enable_writes(sid, caller="alice", allow_structural=True)
+    with pytest.raises(GhidraMcpError) as exc:
+        mgr.require_write_consent(sid, caller="bob", structural=structural)
     assert exc.value.envelope.type is ErrorType.SESSION_INVALID

@@ -25,6 +25,7 @@
 | `validation-error` | tool args failed boundary validation (TB1) | 400 | no |
 | `not-found` | requested object doesn't exist | 404 | no |
 | `session-invalid` | session unknown/expired/evicted (**BOLA-safe**) | 404 | no |
+| `forbidden` | authenticated + owns the target, but not permitted for this op (ADR-036) | 403 | no |
 | `limit-exceeded` | size/count/time bound hit (DoS control) | 413 / 429 | maybe |
 | `timeout` | per-tool/analysis deadline elapsed; worker may be killed | 408 / 504 | maybe |
 | `worker-unavailable` | worker unreachable/crashed/evicted mid-call | 503 | yes |
@@ -32,6 +33,15 @@
 | `analysis-failed` | Ghidra couldn't analyze the input (not a server bug) | 422 | no |
 | `internal-error` | unexpected server fault; detail is generic | 500 | no |
 
+> **`forbidden` (v1.5 — ADR-036):** an ADDITIVE slug — no existing slug is repurposed. Returned when
+> the caller is authenticated and owns the target session but lacks permission for **this** operation:
+> a missing OAuth capability (ADR-033 scope→tool authZ) or absent write/structural consent (ADR-012).
+> **Distinct from `validation-error`** ("your request was malformed") and **from `session-invalid`**.
+> **Critical invariant:** an ownership / cross-caller denial is NEVER `forbidden` — it stays
+> `session-invalid` (404) so a 403 cannot become an existence oracle (BOLA — `std-owasp-api` API1).
+> So `forbidden` only ever fires *after* the owner check has passed. `detail` is a fixed, value-free
+> string (never the token, scope contents, or which capability). Not retryable.
+>
 > **`resource-exhausted` (v1.3 — ADR-023 / F1):** an ADDITIVE slug — no existing slug is repurposed.
 > Distinct from `worker-unavailable` so a client can surface a precise "increase worker memory or
 > reduce input size" hint. **Not retryable** (the same input against the same memory cap would OOM
