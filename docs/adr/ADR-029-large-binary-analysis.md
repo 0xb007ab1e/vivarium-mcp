@@ -251,7 +251,12 @@ Run against a worker image built from this branch (gzip 1.13 target, real chain 
   so **every** preset analyzer-option name (`Decompiler Parameter ID`, `Aggressive Instruction Finder`,
   `Decompiler Switch Analysis`, `Embedded Media`, `Create Address Tables`) is a real Ghidra 12.1.2
   option. The diag was reverted before commit. (Follow-up: fold a profile dimension into the standing
-  ADR-028 harness so this stays continuously verified.)
+  ADR-028 harness so this stays continuously verified.) **LANDED (2026-06-17, post-v0.6.0):**
+  `tests/integration/test_analyze_profiles.py` runs `{default,light,deep}` as hard gates in the
+  ADR-028 nightly (each analyzes + populates a surface on the real worker), so the option-overlay
+  JVM edge is now continuously exercised — see ADR-028 §"Follow-ups (landed)". The stronger
+  option-*existence* check (the reverted diag, made permanent + fail-closed in the worker) was
+  considered and deferred as its own feature rather than a harness follow-up.
 
 ## Consequences
 

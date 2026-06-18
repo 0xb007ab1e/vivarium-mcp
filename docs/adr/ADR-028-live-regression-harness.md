@@ -338,6 +338,21 @@ only new committed fixture; everything binary is built/pulled in the job and liv
   — non-deterministic LLM signal, D1c); a durable metrics store / dashboard for the naming trend
   (start with workflow artifacts + the run log; a dashboard is a later nicety).
 
+## Follow-ups (landed)
+
+- **Analyzer-profile dimension (2026-06-17, post-v0.6.0).** Folded the ADR-029 B follow-up into this
+  harness: `tests/integration/test_analyze_profiles.py` parametrizes `session_analyze` over
+  `{default, light, deep}` as **deterministic HARD gates** — each profile must analyze without an
+  error envelope and populate a function surface (`>= 1`) on the real worker. This is the sole
+  recurring exercise of the ADR-029 option-overlay JVM edge (`getOptions(ANALYSIS_PROPERTIES)` +
+  `setBoolean`), which the `default` (empty-overlay) path skips — a renamed `ANALYSIS_PROPERTIES`
+  constant or a changed `setBoolean` signature across a Ghidra version bump now reds the nightly
+  instead of failing silently in production. The per-profile recovered-function count is recorded
+  into the JUnit XML as an **advisory trend** (NOT asserted to differ — micro-binary pass effects are
+  not deterministic enough to gate). The fail-loud-on-skip assertion's threshold rose `>=2 → >=5`
+  (F2 + F7 + 3 profile params). Harness-only — no `src/` change (ratified scope; an option-existence
+  hardening in the worker was considered and deferred as a separate feature, not a harness follow-up).
+
 ## Alternatives considered
 
 - **Run the live regression on every PR (default gate).** **Rejected** — worker build/pull + Ghidra
