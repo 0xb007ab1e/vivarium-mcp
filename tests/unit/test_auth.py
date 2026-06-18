@@ -22,6 +22,8 @@ from ghidra_mcp.server.auth import (
     OAUTH_ALLOWED_ALGORITHMS,
     OAUTH_DEFAULT_ALGORITHMS,
     OAUTH_PRINCIPAL_CLAIM_DEFAULT,
+    PROXY_IDENTITY_HEADER_DEFAULT,
+    PROXY_SECRET_HEADER_DEFAULT,
     AuthContext,
     Authenticator,
     BearerAuthenticator,
@@ -30,11 +32,19 @@ from ghidra_mcp.server.auth import (
     NullAuthenticator,
     OAuthResourceAuthenticator,
     Principal,
+    ReverseProxyMtlsAuthenticator,
     _token_scopes,
+    _valid_proxy_identity,
     build_authenticator,
 )
 
 _TOKEN = "s3cret-token-of-sufficient-length"  # noqa: S105  # test fixture, not a real secret
+# Reverse-proxy mTLS shared secret (ADR-034). >= 16 chars (the construction floor). Synthetic.
+_PROXY_SECRET = "proxy-shared-secret-of-len"  # noqa: S105  # test fixture, not a real secret
+# Custom proxy header NAMES (not secrets — header names; bandit S105/S106 false-positive on the
+# substring "secret"). Centralized so the literals carry a single justification.
+_CUSTOM_SECRET_HEADER = "x-my-proxy-secret"  # noqa: S105  # a header NAME, not a secret value
+_CUSTOM_IDENTITY_HEADER = "x-my-client-id"
 
 
 def test_bearer_accepts_valid_token() -> None:
@@ -103,6 +113,7 @@ def test_oauth_is_built_not_a_stub() -> None:
         NullAuthenticator,
         MtlsAuthenticator,
         OAuthResourceAuthenticator,
+        ReverseProxyMtlsAuthenticator,
     ],
 )
 def test_all_strategies_satisfy_the_protocol(cls: type) -> None:
@@ -112,6 +123,8 @@ def test_all_strategies_satisfy_the_protocol(cls: type) -> None:
         inst = cls(tokens={_TOKEN: "bearer"})
     elif cls is OAuthResourceAuthenticator:
         inst = cls(issuer="https://idp", audience="gmcp", jwks_uri="https://idp/jwks")
+    elif cls is ReverseProxyMtlsAuthenticator:
+        inst = cls(shared_secret=_PROXY_SECRET)
     else:
         inst = cls()
     assert isinstance(inst, Authenticator)  # runtime_checkable structural check
@@ -1041,3 +1054,275 @@ def test_mtls_principal_is_full_capability() -> None:
     cert = {"subject": ((("commonName", "client-a"),),)}
     principal = auth.authenticate(AuthContext(peer_certificate=cert))
     assert principal is not None and principal.capabilities == ALL_CAPABILITIES
+
+
+# ==============================================================================================
+# ReverseProxyMtlsAuthenticator (ADR-034) — the opt-in reverse-proxy mTLS mode. A TLS-terminating
+# proxy verifies the client cert chain and forwards the verified identity (subject CN/DN) in a
+# header; the server trusts it ONLY when the request also carries the correct pre-shared secret in
+# the secret header (the code-enforced trust anchor against header spoofing). Order: the secret is
+# checked FIRST (constant-time, no oracle) — a missing/wrong secret never even consults the identity
+# header; then the identity is validated (non-empty, <=256, control-free) and mapped to a Principal.
+# Fail closed (generic None) throughout. Hermetic — synthetic header dicts only, no real secrets.
+# ==============================================================================================
+
+
+def _proxy_ctx(
+    *,
+    secret: str | None = _PROXY_SECRET,
+    identity: str | None = "CN=alice",
+    secret_header: str = PROXY_SECRET_HEADER_DEFAULT,
+    identity_header: str = PROXY_IDENTITY_HEADER_DEFAULT,
+) -> AuthContext:
+    """Build an :class:`AuthContext` whose headers carry the proxy secret + identity (omit if None).
+
+    Mirrors how the middleware populates ``AuthContext.headers`` (lowercased name → first value).
+    A ``None`` secret/identity simply omits that header (the "missing header" case).
+    """
+    headers: dict[str, str] = {}
+    if secret is not None:
+        headers[secret_header] = secret
+    if identity is not None:
+        headers[identity_header] = identity
+    return AuthContext(headers=headers)
+
+
+# --- AuthContext default headers ---------------------------------------------------------------
+def test_authcontext_default_headers_is_empty_mapping() -> None:
+    """A bare AuthContext exposes an empty header map (ADR-034 — non-HTTP/test calls)."""
+    assert AuthContext().headers == {}
+
+
+# --- _valid_proxy_identity: bounds + control-char rejection (fail closed) ----------------------
+@pytest.mark.parametrize(
+    "value",
+    [
+        "alice",  # a normal CN
+        "CN=alice,OU=eng,O=acme",  # a full DN (with =,/ . separators — allowed)
+        "x" * 256,  # at the length ceiling (boundary — accepted)
+    ],
+)
+def test_valid_proxy_identity_accepts_safe_values(value: str) -> None:
+    assert _valid_proxy_identity(value) is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",  # empty → not a usable principal id
+        "x" * 257,  # one over the 256-char ceiling
+        "alice\nbob",  # newline (control)
+        "alice\x00",  # NUL (control)
+        "alice\x7f",  # DEL (0x7F)
+        "alice\x1f",  # unit-separator (control < 0x20)
+    ],
+)
+def test_valid_proxy_identity_rejects_unsafe_values(value: str) -> None:
+    """Empty / over-long / any control or 0x7F char → not a safe principal id (fail closed)."""
+    assert _valid_proxy_identity(value) is False
+
+
+# --- authenticate: the happy path --------------------------------------------------------------
+def test_proxy_correct_secret_and_identity_maps_to_principal() -> None:
+    auth = ReverseProxyMtlsAuthenticator(shared_secret=_PROXY_SECRET)
+    principal = auth.authenticate(_proxy_ctx(identity="CN=alice,OU=eng,O=acme"))
+    assert principal == Principal(id="CN=alice,OU=eng,O=acme")
+    assert principal is not None and principal.capabilities == ALL_CAPABILITIES
+
+
+def test_proxy_two_distinct_identities_yield_two_distinct_principals() -> None:
+    """Distinct identities → distinct principals → distinct owner-scoped sessions (ADR-017)."""
+    auth = ReverseProxyMtlsAuthenticator(shared_secret=_PROXY_SECRET)
+    alice = auth.authenticate(_proxy_ctx(identity="alice"))
+    bob = auth.authenticate(_proxy_ctx(identity="bob"))
+    assert alice == Principal(id="alice")
+    assert bob == Principal(id="bob")
+    assert alice != bob
+
+
+# --- authenticate: secret check is FIRST and fail-closed (no oracle) ---------------------------
+_WRONG_SECRET = "wrong-but-long-enough-secret"  # noqa: S105  # test fixture, not a real secret
+
+
+def test_proxy_wrong_secret_is_rejected() -> None:
+    auth = ReverseProxyMtlsAuthenticator(shared_secret=_PROXY_SECRET)
+    assert auth.authenticate(_proxy_ctx(secret=_WRONG_SECRET)) is None
+
+
+def test_proxy_missing_secret_header_is_rejected() -> None:
+    auth = ReverseProxyMtlsAuthenticator(shared_secret=_PROXY_SECRET)
+    assert auth.authenticate(_proxy_ctx(secret=None)) is None
+
+
+def test_proxy_wrong_secret_ignores_a_valid_identity() -> None:
+    """The identity header is irrelevant when the secret is wrong — secret is checked FIRST.
+
+    A perfectly valid identity present alongside a wrong secret still yields ``None`` (the trust
+    anchor must hold before the forwarded identity is ever consulted — ADR-034 fail-closed order).
+    """
+    auth = ReverseProxyMtlsAuthenticator(shared_secret=_PROXY_SECRET)
+    ctx = _proxy_ctx(secret=_WRONG_SECRET, identity="CN=alice")
+    assert auth.authenticate(ctx) is None
+
+
+def test_proxy_empty_headers_context_is_rejected() -> None:
+    """A context with no headers at all (default {}) → fail closed (no secret, no identity)."""
+    auth = ReverseProxyMtlsAuthenticator(shared_secret=_PROXY_SECRET)
+    assert auth.authenticate(AuthContext()) is None
+
+
+# --- authenticate: identity validation after a correct secret (fail closed) --------------------
+def test_proxy_correct_secret_missing_identity_is_rejected() -> None:
+    auth = ReverseProxyMtlsAuthenticator(shared_secret=_PROXY_SECRET)
+    assert auth.authenticate(_proxy_ctx(identity=None)) is None
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        "",  # empty
+        "x" * 257,  # over-long
+        "alice\ninjected",  # newline (control)
+        "alice\x00",  # NUL (control)
+        "alice\x7f",  # DEL
+    ],
+)
+def test_proxy_correct_secret_bad_identity_is_rejected(identity: str) -> None:
+    """A correct secret but a malformed identity → fail closed (no spoofable principal)."""
+    auth = ReverseProxyMtlsAuthenticator(shared_secret=_PROXY_SECRET)
+    assert auth.authenticate(_proxy_ctx(identity=identity)) is None
+
+
+# --- custom header names are honored -----------------------------------------------------------
+def test_proxy_custom_header_names_are_honored() -> None:
+    auth = ReverseProxyMtlsAuthenticator(
+        shared_secret=_PROXY_SECRET,
+        secret_header=_CUSTOM_SECRET_HEADER,
+        identity_header=_CUSTOM_IDENTITY_HEADER,
+    )
+    ctx = _proxy_ctx(
+        secret_header=_CUSTOM_SECRET_HEADER,
+        identity_header=_CUSTOM_IDENTITY_HEADER,
+        identity="svc-account",
+    )
+    assert auth.authenticate(ctx) == Principal(id="svc-account")
+
+
+def test_proxy_custom_header_names_default_headers_miss() -> None:
+    """With custom header names configured, the DEFAULT header names do not authenticate."""
+    auth = ReverseProxyMtlsAuthenticator(
+        shared_secret=_PROXY_SECRET,
+        secret_header=_CUSTOM_SECRET_HEADER,
+        identity_header=_CUSTOM_IDENTITY_HEADER,
+    )
+    # Headers sent under the DEFAULT names — the authenticator looks under the custom names → None.
+    ctx = _proxy_ctx()  # default x-proxy-auth / x-client-cert-subject
+    assert auth.authenticate(ctx) is None
+
+
+# --- construction: the secret length floor -----------------------------------------------------
+def test_proxy_rejects_short_secret_at_construction() -> None:
+    with pytest.raises(ValueError, match="too short"):
+        ReverseProxyMtlsAuthenticator(shared_secret="short")  # noqa: S106  # test fixture
+
+
+def test_proxy_secret_not_in_repr() -> None:
+    """The shared secret is the credential — never in repr/logs (workflow-secrets)."""
+    assert _PROXY_SECRET not in repr(ReverseProxyMtlsAuthenticator(shared_secret=_PROXY_SECRET))
+
+
+def test_proxy_principal_is_full_capability() -> None:
+    """A reverse-proxy principal carries no scope concept → full capability (ADR-033, unchanged)."""
+    auth = ReverseProxyMtlsAuthenticator(shared_secret=_PROXY_SECRET)
+    principal = auth.authenticate(_proxy_ctx(identity="alice"))
+    assert principal is not None and principal.capabilities == ALL_CAPABILITIES
+
+
+def test_proxy_header_defaults_match_constants() -> None:
+    """The authenticator's default header names match the published constants (no drift)."""
+    auth = ReverseProxyMtlsAuthenticator(shared_secret=_PROXY_SECRET)
+    assert auth.secret_header == PROXY_SECRET_HEADER_DEFAULT
+    assert auth.identity_header == PROXY_IDENTITY_HEADER_DEFAULT
+    # The published constants carry the documented values (pin once; header NAMEs, not secrets).
+    assert PROXY_SECRET_HEADER_DEFAULT == "x-proxy-auth"  # noqa: S105  # header NAME, not a secret
+    assert PROXY_IDENTITY_HEADER_DEFAULT == "x-client-cert-subject"
+
+
+# --- build_authenticator wiring (mtls-proxy) ---------------------------------------------------
+def test_build_authenticator_mtls_proxy_without_secret_fails() -> None:
+    with pytest.raises(ValueError, match="requires a shared secret"):
+        build_authenticator("mtls-proxy", proxy_shared_secret=None)
+
+
+def test_build_authenticator_mtls_proxy_empty_secret_fails() -> None:
+    """A falsy (empty) secret is refused — the mode cannot be enabled unsafely (fail closed)."""
+    with pytest.raises(ValueError, match="requires a shared secret"):
+        build_authenticator("mtls-proxy", proxy_shared_secret="")
+
+
+def test_build_authenticator_mtls_proxy_builds_authenticator() -> None:
+    auth = build_authenticator(
+        "mtls-proxy",
+        proxy_shared_secret=_PROXY_SECRET,
+        proxy_secret_header=PROXY_SECRET_HEADER_DEFAULT,
+        proxy_identity_header=PROXY_IDENTITY_HEADER_DEFAULT,
+    )
+    assert isinstance(auth, ReverseProxyMtlsAuthenticator)
+    assert auth.secret_header == PROXY_SECRET_HEADER_DEFAULT
+    assert auth.identity_header == PROXY_IDENTITY_HEADER_DEFAULT
+
+
+def test_build_authenticator_mtls_proxy_end_to_end_authenticate() -> None:
+    """The built authenticator authenticates a correct secret+identity end-to-end."""
+    auth = build_authenticator("mtls-proxy", proxy_shared_secret=_PROXY_SECRET)
+    assert isinstance(auth, ReverseProxyMtlsAuthenticator)
+    assert auth.authenticate(_proxy_ctx(identity="alice")) == Principal(id="alice")
+
+
+def test_build_authenticator_mtls_proxy_threads_custom_headers() -> None:
+    auth = build_authenticator(
+        "mtls-proxy",
+        proxy_shared_secret=_PROXY_SECRET,
+        proxy_secret_header=_CUSTOM_SECRET_HEADER,
+        proxy_identity_header=_CUSTOM_IDENTITY_HEADER,
+    )
+    assert isinstance(auth, ReverseProxyMtlsAuthenticator)
+    ctx = _proxy_ctx(
+        secret_header=_CUSTOM_SECRET_HEADER, identity_header=_CUSTOM_IDENTITY_HEADER, identity="bob"
+    )
+    assert auth.authenticate(ctx) == Principal(id="bob")
+
+
+def test_build_authenticator_other_modes_unaffected_by_proxy_args() -> None:
+    """Passing proxy args to non-proxy modes is harmless — other modes are unchanged."""
+    assert isinstance(
+        build_authenticator("none", proxy_shared_secret=_PROXY_SECRET), NullAuthenticator
+    )
+    assert isinstance(
+        build_authenticator("bearer", bearer_token=_TOKEN, proxy_shared_secret=_PROXY_SECRET),
+        MultiTokenBearerAuthenticator,
+    )
+    assert isinstance(
+        build_authenticator("mtls", proxy_shared_secret=_PROXY_SECRET), MtlsAuthenticator
+    )
+
+
+# --- abuse path: a non-ASCII header value must FAIL CLOSED, not raise (ADR-034 reviewer Low) ------
+# `hmac.compare_digest(str, str)` raises TypeError on a non-ASCII str; every secret/token-comparing
+# authenticator must reject such a value generically (it can never equal the ASCII secret) rather
+# than let an unhandled exception escape the auth middleware (→ 500 instead of the uniform 401).
+def test_bearer_non_ascii_token_rejected_not_raised() -> None:
+    auth = BearerAuthenticator(expected_token=_TOKEN)
+    assert auth.authenticate(AuthContext(authorization="Bearer \xff\xfe-not-ascii-token")) is None
+
+
+def test_multitoken_non_ascii_token_rejected_not_raised() -> None:
+    auth = MultiTokenBearerAuthenticator(tokens={_TOKEN: "alice"})
+    assert auth.authenticate(AuthContext(authorization="Bearer \xffnon-ascii-\xfe")) is None
+
+
+def test_proxy_non_ascii_secret_rejected_not_raised() -> None:
+    # A non-ASCII secret header value → None (fail closed), never a TypeError out of the middleware.
+    auth = ReverseProxyMtlsAuthenticator(shared_secret=_PROXY_SECRET)
+    bad = "\xff\xfe-not-ascii"
+    assert auth.authenticate(_proxy_ctx(secret=bad, identity="CN=alice")) is None

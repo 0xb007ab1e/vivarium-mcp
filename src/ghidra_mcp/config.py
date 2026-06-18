@@ -31,6 +31,8 @@ from ghidra_mcp.server.auth import (
     OAUTH_DEFAULT_ALGORITHMS,
     OAUTH_DEFAULT_LEEWAY_S,
     OAUTH_PRINCIPAL_CLAIM_DEFAULT,
+    PROXY_IDENTITY_HEADER_DEFAULT,
+    PROXY_SECRET_HEADER_DEFAULT,
 )
 
 # Environment variable names (12-Factor; documented in .env.example). Centralized so the read set
@@ -89,6 +91,11 @@ _ENV_HTTP_OAUTH_PRINCIPAL_CLAIM = "GHIDRA_MCP_HTTP_OAUTH_PRINCIPAL_CLAIM"
 _ENV_HTTP_OAUTH_ALGORITHMS = "GHIDRA_MCP_HTTP_OAUTH_ALGORITHMS"
 _ENV_HTTP_OAUTH_LEEWAY = "GHIDRA_MCP_HTTP_OAUTH_LEEWAY_SECONDS"
 _ENV_HTTP_OAUTH_WRITE_SCOPE = "GHIDRA_MCP_HTTP_OAUTH_WRITE_SCOPE"
+# Reverse-proxy mTLS (v1.4 — ADR-034). Read only when auth_mode=mtls-proxy. The shared secret IS a
+# secret (the trust anchor); the header names are non-secret NAMES.
+_ENV_HTTP_PROXY_SHARED_SECRET = "GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET"  # noqa: S105  # nosec B105 - env var name
+_ENV_HTTP_PROXY_SECRET_HEADER = "GHIDRA_MCP_HTTP_PROXY_SECRET_HEADER"  # noqa: S105  # nosec B105 - env var name
+_ENV_HTTP_PROXY_IDENTITY_HEADER = "GHIDRA_MCP_HTTP_PROXY_IDENTITY_HEADER"
 _ENV_HTTP_CORS_ORIGINS = "GHIDRA_MCP_HTTP_CORS_ORIGINS"
 _ENV_HTTP_RATE_PER_S = "GHIDRA_MCP_HTTP_RATE_PER_SECOND"
 _ENV_HTTP_RATE_BURST = "GHIDRA_MCP_HTTP_RATE_BURST"
@@ -113,7 +120,7 @@ _VALID_TRANSPORTS = frozenset({"stdio", "http"})
 # the config allow-list and the adapter's fallback can never drift apart.
 _VALID_WORKER_PREFLIGHT = PREFLIGHT_MODES
 _DEFAULT_WORKER_PREFLIGHT = DEFAULT_PREFLIGHT_MODE
-_VALID_HTTP_AUTH = frozenset({"none", "bearer", "mtls", "oauth"})
+_VALID_HTTP_AUTH = frozenset({"none", "bearer", "mtls", "oauth", "mtls-proxy"})
 # mTLS principal-field selectors (ADR-019 D2). Single source of truth in ``server.auth`` so the
 # config allow-list and the authenticator can never drift apart.
 _VALID_MTLS_PRINCIPAL_FIELDS = MTLS_PRINCIPAL_FIELDS
@@ -224,6 +231,12 @@ class HttpConfig:
     #: tool authZ is OFF (every valid token is full-capability — identity-only). When set, an OAuth
     #: token gets ``write`` only if its ``scope``/``scp`` claim contains it (else read-only).
     oauth_write_scope: str | None = None
+    #: Reverse-proxy mTLS (ADR-034; auth_mode "mtls-proxy"). The shared secret is the trust anchor —
+    #: REQUIRED for that mode, a secret (excluded from repr), from env/secret-manager. The header
+    #: names select where the proxy puts the secret + the verified client identity.
+    proxy_shared_secret: str | None = field(default=None, repr=False)
+    proxy_secret_header: str = PROXY_SECRET_HEADER_DEFAULT
+    proxy_identity_header: str = PROXY_IDENTITY_HEADER_DEFAULT
 
 
 @dataclass(frozen=True, slots=True)
@@ -597,6 +610,19 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
     if oauth_write_scope is not None and len(oauth_write_scope) > _MAX_OAUTH_CLAIM_LEN:
         raise _startup_error(f"environment variable {_ENV_HTTP_OAUTH_WRITE_SCOPE} is too long")
 
+    # ADR-034: reverse-proxy mTLS — the shared secret is the trust anchor; the header names select
+    # where the proxy puts the secret + the verified client identity (both lowercased — HTTP headers
+    # are case-insensitive). The required-for-mode + length-floor checks are in the validation step.
+    proxy_shared_secret = _read_str(src, _ENV_HTTP_PROXY_SHARED_SECRET, "", required=False) or None
+    proxy_secret_header = (
+        _read_str(src, _ENV_HTTP_PROXY_SECRET_HEADER, "", required=False).lower()
+        or PROXY_SECRET_HEADER_DEFAULT
+    )
+    proxy_identity_header = (
+        _read_str(src, _ENV_HTTP_PROXY_IDENTITY_HEADER, "", required=False).lower()
+        or PROXY_IDENTITY_HEADER_DEFAULT
+    )
+
     single_token = _read_str(src, _ENV_HTTP_BEARER_TOKEN, "", required=False) or None
     # Multi-principal bearer map (ADR-017): per-token validation (length floor) + id allow-listing +
     # ambiguity rejection happen inside the loader (fail closed). The single-token var is folded in
@@ -619,6 +645,12 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
         )
     if auth_mode == "bearer" and not bearer_tokens:
         raise _startup_error("bearer auth requires at least one token of at least 16 characters")
+    if auth_mode == "mtls-proxy" and (
+        proxy_shared_secret is None or len(proxy_shared_secret) < _MIN_BEARER_TOKEN_LEN
+    ):
+        # The shared secret is the trust anchor (ADR-034); without it a direct attacker could forge
+        # the identity header, so the mode cannot boot without one (fail closed).
+        raise _startup_error("mtls-proxy auth requires a shared secret of at least 16 characters")
     if auth_mode == "mtls" and tls_client_ca is None:
         # The handshake gate (uvicorn CERT_REQUIRED) cannot verify clients without a CA bundle —
         # refuse to boot rather than fall back to an unverified/no-auth posture (fail closed).
@@ -654,6 +686,9 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:
         oauth_audience=oauth_audience,
         oauth_jwks_uri=oauth_jwks_uri,
         oauth_write_scope=oauth_write_scope,
+        proxy_shared_secret=proxy_shared_secret,
+        proxy_secret_header=proxy_secret_header,
+        proxy_identity_header=proxy_identity_header,
         oauth_principal_claim=oauth_principal_claim,
         oauth_algorithms=oauth_algorithms,
         oauth_leeway_s=oauth_leeway_s,

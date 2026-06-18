@@ -10,6 +10,10 @@ import pytest
 
 from ghidra_mcp.config import load_config
 from ghidra_mcp.core.errors import GhidraMcpError
+from ghidra_mcp.server.auth import (
+    PROXY_IDENTITY_HEADER_DEFAULT,
+    PROXY_SECRET_HEADER_DEFAULT,
+)
 
 _WORKER = {"GHIDRA_MCP_WORKER_IMAGE": "ghcr.io/x/worker@sha256:" + "a" * 64}
 _TOKEN = "s" * 24  # >= _MIN_BEARER_TOKEN_LEN
@@ -639,3 +643,129 @@ def test_non_oauth_config_leaves_write_scope_none() -> None:
     )
     assert cfg.http is not None
     assert cfg.http.oauth_write_scope is None
+
+
+# ==============================================================================================
+# Reverse-proxy mTLS config (ADR-034 — auth_mode "mtls-proxy"). The shared secret IS a secret (the
+# trust anchor): REQUIRED for the mode, length-floored (>=16, like the bearer token), excluded from
+# repr. The header names are non-secret NAMES, lowercased. Fail-closed startup: the mode cannot boot
+# without a sufficiently long secret. Hermetic — ``load_config`` reads an injected env mapping.
+# ==============================================================================================
+_PROXY_SECRET = "p" * 24  # >= _MIN_BEARER_TOKEN_LEN; synthetic, not a real secret
+# Custom header NAMES for the lowercasing test (mixed case input). NAMES, not secrets.
+_CUSTOM_SECRET_HEADER_IN = "X-My-Proxy-Secret"  # noqa: S105  # a header NAME, not a secret value
+_CUSTOM_SECRET_HEADER_LC = "x-my-proxy-secret"  # noqa: S105  # a header NAME, not a secret value
+_CUSTOM_IDENTITY_HEADER_IN = "X-My-Client-ID"
+_CUSTOM_IDENTITY_HEADER_LC = "x-my-client-id"
+
+
+def _proxy_env(**extra: str) -> dict[str, str]:
+    """A loopback HTTP env with auth=mtls-proxy (TLS is terminated at the proxy, not here)."""
+    return _env(
+        GHIDRA_MCP_TRANSPORT="http",
+        GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
+        GHIDRA_MCP_HTTP_AUTH="mtls-proxy",
+        **extra,
+    )
+
+
+def test_mtls_proxy_is_an_accepted_auth_mode() -> None:
+    """``mtls-proxy`` passes the auth-mode allow-list (no 'unsupported value' error)."""
+    cfg = load_config(_proxy_env(GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET=_PROXY_SECRET))
+    assert cfg.http is not None
+    assert cfg.http.auth_mode == "mtls-proxy"
+
+
+def test_mtls_proxy_full_valid_config_defaults() -> None:
+    cfg = load_config(_proxy_env(GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET=_PROXY_SECRET))
+    assert cfg.http is not None
+    h = cfg.http
+    assert h.auth_mode == "mtls-proxy"
+    assert h.proxy_shared_secret == _PROXY_SECRET
+    assert h.proxy_secret_header == PROXY_SECRET_HEADER_DEFAULT  # secure default
+    assert h.proxy_identity_header == PROXY_IDENTITY_HEADER_DEFAULT  # secure default
+
+
+def test_mtls_proxy_without_secret_fails_closed() -> None:
+    """The mode cannot boot without the trust anchor (a direct attacker could forge identity)."""
+    with pytest.raises(GhidraMcpError, match="requires a shared secret"):
+        load_config(_proxy_env())
+
+
+@pytest.mark.parametrize("secret", ["short", "x" * 15])
+def test_mtls_proxy_short_secret_fails_closed(secret: str) -> None:
+    """A present-but-too-short secret (<16) is refused at startup (length floor)."""
+    with pytest.raises(GhidraMcpError, match="requires a shared secret"):
+        load_config(_proxy_env(GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET=secret))
+
+
+def test_mtls_proxy_secret_at_min_len_accepted() -> None:
+    """A boundary secret (exactly 16 chars) is accepted (off-by-one guard)."""
+    cfg = load_config(_proxy_env(GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET="x" * 16))
+    assert cfg.http is not None
+    assert cfg.http.proxy_shared_secret == "x" * 16
+
+
+def test_mtls_proxy_secret_excluded_from_repr() -> None:
+    """The shared secret is the credential — it must not leak via repr/logs (workflow-secrets)."""
+    cfg = load_config(_proxy_env(GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET=_PROXY_SECRET))
+    assert cfg.http is not None
+    assert _PROXY_SECRET not in repr(cfg.http)
+
+
+def test_mtls_proxy_custom_header_names_lowercased() -> None:
+    """The header-name envs are honored and lowercased (HTTP headers are case-insensitive)."""
+    cfg = load_config(
+        _proxy_env(
+            **{
+                "GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET": _PROXY_SECRET,
+                "GHIDRA_MCP_HTTP_PROXY_SECRET_HEADER": _CUSTOM_SECRET_HEADER_IN,
+                "GHIDRA_MCP_HTTP_PROXY_IDENTITY_HEADER": _CUSTOM_IDENTITY_HEADER_IN,
+            }
+        )
+    )
+    assert cfg.http is not None
+    assert cfg.http.proxy_secret_header == _CUSTOM_SECRET_HEADER_LC
+    assert cfg.http.proxy_identity_header == _CUSTOM_IDENTITY_HEADER_LC
+
+
+def test_mtls_proxy_unset_header_names_default_lowercased() -> None:
+    """Unset header-name envs fall back to the lowercased defaults."""
+    cfg = load_config(_proxy_env(GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET=_PROXY_SECRET))
+    assert cfg.http is not None
+    assert cfg.http.proxy_secret_header == PROXY_SECRET_HEADER_DEFAULT
+    assert cfg.http.proxy_identity_header == PROXY_IDENTITY_HEADER_DEFAULT
+
+
+def test_mtls_proxy_network_bind_full_valid_config() -> None:
+    """A network mtls-proxy bind needs server TLS too (generic is_network rule) + the secret."""
+    cfg = load_config(
+        _env(
+            GHIDRA_MCP_TRANSPORT="http",
+            GHIDRA_MCP_HTTP_BIND="0.0.0.0:8765",
+            GHIDRA_MCP_HTTP_AUTH="mtls-proxy",
+            GHIDRA_MCP_HTTP_TLS_CERT="/c.pem",
+            GHIDRA_MCP_HTTP_TLS_KEY="/k.pem",
+            GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET=_PROXY_SECRET,
+        )
+    )
+    assert cfg.http is not None
+    h = cfg.http
+    assert h.is_network is True and h.auth_mode == "mtls-proxy"
+    assert h.proxy_shared_secret == _PROXY_SECRET
+
+
+def test_non_proxy_config_leaves_proxy_fields_default() -> None:
+    """For bearer, the proxy fields keep their harmless defaults — None secret, default headers."""
+    cfg = load_config(
+        _env(
+            GHIDRA_MCP_TRANSPORT="http",
+            GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
+            GHIDRA_MCP_HTTP_AUTH="bearer",
+            GHIDRA_MCP_HTTP_BEARER_TOKEN=_TOKEN,
+        )
+    )
+    assert cfg.http is not None
+    assert cfg.http.proxy_shared_secret is None
+    assert cfg.http.proxy_secret_header == PROXY_SECRET_HEADER_DEFAULT
+    assert cfg.http.proxy_identity_header == PROXY_IDENTITY_HEADER_DEFAULT
