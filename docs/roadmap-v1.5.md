@@ -26,6 +26,16 @@ under SemVer + the frozen-contract posture. An item that changes a **frozen cont
 error-envelope type) carries an explicit contract-version bump and threat-model review; an item that
 opens a new trust boundary must be STRIDE threat-modeled before coding.
 
+## v1.5 outcome (2026-06-18) — push complete
+
+The v1.5 push is **complete**. Shipped to `main`: **#1** hash-pinned dev-dep CI installs (run-from-src,
+PR #101), **#2** analyzer-option existence guard (ADR-035, PR #102), **#3** dedicated `forbidden`/403
+authZ error type (ADR-036, PR #103), **#7** on-demand naming-accuracy scorer + debuginfod (ADR-010,
+PR #105), plus the **scanner-tool-pinning** follow-up (bandit/semgrep/pip-audit, PR #104). **#4**
+(`session_import` progress) **deferred** (low value + no `open_program` monitor hook — §4). **#5** and
+**#6** remain **deferred — condition not met** (below); neither's revisit trigger has fired, so nothing
+was built speculatively (proportionality — `topic-anti-patterns`).
+
 ## Priorities (suggested)
 
 | # | Item | Area | Contract / trust-boundary impact | Expected bump | Source |
@@ -112,7 +122,19 @@ reuses them for the import path.
 **Notes.** Confirm Ghidra's import path exposes a monitor with usable progress (REQUIRES-LIVE
 -VERIFICATION); same flood/redaction bounds; same token-gated client relay.
 
-## 5. Incremental / lazy analysis — ADR-029 §D5 deferred
+## 5. Incremental / lazy analysis — ADR-029 §D5 deferred — **DEFERRED (gate not met, 2026-06-18)**
+
+> **Not pursued — the evidence-gate is unmet.** Ghidra auto-analysis is a whole-program batch; an
+> incremental model is a **very large, high-risk redesign** (partially-analyzed sessions; every read
+> tool needs "not analyzed here" semantics; results become non-deterministic w.r.t. call order — at
+> odds with the deterministic/bounded posture). ADR-029 §D5 gates it on *"profiles proving
+> insufficient on real large targets."* The only large-target failure on record (the v1.3 184 MiB
+> OOM) **predates** the `light`/`deep` profiles + configurable worker memory (v1.3/v1.4) that now
+> mitigate it; nothing has since **measured** those falling short.
+> **Revisit trigger:** a measured profile-insufficiency on a real large binary. **Cheap precursor**
+> (do this before any feasibility ADR): a measurement spike — run the acceptance harness on a
+> genuinely-large binary with `profile=light` + raised `GHIDRA_MCP_WORKER_MEM_MIB` and check it
+> completes. Only if it still fails do we open the incremental-analysis feasibility ADR.
 
 **What.** Analyze-on-demand (per function / region) instead of full auto-analysis up front, so very
 large binaries become usable without a full multi-minute (or OOM) pass.
@@ -126,7 +148,19 @@ actually fall short on real large binaries (via the acceptance harness) before c
 **Notes.** Very large; **start with a feasibility ADR** (does Ghidra's model support partial analysis
 cleanly? interaction with the read tools that assume a fully-analyzed program?). Likely multi-increment.
 
-## 6. Self-hosted gVisor runner for per-PR live gating — ADR-028 §D3 deferred
+## 6. Self-hosted gVisor runner for per-PR live gating — ADR-028 §D3 deferred — **DEFERRED (gate not met, 2026-06-18)**
+
+> **Not pursued — the conditional-gate is unmet, and the cost/security caveat is real.** A
+> self-hosted runsc-capable runner would let CI keep gVisor (prod isolation) and gate live-regression
+> **per-PR** instead of nightly/label. But ADR-028 §D3 gates it on *"drift proving frequent,"* and so
+> far **every** JVM-edge bug (JPype binding ADR-030, stale-image, the ADR-035 option-guard) was caught
+> at **implement-time by pre-merge live-verify**, not by post-merge drift escaping to the nightly —
+> the nightly cadence has been sufficient. Against that unmet need, a self-hosted runner is **ongoing
+> ops + a real security surface**: running PR code on a self-hosted host is a known supply-chain risk
+> (untrusted-code-on-runner), needing ephemeral runners + trusted-PR-only + network restriction.
+> **Revisit trigger:** the nightly starts catching frequent post-merge JVM-edge drift (i.e. pre-merge
+> live-verify is missing things). **Interim** (already available): the opt-in `live-regression` PR
+> label runs the gate (under crun) on a specific PR when extra confidence is wanted.
 
 **What.** A self-hosted, gVisor(runsc)-capable CI runner so the live-regression gate can run **per-PR**
 (at prod isolation) instead of nightly/label-gated under crun.
