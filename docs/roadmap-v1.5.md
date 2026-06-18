@@ -88,7 +88,18 @@ bump + threat-model touch + update every authZ-denial site (scope-authZ + write-
 -compatibility: confirm clients tolerate the new type (additive); decide whether write-consent denial
 also moves to 403 or stays 400 (consistency call to ratify).
 
-## 4. `session_import` progress — ADR-030 deferred (analyze-only)
+## 4. `session_import` progress — ADR-030 deferred (analyze-only) — **DEFERRED (2026-06-18)**
+
+> **Deferred after a feasibility check** (not implemented). Two reasons: (1) **low value** — import is
+> seconds where analyze is minutes (the v1.3 184 MiB run: import 6.5s vs analyze ~26min, ~0.4% of the
+> time); the silent-gap problem ADR-030 solved was overwhelmingly analyze. (2) **no clean hook** — the
+> worker imports via the high-level `pyghidra.open_program(path, analyze=False)` context manager, which
+> exposes **no progress-monitor parameter** (unlike analyze, which already drove `AutoAnalysisManager`
+> and could take a `TaskMonitor`). Surfacing granular import progress would mean replacing
+> `open_program` with the lower-level `AutoImporter`/`ProgramLoader` + a custom monitor + manual
+> project management — all JVM-edge — risking the currently-working import for a non-problem.
+> **Revisit only if** a real large-import latency complaint surfaces *and* a clean monitor hook is
+> confirmed by a live spike.
 
 **What.** Extend the ADR-030 additive `$/progress` notification to `session_import` (today progress is
 **`analyze` only**). Import of a large binary is also slow and silent.
@@ -150,8 +161,11 @@ hostile binary — ADR-001/ADR-016). Stays advisory; pairs with `e2e-groundtruth
 - **Diffing the real hostile binary** in the eval harness — breaches ADR-001 (ADR-016 constraint).
 
 ## Maintenance (not features)
-- **CVE / dependency hygiene** — keep **both** locks (`requirements.lock` + `requirements-dev.lock`)
-  current and regenerated together; the scheduled rescan surfaces new CVEs against `main` (and, once
-  item 1 lands, enforces hash-pinned dev installs everywhere).
+- **CVE / dependency hygiene** — keep the **three** locks (`requirements.lock` runtime +
+  `requirements-dev.lock` dev + `requirements-sast.lock` CI scanners) current and regenerated
+  together (`pip-compile --generate-hashes`; the sast lock uses `--extra=sast --allow-unsafe` so
+  pip-audit's `pip` dep is pinned for `--require-hashes`). The scheduled rescan audits all three, so
+  a new CVE in any surface — incl. the scanner tools — surfaces against `main` between PRs. CI dev +
+  scanner installs are hash-pinned everywhere (v1.5 #1 + this follow-up).
 - **Doc/contract drift sweeps** — after each release, sync the README banner + tool count + ADR range
   (the v0.6.0 cut needed this) and re-check `docs/contracts/` against the catalog assertion in tests.

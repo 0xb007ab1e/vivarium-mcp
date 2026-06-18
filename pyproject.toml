@@ -62,6 +62,17 @@ dev = [
   "pip-audit>=2.7",    # dependency CVE scan (SCA).
 ]
 
+# CI security-scanner tooling, isolated from `dev` so its heavy tree (esp. semgrep) is installed
+# ONLY by the sast/sca/scheduled-rescan jobs — not by every quality job or local dev. Compiled to
+# its own hash-pinned `requirements-sast.lock` (`pip-compile --extra=sast --generate-hashes`); the
+# CI jobs install it with `--require-hashes` so the whole scanner surface is pinned (v1.5; the #1
+# follow-up). bandit/pip-audit are also in `dev`; duplicated here so this extra is self-contained.
+sast = [
+  "bandit>=1.7",       # Python SAST.
+  "semgrep>=1.0",      # broader SAST rulesets (p/python, p/security-audit).
+  "pip-audit>=2.7",    # dependency CVE scan (SCA).
+]
+
 # WORKER-RUNTIME dependency (documented, NOT a pip/PyPI dependency of this package):
 #   The out-of-process worker additionally requires **PyGhidra** (+ JPype1), which is installed in
 #   `Containerfile.worker` from the wheel BUNDLED INSIDE the pinned, SHA-256-verified Ghidra 12.1.2
