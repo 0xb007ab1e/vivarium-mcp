@@ -6,6 +6,93 @@ All notable changes to `ghidra-mcp` are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-06-18
+
+The **v1.5** increment — a correctness/supply-chain hardening pass: a worker analyzer-option
+**existence guard** (fail closed on a version-renamed preset option), an on-demand
+**naming-accuracy scorer** (advisory eval tooling), hash-pinned CI installs for the dev and scanner
+tool surfaces (run-from-`src/`), the analyzer-`profile` dimension folded into the live-regression
+harness, and a dedicated **`forbidden` / 403** authorization-denied error type. Backward-compatible:
+every change is additive or opt-in — no tool / RPC contract was broken. The one client-visible
+contract change is **additive** (a new error-envelope slug; see Security + the compatibility note).
+The tool catalog stays **51** (no new tool); ADRs now span **001–036**.
+
+> **Pre-1.0 / private:** the tool catalog, RPC, and envelope contracts may still evolve before 1.0.
+
+### Added
+- **Analyzer-option existence guard (ADR-035)** — `session_analyze` now **fails closed** with an
+  `internal-error` if a `light`/`deep` profile preset names an analyzer option the running Ghidra
+  build doesn't expose. The v1.4 profile gate (ADR-028 follow-up) caught a *binding crash* on the
+  `getOptions(ANALYSIS_PROPERTIES)` / `setBoolean` edge, but **not** a silently renamed option —
+  `Ghidra Options.setBoolean` tolerates unknown names, so a version bump that renamed a preset option
+  would have made the profile a silent no-op. The guard enumerates the program's available analysis
+  options and rejects any preset name not present (the pure name ∈ available-options decision is
+  unit-tested; the JVM enumeration is live-verified on a real branch worker). An abuse test asserts a
+  bogus preset name fails closed. Worker-side only; no new trust boundary (extends the ADR-029 JVM
+  edge); no client-facing contract change.
+- **On-demand naming-accuracy scorer (ADR-010 — `scripts/naming_eval.py`)** — promotes the v1.3
+  blind-acceptance run's one-off debuginfod scoring into a committed, reusable, **advisory** tool
+  (NOT a CI gate; it runs no LLM). Given a set of **proposed** names and an address→name
+  **ground-truth** source it scores strict exact-match rate + token-set F1 by delegating to the
+  project's own unit-tested scoring, now extracted as the public `naming.metrics.score_name_map`.
+  Three ground-truth sources: **`debuginfod`** (the v1.3 path — build-id → debuginfod → DWARF),
+  **`elf`** (a local unstripped build), and **`json`**. It reads only DWARF/build-id metadata via
+  pyelftools — **never executes the binary and never parses it through Ghidra** (ADR-001 / ADR-016;
+  benign/source-available ground truth only — master §5). Live-verified end-to-end on the `elf`
+  path and against the live debuginfod federation (106 real function names for `/usr/bin/gzip`).
+  Naming quality stays a non-deterministic, advisory LLM signal — never a gate.
+
+### Changed
+- **CI: hash-pinned dev-dependency installs, run-from-`src/` (#101)** — the dev tool surface now
+  installs via `pip install --require-hashes -r requirements-dev.lock` (replacing the floating
+  `pip install -e ".[dev]"`), and the quality jobs run the package from `src/`. Closes the staged
+  `# <- enable once the lock exists` TODO now that `requirements-dev.lock` is committed; reconciles
+  `ci.yml` / `live-regression.yml` with `scheduled-rescan.yml` (which already consumed the dev lock).
+  Pins every dependency by hash (`std-supplychain` / `workflow-cicd`). CI-only; no code change.
+- **CI: hash-pinned scanner-tool installs (#104)** — bandit / semgrep / pip-audit now install from a
+  dedicated hash-pinned `requirements-sast.lock` (`--require-hashes`), so the whole scanner surface
+  is pinned, not just the runtime/dev surfaces. The scheduled rescan audits all **three** locks
+  (runtime + dev + sast), surfacing a new CVE in any surface — including the scanner tooling —
+  against `main` between releases. CI-only; no code change.
+- **Live-regression harness gains the analyzer-`profile` dimension (ADR-028 follow-up, #98)** — the
+  recurring live run now exercises `default` / `light` / `deep` as a **hard-gated** dimension, so a
+  Ghidra change that breaks a profile (or, with ADR-035, renames one of its options) is caught by
+  the nightly/label gate, not just at implement-time. No runtime capability or contract change.
+
+### Security
+- **Dedicated `forbidden` / 403 authorization-denied error type (ADR-036 — frozen-contract change,
+  additive)** — authorization denials now return a distinct `forbidden` (HTTP `403`) error slug
+  instead of riding the generic `validation-error` / `400`. This covers a missing OAuth capability
+  (ADR-033 scope→tool authZ) and an absent write / structural-write consent (ADR-012), letting a
+  client mechanically distinguish "you may not" from "your request was malformed." It is an
+  **additive** slug — no existing slug is repurposed — so the frozen `docs/contracts/error-envelope.md`
+  takes an additive contract bump, not a break. **BOLA invariant preserved (`std-owasp-api` API1):**
+  an ownership / cross-caller denial is **never** `forbidden` — it stays `session-invalid` / `404`,
+  so a 403 can never become an existence oracle; `forbidden` only fires *after* the owner check has
+  passed. `detail` is a fixed, value-free string (never the token, the scope contents, or which
+  capability). Server-only; hardens TB6; not retryable.
+
+  > **Compatibility note (client-visible):** a client that previously branched on
+  > `validation-error` / `400` for a **consent or capability denial** now receives `forbidden` /
+  > `403`. Ownership / cross-caller denials still return `session-invalid` / `404` (BOLA-safe,
+  > unchanged), and malformed arguments still return `validation-error` / `400` (unchanged). The slug
+  > is additive; clients that don't special-case it degrade gracefully (an unknown error type is
+  > still a typed failure). This is the only client-facing compatibility note in v0.7.0.
+
+### Notes
+- **Backward-compatible / no operator action required on upgrade.** Every change is additive or
+  opt-in: the analyzer-option guard only fires on a genuinely-broken preset, the naming scorer is
+  on-demand tooling, the CI changes are pipeline-only, and the `forbidden` type is an additive slug.
+  The only awareness item is the `forbidden` / 403 reclassification above.
+- **Annotation documents:** the v0.6.0 schema note still applies — new exports are `schema_version 2`
+  and a v2 importer reads both v1 and v2; a pre-0.6.0 / v1-only importer rejects a v2 document.
+- **No DB / persistence / schema migration** — sessions remain ephemeral (ADR-002); nothing is
+  persisted server-side. Rollback is a redeploy of the prior signed image digest.
+- **Tracked follow-ups (deferred, not regressions):** `session_import` progress (ADR-030 §D8 —
+  deferred: import is fast + no clean `open_program` monitor hook); incremental/lazy analysis
+  (ADR-029 §D5 — deferred, evidence-gate unmet); a self-hosted gVisor runner for per-PR live gating
+  (ADR-028 §D3 — deferred, drift-gate unmet). See `docs/roadmap-v1.5.md`.
+
 ## [0.6.0] — 2026-06-17
 
 The **v1.4** increment — large-binary usability (analyzer profiles, pre-flight reject, live
@@ -510,7 +597,8 @@ analyzer is the central security control.
   off-by-default and fail-closed. See `docs/security/threat-model.md` and `SECURITY.md` for the
   reporting channel.
 
-[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.3.1...v0.4.0
