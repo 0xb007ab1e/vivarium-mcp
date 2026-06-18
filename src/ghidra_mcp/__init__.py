@@ -20,4 +20,5 @@ the logic against those frozen contracts.
 
 __all__ = ["__version__"]
 
-__version__ = "0.1.0"
+# Kept in sync with [project].version in pyproject.toml (the build-time source of truth).
+__version__ = "0.6.0"
