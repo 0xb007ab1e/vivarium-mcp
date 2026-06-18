@@ -100,7 +100,7 @@ RUN set -eux; \
 # base + python-3.12 as runtime → reproducible toolchain; the wheel is pure-Python (py3-none-any).
 FROM cgr.dev/chainguard/wolfi-base@sha256:0b5fd36c9f36ecc95bf6dbe049fe0a211410e1ba8a9801db0fbe25c7561d81c1 AS pybuilder
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=ignore
-RUN set -eux; apk add --no-cache python-3.12
+RUN set -eux; apk add --no-cache python-3.12 "py3-pip-wheel>=26.1.2-r1"  # CVE-2026-44432 (build stage)
 WORKDIR /build
 COPY pyproject.toml README.md LICENSE NOTICE /build/
 COPY src/ /build/src/
@@ -134,7 +134,11 @@ LABEL org.opencontainers.image.title="ghidra-mcp-worker" \
 # ownership by that numeric uid/gid. Ghidra's writable home is forced to the tmpfs via HOME +
 # -Duser.home below, so no created home dir is required.
 RUN set -eux; \
-    apk add --no-cache python-3.12 openjdk-21; \
+    # CVE-2026-44432: floor py3-pip-wheel to the patched >=26.1.2-r1 (python-3.12 pulls it as a
+    # transitive dep; the explicit constraint also busts the build-layer cache so a fresh resolve
+    # gets the fix in CI, not a stale -r0 cached layer). py3-pip-wheel is build-bootstrap only — not
+    # executed in the runtime — but we upgrade rather than waive (upgrade-first; ADR-003 spirit).
+    apk add --no-cache python-3.12 openjdk-21 "py3-pip-wheel>=26.1.2-r1"; \
     ln -sf /usr/bin/python3.12 /usr/bin/python; \
     ln -sf /usr/bin/python3.12 /usr/bin/python3
 

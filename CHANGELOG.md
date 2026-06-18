@@ -6,6 +6,23 @@ All notable changes to `ghidra-mcp` are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-06-18
+
+A **supply-chain patch** completing the v1.5 release. The `v0.7.0` tag's image build **fail-closed**
+on a newly-published base-layer CVE (the supply-chain gate working as designed), so no signed v0.7.0
+artifacts were published; **v0.7.1 is the first complete, signed v1.5 release** (same application code
+as `[0.7.0]` below — no tool / RPC / envelope change).
+
+### Security
+- **CVE-2026-44432 (HIGH, `py3-pip-wheel`) remediated — upgrade-first, no waiver.** Trivy fail-closed
+  the v0.7.0 release-image build on `py3-pip-wheel 26.1.2-r0` (fixed in `-r1`); `pip` is a
+  build-bootstrap package, **not executed in the distroless runtime**, but it was patched rather than
+  waived (preferred remediation order). **Server:** bumped the Chainguard/Wolfi `python` base image
+  pins (`-dev` builder + runtime) to current digests that ship `py3-pip-wheel 26.1.2-r1`. **Worker:**
+  floored `apk add … "py3-pip-wheel>=26.1.2-r1"` (it rides in as a transitive dep of `python-3.12`;
+  the explicit constraint also busts the stale build-layer cache so a fresh resolve gets the fix).
+  Both images re-verified locally: **Trivy HIGH/CRITICAL = 0**.
+
 ## [0.7.0] — 2026-06-18
 
 The **v1.5** increment — a correctness/supply-chain hardening pass: a worker analyzer-option
