@@ -124,12 +124,18 @@ trial-and-error OOM loop into a one-shot fix.
   attested is Trivy's CycloneDX (already SHA-pinned)** — so this floating input affects only a secondary
   attestation. Pin it via `sbom: generator=docker/buildkit-syft-scanner@sha256:…` if desired; needs a
   gated image pull to resolve the digest, for marginal benefit. *(Low.)*
-- **semgrep ruleset egress** — `semgrep --config p/python --config p/security-audit` fetches rule packs
-  from the registry at scan time (network egress not lock-covered). Vendor/pin the rulesets for a fully
-  offline, reproducible SAST gate. *(Low.)*
-- **`pyelftools` `eval` extra** — `scripts/naming_eval.py` imports pyelftools lazily; it's an
-  operator-run tool outside the runtime/CI dep graph. If naming-eval becomes routine, add a hash-pinned
-  `[project.optional-dependencies] eval = [...]`. *(Info.)*
+- **semgrep ruleset egress — DONE (this PR).** The SAST gate ran `semgrep --config p/python --config
+  p/security-audit`, fetching rule packs from semgrep.dev at scan time (network egress, not
+  lock-covered, silently mutable). Now vendored under `infra/semgrep/p-*.yml` (151 + 225 rules,
+  fetched 2026-06-18) with the gate switched to `--config infra/semgrep/ --metrics=off
+  --disable-version-check` — fully offline + reproducible. Refresh deliberately via
+  `infra/semgrep/refresh.sh`. Trade-off: new upstream rules no longer appear automatically (refresh
+  is a reviewed PR). Verified: vendored config reproduces the green gate (0 findings) and is
+  gitleaks-clean. *(Low.)*
+- **`pyelftools` `eval` extra — DEFERRED (Info, unchanged).** `scripts/naming_eval.py` imports
+  pyelftools lazily; it's an operator-run tool outside the runtime/CI dep graph. Add a hash-pinned
+  `[project.optional-dependencies] eval = [...]` only **if naming-eval becomes routine** — not yet,
+  so doing it now would be speculative (YAGNI).
 
 ---
 
