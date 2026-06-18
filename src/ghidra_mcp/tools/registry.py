@@ -238,16 +238,17 @@ def _authorize_capability(ctx: ToolContext, tool_name: str) -> None:
     The per-tool authZ chokepoint, evaluated server-side before any handler work (complete
     mediation). On a stdio/bearer/mTLS principal — or an OAuth deployment that did not configure a
     write-scope — every principal is full-capability, so this is a no-op (the pre-ADR-033 behavior).
-    A scope-narrowed OAuth read-only token is rejected here for any ``write`` tool, mapped to the
-    existing ``VALIDATION`` envelope (consistent with the write-consent denial — ADR-033 D4); the
-    denial is logged redacted (tool + principal + missing capability, never the token).
+    A scope-narrowed OAuth read-only token is rejected here for any ``write`` tool with a
+    ``FORBIDDEN`` envelope (ADR-036; 403) — consistent with the write-consent denial, which moved to
+    the same type. The denial is logged redacted (tool + principal + missing capability, never the
+    token).
 
     Args:
         ctx: The injected collaborators (its per-request principal supplies the capabilities).
         tool_name: The catalog tool name being invoked.
 
     Raises:
-        GhidraMcpError: ``VALIDATION`` when the required capability is absent.
+        GhidraMcpError: ``FORBIDDEN`` when the required capability is absent.
     """
     required = required_capability(tool_name)
     if required in ctx.caller_capabilities:
@@ -260,15 +261,16 @@ def _authorize_capability(ctx: ToolContext, tool_name: str) -> None:
             "required_capability": required,
         },
     )
-    # Canonical VALIDATION envelope (status 400 / "Invalid arguments") — identical shape to the
-    # write-consent denial, per ADR-033 D4 (no new 403 / error-contract change); the specific reason
-    # rides in the value-free detail.
+    # FORBIDDEN envelope (403, ADR-036): the caller is authenticated but the token lacks the
+    # capability this tool requires — a permission denial, not a malformed request (validation) and
+    # not an existence question (session-invalid). The specific reason rides in the value-free
+    # detail (never the token / scope contents).
     raise GhidraMcpError(
         ErrorEnvelope(
-            type=ErrorType.VALIDATION,
-            title="Invalid arguments",
+            type=ErrorType.FORBIDDEN,
+            title="Forbidden",
             detail="The access token lacks the capability required for this tool.",
-            status=400,
+            status=403,
             retryable=False,
         )
     )

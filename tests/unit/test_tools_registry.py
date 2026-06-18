@@ -707,7 +707,7 @@ def test_each_worker_tool_authorizes_and_delegates(
 # dispatch chokepoint (_bind / _bind_analyze) denies a tool whose required capability the principal
 # lacks, BEFORE any handler work (complete mediation — std-owasp-api API5). A read-only principal
 # (an OAuth token without the write-scope) can run reads + the session/analyze workflow but is
-# barred from every mutation tool, fail closed → VALIDATION envelope, with no session/port call.
+# barred from every mutation tool, fail closed → FORBIDDEN (403, ADR-036), no session/port call.
 # ==============================================================================================
 
 #: The exact 15 mutation tools the ADR designates as ``write`` (asserted to catch drift).
@@ -875,8 +875,10 @@ def test_read_only_principal_is_denied_every_write_tool(
     handlers = reg.build_handlers(_readonly_ctx(sessions, port))
     with pytest.raises(GhidraMcpError) as exc:
         _invoke(handlers[tool], **kwargs)
-    # Denial maps to the existing VALIDATION envelope (ADR-033 D4 — no new error type).
-    assert exc.value.envelope.type is ErrorType.VALIDATION
+    # Denial maps to the dedicated FORBIDDEN envelope (403, ADR-036 — superseding the ADR-033 D4
+    # interim VALIDATION mapping): authenticated but lacking the tool's required capability.
+    assert exc.value.envelope.type is ErrorType.FORBIDDEN
+    assert exc.value.envelope.status == 403
     # Denied BEFORE any handler work: nothing authorized, no consent check, no port call, no
     # enable/disable — the read-only token reached no mutation surface (complete mediation).
     assert sessions.authorized == []

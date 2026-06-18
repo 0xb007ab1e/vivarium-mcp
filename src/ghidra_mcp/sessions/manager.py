@@ -479,8 +479,10 @@ class SessionManager:
         """Authorize the session AND require write consent; fail closed otherwise (ADR-012 §3).
 
         The mutation-tool gate chokepoint: every write handler calls this before delegating to the
-        port. A session without consent (the default) is rejected with a ``VALIDATION`` envelope —
-        no destructive action runs without the explicit, prior :meth:`enable_writes` grant (LLM08).
+        port. A session without consent (the default) is rejected with a ``FORBIDDEN`` envelope
+        (ADR-036) — no destructive action runs without the explicit, prior :meth:`enable_writes`
+        grant (LLM08). A foreign caller is rejected earlier at the owner check with the BOLA-safe
+        ``SESSION_INVALID`` (never 403 — that would be an existence oracle).
 
         Args:
             session_id: The opaque session id.
@@ -493,19 +495,23 @@ class SessionManager:
             The authorized :class:`SessionInfo`.
 
         Raises:
-            GhidraMcpError: ``SESSION_INVALID`` (BOLA-safe) for a bad/foreign id, or ``VALIDATION``
-                when the session has not been granted (structural) write consent.
+            GhidraMcpError: ``SESSION_INVALID`` (BOLA-safe) for a bad/foreign id, or ``FORBIDDEN``
+                (ADR-036) when the owned session has not been granted (structural) write consent.
         """
         with self._lock:
             sess = self._get_live_locked(session_id, caller=caller)
             if not sess.writes_enabled:
+                # FORBIDDEN (ADR-036): authenticated + owns the session (the owner check in
+                # _get_live_locked already passed), but write consent was never granted — a
+                # permission denial, not a malformed request. Distinct from the BOLA-safe
+                # SESSION_INVALID a foreign caller gets at the owner check above.
                 raise _errors.make_error(
-                    ErrorType.VALIDATION,
+                    ErrorType.FORBIDDEN,
                     "session is read-only; write consent not granted",
                 )
             if structural and not sess.allow_structural:
                 raise _errors.make_error(
-                    ErrorType.VALIDATION,
+                    ErrorType.FORBIDDEN,
                     "structural writes not permitted for this session",
                 )
             return self._to_info(sess)

@@ -36,6 +36,14 @@ class ErrorType(StrEnum):
     """Session id is unknown, expired, or evicted (also the BOLA-safe response — never reveal
     whether another session exists)."""
 
+    FORBIDDEN = "forbidden"
+    """The caller is authenticated and owns the target, but lacks permission for THIS operation
+    (ADR-036): a missing OAuth capability (ADR-033 scope→tool authZ) or absent write/structural
+    consent (ADR-012). Distinct from ``validation-error`` ("your request was malformed") and from
+    ``session-invalid`` ("you may not even know this exists" — BOLA-safe). NEVER used for
+    ownership/cross-caller denial (that stays ``session-invalid`` so 403 cannot become an
+    existence oracle). 403, not retryable."""
+
     LIMIT_EXCEEDED = "limit-exceeded"
     """A size/count/time bound was exceeded (DoS control — PLAN §3 F7)."""
 
