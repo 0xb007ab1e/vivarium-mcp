@@ -19,6 +19,7 @@ from ghidra_mcp.naming.metrics import (
     naming_accuracy,
     normalize_output,
     score,
+    score_name_map,
 )
 
 
@@ -154,6 +155,40 @@ def test_naming_accuracy_handles_empty_token_identifiers() -> None:
     # Two empty-token identifiers are token-equal → F1 1.0 (the ``pt == tt`` side of the branch).
     same = _program(_inferred("0x401000", "__"))
     assert naming_accuracy(same, {"0x401000": "++"}).mean_token_f1 == 1.0
+
+
+# --- score_name_map (the public map-vs-map core reused by the on-demand scorer, ADR-010/v1.5) -----
+
+
+def test_score_name_map_exact_and_partial_credit() -> None:
+    """The pure map-vs-map scorer: exact (case/underscore-insensitive) + token-F1 partial credit."""
+    proposed = {"0x401000": "cjson_parse", "0x401286": "get_array_size"}
+    truth = {"0x401000": "cJSON_Parse", "0x401286": "cJSON_GetArraySize"}
+    acc = score_name_map(proposed, truth)
+    assert acc.scored == 2
+    assert acc.exact_matches == 1  # cjson_parse ≈ cJSON_Parse (normalized equal)
+    assert acc.exact_match_rate == 0.5
+    assert 0.0 < acc.mean_token_f1 <= 1.0  # second pair earns partial token-set credit
+
+
+def test_score_name_map_unscored_when_absent_from_truth() -> None:
+    """A proposed entry whose address isn't in the ground truth is unscored (honest denominator)."""
+    acc = score_name_map({"0x401000": "x", "0x499999": "y"}, {"0x401000": "parse"})
+    assert acc.scored == 1 and acc.unscored == 1
+
+
+def test_score_name_map_joins_regardless_of_hex_formatting() -> None:
+    """Addresses join by integer value (``0x401286`` vs ``401286`` are the same key)."""
+    acc = score_name_map({"401286": "parse_string"}, {"0x401286": "parse_string"})
+    assert acc.scored == 1 and acc.exact_matches == 1
+
+
+def test_score_name_map_matches_naming_accuracy_projection() -> None:
+    """score_name_map over the program's inferred projection equals naming_accuracy (delegation)."""
+    prog = _program(_inferred("0x401000", "decode"), _external("0x402000", "free"))
+    truth = {"0x401000": "decode_frame", "0x402000": "free"}
+    projected = {"0x401000": "decode"}  # only the inferred function (externals aren't scored)
+    assert score_name_map(projected, truth) == naming_accuracy(prog, truth)
 
 
 def test_score_wires_ground_truth() -> None:

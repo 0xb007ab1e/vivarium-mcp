@@ -140,7 +140,17 @@ something the unit suite didn't; promote only if the rate justifies the ops cost
 **Notes.** Ops/infra (runner provisioning, hardening, maintenance) — weigh against the nightly's
 adequacy. Not a code change.
 
-## 7. Reusable naming-accuracy ground-truth eval harness
+## 7. Reusable naming-accuracy ground-truth eval harness — **LANDED (2026-06-18)**
+
+> **Shipped** as `scripts/naming_eval.py` (advisory, on-demand — NOT a CI gate; runs no LLM). It
+> reuses the project's own unit-tested scoring (`naming.metrics.score_name_map`, extracted from
+> `naming_accuracy` in this increment) and supports three ground-truth sources: `debuginfod` (the
+> v1.3 path — build-id → debuginfod.debian.net → DWARF), `elf` (a local unstripped build), and
+> `json`. Reads only DWARF/build-id metadata via pyelftools — never executes/Ghidra-parses the
+> binary (ADR-001). **Live-verified:** elf path end-to-end, and the debuginfod path fetched + parsed
+> 106 real function names for `/usr/bin/gzip` against the live federation. A *recurring* trend with a
+> real LLM namer stays out of CI by design (non-deterministic LLM signal) — the tool is run on-demand
+> by a human/agent, as in the v1.3 acceptance run.
 
 **What.** Promote the debuginfod-based naming-accuracy scorer used in the v1.3 acceptance run into a
 maintained, reusable eval harness (a tracked trend, not a gate — naming quality is a non-deterministic
