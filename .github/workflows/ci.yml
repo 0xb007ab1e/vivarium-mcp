@@ -26,6 +26,13 @@ jobs:
   # 1-4. Build, lint+format, type-check, unit+coverage (>=90% line+branch baseline).
   quality:
     runs-on: ubuntu-latest
+    # Run the package from `src/` (src-layout) instead of an editable install, so the install step
+    # fetches NOTHING unpinned (an editable build would pull the `hatchling` backend, which is not in
+    # the dev lock). PYTHONPATH/MYPYPATH cover pytest, mypy (files=["src","tests"]), and any spawned
+    # `python -m ghidra_mcp`. Same pattern the integration suite already uses.
+    env:
+      PYTHONPATH: src
+      MYPYPATH: src
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # actions/checkout@v6.0.3
@@ -33,12 +40,14 @@ jobs:
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # actions/setup-python@v6.2.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Install (hash-pinned lockfile — GATED; see pyproject lockfile-intent note)
+      - name: Install (hash-pinned dev lockfile only — no unpinned fetch)
         run: |
           python -m pip install --upgrade pip
-          # Install from the committed hash-pinned lockfile only (require-hashes). No floating resolve.
-          # pip install --require-hashes -r requirements-dev.lock   # <- enable once the lock exists
-          pip install -e ".[dev]"
+          # Hash-pinned dev deps ONLY (require-hashes); the package itself runs from `src/` via
+          # PYTHONPATH (no editable install → no unpinned build-backend fetch).
+          # requirements-dev.lock = `pip-compile --extra=dev --generate-hashes` (regenerate with the
+          # runtime lock — see the Maintenance note in docs/roadmap-v1.5.md).
+          pip install --require-hashes -r requirements-dev.lock
       - name: Lint + format (ruff)          # gate 2
         run: |
           ruff check .
@@ -73,6 +82,9 @@ jobs:
   # branch-protection required checks (a GATED admin step) alongside `quality`.
   quality-py314:
     runs-on: ubuntu-latest
+    # Same src-layout / no-editable-install posture as `quality` (no unpinned build-backend fetch).
+    env:
+      PYTHONPATH: src
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # actions/checkout@v6.0.3
@@ -80,11 +92,10 @@ jobs:
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # actions/setup-python@v6.2.0
         with:
           python-version: "3.14"
-      - name: Install (hash-pinned lockfile — GATED; see pyproject lockfile-intent note)
+      - name: Install (hash-pinned dev lockfile only — no unpinned fetch)
         run: |
           python -m pip install --upgrade pip
-          # pip install --require-hashes -r requirements-dev.lock   # <- enable once the lock exists
-          pip install -e ".[dev]"
+          pip install --require-hashes -r requirements-dev.lock
       - name: Unit tests + coverage (server runtime — Python 3.14)
         run: pytest -m "not integration"
 
