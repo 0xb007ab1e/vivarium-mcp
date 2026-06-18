@@ -29,7 +29,7 @@ from ghidra_mcp.core.envelope import DataOrigin, Untrusted
 from ghidra_mcp.core.errors import ErrorType, GhidraMcpError
 from ghidra_mcp.ghidra import rpc_framing
 from ghidra_mcp.ghidra.rpc_client import RpcGhidraAdapter
-from ghidra_mcp.security.limits import Limits
+from ghidra_mcp.security.limits import DEFAULT_WORKER_MEM_MIB, Limits
 from ghidra_mcp.tools import schemas as s
 
 _CAP = 4 * 1024 * 1024
@@ -301,6 +301,22 @@ def test_resource_exhausted_factory_envelope() -> None:
     assert env.status == 503
     assert env.retryable is False
     assert env.correlation_id == "cid-1"
+    # No-arg form: generic safe hint (no cap), still leak-free.
+    assert "Traceback" not in env.detail and "/" not in env.detail
+    assert "memory" in env.detail
+
+
+def test_resource_exhausted_detail_includes_cap_and_knob() -> None:
+    """With ``mem_mib`` the detail names the configured cap + the env knob (ADR-037 §3 sizing hint),
+    and still leaks no host path / binary content."""
+    from ghidra_mcp.ghidra import _errors
+
+    env = _errors.resource_exhausted(4096, correlation_id="cid-2").envelope
+    assert env.type is ErrorType.RESOURCE_EXHAUSTED
+    assert "4096 MiB" in env.detail
+    assert "GHIDRA_MCP_WORKER_MEM_MIB" in env.detail
+    assert "(currently 4096)" in env.detail
+    # Disclosure safety unchanged: no traceback / host path / binary content.
     assert "Traceback" not in env.detail and "/" not in env.detail
 
 
@@ -332,9 +348,12 @@ def test_oom_worker_death_maps_to_resource_exhausted(tmp_path: Path) -> None:
     assert ei.value.envelope.type is ErrorType.RESOURCE_EXHAUSTED
     assert ei.value.envelope.status == 503
     assert ei.value.envelope.retryable is False
-    # Detail is the fixed, safe, actionable hint (no binary content / host path).
+    # Detail is the safe, actionable hint carrying the configured cap + knob (ADR-037 §3) — no
+    # binary content / host path.
     detail = ei.value.envelope.detail
     assert "memory" in detail
+    assert "GHIDRA_MCP_WORKER_MEM_MIB" in detail
+    assert f"{DEFAULT_WORKER_MEM_MIB} MiB" in detail
     assert "Traceback" not in detail and "/" not in detail
     assert worker.killed == 1
 

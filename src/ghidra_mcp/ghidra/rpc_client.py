@@ -418,7 +418,7 @@ class RpcGhidraAdapter:
                 "worker.preflight_rejected",
                 extra={"size_bytes": size_bytes, "worker_mem_mib": self._worker_mem_mib},
             )
-            raise _errors.resource_exhausted()
+            raise _errors.resource_exhausted(self._worker_mem_mib)
         # warn: emit a heads-up (size + configured memory ONLY) and PROCEED — the hard size cap and
         # the worker's memory cgroup remain the enforcing controls.
         _log.warning(
@@ -1296,8 +1296,10 @@ class RpcGhidraAdapter:
             )
             self.kill_worker(session_id)
             if diagnosis == "oom":
-                # Fixed, safe, actionable detail (no binary content / host paths) — error-envelope.
-                raise _errors.resource_exhausted() from exc
+                # Safe, actionable detail with the configured cap (ADR-037 §3 sizing hint) — no
+                # binary content / host paths. Covers both the cgroup OOM-kill (137/OOMKilled) and
+                # the JVM ExitOnOutOfMemoryError heap-OOM self-exit (ExitCode 3, ADR-037 §D1).
+                raise _errors.resource_exhausted(self._worker_mem_mib) from exc
             raise _errors.make_error(ErrorType.WORKER_UNAVAILABLE, "worker unavailable") from exc
 
     def _ensure_connected(self, sess: _Session) -> socket.socket:

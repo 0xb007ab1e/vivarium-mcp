@@ -73,7 +73,7 @@ class ContainerWorkerProcess:
         return r.returncode == 0 and r.stdout.strip() == "true"
 
     def exit_diagnosis(self) -> str:
-        """Classify why the worker exited: ``"oom"`` / ``"other"`` / ``"unknown"`` (ADR-023 / F1).
+        """Classify why the worker exited: ``"oom"`` / ``"other"`` / ``"unknown"`` (ADR-023/037).
 
         Server-side container-engine METADATA query only (``inspect`` of ``State.OOMKilled`` and
         ``State.ExitCode``) — it parses no binary and loads no JVM (ADR-001). Used by the adapter to
@@ -81,10 +81,22 @@ class ContainerWorkerProcess:
         (→ ``worker-unavailable``). Fails closed to ``"unknown"`` on any engine error or
         unparseable output (never mis-report an OOM the engine didn't confirm).
 
+        A worker OOMs two ways with DIFFERENT exit signatures (ADR-037):
+
+        - **Native / off-heap overrun** → the cgroup OOM-killer SIGKILLs the container →
+          ``OOMKilled=true`` / ``ExitCode=137`` (128 + SIGKILL).
+        - **JVM heap exhaustion** → the worker JVM (``-XX:MaxRAMPercentage=75``) hits its heap
+          ceiling *below* the cgroup wall and self-exits via ``-XX:+ExitOnOutOfMemoryError``, which
+          is HotSpot ``os::exit(3)`` → ``ExitCode=3`` / ``OOMKilled=false``. This is the **common**
+          large-binary case (the v1.5 #5 spike observed it mis-tagged ``worker-unavailable``). Exit
+          ``3`` is collision-free here: the worker's own deliberate codes are ``{0}`` (clean) and
+          ``{2}`` (missing-session-id, pre-JVM); a Python error exits 1, a JVM hard crash 134 — only
+          ``ExitOnOutOfMemoryError`` uses 3.
+
         Returns:
-            ``"oom"`` when the engine reports OOMKilled or an OOM-signature exit (137 = 128+SIGKILL,
-            the cgroup OOM-killer signal); ``"other"`` for any other confirmed exit; ``"unknown"``
-            when the engine query fails or its output cannot be parsed.
+            ``"oom"`` when the engine reports OOMKilled, the cgroup OOM-kill exit ``137``, or the
+            JVM ``ExitOnOutOfMemoryError`` exit ``3``; ``"other"`` for any other confirmed exit;
+            ``"unknown"`` when the engine query fails or its output cannot be parsed.
         """
         r = self.runner(
             [
@@ -101,7 +113,7 @@ class ContainerWorkerProcess:
         if len(parts) != 2:
             return "unknown"
         oom_killed, exit_code = parts
-        if oom_killed == "true" or exit_code == "137":
+        if oom_killed == "true" or exit_code in ("137", "3"):
             return "oom"
         return "other"
 

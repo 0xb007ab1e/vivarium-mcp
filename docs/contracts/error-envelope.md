@@ -46,8 +46,11 @@
 > Distinct from `worker-unavailable` so a client can surface a precise "increase worker memory or
 > reduce input size" hint. **Not retryable** (the same input against the same memory cap would OOM
 > again — the operator must raise `GHIDRA_MCP_WORKER_MEM_MIB` or the client shrink the input). The
-> `detail` is a fixed, safe string (no binary content / host paths). The worker's death is
-> classified server-side via a container-engine metadata query (`OOMKilled` flag / exit 137) — NO
+> `detail` is a safe string that may name the configured cap + the `GHIDRA_MCP_WORKER_MEM_MIB` knob
+> (ADR-037 §3 sizing hint) — still no binary content / host paths, and `type`/`title`/`status`/
+> `retryable` are unchanged (`detail` is the non-frozen per-occurrence field). The worker's death is
+> classified server-side via a container-engine metadata query — the `OOMKilled` flag, the cgroup
+> OOM-kill exit `137`, or the JVM `ExitOnOutOfMemoryError` heap-OOM self-exit `3` (ADR-037) — NO
 > binary parsing (ADR-001).
 
 ## Disclosure rules (master §5, `topic-error-handling`)
