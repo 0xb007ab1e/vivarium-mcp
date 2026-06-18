@@ -422,19 +422,22 @@ def _addr_key(address: str) -> int | None:
         return None
 
 
-def naming_accuracy(program: RenamedProgram, ground_truth: Mapping[str, str]) -> NamingAccuracy:
-    """Score the pass's inferred names against a ground-truth address→name map.
+def score_name_map(proposed: Mapping[str, str], ground_truth: Mapping[str, str]) -> NamingAccuracy:
+    """Score a proposed address→name map against a ground-truth address→name map (PURE).
+
+    The reusable core of :func:`naming_accuracy`, decoupled from the naming-loop's program model so
+    an out-of-band scorer (``scripts/naming_eval.py``, ADR-010 / v1.5) can score names from any
+    source — e.g. a client LLM's proposals vs. **debuginfod** ground truth — without constructing a
+    :class:`RenamedProgram`. Addresses join by integer value (``0x401286``/``00401286``/``401286``
+    are the same key). A proposed entry whose address is absent from ``ground_truth`` is
+    ``unscored`` (honest denominator — we neither credit nor penalize names we can't check).
 
     Args:
-        program: The naming pass result.
-        ground_truth: Map of function entry address (hex; any of ``0x401286``/``00401286``/
-            ``401286`` — normalized by value, not string form) to the true name. Externals are not
-            scored (their names are known, not inferred).
+        proposed: Map of function entry address (hex) → the proposed/inferred name.
+        ground_truth: Map of function entry address (hex) → the true name.
 
     Returns:
-        A :class:`NamingAccuracy`. Only inferred functions present in ``ground_truth`` are scored;
-        the rest are counted as ``unscored`` (honest denominator — we don't credit or penalize names
-        we can't check).
+        A :class:`NamingAccuracy` over the proposed names that join the ground truth.
     """
     truth_by_int: dict[int, str] = {}
     for addr, name in ground_truth.items():
@@ -446,18 +449,16 @@ def naming_accuracy(program: RenamedProgram, ground_truth: Mapping[str, str]) ->
     exact = 0
     f1_total = 0.0
     unscored = 0
-    for fn in program.functions:
-        if not fn.inferred:
-            continue
-        key = _addr_key(fn.address)
+    for addr, proposed_name in proposed.items():
+        key = _addr_key(addr)
         truth = truth_by_int.get(key) if key is not None else None
         if truth is None:
             unscored += 1
             continue
         scored += 1
-        if _normalized(fn.assigned_name) == _normalized(truth):
+        if _normalized(proposed_name) == _normalized(truth):
             exact += 1
-        f1_total += _token_f1(fn.assigned_name, truth)
+        f1_total += _token_f1(proposed_name, truth)
 
     return NamingAccuracy(
         scored=scored,
@@ -466,6 +467,27 @@ def naming_accuracy(program: RenamedProgram, ground_truth: Mapping[str, str]) ->
         exact_match_rate=(exact / scored) if scored else 0.0,
         mean_token_f1=(f1_total / scored) if scored else 0.0,
     )
+
+
+def naming_accuracy(program: RenamedProgram, ground_truth: Mapping[str, str]) -> NamingAccuracy:
+    """Score the pass's inferred names against a ground-truth address→name map.
+
+    Projects the program's **inferred** functions to a proposed address→name map and delegates to
+    the pure :func:`score_name_map` (externals are not scored — their names are known, not
+    inferred).
+
+    Args:
+        program: The naming pass result.
+        ground_truth: Map of function entry address (hex; any of ``0x401286``/``00401286``/
+            ``401286`` — normalized by value, not string form) to the true name.
+
+    Returns:
+        A :class:`NamingAccuracy`. Only inferred functions present in ``ground_truth`` are scored;
+        the rest are counted as ``unscored`` (honest denominator — we don't credit or penalize names
+        we can't check).
+    """
+    proposed = {fn.address: fn.assigned_name for fn in program.functions if fn.inferred}
+    return score_name_map(proposed, ground_truth)
 
 
 def score(
