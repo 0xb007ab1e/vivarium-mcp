@@ -26,6 +26,7 @@ htmlcov/
 # ...but the Python hash-pinned dependency lockfiles ARE the supply-chain source of truth — track them.
 !requirements.lock
 !requirements-dev.lock
+!requirements-sast.lock
 !uv.lock
 ghidra_projects/
 samples/        # binary samples are not committed; tests use synthetic fixtures
