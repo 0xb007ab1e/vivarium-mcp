@@ -6,6 +6,115 @@ All notable changes to `ghidra-mcp` are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-06-17
+
+The **v1.4** increment — large-binary usability (analyzer profiles, pre-flight reject, live
+`analyze` progress), a deletion/round-trip completion of the type-write surface, fine-grained
+OAuth authorization, and a reverse-proxy mTLS mode. Backward-compatible: every change is additive
+or opt-in — no client-facing tool / RPC / envelope contract was broken. The tool catalog grows
+**50 → 51** (`delete_type`). The TB2 worker RPC framing gains an **additive, opt-in** progress
+notification (non-progress calls are byte-for-byte unchanged), and the annotation document schema
+bumps **1 → 2** with import accepting both `{1, 2}`. A correctness-of-release fix also syncs the
+stale in-package `__version__` (was `0.1.0`) to the real version.
+
+> **Pre-1.0 / private:** the tool catalog, RPC, and envelope contracts may still evolve before 1.0.
+
+### Added
+- **Analyzer-profile selector (ADR-029 B)** — `session_analyze` gains an additive, optional
+  `profile: "default" | "light" | "deep"` (default = byte-for-byte current behavior). `light` skips
+  the expensive Ghidra passes (decompiler parameter-ID, switch analysis, aggressive finders) so a
+  large binary finishes in less heap/time while still populating the function/symbol surface the
+  read tools depend on; `deep` adds the thorough passes. The closed `Literal` vocabulary is the
+  validation (no free-form analyzer strings from the client — least-agency). Server→worker additive
+  RPC param; live-verified on a real worker (default 8.2 s / light 6.7 s / deep 13.8 s on gzip 1.13).
+- **Worker analyze progress signal (ADR-030, Phase 1 + Phase 2)** — a long `analyze` is no longer
+  silent. The worker's Ghidra `TaskMonitor` emits **additive, opt-in `$/progress` JSON-RPC
+  notifications** (TB2 framing revision; only when the call sets `params.progress: true`) carrying
+  **percent + a closed phase enum only** — never free-form / binary-derived `TaskMonitor` strings
+  (ADR-005 redaction). **Phase 1** relays them to the server log (correlation-id scoped, bounded).
+  **Phase 2** streams them to the MCP client via `Context.report_progress`, **token-gated** on a
+  client-supplied `progressToken`: with a token, `session_analyze` runs async (offloaded via
+  `anyio.to_thread`) so the event loop stays free to flush notifications; with no token it runs
+  inline exactly as before. Live-verified end-to-end through the real FastMCP runtime.
+- **`define_types` annotation round-trip (ADR-032)** — session-authored composites now export as a
+  **single `define_types` batch entry** and re-import through the existing gated handler, so
+  **mutually-recursive pointer composites** (and any acyclic-but-misordered interdependency)
+  round-trip losslessly (the pre-registration in the batch resolves the cycle; no per-entry ordering
+  problem). The annotation document `schema_version` bumps **1 → 2**; import accepts **both `{1, 2}`**
+  so existing v1 exports still import. A session authoring **> 64** composites fails closed
+  `limit-exceeded` on export (no partial/lossy round-trip; the live writes succeeded).
+- **Recurring live-worker regression harness (ADR-028)** — promotes the v1.3 blind-acceptance run
+  into a scheduled CI workflow (`live-regression.yml`): nightly cron + `workflow_dispatch` + opt-in
+  `live-regression` PR label (not per-PR — bounds Actions cost). It brings up the real hardened
+  worker on **benign synthetic/OSS fixtures only** and asserts the two deterministic JVM-edge
+  regressions unit tests structurally cannot catch — **F2** (export succeeds on a real program) and
+  **F7** (exact user-authored entry count, zero auto-content) — as **hard gates**; naming-accuracy /
+  behavioral-equivalence is an **advisory tracked metric**, never a gate (non-deterministic LLM
+  signal). CI relaxes only gVisor → crun (the ADR-004 sanctioned floor for benign inputs); prod
+  isolation is unchanged. A failed scheduled run is the alert. No runtime capability or contract
+  change.
+
+### Changed
+- **Tool catalog 50 → 51** — adds the gated `delete_type` (below); all prior tools unchanged. The
+  exact count stays asserted in tests.
+- **Pre-flight reject mode (ADR-029 C)** — the v1.3 warn-only size-vs-memory pre-flight is now
+  selectable via `GHIDRA_MCP_WORKER_PREFLIGHT ∈ {warn, reject, off}`, **default `warn`** (v1.3
+  behavior preserved). `reject` fails fast at import time with the existing non-retryable
+  `resource-exhausted` (503) instead of burning ~26 min on a doomed OOM run; `off` silences the
+  heuristic (the hard size cap + memory cgroup remain). Opt-in; no behavior change unless configured.
+- **In-package `__version__` synced** — `src/ghidra_mcp/__init__.py` advertised a stale
+  `__version__ = "0.1.0"`; it is now `0.6.0`, kept in sync with `[project].version` in
+  `pyproject.toml` (the build-time source of truth). No runtime path read the stale value (it is not
+  wired into the MCP handshake), so this is a metadata-correctness fix, not a behavior change.
+
+### Security
+- **Gated `delete_type` for session-authored composites (ADR-031 — tools 50 → 51, GATED)** — the
+  inverse of `define_struct`/`define_union`/`define_types`. Deletion is bounded to types **this
+  session created** (the ADR-027 change-log `composite_targets`, server-side authority) — a Ghidra
+  auto-analysis struct, a built-in, or another session's type is **never** deletable, so the
+  injection "delete type `FILE`" fails closed (a data-poisoning defense by construction, not by
+  in-use detection). Gated by **write consent + `allow_structural`**, untrusted name validated at
+  the boundary, one worker transaction with rollback, audited (name length only — never contents),
+  and the change-log entry removed so a later export never references a deleted type. An in-use type
+  may be deleted and the result reports `dependents_reverted` (the caller's own applications). No new
+  trust boundary (extends TB7). Live-verified on a real worker.
+- **OAuth scopes → per-tool read/write authorization (ADR-033)** — closes the ADR-019 §E gap
+  (`std-owasp-api` API5). A `Principal` now carries `capabilities ⊆ {read, write}`; the 15 mutation
+  tools require `write`, everything else requires `read`, enforced at the registry dispatch chokepoint
+  (complete mediation, server-side, every request). **Config-gated opt-in, default off**: with
+  `GHIDRA_MCP_HTTP_OAUTH_WRITE_SCOPE` unset, OAuth tokens get full capability (byte-for-byte prior
+  behavior); set it and a token gets `write` **iff** its `scope`/`scp` claim contains the configured
+  value — a read-only token is mechanically barred from every write tool. Non-OAuth principals
+  (stdio / bearer / mTLS) stay full-capability. Structural granularity remains the orthogonal
+  `allow_structural` runtime consent (defense in depth). Denial maps to the existing `VALIDATION`
+  envelope (no error-contract change). Server-only; hardens TB6.
+- **Reverse-proxy-terminated mTLS, opt-in (ADR-034)** — a new `auth_mode=mtls-proxy` lets a
+  TLS-terminating reverse proxy (nginx/Envoy/HAProxy) forward a verified client identity, made safe
+  by a **required pre-shared secret** that anchors trust: the proxy must send a correct secret header
+  (`x-proxy-auth`, constant-time compared against `proxy_shared_secret`) or the forwarded identity
+  header (`x-client-cert-subject`) is never consulted — generic reject, no oracle, fail closed. The
+  mode **cannot start without the secret** (config validation), and a mandatory network-isolation
+  deployment constraint is documented. The forwarded subject is validated (non-empty, length-bounded,
+  no control chars) → owner-scoped `Principal` (ADR-017). The secret is never logged / excluded from
+  `repr`. Purely additive (bearer / mTLS / OAuth / none paths unchanged); server-only; hardens TB6.
+
+### Notes
+- **Backward-compatible / no operator action required on upgrade.** Every new capability is additive
+  or opt-in and default-safe: `profile` defaults to `default`, `GHIDRA_MCP_WORKER_PREFLIGHT` defaults
+  to `warn`, progress is inert without a client `progressToken`, OAuth scope-authZ is off until
+  `GHIDRA_MCP_HTTP_OAUTH_WRITE_SCOPE` is set, and `auth_mode=mtls-proxy` is a new opt-in mode.
+- **Annotation documents:** new exports are `schema_version 2`; a v2 importer reads both v1 and v2,
+  so existing v1 exports keep importing unchanged. (A pre-0.6.0 / v1-only importer will reject a v2
+  document as an unsupported version rather than mis-parse it — export v1 documents if a downstream
+  consumer is still on an older build.)
+- **No DB / persistence / schema migration** — sessions remain ephemeral (ADR-002); nothing is
+  persisted server-side.
+- **Tracked follow-ups (deferred, not regressions):** real `analyze` progress for `import_binary`
+  (ADR-030 §D8 — import is fast; trivial future extension); incremental/lazy analysis (ADR-029 §D5);
+  atomic type *redefine* and deletion of built-in/recovered types (ADR-031 — each its own re-render
+  threat model). The README "latest release" banner still cites an older version (docs-only drift,
+  not shipped behavior) — refresh separately.
+
 ## [0.5.0] — 2026-06-17
 
 The **v1.3** increment — hardening and correctness driven by a **blind real-world acceptance run**
@@ -401,7 +510,8 @@ analyzer is the central security control.
   off-by-default and fail-closed. See `docs/security/threat-model.md` and `SECURITY.md` for the
   reporting channel.
 
-[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.3.0...v0.3.1
