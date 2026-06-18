@@ -212,14 +212,17 @@ def test_adr004_hardening_flags_unchanged_with_tuned_resources(tmp_path: Path) -
 
 
 # ----------------------------------------------------------------------------------------------
-# exit_diagnosis (ADR-023 / F1): OOM vs other vs unknown via fake engine runner.
+# exit_diagnosis (ADR-023 / F1 + ADR-037): OOM vs other vs unknown via fake engine runner.
 # ----------------------------------------------------------------------------------------------
 @pytest.mark.parametrize(
     ("rc", "stdout", "expected"),
     [
         (0, "true 137", "oom"),  # engine reports OOMKilled
-        (0, "false 137", "oom"),  # SIGKILL exit signature (128+9) even without the flag
-        (0, "false 1", "other"),  # confirmed non-OOM exit
+        (0, "false 137", "oom"),  # cgroup SIGKILL exit signature (128+9) even without the flag
+        (0, "false 3", "oom"),  # JVM ExitOnOutOfMemoryError heap-OOM self-exit (ADR-037 §D1)
+        (0, "true 3", "oom"),  # OOMKilled flag still wins regardless of exit code
+        (0, "false 2", "other"),  # worker missing-session-id exit — NOT an OOM (collision guard)
+        (0, "false 1", "other"),  # uncaught Python error — confirmed non-OOM exit
         (0, "false 0", "other"),  # clean exit
         (1, "true 137", "unknown"),  # engine query failed → fail closed (never spurious oom)
         (0, "true", "unknown"),  # unparseable output (one field) → unknown
@@ -228,7 +231,8 @@ def test_adr004_hardening_flags_unchanged_with_tuned_resources(tmp_path: Path) -
     ],
 )
 def test_exit_diagnosis_classification(rc: int, stdout: str, expected: str) -> None:
-    """``exit_diagnosis`` classifies via OOMKilled flag / exit 137, failing closed to unknown."""
+    """``exit_diagnosis`` classifies via OOMKilled flag / exit 137 / JVM exit 3 (ADR-037),
+    failing closed to unknown; worker's own codes {0,2} stay ``other``."""
     proc = ContainerWorkerProcess(
         container_name="w", engine="podman", runner=_Recorder(returncode=rc, stdout=stdout)
     )

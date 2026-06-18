@@ -104,22 +104,37 @@ def session_invalid(correlation_id: str | None = None) -> GhidraMcpError:
     )
 
 
-def resource_exhausted(correlation_id: str | None = None) -> GhidraMcpError:
-    """Build the ``resource-exhausted`` error for a worker OOM/resource-pressure exit (ADR-023).
+def resource_exhausted(
+    mem_mib: int | None = None, correlation_id: str | None = None
+) -> GhidraMcpError:
+    """Build the ``resource-exhausted`` error for a worker OOM/resource-pressure exit (ADR-023/037).
 
-    The detail is a fixed, safe, actionable hint (no host paths, binary content, or engine
-    internals — error-envelope.md disclosure rules); 503, not retryable (the same input against the
-    same memory cap would OOM again — the operator must raise the cap or the client shrink input).
+    The detail is a safe, actionable hint (no host paths, binary content, or engine internals —
+    error-envelope.md disclosure rules); 503, not retryable (the same input against the same memory
+    cap would OOM again — the operator must raise the cap or the client shrink input).
+
+    When ``mem_mib`` is supplied (ADR-037 §3 sizing hint) the detail names the current configured
+    worker memory and the env knob to raise, so the operator knows the baseline to grow from. The
+    value is a server-computed integer only — no host path or binary-derived content leaks.
 
     Args:
+        mem_mib: The resolved worker memory cap (MiB) to surface as the sizing hint; ``None`` falls
+            back to the generic message (e.g. when the cap is not known at the call site).
         correlation_id: Optional id tying the error to redacted server-side logs.
 
     Returns:
         A ``RESOURCE_EXHAUSTED`` :class:`GhidraMcpError`.
     """
+    if mem_mib is not None:
+        detail = (
+            f"worker exhausted its memory limit ({mem_mib} MiB); increase "
+            f"GHIDRA_MCP_WORKER_MEM_MIB (currently {mem_mib}) or reduce input size"
+        )
+    else:
+        detail = "worker exhausted its memory limit; increase worker memory or reduce input size"
     return make_error(
         ErrorType.RESOURCE_EXHAUSTED,
-        "worker exhausted its memory limit; increase worker memory or reduce input size",
+        detail,
         correlation_id=correlation_id,
     )
 

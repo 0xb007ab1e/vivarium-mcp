@@ -199,8 +199,10 @@ ENV GHIDRA_MCP_RPC_SOCKET_DIR=/run/ghidra-mcp \
     GHIDRA_MCP_TOOL_TIMEOUT_SECONDS=60 \
     GHIDRA_MCP_MAX_RESPONSE_BYTES=4194304 \
     GHIDRA_MCP_MAX_BINARY_BYTES=134217728 \
-    # JVM: cap the heap (deploy/ cgroup mem limit is the hard wall); -XX:+ExitOnOutOfMemoryError so
-    # an OOM kills the JVM (→ worker-unavailable → evict). No network properties; Ghidra runs offline.
+    # JVM: cap the heap (deploy/ cgroup mem limit is the hard wall); -XX:+ExitOnOutOfMemoryError so a
+    # heap OOM self-exits the JVM with code 3 → server classifies it `resource-exhausted` and evicts
+    # (ADR-037; a native/off-heap overrun instead trips the cgroup OOM-kill = exit 137). No network
+    # properties; Ghidra runs offline.
     # -Duser.home: Ghidra reads Java's `user.home` (not $HOME) from the passwd entry; point it at the
     # writable /tmp/ghidra tmpfs so Ghidra can save its JDK config + user settings under ro-rootfs.
     JAVA_TOOL_OPTIONS="-XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=75.0 -Djava.awt.headless=true -Djava.net.preferIPv4Stack=true -Djava.io.tmpdir=/tmp/ghidra -Duser.home=/tmp/ghidra"
