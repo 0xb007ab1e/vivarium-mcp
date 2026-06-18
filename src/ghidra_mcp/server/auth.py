@@ -36,6 +36,7 @@ and the HTTP shell (a later slice) adapts its request to :class:`AuthContext`.
 from __future__ import annotations
 
 import hmac
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -59,6 +60,35 @@ MTLS_PRINCIPAL_FIELD_DEFAULT = "cn"
 _DEFAULT_MTLS_PRINCIPAL_FIELD = MTLS_PRINCIPAL_FIELD_DEFAULT
 #: Map a ``san-*`` selector to the SAN entry tag :func:`ssl.getpeercert` uses (case as returned).
 _SAN_FIELD_TAGS = {"san-dns": "DNS", "san-uri": "URI", "san-email": "email"}
+
+#: Reverse-proxy mTLS defaults (ADR-034). Header names are lowercased (HTTP headers are
+#: case-insensitive; the middleware lowercases). Public so config shares the same defaults.
+PROXY_SECRET_HEADER_DEFAULT = "x-proxy-auth"  # noqa: S105  # nosec B105 - a header NAME, not a secret
+PROXY_IDENTITY_HEADER_DEFAULT = "x-client-cert-subject"
+_DEFAULT_PROXY_SECRET_HEADER = PROXY_SECRET_HEADER_DEFAULT
+_DEFAULT_PROXY_IDENTITY_HEADER = PROXY_IDENTITY_HEADER_DEFAULT
+#: Upper bound on a forwarded identity (a subject CN/DN). Bounds the principal-id length the proxy
+#: can assert (it becomes the session-owner key — ADR-017); a longer value fails closed.
+_MAX_PROXY_IDENTITY_LEN = 256
+
+
+def _valid_proxy_identity(value: str) -> bool:
+    """Return whether a proxy-forwarded identity is a safe principal id (ADR-034; fail closed).
+
+    Non-empty, ``<= _MAX_PROXY_IDENTITY_LEN`` chars, and free of control/newline characters (it is
+    attacker-influenced if the proxy is compromised, and becomes the session-owner key — bound it).
+    A subject DN's ``=,/ .`` etc. are allowed; only control characters are rejected.
+
+    Args:
+        value: The raw identity-header value (already confirmed non-``None`` by the caller).
+
+    Returns:
+        ``True`` iff the value is a usable, bounded, control-char-free principal id.
+    """
+    if not value or len(value) > _MAX_PROXY_IDENTITY_LEN:
+        return False
+    return not any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+
 
 #: OAuth (ADR-019 D3). The PINNED algorithm allow-list — only **asymmetric** JWS algorithms whose
 #: verification key is a *public* key (so a leaked/guessed JWKS key cannot be used to MINT tokens).
@@ -140,10 +170,14 @@ class AuthContext:
             or ``None`` when the request carried no verified peer cert. Populated by the HTTP shell
             (the auth middleware) from the ASGI scope; unused by bearer. ``None``/empty ⇒ the mTLS
             authenticator fails closed.
+        headers: The request headers as a lowercased-name → first-value mapping (ADR-034). Populated
+            by the auth middleware. Read only by the reverse-proxy authenticator (its configured
+            secret + identity headers); bearer/mTLS/OAuth ignore it. Empty for non-HTTP/test calls.
     """
 
     authorization: str | None = None
     peer_certificate: object | None = field(default=None, repr=False)
+    headers: Mapping[str, str] = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -179,9 +213,11 @@ class BearerAuthenticator:
         if header is None or header[: len(_BEARER_PREFIX)].lower() != _BEARER_PREFIX:
             return None
         presented = header[len(_BEARER_PREFIX) :].strip()
-        if hmac.compare_digest(presented, self.expected_token):
-            return Principal(id="bearer")
-        return None
+        # A non-ASCII value can never equal the ASCII configured token; reject it BEFORE
+        # compare_digest (which raises TypeError on non-ASCII) — fail closed, no oracle, no raise.
+        if not presented.isascii() or not hmac.compare_digest(presented, self.expected_token):
+            return None
+        return Principal(id="bearer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +258,8 @@ class MultiTokenBearerAuthenticator:
         if header is None or header[: len(_BEARER_PREFIX)].lower() != _BEARER_PREFIX:
             return None
         presented = header[len(_BEARER_PREFIX) :].strip()
+        if not presented.isascii():
+            return None  # non-ASCII can't match an ASCII token + would raise in compare_digest
         matched_id: str | None = None
         # Compare against EVERY entry; do not break on a hit — the loop's work is independent of
         # which (if any) token matched, so there is no which-token timing oracle (ADR-017 STRIDE-S).
@@ -357,6 +395,62 @@ class MtlsAuthenticator:
         if not value:  # missing or empty mapped field → fail closed (no anonymous principal)
             return None
         return Principal(id=value)
+
+
+@dataclass(frozen=True, slots=True)
+class ReverseProxyMtlsAuthenticator:
+    """Trust a TLS-terminating proxy's forwarded client identity, gated on a secret (ADR-034).
+
+    The opt-in reverse-proxy mTLS mode. The proxy terminates TLS, **verifies the client cert
+    chain**, and forwards the verified identity (subject CN/DN) in :attr:`identity_header`. Because
+    the server has no direct TLS to the client, it trusts that header **only** when the request also
+    carries the correct pre-shared secret in :attr:`secret_header` — the code-enforced trust anchor
+    against the header-spoofing footgun ADR-019 named (a direct attacker cannot forge identity
+    without the secret). The mode is also subject to a mandatory network-isolation deployment
+    constraint (only the proxy may reach the server — see the threat model / deploy docs).
+
+    Fail closed, no oracle: a missing/wrong secret, or a missing/malformed identity, returns a
+    uniform ``None`` (→ the shell's generic ``401``). The secret is never logged (excluded from
+    ``repr``); the identity is never logged verbatim.
+
+    Attributes:
+        shared_secret: The pre-shared secret the proxy must present (the trust anchor). Excluded
+            from ``repr`` (it is the credential).
+        secret_header: The (lowercased) header carrying the shared secret. Default ``x-proxy-auth``.
+        identity_header: The (lowercased) header carrying the proxy-verified client identity.
+            Default ``x-client-cert-subject``.
+    """
+
+    shared_secret: str = field(repr=False)
+    secret_header: str = _DEFAULT_PROXY_SECRET_HEADER
+    identity_header: str = _DEFAULT_PROXY_IDENTITY_HEADER
+
+    def __post_init__(self) -> None:
+        """Re-assert the secret length floor (defense in depth over the config gate)."""
+        if len(self.shared_secret) < _MIN_BEARER_TOKEN_LEN:
+            raise ValueError("reverse-proxy shared secret too short")
+
+    def authenticate(self, ctx: AuthContext) -> Principal | None:
+        """Map the proxy-forwarded identity to a principal IFF the shared secret matches (ADR-034).
+
+        Order (fail closed): verify the secret header **first** (constant-time, no early-return
+        oracle) — a missing/wrong secret never even consults the identity header; then read +
+        validate the identity header and map it to a :class:`Principal`. Any failure → ``None``.
+        """
+        presented = ctx.headers.get(self.secret_header)
+        # Constant-time compare; reject before touching the identity header (the secret is the
+        # anchor — without it the forwarded identity is meaningless). A non-ASCII value can't equal
+        # the ASCII secret and would raise in compare_digest, so reject it first. No oracle.
+        if (
+            presented is None
+            or not presented.isascii()
+            or not hmac.compare_digest(presented, self.shared_secret)
+        ):
+            return None
+        identity = ctx.headers.get(self.identity_header)
+        if identity is None or not _valid_proxy_identity(identity):
+            return None  # missing/empty/over-long/control-char identity → fail closed
+        return Principal(id=identity)
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,6 +605,9 @@ def build_authenticator(
     oauth_algorithms: tuple[str, ...] = OAUTH_DEFAULT_ALGORITHMS,
     oauth_leeway_s: int = OAUTH_DEFAULT_LEEWAY_S,
     oauth_write_scope: str | None = None,
+    proxy_shared_secret: str | None = None,
+    proxy_secret_header: str = _DEFAULT_PROXY_SECRET_HEADER,
+    proxy_identity_header: str = _DEFAULT_PROXY_IDENTITY_HEADER,
 ) -> Authenticator:
     """Construct the :class:`Authenticator` for a validated ``auth_mode`` (the wiring seam).
 
@@ -542,6 +639,11 @@ def build_authenticator(
         oauth_leeway_s: Clock-skew leeway in seconds for ``exp``/``nbf``.
         oauth_write_scope: The scope granting the ``write`` capability (ADR-033); ``None`` ⇒
             scope-gating off (every valid token is full-capability — identity-only).
+        proxy_shared_secret: The pre-shared secret for ``mtls-proxy`` (ADR-034); REQUIRED for that
+            mode (the trust anchor) — absent ⇒ ``ValueError``.
+        proxy_secret_header: The header carrying the shared secret (default ``x-proxy-auth``).
+        proxy_identity_header: The header carrying the proxy-verified client identity (default
+            ``x-client-cert-subject``).
 
     Returns:
         The matching authenticator.
@@ -562,6 +664,14 @@ def build_authenticator(
         return MultiTokenBearerAuthenticator(tokens=tokens)
     if auth_mode == "mtls":
         return MtlsAuthenticator(principal_field=mtls_principal_field)
+    if auth_mode == "mtls-proxy":
+        if not proxy_shared_secret:
+            raise ValueError("mtls-proxy auth requires a shared secret")
+        return ReverseProxyMtlsAuthenticator(
+            shared_secret=proxy_shared_secret,
+            secret_header=proxy_secret_header,
+            identity_header=proxy_identity_header,
+        )
     if auth_mode == "oauth":
         if oauth_issuer is None or oauth_audience is None or oauth_jwks_uri is None:
             # Config guarantees these for auth_mode=oauth; re-checked here so a programmatic caller

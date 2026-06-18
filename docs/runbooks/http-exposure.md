@@ -37,17 +37,20 @@ aborts with a clear, redacted error (no insecure runtime state).
 |---|---|---|
 | `GHIDRA_MCP_TRANSPORT` | `stdio` | set `http` to enable HTTP |
 | `GHIDRA_MCP_HTTP_BIND` | `127.0.0.1:8765` | `host:port` (IPv6 as `[::1]:8765`) or `unix:/path.sock` |
-| `GHIDRA_MCP_HTTP_AUTH` | `none` on loopback/UDS · `bearer` on network | `none`/`bearer` (`mtls`/`oauth` are **not implemented** in v1.1 — do not select) |
+| `GHIDRA_MCP_HTTP_AUTH` | `none` on loopback/UDS · `bearer` on network | `none`/`bearer`/`mtls`/`oauth`/`mtls-proxy` (all implemented — ADR-019/033/034) |
 | `GHIDRA_MCP_HTTP_BEARER_TOKEN` | unset | required for `bearer`; **≥ 16 chars**; never logged |
+| `GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET` | unset | **required** for `mtls-proxy` (the trust anchor); **≥ 16 chars**; never logged |
+| `GHIDRA_MCP_HTTP_PROXY_SECRET_HEADER` / `_PROXY_IDENTITY_HEADER` | `x-proxy-auth` / `x-client-cert-subject` | headers the proxy injects (secret + verified client identity) for `mtls-proxy` |
 | `GHIDRA_MCP_HTTP_TLS_CERT` / `_TLS_KEY` | unset | PEM paths; **both or neither**; required for any network bind |
 | `GHIDRA_MCP_HTTP_CORS_ORIGINS` | _(none)_ | comma-separated explicit origins; `*` is rejected |
 | `GHIDRA_MCP_HTTP_RATE_PER_SECOND` | `10` | per-client token-bucket refill rate |
 | `GHIDRA_MCP_HTTP_RATE_BURST` | `20` | per-client bucket size |
 | `GHIDRA_MCP_HTTP_MAX_BODY_BYTES` | `1048576` | request size cap (1 MiB); `413` over it |
 
-> **Auth note:** only `bearer` (and `none` on loopback/UDS) is implemented in v1.1. `mtls`/`oauth`
-> are port-ready stubs (ADR-011 §3) and are **not** usable yet — selecting them boots but fails the
-> first request. Do not configure them.
+> **Auth note:** `bearer` (and `none` on loopback/UDS) plus `mtls` + `oauth` (ADR-019) and
+> `mtls-proxy` (ADR-034) are all implemented. `oauth` adds optional scope→per-tool authZ
+> (`GHIDRA_MCP_HTTP_OAUTH_WRITE_SCOPE` — ADR-033). `mtls-proxy` trusts a TLS-terminating reverse
+> proxy's forwarded client identity, gated on a shared secret — see the constraint below.
 
 ### Rung 1 — Loopback TCP (same host, simplest)
 
@@ -98,6 +101,23 @@ Clients send `Authorization: Bearer <token>` over **https**.
 Bind the server to **loopback or UDS** (Rung 1/2) and let nginx/Caddy/Envoy terminate TLS (and
 optionally mTLS/OAuth) in front, forwarding to the loopback/socket. The server stays off the network
 directly; the proxy owns the public cert. Keep the bearer token (or proxy-injected auth) in force.
+
+#### `mtls-proxy` — trust the proxy's verified client identity (ADR-034)
+
+When the proxy terminates **client-cert (mTLS)** and you want that identity inside the server, set
+`GHIDRA_MCP_HTTP_AUTH=mtls-proxy`. The proxy must inject TWO headers: the **shared secret**
+(`x-proxy-auth` by default) and the **verified client identity** it extracted from the cert
+(`x-client-cert-subject` by default, e.g. nginx `proxy_set_header X-Client-Cert-Subject
+$ssl_client_s_dn;`). The server trusts the identity **only** when the secret matches (constant-time).
+
+> ⚠️ **MANDATORY constraints — both, or this is a spoofing footgun:**
+> 1. **Network-isolate the server so ONLY the proxy can reach it** (bind loopback/UDS, or a private
+>    interface + firewall/NetworkPolicy). Anyone who can reach the server directly AND knows the
+>    secret can forge any identity.
+> 2. **Set a strong `GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET`** (≥16 chars, from your secret manager;
+>    the mode refuses to boot without one) and have the proxy **strip** any client-supplied
+>    `x-proxy-auth`/`x-client-cert-subject` headers before injecting its own (so a client can't
+>    smuggle them through). Rotate it via `runbooks/secret-rotation.md`.
 
 ## Secret handling (bearer token + TLS key)
 

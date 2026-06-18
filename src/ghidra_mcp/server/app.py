@@ -405,6 +405,9 @@ def run_http(
         oauth_algorithms=http.oauth_algorithms,
         oauth_leeway_s=http.oauth_leeway_s,
         oauth_write_scope=http.oauth_write_scope,
+        proxy_shared_secret=http.proxy_shared_secret,
+        proxy_secret_header=http.proxy_secret_header,
+        proxy_identity_header=http.proxy_identity_header,
     )
     asgi = build_http_asgi_app(app.streamable_http_app(), http, authenticator=authenticator)
     _install_shutdown_handlers()

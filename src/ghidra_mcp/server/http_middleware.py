@@ -54,6 +54,27 @@ def _header(scope: Scope, name: bytes) -> bytes | None:
     return None
 
 
+def _header_map(scope: Scope) -> dict[str, str]:
+    """Build a lowercased-name → first-value request-header map for ``AuthContext`` (ADR-034).
+
+    ASGI header names are already lowercase bytes; values are decoded latin-1 (the HTTP header
+    charset). First value wins on a repeated header (deterministic). Read only by the reverse-proxy
+    authenticator's configured secret/identity headers — other authenticators ignore it.
+
+    Args:
+        scope: The ASGI HTTP scope.
+
+    Returns:
+        A ``{lowercased-name: first-value}`` mapping of the request headers.
+    """
+    out: dict[str, str] = {}
+    for key, value in scope.get("headers", []):
+        name = cast("bytes", key).decode("latin-1")
+        if name not in out:  # first value wins
+            out[name] = cast("bytes", value).decode("latin-1")
+    return out
+
+
 def _peer_certificate(scope: Scope) -> object | None:
     """Extract the **verified** client cert from the ASGI scope's TLS extension, or ``None``.
 
@@ -190,6 +211,9 @@ class AuthenticationMiddleware:
                 authorization=authorization.decode("latin-1") if authorization else None,
                 # The verified peer cert (mTLS — ADR-019 D2), or None for non-mTLS / no client cert.
                 peer_certificate=_peer_certificate(scope),
+                # Lowercased header map (ADR-034) — read only by the reverse-proxy authenticator's
+                # configured secret/identity headers; other authenticators ignore it.
+                headers=_header_map(scope),
             )
         )
         if principal is None:

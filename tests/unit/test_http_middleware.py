@@ -18,6 +18,7 @@ from ghidra_mcp.server.auth import (
     MtlsAuthenticator,
     NullAuthenticator,
     Principal,
+    ReverseProxyMtlsAuthenticator,
 )
 from ghidra_mcp.server.http_middleware import (
     _SCOPE_PRINCIPAL_KEY,
@@ -259,4 +260,78 @@ def test_auth_mtls_empty_cn_is_401() -> None:
     app = _App()
     mw = AuthenticationMiddleware(app, authenticator=MtlsAuthenticator())
     status, _ = _drive(mw, _tls_scope({"subject": ((("commonName", ""),),)}))
+    assert status == 401 and app.called is False
+
+
+# --- _header_map: lowercased name → first value (ADR-034) --------------------------------------
+# The reverse-proxy authenticator reads request headers via AuthContext.headers; the middleware
+# builds that map from the ASGI scope. ASGI header NAMES are already lowercase bytes; values are
+# latin-1 decoded; the FIRST value wins on a duplicate (deterministic).
+
+
+def test_header_map_lowercases_and_first_value_wins() -> None:
+    scope = _scope(
+        headers=[
+            (b"authorization", b"Bearer abc"),
+            (b"x-proxy-auth", b"secret-1"),
+            (b"x-proxy-auth", b"secret-2"),  # duplicate — first wins
+            (b"x-client-cert-subject", b"CN=alice"),
+        ]
+    )
+    hm = _mw._header_map(scope)
+    assert hm == {
+        "authorization": "Bearer abc",
+        "x-proxy-auth": "secret-1",  # first value, not "secret-2"
+        "x-client-cert-subject": "CN=alice",
+    }
+
+
+def test_header_map_latin1_decoded_and_empty_scope() -> None:
+    """Values are latin-1 decoded (the HTTP header charset); a header-less scope → empty map."""
+    scope = _scope(headers=[(b"x-client-cert-subject", "CN=café".encode("latin-1"))])
+    assert _mw._header_map(scope) == {"x-client-cert-subject": "CN=café"}
+    assert _mw._header_map(_scope(headers=[])) == {}
+
+
+# --- AuthenticationMiddleware end-to-end with the reverse-proxy authenticator (ADR-034) --------
+_PROXY_SECRET = "proxy-shared-secret-of-len"  # noqa: S105  # test fixture, not a real secret
+
+
+def _proxy_scope(*, secret: bytes | None, identity: bytes | None = b"CN=alice") -> dict[str, Any]:
+    """A scope carrying the proxy secret + identity headers (omit either when its arg is None)."""
+    headers: list[tuple[bytes, bytes]] = []
+    if secret is not None:
+        headers.append((b"x-proxy-auth", secret))
+    if identity is not None:
+        headers.append((b"x-client-cert-subject", identity))
+    return _scope(headers=headers)
+
+
+def test_auth_proxy_correct_secret_and_identity_authenticates() -> None:
+    """Right secret + identity headers → authenticated; principal stashed on scope state."""
+    app = _App()
+    mw = AuthenticationMiddleware(
+        app, authenticator=ReverseProxyMtlsAuthenticator(shared_secret=_PROXY_SECRET)
+    )
+    status, _ = _drive(mw, _proxy_scope(secret=_PROXY_SECRET.encode(), identity=b"CN=carol"))
+    assert status == 200 and app.called is True
+    assert app.seen_scope is not None
+    assert app.seen_scope["state"][_SCOPE_PRINCIPAL_KEY] == Principal(id="CN=carol")
+
+
+def test_auth_proxy_missing_secret_header_is_401() -> None:
+    app = _App()
+    mw = AuthenticationMiddleware(
+        app, authenticator=ReverseProxyMtlsAuthenticator(shared_secret=_PROXY_SECRET)
+    )
+    status, _ = _drive(mw, _proxy_scope(secret=None))  # identity present, no secret
+    assert status == 401 and app.called is False
+
+
+def test_auth_proxy_wrong_secret_is_401() -> None:
+    app = _App()
+    mw = AuthenticationMiddleware(
+        app, authenticator=ReverseProxyMtlsAuthenticator(shared_secret=_PROXY_SECRET)
+    )
+    status, _ = _drive(mw, _proxy_scope(secret=b"wrong-but-long-enough-secret"))
     assert status == 401 and app.called is False

@@ -1135,3 +1135,24 @@ gate. Server-only; no worker/JVM.
 that opt in. The gate is a pure server-side check (no worker, no JVM, no new boundary) and is fully
 unit-tested; there is no live-verification dependency. Finer granularity (per-tool scopes,
 structural-as-scope) remains a future increment.
+
+## 19. TB6 (delta) — Reverse-proxy-terminated mTLS, shared-secret-anchored (v1.4 — ADR-034, ACCEPTED)
+
+Extends the HTTP boundary (**TB6**, no new boundary): a new opt-in auth mode `mtls-proxy` lets a
+TLS-terminating reverse proxy forward a verified client identity, which ADR-019 D2 **rejected as the
+default** (header-spoofing footgun). It returns as opt-in made safe by a **code-enforced shared-secret
+trust anchor** — not a documentation hope. Server-only; no worker/JVM.
+
+| STRIDE | Threat | Mitigation |
+|--------|--------|------------|
+| **S** | **Header spoofing — a direct attacker forges the identity header** to impersonate any client | the identity header is trusted **only** when the request carries the correct pre-shared secret (`proxy_secret_header`), compared **constant-time** (`hmac.compare_digest`) against `proxy_shared_secret`; a missing/wrong secret → uniform `None` (generic 401, no oracle), identity never consulted. The mode **cannot boot without a secret** (config fail-closed; ≥16 chars). **Plus** the mandatory network-isolation deployment constraint (only the proxy may reach the server). Forging identity requires BOTH reaching the server directly AND the secret |
+| **T** | **Malformed/oversized forwarded identity** poisons the principal/session-owner key | `_valid_proxy_identity` bounds it: non-empty, ≤256 chars, no control/newline chars (ADR-017 owner key). A malformed value → `None` |
+| **I/R** | secret/identity leakage | the shared secret is excluded from `repr`, sourced from env/secret-manager (`workflow-secrets`), never logged; a reject is generic; the identity is not logged verbatim |
+| **(transport)** | proxy→server hop on a shared network | unchanged existing rule: a **non-loopback bind still requires TLS** (`config`) — a cross-host proxy→server hop is encrypted; a same-host proxy uses loopback (no TLS needed). The mode does not relax this |
+| **(authZ/identity)** | over-grant | the resulting `Principal` is **owner-scoped** like every other (ADR-017 — own sessions only, BOLA-safe) and **full-capability** (ADR-033 narrows only OAuth) |
+
+**Residual risk.** The residual is operator misconfiguration — exposing the server directly to
+untrusted networks **and** leaking the shared secret; both are required to forge identity, and both
+are documented mandatory constraints (threat model + `docs/runbooks/http-exposure.md`). The mode is
+**off by default** (opt-in `auth_mode=mtls-proxy`, which cannot start without the secret). Server-only,
+fully unit-tested — no live-verification dependency.
