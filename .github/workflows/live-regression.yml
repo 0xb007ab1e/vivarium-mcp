@@ -5,17 +5,22 @@
 # F2/F7 class — by driving the REAL Ghidra worker end to end. Unit coverage stops at the TB3
 # PyGhidra boundary (ADR-001); only a live worker exercises the export-after-write enumeration.
 #
-# TWO HARD GATES (deterministic — a failure or a SKIP fails the job):
+# HARD GATES (deterministic — a failure or a SKIP fails the job):
 #   * F2 — `session_export_annotations` succeeds on a real program after a rename
 #     (tests/integration/test_export_annotations_after_rename.py — scheduled, not rewritten).
 #   * F7 — a session making exactly 1 rename + 1 comment + 1 struct exports EXACTLY 3 entries and
 #     ZERO auto-generated content (tests/integration/test_export_known_count.py).
+#   * Analyzer profiles (ADR-029 B) — `session_analyze` under each of {default,light,deep} succeeds
+#     and populates a function surface (tests/integration/test_analyze_profiles.py, 3 params). Only
+#     light/deep drive the option-overlay JVM edge (getOptions(ANALYSIS_PROPERTIES)+setBoolean),
+#     which `default` (empty overlay) skips — so this is the sole recurring guard for that binding.
 # Naming-accuracy / behavioral-equivalence is ADVISORY (NOT a hard gate, NOT run with an LLM in CI)
 # and is deliberately NOT part of this job — see e2e-groundtruth.yml for the gated naming-eval e2e.
+# Per-profile recovered-function counts are recorded into the JUnit XML as an advisory trend.
 #
 # FAIL-LOUD ON SKIP (workflow-cicd: a skipped/errored security stage counts as a FAILURE, not a
-# pass): if either hard-gate test is SKIPPED (broken harness / worker didn't come up) the job FAILS.
-# We assert post-run that both tests actually RAN (parse the JUnit XML).
+# pass): if any hard-gate test is SKIPPED (broken harness / worker didn't come up) the job FAILS.
+# We assert post-run that all hard-gate tests actually RAN (parse the JUnit XML; expect >=5).
 #
 # TEST WHAT YOU SHIP: by default this PULLS the cosign-SIGNED released worker image and
 # cosign-VERIFIES it before use; a `workflow_dispatch` input (or a pull failure) falls back to
@@ -154,8 +159,8 @@ jobs:
           podman pull "${WORKER_IMAGE}"
           echo "image=${WORKER_IMAGE}" >> "$GITHUB_OUTPUT"
 
-      # --- Run the F2 + F7 HARD GATES against the real worker --------------------------------------
-      - name: Run F2 + F7 live regression (real worker under crun)
+      # --- Run the F2 + F7 + profile HARD GATES against the real worker ---------------------------
+      - name: Run F2 + F7 + analyzer-profile live regression (real worker under crun)
         env:
           GHIDRA_MCP_INTEGRATION: "1"
           GHIDRA_MCP_WORKER_IMAGE: ${{ steps.image.outputs.image }}
@@ -184,10 +189,11 @@ jobs:
           pytest -m integration --no-cov -v \
             --junit-xml=live-regression-junit.xml \
             tests/integration/test_export_annotations_after_rename.py \
-            tests/integration/test_export_known_count.py
+            tests/integration/test_export_known_count.py \
+            tests/integration/test_analyze_profiles.py
 
       # --- FAIL-LOUD ON SKIP: a skipped hard gate is a FAILURE, not a silent pass ------------------
-      - name: Assert both hard gates actually RAN (fail-loud on skip)
+      - name: Assert all hard gates actually RAN (fail-loud on skip)
         if: always()
         run: |
           set -euo pipefail
@@ -212,9 +218,10 @@ jobs:
 
           print(f"tests={tests} failures={failures} errors={errors} skipped={skipped}")
           problems = []
-          # Expect EXACTLY the two hard-gate tests to have run.
-          if tests < 2:
-              problems.append(f"expected >=2 hard-gate tests to run, collected {tests}")
+          # Expect at least the hard-gate tests to have run: F2 (export-after-rename) + F7
+          # (known-count) + the 3 analyzer-profile params (default/light/deep) = 5.
+          if tests < 5:
+              problems.append(f"expected >=5 hard-gate tests to run, collected {tests}")
           if skipped:
               problems.append(f"{skipped} hard-gate test(s) SKIPPED — a skipped gate is a FAILURE")
           if failures or errors:
