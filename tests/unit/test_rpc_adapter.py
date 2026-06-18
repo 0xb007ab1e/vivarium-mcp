@@ -1434,6 +1434,51 @@ def test_build_error_without_detail_omits_data_detail() -> None:
     assert "detail" not in resp["error"]["data"]
 
 
+def test_worker_error_detail_threads_to_data_detail_log_only() -> None:
+    """A ``WorkerError`` carrying a ``detail`` surfaces it in log-only ``data.detail`` (ADR-035).
+
+    The analyzer-option guard raises ``WorkerError(CODE_INTERNAL, <template>, detail=<missing>)``.
+    The client-facing ``message`` stays generic; the redacted, log-only ``data.detail`` carries the
+    diagnostic (which option drifted) — so a red ADR-028 nightly is actionable.
+    """
+
+    class _Boom:
+        def memory_map(self, params: dict[str, object]) -> dict[str, object]:
+            raise dispatch.WorkerError(
+                dispatch.CODE_INTERNAL,
+                "analyzer profile references option(s) not available in this Ghidra build",
+                detail="analyzer profile option(s) absent in this Ghidra build: ['Bogus Analyzer']",
+            )
+
+    resp = dispatch.handle_request(
+        cast("dispatch.GhidraBackend", _Boom()),
+        {"jsonrpc": "2.0", "id": "9", "method": "memory_map", "params": {}},
+    )
+    assert resp["error"]["code"] == dispatch.CODE_INTERNAL
+    assert resp["error"]["data"]["type"] == "internal-error"
+    # Generic client-facing message (no diagnostic leaks to the client envelope message).
+    assert resp["error"]["message"] == (
+        "analyzer profile references option(s) not available in this Ghidra build"
+    )
+    # The missing-option diagnostic rides ONLY in the log-only data.detail.
+    assert "Bogus Analyzer" in resp["error"]["data"]["detail"]
+
+
+def test_worker_error_defaults_to_no_detail() -> None:
+    """A plain ``WorkerError`` (no ``detail``) still omits ``data.detail`` (backward compat)."""
+
+    class _Boom:
+        def memory_map(self, params: dict[str, object]) -> dict[str, object]:
+            raise dispatch.WorkerError(dispatch.CODE_NOT_FOUND, "missing")
+
+    resp = dispatch.handle_request(
+        cast("dispatch.GhidraBackend", _Boom()),
+        {"jsonrpc": "2.0", "id": "10", "method": "memory_map", "params": {}},
+    )
+    assert resp["error"]["data"] == {"type": "not-found"}
+    assert "detail" not in resp["error"]["data"]
+
+
 def test_parse_error_reads_optional_detail() -> None:
     """The framing parser threads the optional ``data.detail`` into the RpcError (capped)."""
     err = {
