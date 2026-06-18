@@ -23,7 +23,7 @@ A separate worker entrypoint (``worker/`` — WS2/WS3) hosts this bridge and the
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 # Bounds the bridge enforces itself (defense-in-depth; the server also caps before calling).
@@ -104,6 +104,29 @@ def _analyzer_options_for_profile(profile: str | None) -> dict[str, bool]:
     """
     preset = _PROFILE_PRESETS.get(profile or _PROFILE_DEFAULT, _PROFILE_PRESETS[_PROFILE_DEFAULT])
     return dict(preset)
+
+
+def _missing_profile_options(overlay: dict[str, bool], available: Iterable[str]) -> list[str]:
+    """Return preset option names absent from ``available`` (PURE — ADR-035; unit-tested).
+
+    The *decision* half of the analyzer-option existence guard: given a profile ``overlay`` and the
+    set of analyzer-option names the running Ghidra build actually exposes, return the overlay names
+    that are **not** present (sorted, for a stable diagnostic). An empty result means every preset
+    option exists and the overlay is safe to apply. A non-empty result is a fail-closed condition
+    (a stale preset vs this Ghidra build — see :meth:`_GhidraSession._gh_analyze`).
+
+    The JVM *enumeration* that produces ``available`` (``Options.getOptionNames()``) is the
+    ``# pragma: no cover`` edge; this membership decision is pure and hermetically tested.
+
+    Args:
+        overlay: The ``{analyzer-option-name: enabled}`` overlay for the selected profile.
+        available: The analyzer-option names the program's analysis options expose.
+
+    Returns:
+        The sorted overlay option names missing from ``available`` (empty if all present).
+    """
+    available_set = set(available)
+    return sorted(name for name in overlay if name not in available_set)
 
 
 def _monitor_percent(value: int, maximum: int) -> int | None:
@@ -646,7 +669,7 @@ class PyGhidraBackend:
         Raises:
             WorkerError: ``analysis-failed`` if no program is loaded.
         """
-        from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+        from worker.dispatch import CODE_ANALYSIS_FAILED, CODE_INTERNAL, WorkerError
 
         if self._program is None:
             raise WorkerError(CODE_ANALYSIS_FAILED, "no program imported for analysis")
@@ -667,6 +690,26 @@ class PyGhidraBackend:
             # documented options group auto-analysis reads; toggling a named analyzer there
             # disables/enables it for the ``analyze`` run that follows.
             options = self._program.getOptions(self._program.ANALYSIS_PROPERTIES)
+            # ADR-035 existence guard: Ghidra's ``setBoolean`` silently CREATES an unknown option,
+            # so a renamed/typo'd preset name would become a silent no-op (the profile quietly stops
+            # taking effect). Fail closed instead — verify every preset name exists before applying.
+            # The membership decision is the PURE ``_missing_profile_options`` (unit-tested); the
+            # ``getOptionNames()`` enumeration is the JVM edge. A miss is a SERVER defect (a stale
+            # preset vs this Ghidra build), so it maps to ``internal-error`` (redacted template, no
+            # option names echoed). Paired with the ADR-028 profile gate, this makes a Ghidra
+            # option rename a deterministic red instead of silent drift.
+            available = options.getOptionNames()
+            missing = _missing_profile_options(overlay, available)
+            if missing:
+                # The client envelope stays generic (internal-error); the missing names go ONLY into
+                # the redacted, log-only ``data.detail`` (ADR-024) so a red ADR-028 nightly says
+                # exactly WHICH option drifted. The names are our own preset constants (not
+                # binary-derived), so they are safe to log.
+                raise WorkerError(
+                    CODE_INTERNAL,
+                    "analyzer profile references option(s) not available in this Ghidra build",
+                    detail=f"analyzer profile option(s) absent in this Ghidra build: {missing}",
+                )
             for option_name, enabled in overlay.items():
                 options.setBoolean(option_name, enabled)
         if emit_progress is None:

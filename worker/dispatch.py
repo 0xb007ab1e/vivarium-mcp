@@ -125,18 +125,25 @@ class WorkerError(Exception):
     Attributes:
         code: JSON-RPC numeric code.
         safe_message: A message safe to cross the boundary (no host detail).
+        detail: Optional **log-only**, **redacted** diagnostic (ADR-024 ``data.detail``) — it is
+            logged by the server under a correlation id and **never reaches the client envelope**.
+            Must already be free of binary-derived content (e.g. a fixed template + our own
+            constants, never decompiled text / symbol names — master §5).
     """
 
-    def __init__(self, code: int, safe_message: str) -> None:
+    def __init__(self, code: int, safe_message: str, *, detail: str | None = None) -> None:
         """Initialize a worker error.
 
         Args:
             code: JSON-RPC numeric error code.
             safe_message: Boundary-safe message.
+            detail: Optional redacted, log-only diagnostic (see the class docstring); defaults to
+                ``None`` (no detail — unchanged behaviour for every existing call site).
         """
         super().__init__(safe_message)
         self.code = code
         self.safe_message = safe_message
+        self.detail = detail
 
 
 class GhidraBackend(Protocol):
@@ -483,7 +490,9 @@ def handle_request(
     try:
         result = dispatch(backend, method, params, emit_progress=emit_progress)
     except WorkerError as exc:
-        return build_error(request_id, exc.code, exc.safe_message)
+        # exc.detail (when set) is the redacted, log-only ADR-024 ``data.detail`` — the server logs
+        # it under a correlation id; it never reaches the client envelope. Default None ⇒ no detail.
+        return build_error(request_id, exc.code, exc.safe_message, detail=exc.detail)
     except Exception as exc:
         # The client-facing message stays generic (no host/JVM detail crosses to the client).
         # The optional, redacted ``data.detail`` (class name + fixed template, NOT str(exc)) lets

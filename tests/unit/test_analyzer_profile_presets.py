@@ -14,11 +14,18 @@ Key guarantees asserted:
   analyze path takes the byte-for-byte unchanged code path (no options object touched).
 - ``light`` DISABLES the expensive analyzers; ``deep`` ENABLES the fuller set.
 - The selector returns a COPY (mutating the result cannot corrupt the shared preset table).
+- ADR-035 existence guard (the PURE half): :func:`_missing_profile_options` returns the overlay
+  names absent from a given available-options set (the fail-closed condition). The JVM enumeration
+  that produces the available set is the ``# pragma: no cover`` edge, validated on a real worker.
 """
 
 from __future__ import annotations
 
-from ghidra_mcp.ghidra._jvm_bridge import _PROFILE_PRESETS, _analyzer_options_for_profile
+from ghidra_mcp.ghidra._jvm_bridge import (
+    _PROFILE_PRESETS,
+    _analyzer_options_for_profile,
+    _missing_profile_options,
+)
 
 
 def test_default_profile_is_empty_overlay_no_op() -> None:
@@ -57,3 +64,44 @@ def test_selector_returns_a_copy_not_the_shared_preset() -> None:
     # The shared table is unchanged for the next caller.
     assert _PROFILE_PRESETS["light"]["Decompiler Parameter ID"] is False
     assert _analyzer_options_for_profile("light")["Decompiler Parameter ID"] is False
+
+
+# --- ADR-035 existence guard: the PURE membership decision ----------------------------------------
+
+
+def test_missing_profile_options_all_present_returns_empty() -> None:
+    """When every overlay name is available, there is nothing missing (overlay safe to apply)."""
+    overlay = _analyzer_options_for_profile("light")
+    available = set(overlay) | {"Some Other Analyzer", "Stack"}
+    assert _missing_profile_options(overlay, available) == []
+
+
+def test_missing_profile_options_reports_absent_names_sorted() -> None:
+    """Overlay names absent from the available set are returned, sorted, for a stable diagnostic."""
+    overlay = {"Zeta Analyzer": True, "Alpha Analyzer": False, "Present One": True}
+    available = ["Present One", "Unrelated"]
+    # Absent: "Zeta Analyzer", "Alpha Analyzer" → sorted.
+    assert _missing_profile_options(overlay, available) == ["Alpha Analyzer", "Zeta Analyzer"]
+
+
+def test_missing_profile_options_empty_overlay_is_never_missing() -> None:
+    """The ``default`` (empty) overlay can never be missing anything (the guard is skipped)."""
+    assert _missing_profile_options({}, []) == []
+    assert _missing_profile_options({}, ["anything"]) == []
+
+
+def test_missing_profile_options_accepts_any_iterable() -> None:
+    """``available`` is consumed as any iterable (e.g. a JVM ``getOptionNames()`` result)."""
+    overlay = {"A": True, "B": False}
+    assert _missing_profile_options(overlay, iter(["A"])) == ["B"]
+
+
+def test_real_presets_against_empty_available_are_all_missing() -> None:
+    """If the build exposed NO analyzer options, every real preset name would be reported missing.
+
+    Sanity that the guard would fire loudly in the degenerate case — the live worker supplies the
+    real available-options set (the happy path is verified there, not here).
+    """
+    for profile in ("light", "deep"):
+        overlay = _analyzer_options_for_profile(profile)
+        assert _missing_profile_options(overlay, []) == sorted(overlay)
