@@ -8,12 +8,12 @@
 
 - **Allow-list only:** the catalog is fixed; there are exactly **51** tools (asserted in tests) —
   22 Tier-1 read-only (v1) + 5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
-  reporting/metrics tools (ADR-008; all read-only) + **6 v1.1 mutation/write tools (ADR-012) + 6
-  v1.1 structural-write tools (ADR-013 Phase A + ADR-014 Phase B + ADR-015 Phase C)** + **2 v1.2
-  annotation-persistence tools (ADR-018: `session_export_annotations` read-only +
-  `session_import_annotations` GATED)** — the 12 mutation tools GATED by per-session write-consent
-  (structural additionally by `allow_structural`); import is GATED identically (and additionally by
-  `allow_structural` when any imported entry is structural).
+  reporting/metrics tools (ADR-008; all read-only) + **6 v1.1 mutation/write tools (ADR-012) + 8
+  structural-write tools (ADR-013 Phase A + ADR-014 Phase B + ADR-015 Phase C + ADR-021 batch
+  `define_types` + ADR-031 `delete_type`)** + **2 v1.2 annotation-persistence tools (ADR-018:
+  `session_export_annotations` read-only + `session_import_annotations` GATED)** — the 14 mutation
+  tools GATED by per-session write-consent (structural additionally by `allow_structural`); import is
+  GATED identically (and additionally by `allow_structural` when any imported entry is structural).
 - **Session-scoped:** every tool except `session_create` takes an opaque `session_id`, authorized
   server-side (BOLA defense). Inputs are `frozen` and reject unknown fields (`extra="forbid"`).
 - **Bounded by default:** list/search/read tools take `offset` + `limit` (or `length`) with hard

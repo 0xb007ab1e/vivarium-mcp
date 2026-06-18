@@ -44,12 +44,22 @@ stable analysis. `light` reduces passes but the memory *ceiling* (not the profil
 | # | Item | Area | Contract / TB impact | Expected bump | Source |
 |---|------|------|----------------------|---------------|--------|
 | 1 | **OOM classified as `resource-exhausted` on the JVM self-exit path** | Reliability / observability | none (existing slug) | minor | v1.5 #5 spike (mis-classified as `worker-unavailable`) |
-| 2 | **Proactive base-image CVE rescan** in `scheduled-rescan` | Supply chain / CI | none | minor | v0.7.0→v0.7.1 incident |
-| 3 | **Pin `buildkit-syft-scanner`** (floating `stable-1` → digest) | Supply chain / CI | none | patch | release-build review |
-| 4 | **Operator memory-sizing hint** for large binaries | Reliability / UX | none | minor | v1.5 #5 spike |
-| 5 | **`tool-catalog.md` prose drift** fix (math reads 50; headline 51) | Docs | none | patch | release-prep flag (×2) |
-| 6 | Carry-forward: **#4 import progress** / **#5 incremental analysis** / **#6 self-hosted gVisor runner** | — | — | — | v1.5 deferrals (gates below) |
-| 7 | **semgrep ruleset egress** hardening; **pyelftools `eval` extra** | Supply chain / maint | none | patch | reviewer notes |
+| 2 | **`tool-catalog.md` prose drift** fix (prose sums to 49; headline + tests assert 51) | Docs | none | patch | release-prep flag (×3) |
+| 3 | **Operator memory-sizing hint** for large binaries | Reliability / UX | none | minor | v1.5 #5 spike |
+| 4 | Carry-forward: **import progress** / **incremental analysis** / **self-hosted gVisor runner** | — | — | — | v1.5 deferrals (gates below) |
+| 5 | **semgrep ruleset egress** hardening; **pyelftools `eval` extra** | Supply chain / maint | none | patch | reviewer notes |
+
+> **Reconciled 2026-06-18 against the actual workflow/contract files** (the first draft asserted two
+> items without diffing them — corrected here):
+> - **Proactive base-image CVE rescan — DROPPED, already implemented.** `scheduled-rescan.yml`'s
+>   `image-rescan` job already rebuilds *both* images from the digest-pinned Containerfiles and
+>   Trivy-scans them daily, fail-closed on HIGH/CRITICAL. The v0.7.0 CVE was a **timing** gap (release
+>   cut before the next daily rescan ran), not a missing capability — no new work warranted.
+> - **Pin `buildkit-syft-scanner` — DEMOTED to a maintenance note (see §5).** There is no literal
+>   `buildkit-syft-scanner:stable-1` reference; it is the *implicit* default scanner that buildx invokes
+>   for the supplementary `sbom: true` build attestation. The **signed/uploaded release SBOM is Trivy's,
+>   already SHA-pinned** — so the floating input affects only a secondary attestation, and pinning it
+>   needs a gated image pull for marginal benefit. Tracked, not prioritized.
 
 ---
 
@@ -69,29 +79,17 @@ mis-reported as a generic transport drop. The operator loses the precise, action
 existing `resource-exhausted` slug (no contract change). Server-side classification; REQUIRES-LIVE
 -VERIFICATION on a real OOM (the spike's caido@4 GiB reproduces it deterministically).
 
-## 2. Proactive base-image CVE rescan in `scheduled-rescan`
+## 2. `tool-catalog.md` prose drift fix
 
-**What.** Have `scheduled-rescan.yml` rebuild the server + worker images from the pinned Containerfiles
-and **Trivy-scan the images** (not just `pip-audit` the three lockfiles), so a new base-layer CVE
-surfaces against `main` on a schedule.
+**Shipped in this PR.** The catalog's **headline count is correct (51, asserted in tests)**, but the
+"Conventions" prose breakdown summed to **49** (22 + 5 + 8 + 6 + 6 + 2) — it under-counted the
+structural-write tier at 6 when it is now **8** (the ADR-013/014/015 Phase A–C set **plus** `define_types`
+(ADR-021) **plus** `delete_type` (ADR-031)). Corrected to `… + 8 structural-write tools … + 2
+annotation-persistence …` and "the **14** mutation tools GATED …" (6 mutation + 8 structural). Doc-only;
+the actual contract (51 tools, schemas, envelopes, per-tool tables) was already complete and unchanged.
+Flagged during the v0.6.0 and v0.7.0 release preps.
 
-**Why.** v0.7.0's release build fail-closed on **CVE-2026-44432** (`py3-pip-wheel`, a base-layer
-package) that was published *after* the prior build — caught only at release time, forcing the v0.7.1
-remediation. A scheduled image rescan would surface such base CVEs proactively (between releases), as
-`workflow-cve-management` intends, instead of blocking the next release.
-
-**Notes.** Reuse the digest-pinned Containerfiles + the same Trivy config/ignore as `worker-image.yml`;
-alert on a failed scheduled run (mirrors the existing rescan cadence). CI-only.
-
-## 3. Pin `buildkit-syft-scanner` by digest
-
-**What.** `worker-image.yml`'s SBOM generation pulls `docker.io/docker/buildkit-syft-scanner:stable-1`
-— a **floating tag**. Pin it by digest (`std-supplychain`: pin every build input).
-
-**Why.** The release build's SBOM attestation depends on a floating image; a silent roll could change
-the SBOM/attestation format or break the build. Small, closes an unpinned supply-chain input.
-
-## 4. Operator memory-sizing hint for large binaries
+## 3. Operator memory-sizing hint for large binaries
 
 **What.** Surface a clearer "this input likely needs ~N GiB of worker memory" signal — extend the
 ADR-023 size-vs-memory pre-flight (currently `warn`/`reject` on a coarse heuristic) with an estimated
@@ -104,13 +102,7 @@ trial-and-error OOM loop into a one-shot fix.
 **Notes.** Pairs with item 1 (a `resource-exhausted` error could carry the suggested figure in its safe
 `detail`). Heuristic only (no binary parsing server-side — ADR-001).
 
-## 5. `tool-catalog.md` prose drift fix
-
-The catalog's **headline count is correct (51, asserted in tests)**, but the prose breakdown still
-enumerates the v1.1/v1.2 tiers and omits `delete_type` (the v0.6.0 50→51 tool) — the descriptive math
-reads 50. Doc-only sync. Flagged during both the v0.6.0 and v0.7.0 release preps.
-
-## 6. Carry-forward v1.5 deferrals (gates restated)
+## 4. Carry-forward v1.5 deferrals (gates restated)
 
 - **#4 `session_import` progress (ADR-030 deferred)** — still deferred: `pyghidra.open_program` exposes
   no monitor hook and import is ~0.4% of analyze time. Revisit only on a real large-import complaint +
@@ -124,8 +116,14 @@ reads 50. Doc-only sync. Flagged during both the v0.6.0 and v0.7.0 release preps
   implement-time by pre-merge live-verify, not by the nightly; ops + untrusted-code-on-runner cost.
   Interim remains the opt-in `live-regression` PR label.
 
-## 7. Maintenance / low-priority hardening
+## 5. Maintenance / low-priority hardening
 
+- **Pin the buildx `sbom: true` generator** — `worker-image.yml` sets `sbom: true`, so buildx invokes
+  its **implicit default scanner** (`docker/buildkit-syft-scanner`, floating) to produce the
+  supplementary build-time SBOM *attestation*. The **release-artifact SBOM that is uploaded and cosign-
+  attested is Trivy's CycloneDX (already SHA-pinned)** — so this floating input affects only a secondary
+  attestation. Pin it via `sbom: generator=docker/buildkit-syft-scanner@sha256:…` if desired; needs a
+  gated image pull to resolve the digest, for marginal benefit. *(Low.)*
 - **semgrep ruleset egress** — `semgrep --config p/python --config p/security-audit` fetches rule packs
   from the registry at scan time (network egress not lock-covered). Vendor/pin the rulesets for a fully
   offline, reproducible SAST gate. *(Low.)*
@@ -141,8 +139,9 @@ reads 50. Doc-only sync. Flagged during both the v0.6.0 and v0.7.0 release preps
 
 ## Maintenance (not features)
 - **CVE / dependency hygiene** — keep the three locks (`requirements.lock` + `requirements-dev.lock` +
-  `requirements-sast.lock`) current and regenerated together; rescan all three + (item 2) the images.
+  `requirements-sast.lock`) current and regenerated together; rescan runs daily via
+  `scheduled-rescan.yml` (both lockfiles **and** rebuilt images — see the reconciliation note above).
   **A release build can fail-closed anytime a new base CVE lands** — remediate via base re-pin (server)
   / apk floor (worker), as in v0.7.1.
 - **Post-release doc/contract drift sweeps** — sync README banner + tool count + ADR range; re-check
-  `docs/contracts/` against the catalog assertion (item 5).
+  `docs/contracts/` against the catalog assertion (item 2).
