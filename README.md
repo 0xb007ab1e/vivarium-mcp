@@ -5,8 +5,9 @@ reverse-engineering capabilities to LLM clients as **tools**. Ghidra runs **isol
 out-of-process**, reachable only through the server's internal RPC. **The analyzed binary is treated
 as hostile input** — containment of the analyzer is the central security control.
 
-> **Latest release: [v0.7.0](https://github.com/0xb007ab1e/ghidra-mcp/releases/tag/v0.7.0)** (2026-06-18) —
-> the **v1.5** increment: a correctness / supply-chain hardening pass — an analyzer-option
+> **Latest release: [v0.7.1](https://github.com/0xb007ab1e/ghidra-mcp/releases/tag/v0.7.1)** (2026-06-18) —
+> the **v1.5** increment (v0.7.1 is the signed release; v0.7.0's image build fail-closed on a base
+> CVE, now remediated — see the CHANGELOG): a correctness / supply-chain hardening pass — an analyzer-option
 > **existence guard** (fail closed on a version-renamed preset option), a dedicated **`forbidden` /
 > 403** authorization-denied error type, an on-demand **naming-accuracy scorer** (advisory eval
 > tooling), and **hardened, hash-pinned CI** (dev + scanner tool surfaces, run-from-`src/`). Builds
