@@ -167,9 +167,7 @@ def test_single_token_back_compat_maps_to_bearer_principal() -> None:
 
 
 def test_multi_token_map_parsed_from_pairs() -> None:
-    cfg = load_config(
-        _bearer_env(VIVARIUM_HTTP_BEARER_TOKENS=f"alice:{_TOKEN_A}, bob:{_TOKEN_B}")
-    )
+    cfg = load_config(_bearer_env(VIVARIUM_HTTP_BEARER_TOKENS=f"alice:{_TOKEN_A}, bob:{_TOKEN_B}"))
     assert cfg.http is not None
     assert cfg.http.bearer_tokens == {_TOKEN_A: "alice", _TOKEN_B: "bob"}
 
@@ -219,9 +217,7 @@ def test_multi_token_ambiguous_token_two_principals_fails_closed() -> None:
 
 
 def test_multi_token_newline_separated_pairs() -> None:
-    cfg = load_config(
-        _bearer_env(VIVARIUM_HTTP_BEARER_TOKENS=f"alice:{_TOKEN_A}\nbob:{_TOKEN_B}")
-    )
+    cfg = load_config(_bearer_env(VIVARIUM_HTTP_BEARER_TOKENS=f"alice:{_TOKEN_A}\nbob:{_TOKEN_B}"))
     assert cfg.http is not None
     assert cfg.http.bearer_tokens == {_TOKEN_A: "alice", _TOKEN_B: "bob"}
 
