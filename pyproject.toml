@@ -83,9 +83,9 @@ sast = [
 #   would pull an unpinned PyPI build and break the version-match + offline-install guarantees).
 
 [project.urls]
-Homepage = "https://github.com/OWNER/vivarium"
-Repository = "https://github.com/OWNER/vivarium"
-Issues = "https://github.com/OWNER/vivarium/issues"
+Homepage = "https://github.com/OWNER/vivarium-mcp"
+Repository = "https://github.com/OWNER/vivarium-mcp"
+Issues = "https://github.com/OWNER/vivarium-mcp/issues"
 
 [project.scripts]
 # stdio entrypoint (the only transport in v1). Implementation stub lives in src/vivarium/__main__.py.

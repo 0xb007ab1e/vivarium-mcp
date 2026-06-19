@@ -122,7 +122,7 @@ ARG GHIDRA_VERSION
 LABEL org.opencontainers.image.title="vivarium-worker" \
       org.opencontainers.image.description="Hardened, network-isolated headless Ghidra analysis worker (TB3)." \
       org.opencontainers.image.licenses="Apache-2.0" \
-      org.opencontainers.image.source="https://github.com/OWNER/vivarium" \
+      org.opencontainers.image.source="https://github.com/OWNER/vivarium-mcp" \
       org.vivarium.ghidra-version="${GHIDRA_VERSION}" \
       org.vivarium.trust-boundary="TB3-hostile-input" \
       org.vivarium.network="none"

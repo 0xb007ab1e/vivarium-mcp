@@ -103,7 +103,7 @@ FROM cgr.dev/chainguard/python:latest@sha256:37e0742458293f7bfa45573297955574ec7
 LABEL org.opencontainers.image.title="vivarium-server" \
       org.opencontainers.image.description="Secure MCP control-plane server for headless Ghidra (stdio, v1)." \
       org.opencontainers.image.licenses="Apache-2.0" \
-      org.opencontainers.image.source="https://github.com/OWNER/vivarium" \
+      org.opencontainers.image.source="https://github.com/OWNER/vivarium-mcp" \
       org.vivarium.role="control-plane" \
       org.vivarium.transport="stdio" \
       org.vivarium.ports="none"

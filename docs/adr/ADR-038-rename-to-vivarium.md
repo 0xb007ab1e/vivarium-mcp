@@ -26,7 +26,7 @@ dangerous specimen → the per-session isolated hostile-binary worker (contain) 
 
 ## Decisions
 
-- **D1 — Python import package `ghidra_mcp` → `vivarium`.** Rename `src/ghidra_mcp/` → `src/vivarium/`;
+- **D1 — Python import package `ghidra_mcp` → `vivarium-mcp`.** Rename `src/ghidra_mcp/` → `src/vivarium/`;
   rewrite all `import ghidra_mcp` / `from ghidra_mcp…` across src, tests, scripts, and the `worker`
   package (which imports the bridge). `pyproject` `packages`, `[project.scripts]` (`ghidra-mcp` →
   `vivarium = "vivarium.__main__:main"`), `__main__` (`python -m vivarium`). Distribution name
@@ -46,7 +46,7 @@ dangerous specimen → the per-session isolated hostile-binary worker (contain) 
   `deploy/*`). **GATED** (publishes new image packages on the next tag). Old `ghidra-mcp-*` images **stay**
   as historical artifacts (not deleted). The new images publish on the first post-rename release tag.
 
-- **D5 — GitHub repo `0xb007ab1e/ghidra-mcp` → `0xb007ab1e/vivarium`.** **GATED, outward-facing.** GitHub
+- **D5 — GitHub repo `0xb007ab1e/ghidra-mcp` → `0xb007ab1e/vivarium-mcp`.** **GATED, outward-facing.** GitHub
   auto-redirects the old path (clones, links, and the v0.8.0 release URLs keep working), so this is low-risk
   but must be a deliberate, human-performed step. Update the `pyproject`/README URLs to the new path after.
 
