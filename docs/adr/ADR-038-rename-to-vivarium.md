@@ -26,7 +26,7 @@ dangerous specimen → the per-session isolated hostile-binary worker (contain) 
 
 ## Decisions
 
-- **D1 — Python import package `ghidra_mcp` → `vivarium-mcp`.** Rename `src/ghidra_mcp/` → `src/vivarium/`;
+- **D1 — Python import package `ghidra_mcp` → `vivarium`** (distribution name → `vivarium-mcp`). Rename `src/ghidra_mcp/` → `src/vivarium/`;
   rewrite all `import ghidra_mcp` / `from ghidra_mcp…` across src, tests, scripts, and the `worker`
   package (which imports the bridge). `pyproject` `packages`, `[project.scripts]` (`ghidra-mcp` →
   `vivarium = "vivarium.__main__:main"`), `__main__` (`python -m vivarium`). Distribution name

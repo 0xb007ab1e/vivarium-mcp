@@ -14,12 +14,13 @@ inspect (reveal). No capability change; the catalog stays **51 tools**. The proj
 server exposing **Ghidra** — "Ghidra" still names the engine throughout.
 
 ### Changed (BREAKING — operator + integrator action required)
-- **Import package `ghidra_mcp` → `vivarium-mcp`**; module entry point `python -m ghidra_mcp` → `python -m
-  vivarium`; distribution name → `vivarium-mcp`; console script `ghidra-mcp` → `vivarium-mcp`.
+- **Import package `ghidra_mcp` → `vivarium`**; module entry point `python -m ghidra_mcp` → `python -m
+  vivarium`; **distribution name → `vivarium-mcp`** (matches the GitHub repo); console script
+  `ghidra-mcp` → `vivarium`.
 - **Environment-variable prefix `GHIDRA_MCP_*` → `VIVARIUM_*` (clean break, no fallback — ADR-038 D2).**
   Every config var is renamed (e.g. `GHIDRA_MCP_WORKER_MEM_MIB` → `VIVARIUM_WORKER_MEM_MIB`); the server
   reads **only** `VIVARIUM_*`. Update all deployment/launch env and local recipes before upgrading.
-- **MCP server display name `ghidra-mcp` → `vivarium-mcp`** (the handshake name MCP clients see).
+- **MCP server display name `ghidra-mcp` → `vivarium`** (the handshake name MCP clients see).
 - **Container images `ghidra-mcp-{worker,server}` → `vivarium-{worker,server}`** (`ghcr.io/0xb007ab1e/…`);
   the new images publish on this release tag. Prior `ghidra-mcp-*` images remain as historical artifacts.
 
