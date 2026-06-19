@@ -5,18 +5,18 @@ reverse-engineering capabilities to LLM clients as **tools**. Ghidra runs **isol
 out-of-process**, reachable only through the server's internal RPC. **The analyzed binary is treated
 as hostile input** — containment of the analyzer is the central security control.
 
-> **Latest release: [v0.7.1](https://github.com/0xb007ab1e/ghidra-mcp/releases/tag/v0.7.1)** (2026-06-18) —
-> the **v1.5** increment (v0.7.1 is the signed release; v0.7.0's image build fail-closed on a base
-> CVE, now remediated — see the CHANGELOG): a correctness / supply-chain hardening pass — an analyzer-option
-> **existence guard** (fail closed on a version-renamed preset option), a dedicated **`forbidden` /
-> 403** authorization-denied error type, an on-demand **naming-accuracy scorer** (advisory eval
-> tooling), and **hardened, hash-pinned CI** (dev + scanner tool surfaces, run-from-`src/`). Builds
-> on the gated default-deny write surface, the HTTP transport, analyzer-depth profiles, and
-> multi-principal / OAuth authorization. See the [CHANGELOG](./CHANGELOG.md) for what's new, and
-> [`PLAN.md`](./PLAN.md) for the delivery plan, locked decisions, architecture, trust boundaries,
-> and ADRs.
+> **Latest release: [v0.8.0](https://github.com/0xb007ab1e/ghidra-mcp/releases/tag/v0.8.0)** (2026-06-19) —
+> the **v1.6** increment: a reliability/observability + supply-chain hardening pass. A worker **heap-OOM
+> is now classified `resource-exhausted` (non-retryable), not `worker-unavailable`** (ADR-037 — the JVM
+> self-exits at its heap ceiling with exit 3, below the cgroup wall), and the error now **names the
+> configured memory cap + the `GHIDRA_MCP_WORKER_MEM_MIB` knob** to raise. The **SAST gate runs fully
+> offline** on vendored Semgrep rulesets (no scan-time registry fetch). No new tools (catalog stays
+> **51**), no RPC/error-envelope contract change. Builds on the gated default-deny write surface, the
+> HTTP transport, analyzer-depth profiles, and multi-principal / OAuth authorization. See the
+> [CHANGELOG](./CHANGELOG.md) for what's new, and [`PLAN.md`](./PLAN.md) for the delivery plan, locked
+> decisions, architecture, trust boundaries, and ADRs.
 
-## At a glance (v0.7.0)
+## At a glance (v0.8.0)
 - **Tool scope:** 51 tools — Tier-1 read-only core (decompile, disassemble, functions, xrefs, strings,
   symbols, data types, comments, memory map, bounded read/search, program metadata) + Tier-2
   reporting/metrics + semantic-naming + a **gated, default-deny write tier** (annotation + structural

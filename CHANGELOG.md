@@ -6,6 +6,46 @@ All notable changes to `ghidra-mcp` are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-06-19
+
+The **v1.6** increment — a reliability/observability + supply-chain hardening pass. No new tools (the
+catalog stays **51**), no RPC or error-envelope **contract** change; the one client-observable change
+is the worker heap-OOM reclassification below.
+
+### Changed
+- **Worker JVM heap-OOM is now classified `resource-exhausted` (503, not retryable), not
+  `worker-unavailable` (ADR-037).** The worker JVM runs `-XX:MaxRAMPercentage=75` +
+  `-XX:+ExitOnOutOfMemoryError`, so a heap OOM self-exits the JVM via `os::exit(3)` (container
+  `ExitCode=3`, `OOMKilled=false`) *below* the cgroup wall — which `exit_diagnosis()` previously
+  mis-tagged as the generic, **retryable** `worker-unavailable`. It now also recognizes exit `3`
+  (collision-free: the worker's own deliberate exit codes are `{0,2}`) alongside the existing cgroup
+  OOM-kill path (`OOMKilled` / exit `137`). **Client impact:** a heap-OOM on the same input + cap is
+  now correctly reported as non-retryable (it would OOM again). Pure server-side container-engine
+  metadata query — ADR-001 intact (no binary parsed, no JVM in the server). Live-verified on the real
+  worker image.
+- **`resource-exhausted` errors now name the configured memory cap + the knob to raise** (ADR-037 §3):
+  `"worker exhausted its memory limit (N MiB); increase GHIDRA_MCP_WORKER_MEM_MIB (currently N) or
+  reduce input size"`. Server-computed integer + fixed knob name only — no host path or
+  binary-derived content (error-envelope disclosure rules unchanged; `detail` is the non-frozen
+  per-occurrence field, so this is not a contract change).
+
+### Security
+- **SAST gate is now fully offline + reproducible (v1.6 #5).** Semgrep previously ran
+  `--config p/python --config p/security-audit`, fetching rule packs from semgrep.dev at scan time
+  (network egress, not lock-covered, silently mutable). The packs are now **vendored** under
+  `infra/semgrep/p-*.yml` (151 + 225 rules, with provenance headers) and the gate runs
+  `--config infra/semgrep/ --metrics=off --disable-version-check --exclude infra/semgrep .` — no
+  scan-time network calls, whole-repo coverage preserved (`worker/` + `scripts/` included; bandit
+  only covers `src/`), refreshed deliberately via `infra/semgrep/refresh.sh`.
+
+### Docs
+- Corrected the frozen tool-catalog tier-count prose (the breakdown summed to 49; the structural-write
+  tier is **8** — the ADR-013/014/015 set plus `define_types` (ADR-021) and `delete_type` (ADR-031);
+  the headline **51** was always correct and test-asserted) and synced the error-envelope
+  `resource-exhausted` note with ADR-037. Added ADR-037 and the v1.6 roadmap (reconciled against the
+  actual workflow/contract files: dropped an already-implemented "proactive image rescan" item and
+  demoted a "pin buildkit-syft-scanner" item to a maintenance note).
+
 ## [0.7.1] — 2026-06-18
 
 A **supply-chain patch** completing the v1.5 release. The `v0.7.0` tag's image build **fail-closed**
