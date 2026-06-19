@@ -54,11 +54,11 @@ dangerous specimen → the per-session isolated hostile-binary worker (contain) 
   env contract + server name (breaking for any consumer), but capabilities are unchanged and a 1.0 should
   be earned by a stability declaration, not a rename.
 
-- **D7 — Compatibility shims (RATIFY, depends on D2/D6).** Recommended minimal set: (a) the `GHIDRA_MCP_*`
-  env fallback from D2; (b) keep a `ghidra-mcp` **console-script alias** → same entry point for one minor;
-  (c) rely on GitHub's redirect for repo links; (d) **no** PyPI `ghidra-mcp` shim release (the project was
-  never published to PyPI under that name — nothing to redirect). Drop (a)/(b) at 1.0. *Alternative:* clean
-  break (no shims) if you confirm there are no external consumers.
+- **D7 — Compatibility shims — RATIFIED: none, beyond GitHub's automatic repo redirect.** No `GHIDRA_MCP_*`
+  env fallback (consistent with D2's clean break), no `ghidra-mcp` console-script alias, and no PyPI
+  `ghidra-mcp` shim release (the project was never published to PyPI under that name — nothing to redirect).
+  GitHub auto-redirects the old repo path for links/clones (D5), which is the only carried-over
+  compatibility. Justified pre-1.0 with no known external consumers.
 
 - **D8 — Do NOT rewrite history.** Historical ADRs (001–037), CHANGELOG entries `[0.1.0]…[0.8.0]`, and the
   roadmaps are an immutable record — they keep "ghidra-mcp" as it was. Only **forward-facing** docs are
@@ -70,12 +70,12 @@ dangerous specimen → the per-session isolated hostile-binary worker (contain) 
 
 1. **Code+config sweep (non-gated, on branch):** rename `src/ghidra_mcp/`→`src/vivarium/` (`git mv`);
    mechanical rewrite of imports + module refs; `pyproject` identity/scripts/packages; `_SERVER_NAME`;
-   env prefix per D2 (+ fallback shim + tests); Containerfile/CI/deploy image names per D4; forward-facing
-   docs per D8; CHANGELOG `[0.9.0]`; version bump per D6.
-2. **Gates:** ruff + mypy --strict + full pytest (the 1604-test suite must stay green; the env-fallback
-   shim gets its own tests) + the CI security gates. **`sdlc-reviewer`** pass (focus: no missed `ghidra_mcp`
-   import, env-fallback correctness, no secret/contract regression, the frozen contracts' *content*
-   unchanged — only the brand string).
+   env prefix per D2 (clean break — `VIVARIUM_*` only); Containerfile/CI/deploy image names per D4;
+   forward-facing docs per D8; CHANGELOG `[0.9.0]`; version bump per D6.
+2. **Gates:** ruff + mypy --strict + full pytest (the 1604-test suite must stay green) + the CI security
+   gates. **`sdlc-reviewer`** pass (focus: no missed `ghidra_mcp`/`GHIDRA_MCP_`/`ghidra-mcp` reference, the
+   clean-break env rename is complete, no secret/contract regression, the frozen contracts' *content*
+   unchanged — only the brand string; the worker Containerfile installs the `vivarium-mcp` **dist** name).
 3. **PR → human merge gate.**
 4. **GATED outward steps (post-merge, human-performed/approved, in order):** rename the GitHub repo (D5);
    tag `v0.9.0` → `worker-image.yml` builds/scans/signs the **new** `vivarium-*` images; publish the release.
@@ -88,9 +88,10 @@ rename aligns the operator + protocol surface with the brand; history stays inta
 
 **Negative / risks.** Large mechanical diff (≈457+612 refs) — risk of a missed reference; mitigated by
 mypy --strict (catches stale imports), a repo-wide `ghidra_mcp`/`GHIDRA_MCP_` grep-gate in review, and the
-full suite. The env rename is the only operator-facing break — mitigated by the D7 fallback. The local
-real-worker / acceptance recipes (and the `[[acceptance-run-recipe]]` memory) reference `GHIDRA_MCP_*` and
-must be updated. Gated image/repo renames are deliberate, low-risk (old artifacts + GitHub redirect persist).
+full suite. The env rename is the only operator-facing break — a deliberate clean break (D2/D7), so the
+local real-worker / acceptance recipes (and the `[[acceptance-run-recipe]]` memory) that reference
+`GHIDRA_MCP_*` MUST be updated in lockstep. Gated image/repo renames are deliberate, low-risk (old
+artifacts + GitHub redirect persist).
 
 ## Alternatives considered
 

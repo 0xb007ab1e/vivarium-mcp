@@ -184,7 +184,7 @@ RUN set -eux; \
     python3.12 -m pip install --no-cache-dir --require-hashes \
         --requirement /opt/vivarium/requirements.lock; \
     python3.12 -m pip install --no-cache-dir --no-deps --no-index \
-        --find-links /opt/vivarium/dist vivarium; \
+        --find-links /opt/vivarium/dist vivarium-mcp; \
     test -d "${PYGHIDRA_DIST}" || { echo "PyGhidra dist not found at ${PYGHIDRA_DIST}" >&2; exit 1; }; \
     python3.12 -m pip install --no-cache-dir --no-index \
         --find-links "${PYGHIDRA_DIST}" pyghidra; \
