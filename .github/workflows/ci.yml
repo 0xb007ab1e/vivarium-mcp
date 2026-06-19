@@ -118,7 +118,10 @@ jobs:
         # fetch rules from semgrep.dev at scan time (network egress + silent rule drift). Offline +
         # reproducible: --metrics=off and --disable-version-check suppress all network calls; refresh
         # the vendored rules deliberately via infra/semgrep/refresh.sh (v1.6 #5 supply-chain hardening).
-        run: semgrep --config infra/semgrep/ --error --metrics=off --disable-version-check src
+        # Scan the WHOLE first-party tree (default .semgrepignore drops tests/) — same scope as the
+        # prior no-target invocation, so worker/ + scripts/ keep SAST coverage (bandit only covers
+        # src/). --exclude infra/semgrep so the rules don't self-match their own example snippets.
+        run: semgrep --config infra/semgrep/ --error --metrics=off --disable-version-check --exclude infra/semgrep .
 
   # 6. SCA — dependency vulnerability scan (block on high/critical CVEs).
   sca:

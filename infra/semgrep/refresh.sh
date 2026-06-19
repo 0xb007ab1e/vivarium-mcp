@@ -12,8 +12,14 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 DATE="$(date -u +%Y-%m-%d)"
+tmp=""
+trap 'rm -f "${tmp:-}"' EXIT   # clean up the temp file on any exit path (incl. set -e mid-loop)
 for p in python security-audit; do
   tmp="$(mktemp)"
+  # NOTE: the rule pack is fetched over TLS with NO pinned checksum/signature — semgrep.dev serves
+  # the canonical pack and has no published per-pack digest. The compensating control is the
+  # vendor-and-review workflow: this script only stages the new rules; a human reviews the YAML diff
+  # in the PR before it lands (the diff IS the integrity check). Refresh deliberately, never blindly.
   curl -fsSL "https://semgrep.dev/c/p/${p}" -o "$tmp"
   {
     echo "# Vendored Semgrep ruleset: p/${p} (registry pack), frozen for an OFFLINE, reproducible SAST gate."

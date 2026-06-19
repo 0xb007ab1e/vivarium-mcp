@@ -1,5 +1,5 @@
 # Vendored Semgrep ruleset: p/python (registry pack), frozen for an OFFLINE, reproducible SAST gate.
-# Source: https://semgrep.dev/c/p/python  — fetched 2026-06-18 (ADR-less v1.6 #5 hardening).
+# Source: https://semgrep.dev/c/p/python  — fetched 2026-06-18.
 # DO NOT hand-edit. Refresh deliberately: re-run infra/semgrep/refresh.sh, review the diff, re-run the gate.
 # Rationale: the CI SAST gate must not fetch rules from the network at scan time (egress + non-reproducible).
 rules:
