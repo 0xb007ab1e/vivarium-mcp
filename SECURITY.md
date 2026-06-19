@@ -1,6 +1,6 @@
 # Security Policy
 
-`ghidra-mcp` runs **hostile input** (the analyzed binary) through Ghidra and exposes the results
+`vivarium` runs **hostile input** (the analyzed binary) through Ghidra and exposes the results
 to an LLM. Security is the central design concern, not an add-on. This document covers how to
 report vulnerabilities and the security posture you can expect.
 
@@ -10,7 +10,7 @@ report vulnerabilities and the security posture you can expect.
 
 - Use **GitHub Private Vulnerability Reporting** (the repository's *Security → Report a
   vulnerability* tab), or
-- email the maintainers (see the repository owner profile) with the subject `SECURITY: ghidra-mcp`.
+- email the maintainers (see the repository owner profile) with the subject `SECURITY: vivarium`.
 
 Please include: affected version/commit, a description, reproduction steps, impact, and any PoC.
 **Use only benign/synthetic samples in reports — never attach real malware.**

@@ -18,12 +18,12 @@ from typing import Any, cast
 
 import pytest
 
-from ghidra_mcp.config import Config, HttpConfig
-from ghidra_mcp.ghidra.port import GhidraPort
-from ghidra_mcp.security.limits import Limits
-from ghidra_mcp.server.app import build_app, build_http_asgi_app
-from ghidra_mcp.server.auth import BearerAuthenticator, NullAuthenticator
-from ghidra_mcp.sessions.manager import SessionManager
+from vivarium.config import Config, HttpConfig
+from vivarium.ghidra.port import GhidraPort
+from vivarium.security.limits import Limits
+from vivarium.server.app import build_app, build_http_asgi_app
+from vivarium.server.auth import BearerAuthenticator, NullAuthenticator
+from vivarium.sessions.manager import SessionManager
 
 # starlette is a transitive dep via the `mcp` SDK; skip cleanly if the optional client extra is
 # unavailable in a given environment rather than erroring the whole suite.

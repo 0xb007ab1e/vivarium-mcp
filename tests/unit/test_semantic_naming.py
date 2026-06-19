@@ -20,9 +20,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from ghidra_mcp.core.envelope import DataOrigin, Untrusted
-from ghidra_mcp.ghidra import rpc_client as rc
-from ghidra_mcp.tools import schemas as s
+from vivarium.core.envelope import DataOrigin, Untrusted
+from vivarium.ghidra import rpc_client as rc
+from vivarium.tools import schemas as s
 
 _SID = "sid1"
 

@@ -240,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
 
     metas = [build_one(t, work, out, ns.jobs) for t in tools]
     (out / "index.json").write_text(
-        json.dumps({"schema": "ghidra-mcp/e2e-fixtures-index/1", "tools": metas}, indent=2) + "\n"
+        json.dumps({"schema": "vivarium/e2e-fixtures-index/1", "tools": metas}, indent=2) + "\n"
     )
     _log(f"built {len(metas)} fixture(s) into {out}")
     return 0

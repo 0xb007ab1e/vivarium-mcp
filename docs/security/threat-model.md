@@ -1,4 +1,4 @@
-# Threat Model — `ghidra-mcp` (v1, stdio)
+# Threat Model — `vivarium` (v1, stdio)
 
 > Method: STRIDE over a data-flow diagram (`workflow-threat-model`). Scope: v1 (Tier-1 read-only,
 > **stdio only**). v1.1 increments are modeled inline as they land: Tier-2 reporting (§9, ADR-008),
@@ -28,7 +28,7 @@ The four boundaries are fixed by PLAN §4.
 ```mermaid
 flowchart LR
   client([MCP Client / LLM host]):::ext
-  subgraph SRV["ghidra-mcp server process (trusted control plane — NO JVM)"]
+  subgraph SRV["vivarium server process (trusted control plane — NO JVM)"]
     val["Validate + allow-list (core)"]
     sess["Session mgr (authorize / evict)"]
     lim["Limits (size/time/count)"]
@@ -154,7 +154,7 @@ Likelihood × Impact → severity (master §7). "L/M/H".
 > byte-for-byte no-op (the analyze RPC omits the param and the worker touches no options object), so
 > the existing analysis path is unchanged when the profile is omitted; `light` is a DoS *mitigation*
 > (less time/heap on a huge binary). The pre-flight gains a **reject** mode
-> (`GHIDRA_MCP_WORKER_PREFLIGHT=reject`): an input over the OOM-plausible threshold is failed closed
+> (`VIVARIUM_WORKER_PREFLIGHT=reject`): an input over the OOM-plausible threshold is failed closed
 > with the existing non-retryable `resource-exhausted` **before** the worker is contacted — a
 > fail-closed resource-DoS guard (strictly stronger than the warn-only default), not a new surface.
 > The new `worker.preflight_rejected` log and the reject error carry **no binary content or host
@@ -205,7 +205,7 @@ enforced — closing the BOLA gap that ADR-011 §6 deferred (TB6-I).
 | **T** | Request tampering / MITM on the wire | M×H=**High** | **TLS required off-loopback** (1.2+, prefer 1.3); plaintext only on loopback/UDS; HSTS + security headers; proxy-terminated TLS supported. Session `owner` is set once at create from the server-derived principal and is **immutable** (no tool rewrites it) |
 | **R** | Caller denies issuing a request | L×M=**Low** | structured audit log per request and per **principal+session** event (create / authorize-deny / write-consent — principal id + session id + outcome, redacted; `topic-logging-observability`); append-only stream |
 | **I** | Cross-principal/session data disclosure (BOLA) or verbose errors leak internals | M×H=**High** | **TB6-I — ENFORCED (ADR-017), no longer deferred:** every session-scoped entry point goes through the shared `_get_live_locked` owner check (complete mediation); a session whose `owner ≠ caller` is denied the **same `SESSION_INVALID`** as unknown/expired/evicted — **no oracle** distinguishes "exists but not yours" from "does not exist" (D2). Defense in depth on top of the 256-bit CSPRNG session-id capability; per-request authZ server-side; consistent error envelope, no stack traces/internals (`topic-error-handling`); strict CORS (no `*`+creds; default no origins). **ADR-036 invariant:** the dedicated `forbidden` (403) authZ type is raised ONLY *after* the owner check passes (missing OAuth capability / write-consent on a session the caller owns) — an ownership/cross-caller denial NEVER becomes `forbidden`, so 403 cannot be used as an existence oracle |
-| **D** | Request flood / huge payloads, **or one principal starving others** | M×H=**High** | per-client **rate limit + quota**, **request size caps**, timeouts + backpressure (`topic-reliability`); bounded by ADR-002 one-worker-per-session + eviction; an **operator-configurable per-owner session cap** (`GHIDRA_MCP_MAX_SESSIONS_PER_OWNER`; **default off** — the global `max_sessions` bounds total exhaustion) so a multi-principal deployment can stop one principal monopolizing the pool (noisy-neighbor — `topic-multi-tenancy`); loopback default limits reach |
+| **D** | Request flood / huge payloads, **or one principal starving others** | M×H=**High** | per-client **rate limit + quota**, **request size caps**, timeouts + backpressure (`topic-reliability`); bounded by ADR-002 one-worker-per-session + eviction; an **operator-configurable per-owner session cap** (`VIVARIUM_MAX_SESSIONS_PER_OWNER`; **default off** — the global `max_sessions` bounds total exhaustion) so a multi-principal deployment can stop one principal monopolizing the pool (noisy-neighbor — `topic-multi-tenancy`); loopback default limits reach |
 | **E** | Remote caller escalates via the network edge to actions beyond the read-only catalog, **or acts on another principal's session/worker** | L×H=**Med** | **same frozen read-only catalog** (no new/mutation tools); the network edge does not bypass per-call validation/allow-listing (defense in depth); least privilege. A principal **cannot read or write another's session** (owner-checked read+write) and **cannot gain another's worker** (`ensure_worker` is owner-gated before spawn); write-consent is bound to principal+session (ADR-012) on top of the owner-scoped session. The hostile-binary containment (TB3) is unchanged and unaffected by transport |
 
 ## 4. Supply chain (build-time)
@@ -810,7 +810,7 @@ BOLA gap that ADR-011 §6 deferred**. Two mechanisms: (1) a **multi-token bearer
 chokepoint, so every session-scoped entry point (authorize, enable/disable writes, require-consent,
 `ensure_worker`, tool-initiated close) denies a foreign caller the **same `SESSION_INVALID`** as an
 unknown id (D2 — no oracle). Owner is server-derived at create and immutable. An operator-configurable **per-owner session
-cap** (`GHIDRA_MCP_MAX_SESSIONS_PER_OWNER`; default off, global cap backstops) bounds noisy-neighbor. No tool/RPC/error-envelope contract change (reuses `SESSION_INVALID`);
+cap** (`VIVARIUM_MAX_SESSIONS_PER_OWNER`; default off, global cap backstops) bounds noisy-neighbor. No tool/RPC/error-envelope contract change (reuses `SESSION_INVALID`);
 ADR-001 preserved (authZ is server-only; worker untouched). See the strengthened **TB6** STRIDE rows
 above.
 

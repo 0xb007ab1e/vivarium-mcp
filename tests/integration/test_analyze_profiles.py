@@ -27,16 +27,16 @@ gate, trend metrics are advisory). The counts are NOT asserted to differ (analys
 tiny micro-binary are not deterministic enough to gate without flakiness).
 
 Posture mirrors ``test_export_known_count.py``: it drives the **real MCP stdio chain** (launches
-``python -m ghidra_mcp`` → real ``RpcGhidraAdapter`` → hardened worker container) over a tiny,
+``python -m vivarium`` → real ``RpcGhidraAdapter`` → hardened worker container) over a tiny,
 benign, locally-built micro-binary (no real malware, master §5). ``read_timeout_seconds`` takes a
 ``datetime.timedelta``, NOT an int.
 
 Gating (reused from ``conftest.py``): ``integration``-marked, so the default hermetic ``pytest`` run
-SKIPS it. It runs only when ``GHIDRA_MCP_INTEGRATION`` is truthy AND a real worker image + container
+SKIPS it. It runs only when ``VIVARIUM_INTEGRATION`` is truthy AND a real worker image + container
 engine + a C compiler are available; the PM performs that live verification on a gated worker-image
-run. Honored environment matches the other integration tests (``GHIDRA_MCP_WORKER_IMAGE`` /
-``GHIDRA_MCP_CONTAINER_ENGINE`` / ``GHIDRA_MCP_WORKER_RUNTIME`` / ``GHIDRA_MCP_WORKER_UID`` /
-``GHIDRA_MCP_WORKER_GID`` / ``GHIDRA_MCP_RPC_SOCKET_DIR`` / ``GHIDRA_MCP_E2E_TIMEOUT``).
+run. Honored environment matches the other integration tests (``VIVARIUM_WORKER_IMAGE`` /
+``VIVARIUM_CONTAINER_ENGINE`` / ``VIVARIUM_WORKER_RUNTIME`` / ``VIVARIUM_WORKER_UID`` /
+``VIVARIUM_WORKER_GID`` / ``VIVARIUM_RPC_SOCKET_DIR`` / ``VIVARIUM_E2E_TIMEOUT``).
 """
 
 from __future__ import annotations
@@ -81,12 +81,12 @@ int main(int argc, char **argv) {
 
 def _read_timeout() -> datetime.timedelta:
     """Build the MCP client per-call read timeout (a ``datetime.timedelta``, NOT an int)."""
-    return datetime.timedelta(seconds=int(os.environ.get("GHIDRA_MCP_E2E_TIMEOUT", "600")))
+    return datetime.timedelta(seconds=int(os.environ.get("VIVARIUM_E2E_TIMEOUT", "600")))
 
 
 def _engine_available() -> bool:
     """Return whether the configured container engine binary is resolvable on ``PATH``."""
-    engine = os.environ.get("GHIDRA_MCP_CONTAINER_ENGINE", "podman").strip() or "podman"
+    engine = os.environ.get("VIVARIUM_CONTAINER_ENGINE", "podman").strip() or "podman"
     return shutil.which(engine) is not None
 
 
@@ -200,8 +200,8 @@ async def _drive_profile_analyze(profile: str, binary: Path, import_root: Path) 
 
     params = StdioServerParameters(
         command=sys.executable,
-        args=["-m", "ghidra_mcp"],
-        env={**os.environ, "GHIDRA_MCP_IMPORT_ROOT": str(import_root)},
+        args=["-m", "vivarium"],
+        env={**os.environ, "VIVARIUM_IMPORT_ROOT": str(import_root)},
     )
     timeout = _read_timeout()
 
@@ -260,7 +260,7 @@ def test_analyze_profile_succeeds_and_populates_surface(
             workflow uploads it as an artifact) for the advisory per-profile count.
     """
     if not _engine_available():
-        engine = os.environ.get("GHIDRA_MCP_CONTAINER_ENGINE", "podman").strip() or "podman"
+        engine = os.environ.get("VIVARIUM_CONTAINER_ENGINE", "podman").strip() or "podman"
         pytest.skip(f"container engine {engine!r} not found on PATH")
     if _compiler() is None:
         pytest.skip("no C compiler (cc/gcc) on PATH to build the benign micro-binary")

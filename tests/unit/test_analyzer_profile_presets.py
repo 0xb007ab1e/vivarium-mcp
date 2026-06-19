@@ -1,7 +1,7 @@
 """Unit tests for the pure analyzer-profile → option-overlay mapping (ADR-029 B).
 
 The profile→preset selection is a pure data table + selector in the worker bridge
-(:func:`ghidra_mcp.ghidra._jvm_bridge._analyzer_options_for_profile`). The JVM option-SETTING that
+(:func:`vivarium.ghidra._jvm_bridge._analyzer_options_for_profile`). The JVM option-SETTING that
 consumes the overlay is a ``# pragma: no cover`` edge (validated only on a real worker via the
 ADR-028 harness — the option names are flagged REQUIRES-LIVE-VERIFICATION). These tests pin the pure
 selector hermetically, with NO JVM and NO real worker (ADR-001): the JVM symbols in ``_jvm_bridge``
@@ -21,7 +21,7 @@ Key guarantees asserted:
 
 from __future__ import annotations
 
-from ghidra_mcp.ghidra._jvm_bridge import (
+from vivarium.ghidra._jvm_bridge import (
     _PROFILE_PRESETS,
     _analyzer_options_for_profile,
     _missing_profile_options,

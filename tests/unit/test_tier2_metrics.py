@@ -24,11 +24,11 @@ from typing import Any
 
 import pytest
 
-from ghidra_mcp.core.envelope import DataOrigin, Untrusted
-from ghidra_mcp.core.errors import ErrorType, GhidraMcpError
-from ghidra_mcp.core.iocscan import CRYPTO_SIGNATURES
-from ghidra_mcp.ghidra import rpc_client as rc
-from ghidra_mcp.tools import schemas as s
+from vivarium.core.envelope import DataOrigin, Untrusted
+from vivarium.core.errors import ErrorType, GhidraMcpError
+from vivarium.core.iocscan import CRYPTO_SIGNATURES
+from vivarium.ghidra import rpc_client as rc
+from vivarium.tools import schemas as s
 
 _SID = "sid1"
 

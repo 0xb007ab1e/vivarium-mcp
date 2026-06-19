@@ -23,12 +23,12 @@ test additionally skips cleanly if the container engine binary is absent. No rea
 analyzed input is a benign OS utility already present in the image (master §5, PLAN §6).
 
 Honored environment:
-    * ``GHIDRA_MCP_INTEGRATION`` — truthy ({1,true,yes,on}) enables the suite (see conftest).
-    * ``GHIDRA_MCP_WORKER_IMAGE`` — the pinned-by-digest worker image ref (conftest fixture;
-      defaults to ``localhost/ghidra-mcp-worker:dev`` for local validation if unset).
-    * ``GHIDRA_MCP_CONTAINER_ENGINE`` — container CLI to invoke (default ``podman``).
-    * ``GHIDRA_MCP_INTEGRATION_TARGET`` — in-image ELF to analyze (default ``/bin/true``).
-    * ``GHIDRA_MCP_WORKER_SRC_MOUNT`` — OPTIONAL dev hook: a host repo root to bind read-only over
+    * ``VIVARIUM_INTEGRATION`` — truthy ({1,true,yes,on}) enables the suite (see conftest).
+    * ``VIVARIUM_WORKER_IMAGE`` — the pinned-by-digest worker image ref (conftest fixture;
+      defaults to ``localhost/vivarium-worker:dev`` for local validation if unset).
+    * ``VIVARIUM_CONTAINER_ENGINE`` — container CLI to invoke (default ``podman``).
+    * ``VIVARIUM_INTEGRATION_TARGET`` — in-image ELF to analyze (default ``/bin/true``).
+    * ``VIVARIUM_WORKER_SRC_MOUNT`` — OPTIONAL dev hook: a host repo root to bind read-only over
       the image's installed package (validate working-tree code against the pinned image without a
       rebuild). CI leaves it UNSET so the baked, digest-pinned image is what gets validated.
 """
@@ -47,13 +47,13 @@ import pytest
 pytestmark = pytest.mark.integration
 
 # --- gating / engine constants -------------------------------------------------------------------
-_ENGINE_ENV = "GHIDRA_MCP_CONTAINER_ENGINE"
+_ENGINE_ENV = "VIVARIUM_CONTAINER_ENGINE"
 _DEFAULT_ENGINE = "podman"
-_TARGET_ENV = "GHIDRA_MCP_INTEGRATION_TARGET"
+_TARGET_ENV = "VIVARIUM_INTEGRATION_TARGET"
 _DEFAULT_TARGET = "/bin/true"
 #: Optional dev hook: bind a host repo root read-only over the image's installed package, so a
 #: working-tree change can be validated against the pinned image without a rebuild (CI unsets it).
-_SRC_MOUNT_ENV = "GHIDRA_MCP_WORKER_SRC_MOUNT"
+_SRC_MOUNT_ENV = "VIVARIUM_WORKER_SRC_MOUNT"
 
 #: Generous overall ceiling for JVM boot + Ghidra auto-analysis + the read-only queries.
 _RUN_TIMEOUT_SECONDS = 300
@@ -62,13 +62,13 @@ _ANALYZE_TIMEOUT_SECONDS = 180
 
 #: Unique sentinel framing the single JSON result line on stdout, so the parser ignores all JVM /
 #: Ghidra / log noise the worker prints around it.
-_MARKER = "GHIDRA_MCP_INTEGRATION_RESULT:"
+_MARKER = "VIVARIUM_INTEGRATION_RESULT:"
 
 _SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 
 # --- the in-container driver --------------------------------------------------------------------
 # Runs as `python -c <DRIVER>` INSIDE the worker image (image PYTHONPATH already exposes both the
-# installed `ghidra_mcp` package and the `worker/` modules; image ENV provides writable HOME/tmpdir
+# installed `vivarium` package and the `worker/` modules; image ENV provides writable HOME/tmpdir
 # and the project-store dir). It drives the backend directly, collects plain JSON-serializable
 # results, and prints exactly one marker-prefixed JSON line. It NEVER prints binary-derived content
 # beyond the small, capped fields the contract returns (the test asserts shape, not payload), and
@@ -76,13 +76,13 @@ _SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 _DRIVER = r"""
 import json, os, sys, traceback
 
-MARKER = "GHIDRA_MCP_INTEGRATION_RESULT:"
-TARGET = os.environ.get("GHIDRA_MCP_INTEGRATION_TARGET", "/bin/true")
-ANALYZE_TIMEOUT = int(os.environ.get("GHIDRA_MCP_DRIVER_ANALYZE_TIMEOUT", "180"))
+MARKER = "VIVARIUM_INTEGRATION_RESULT:"
+TARGET = os.environ.get("VIVARIUM_INTEGRATION_TARGET", "/bin/true")
+ANALYZE_TIMEOUT = int(os.environ.get("VIVARIUM_DRIVER_ANALYZE_TIMEOUT", "180"))
 
 
 def main():
-    from ghidra_mcp.ghidra._jvm_bridge import PyGhidraBackend
+    from vivarium.ghidra._jvm_bridge import PyGhidraBackend
 
     backend = PyGhidraBackend()
     out = {}
@@ -188,14 +188,14 @@ def _build_command(engine: str, image: str, target: str) -> list[str]:
         "/tmp/ghidra:rw,noexec,nosuid,nodev,mode=1777,size=1g",  # noqa: S108 — in-container tmpfs.
         # Point the backend's project store at the writable tmpfs (image default is /work/project).
         "--env",
-        "GHIDRA_MCP_WORKER_PROJECT_DIR=/work/project",
+        "VIVARIUM_WORKER_PROJECT_DIR=/work/project",
         "--env",
         f"{_TARGET_ENV}={target}",
         "--env",
-        f"GHIDRA_MCP_DRIVER_ANALYZE_TIMEOUT={_ANALYZE_TIMEOUT_SECONDS}",
+        f"VIVARIUM_DRIVER_ANALYZE_TIMEOUT={_ANALYZE_TIMEOUT_SECONDS}",
     ]
     # OPTIONAL dev hook (off by default): validate WORKING-TREE code against the pinned image
-    # without a rebuild. Set GHIDRA_MCP_WORKER_SRC_MOUNT=<repo-root> to bind it read-only and put
+    # without a rebuild. Set VIVARIUM_WORKER_SRC_MOUNT=<repo-root> to bind it read-only and put
     # its src/ + worker/ ahead of the image's installed package on PYTHONPATH. CI leaves this UNSET,
     # so the suite validates the baked, digest-pinned image (the shipped artifact). The mount is
     # read-only — the worker still cannot modify host code (defense in depth holds).
@@ -522,7 +522,7 @@ def _assert_function_cfg_shape(cfg: dict[str, Any]) -> None:
 
     Proves the ``_gh_function_cfg`` JVM binding emits a non-empty block count, a non-negative edge
     count, an extracted ``name``, and the ``incomplete`` honesty flag — the exact dict the pure
-    :func:`ghidra_mcp.core.metrics.cyclomatic_complexity` derivation needs.
+    :func:`vivarium.core.metrics.cyclomatic_complexity` derivation needs.
 
     Args:
         cfg: The ``function_cfg`` result dict.

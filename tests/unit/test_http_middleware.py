@@ -12,15 +12,15 @@ from typing import Any
 
 import pytest
 
-from ghidra_mcp.server import http_middleware as _mw
-from ghidra_mcp.server.auth import (
+from vivarium.server import http_middleware as _mw
+from vivarium.server.auth import (
     BearerAuthenticator,
     MtlsAuthenticator,
     NullAuthenticator,
     Principal,
     ReverseProxyMtlsAuthenticator,
 )
-from ghidra_mcp.server.http_middleware import (
+from vivarium.server.http_middleware import (
     _SCOPE_PRINCIPAL_KEY,
     AuthenticationMiddleware,
     RateLimitMiddleware,

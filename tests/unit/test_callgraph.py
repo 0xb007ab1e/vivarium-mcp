@@ -1,6 +1,6 @@
 """Unit tests for the pure call-graph ordering core (ADR-007) — critical path (100% target).
 
-Exercises :func:`ghidra_mcp.core.callgraph.compute_analysis_order` over every shape the algorithm
+Exercises :func:`vivarium.core.callgraph.compute_analysis_order` over every shape the algorithm
 must handle: empty, single node, linear chain, branching DAG, disconnected components, self-loop
 (direct recursion), a multi-node cycle (mutual recursion), nested cycles, unknown callee ids
 (leaves with no own adjacency entry), and unresolved (indirect/virtual) edges. The ordering
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from ghidra_mcp.core.callgraph import (
+from vivarium.core.callgraph import (
     AnalysisOrder,
     Component,
     compute_analysis_order,

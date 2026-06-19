@@ -8,8 +8,8 @@ the critical comparison core — it executes NOTHING, only compares inert captur
 
 from __future__ import annotations
 
-from ghidra_mcp.naming.loop import FunctionNaming, RenamedProgram
-from ghidra_mcp.naming.metrics import (
+from vivarium.naming.loop import FunctionNaming, RenamedProgram
+from vivarium.naming.metrics import (
     CompileResult,
     RunResult,
     behavioral_equivalence,

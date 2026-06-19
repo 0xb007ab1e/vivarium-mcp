@@ -1,4 +1,4 @@
-# Trivy config — image + IaC/misconfig + secret scanning for the ghidra-mcp images and deploy specs.
+# Trivy config — image + IaC/misconfig + secret scanning for the vivarium images and deploy specs.
 # Used by the WS3 worker-image workflow (.github/workflows/worker-image.yml) for IMAGE scans, and
 # complements the existing ci.yml `container-iac-scan` job (which does config/IaC scanning).
 #

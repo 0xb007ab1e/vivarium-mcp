@@ -15,16 +15,16 @@ worker. The *pure* guard predicate is unit-tested hermetically in
 
 Gating (reused verbatim from ``conftest.py``): every test here is ``integration``-marked, so the
 default ``pytest`` / unit-coverage run SKIPS it and stays green + hermetic. It runs only when
-``GHIDRA_MCP_INTEGRATION`` is truthy AND a real worker image + container engine are available — the
+``VIVARIUM_INTEGRATION`` is truthy AND a real worker image + container engine are available — the
 PM performs that live verification on a gated worker-image rebuild. No real malware: the analyzed
 input is a benign OS utility already in the image (master §5, PLAN §6).
 
 Honored environment (same as ``test_worker_analysis.py``):
-    * ``GHIDRA_MCP_INTEGRATION`` — truthy ({1,true,yes,on}) enables the suite (see conftest).
-    * ``GHIDRA_MCP_WORKER_IMAGE`` — the pinned-by-digest worker image ref (conftest fixture).
-    * ``GHIDRA_MCP_CONTAINER_ENGINE`` — container CLI to invoke (default ``podman``).
-    * ``GHIDRA_MCP_INTEGRATION_TARGET`` — in-image ELF to analyze (default ``/bin/true``).
-    * ``GHIDRA_MCP_WORKER_SRC_MOUNT`` — OPTIONAL dev hook: bind a host repo root read-only over the
+    * ``VIVARIUM_INTEGRATION`` — truthy ({1,true,yes,on}) enables the suite (see conftest).
+    * ``VIVARIUM_WORKER_IMAGE`` — the pinned-by-digest worker image ref (conftest fixture).
+    * ``VIVARIUM_CONTAINER_ENGINE`` — container CLI to invoke (default ``podman``).
+    * ``VIVARIUM_INTEGRATION_TARGET`` — in-image ELF to analyze (default ``/bin/true``).
+    * ``VIVARIUM_WORKER_SRC_MOUNT`` — OPTIONAL dev hook: bind a host repo root read-only over the
       image's installed package (validate working-tree code against the pinned image, no rebuild).
 """
 
@@ -41,11 +41,11 @@ import pytest
 pytestmark = pytest.mark.integration
 
 # --- gating / engine constants (mirror test_worker_analysis.py) ----------------------------------
-_ENGINE_ENV = "GHIDRA_MCP_CONTAINER_ENGINE"
+_ENGINE_ENV = "VIVARIUM_CONTAINER_ENGINE"
 _DEFAULT_ENGINE = "podman"
-_TARGET_ENV = "GHIDRA_MCP_INTEGRATION_TARGET"
+_TARGET_ENV = "VIVARIUM_INTEGRATION_TARGET"
 _DEFAULT_TARGET = "/bin/true"
-_SRC_MOUNT_ENV = "GHIDRA_MCP_WORKER_SRC_MOUNT"
+_SRC_MOUNT_ENV = "VIVARIUM_WORKER_SRC_MOUNT"
 
 #: Generous ceiling for JVM boot + Ghidra auto-analysis + rename + export.
 _RUN_TIMEOUT_SECONDS = 300
@@ -53,7 +53,7 @@ _RUN_TIMEOUT_SECONDS = 300
 _ANALYZE_TIMEOUT_SECONDS = 180
 
 #: Sentinel framing the single JSON result line on stdout, so the parser ignores JVM/Ghidra noise.
-_MARKER = "GHIDRA_MCP_INTEGRATION_RESULT:"
+_MARKER = "VIVARIUM_INTEGRATION_RESULT:"
 
 #: The new name applied to the first function before export — a benign, recognizable rename so the
 #: assertion can confirm the rename_function entry round-tripped through the (formerly crashing)
@@ -69,14 +69,14 @@ _RENAMED_FN = "adr024_f2_export_probe"
 _DRIVER = r"""
 import json, os, sys, traceback
 
-MARKER = "GHIDRA_MCP_INTEGRATION_RESULT:"
-TARGET = os.environ.get("GHIDRA_MCP_INTEGRATION_TARGET", "/bin/true")
-ANALYZE_TIMEOUT = int(os.environ.get("GHIDRA_MCP_DRIVER_ANALYZE_TIMEOUT", "180"))
-RENAMED_FN = os.environ.get("GHIDRA_MCP_DRIVER_RENAMED_FN", "adr024_f2_export_probe")
+MARKER = "VIVARIUM_INTEGRATION_RESULT:"
+TARGET = os.environ.get("VIVARIUM_INTEGRATION_TARGET", "/bin/true")
+ANALYZE_TIMEOUT = int(os.environ.get("VIVARIUM_DRIVER_ANALYZE_TIMEOUT", "180"))
+RENAMED_FN = os.environ.get("VIVARIUM_DRIVER_RENAMED_FN", "adr024_f2_export_probe")
 
 
 def main():
-    from ghidra_mcp.ghidra._jvm_bridge import PyGhidraBackend
+    from vivarium.ghidra._jvm_bridge import PyGhidraBackend
 
     backend = PyGhidraBackend()
     out = {}
@@ -148,13 +148,13 @@ def _build_command(engine: str, image: str, target: str) -> list[str]:
         "--tmpfs",
         "/tmp/ghidra:rw,noexec,nosuid,nodev,mode=1777,size=1g",  # noqa: S108 — in-container tmpfs.
         "--env",
-        "GHIDRA_MCP_WORKER_PROJECT_DIR=/work/project",
+        "VIVARIUM_WORKER_PROJECT_DIR=/work/project",
         "--env",
         f"{_TARGET_ENV}={target}",
         "--env",
-        f"GHIDRA_MCP_DRIVER_ANALYZE_TIMEOUT={_ANALYZE_TIMEOUT_SECONDS}",
+        f"VIVARIUM_DRIVER_ANALYZE_TIMEOUT={_ANALYZE_TIMEOUT_SECONDS}",
         "--env",
-        f"GHIDRA_MCP_DRIVER_RENAMED_FN={_RENAMED_FN}",
+        f"VIVARIUM_DRIVER_RENAMED_FN={_RENAMED_FN}",
     ]
     src_mount = os.environ.get(_SRC_MOUNT_ENV, "").strip()
     if src_mount:

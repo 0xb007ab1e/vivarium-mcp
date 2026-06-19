@@ -1,7 +1,7 @@
 # OSS ground-truth e2e fixtures (WS5)
 
 A **known-answer sanity check**: run real, source-available Linux tools through the full
-ghidra-mcp pipeline (MCP stdio → real Ghidra worker) and compare Ghidra's *recovered* structure
+vivarium pipeline (MCP stdio → real Ghidra worker) and compare Ghidra's *recovered* structure
 against a **ground truth** derived from the tools' own source/symbols. It answers, end to end:
 *can the server ingest a binary, decompile/analyze it, produce a leaf-first reverse call-graph
 order, and return results — and is what it returns actually correct?*
@@ -52,8 +52,8 @@ Per-tool thresholds live in `test_groundtruth_oss.py`.
   (manual dispatch), never in the fast PR/unit job. The committed repo contains **no binaries**
   (`.gitignore` excludes `samples/`); only source, the driver, and these scripts are committed.
 - The **e2e** (`tests/e2e/test_groundtruth_oss.py`) is hermetic at run time (consumes the artifact,
-  no network) and **self-skips** unless `GHIDRA_MCP_INTEGRATION` + `GHIDRA_MCP_FIXTURES` +
-  `GHIDRA_MCP_WORKER_IMAGE` + a container engine are all present.
+  no network) and **self-skips** unless `VIVARIUM_INTEGRATION` + `VIVARIUM_FIXTURES` +
+  `VIVARIUM_WORKER_IMAGE` + a container engine are all present.
 - The **pure scorer + extractor methodology** are validated offline in the normal CI run.
 
 ## Supply-chain pins
@@ -73,7 +73,7 @@ python tests/fixtures/oss/build_fixtures.py --out /tmp/fix          # all 3
 python tests/fixtures/oss/build_fixtures.py --out /tmp/fix --only cjson
 
 # 2) Gated e2e against a built+signed worker image:
-export GHIDRA_MCP_INTEGRATION=1 GHIDRA_MCP_FIXTURES=/tmp/fix
-export GHIDRA_MCP_WORKER_IMAGE=ghcr.io/0xb007ab1e/ghidra-mcp-worker@sha256:...
+export VIVARIUM_INTEGRATION=1 VIVARIUM_FIXTURES=/tmp/fix
+export VIVARIUM_WORKER_IMAGE=ghcr.io/0xb007ab1e/vivarium-worker@sha256:...
 pytest tests/e2e/test_groundtruth_oss.py -m integration -v --no-cov
 ```

@@ -5,7 +5,7 @@ Promotes the v1.3 blind-acceptance run's one-off debuginfod scoring into a commi
 tool. Given a set of **proposed** function names (e.g. an LLM namer's output over a stripped
 binary's decompilation) and a **ground-truth** address→name source, it scores naming accuracy
 (strict exact-match rate + a fairer token-set F1) by delegating to the project's own, unit-tested
-:func:`ghidra_mcp.naming.metrics.score_name_map`, and writes a scorecard.
+:func:`vivarium.naming.metrics.score_name_map`, and writes a scorecard.
 
 **Advisory only** (the roadmap calls naming quality a non-deterministic LLM signal): it prints a
 summary and writes a scorecard JSON; it always exits 0 on a successful score (a usage/IO error exits
@@ -50,7 +50,7 @@ from typing import Any
 # directly from a checkout.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ghidra_mcp.naming.metrics import (
+from vivarium.naming.metrics import (
     NamingAccuracy,
     _normalized,
     _token_f1,

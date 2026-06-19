@@ -13,12 +13,12 @@ from typing import Any, cast
 
 import pytest
 
-from ghidra_mcp import __main__ as entry
-from ghidra_mcp.config import HttpConfig
-from ghidra_mcp.ghidra.port import GhidraPort
-from ghidra_mcp.server.app import build_http_asgi_app
-from ghidra_mcp.server.auth import BearerAuthenticator, NullAuthenticator
-from ghidra_mcp.sessions.manager import SessionManager
+from vivarium import __main__ as entry
+from vivarium.config import HttpConfig
+from vivarium.ghidra.port import GhidraPort
+from vivarium.server.app import build_http_asgi_app
+from vivarium.server.auth import BearerAuthenticator, NullAuthenticator
+from vivarium.sessions.manager import SessionManager
 
 _TOKEN = "token-of-sufficient-length-xx"  # noqa: S105  # test fixture, not a real secret
 
@@ -144,8 +144,8 @@ def test_stack_adds_cors_headers_when_origins_configured() -> None:
 
 def _min_http_env() -> dict[str, str]:
     return {
-        "GHIDRA_MCP_WORKER_IMAGE": "ghcr.io/x/worker@sha256:" + "a" * 64,
-        "GHIDRA_MCP_TRANSPORT": "http",  # loopback default → auth none, valid
+        "VIVARIUM_WORKER_IMAGE": "ghcr.io/x/worker@sha256:" + "a" * 64,
+        "VIVARIUM_TRANSPORT": "http",  # loopback default → auth none, valid
     }
 
 
@@ -182,8 +182,8 @@ def test_main_selects_http_transport(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_main_defaults_to_stdio(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GHIDRA_MCP_WORKER_IMAGE", "ghcr.io/x/worker@sha256:" + "a" * 64)
-    monkeypatch.delenv("GHIDRA_MCP_TRANSPORT", raising=False)
+    monkeypatch.setenv("VIVARIUM_WORKER_IMAGE", "ghcr.io/x/worker@sha256:" + "a" * 64)
+    monkeypatch.delenv("VIVARIUM_TRANSPORT", raising=False)
     calls = _patch_runners(monkeypatch)
     rc = entry.main(
         port_factory=lambda c: cast(GhidraPort, object()),

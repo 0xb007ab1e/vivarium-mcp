@@ -3,7 +3,7 @@
 # deploy/worker-run.sh — reference rootless-podman invocation for ONE Ghidra worker
 # =============================================================================
 # Realizes ADR-004 (isolation tier) as code. This is the EXACT, auditable runtime spec the server's
-# RPC adapter (src/ghidra_mcp/ghidra/rpc_client.py, WS2) translates into its container-spawn call,
+# RPC adapter (src/vivarium/ghidra/rpc_client.py, WS2) translates into its container-spawn call,
 # and the reference a maintainer/operator runs by hand for a smoke test.
 #
 # ONE WORKER PER SESSION (ADR-002): the server spawns one of these per session and KILLS it on
@@ -25,28 +25,28 @@ SESSION_ID="${1:?usage: worker-run.sh <session_id> [binary_path]}"   # opaque, h
 BINARY_PATH="${2:-}"                                                  # host path to the binary (optional at start).
 
 # Pinned BY DIGEST (ADR-003). GATED ITEM W-IMG: a maintainer pins the real digest; placeholder
-# mirrors .env.example's GHIDRA_MCP_WORKER_IMAGE convention.
-WORKER_IMAGE="${GHIDRA_MCP_WORKER_IMAGE:-ghcr.io/0xb007ab1e/ghidra-mcp-worker@sha256:921cd0ec9b2fbf2456b405acdd0ab8c4458c1cd4424d55f7d3d4539300f2c3c7}"
+# mirrors .env.example's VIVARIUM_WORKER_IMAGE convention.
+WORKER_IMAGE="${VIVARIUM_WORKER_IMAGE:-ghcr.io/0xb007ab1e/vivarium-worker@sha256:921cd0ec9b2fbf2456b405acdd0ab8c4458c1cd4424d55f7d3d4539300f2c3c7}"
 
 # gVisor by default (ADR-004); falls back to the rootless OCI baseline only where runsc is absent.
-WORKER_RUNTIME="${GHIDRA_MCP_WORKER_RUNTIME:-runsc}"
+WORKER_RUNTIME="${VIVARIUM_WORKER_RUNTIME:-runsc}"
 
 # Per-session UDS directory on the host (server-owned, private 0700 — see deploy/socket-dir.md).
-RPC_SOCKET_DIR="${GHIDRA_MCP_RPC_SOCKET_DIR:-/run/ghidra-mcp}"
+RPC_SOCKET_DIR="${VIVARIUM_RPC_SOCKET_DIR:-/run/vivarium}"
 
-# Resource bounds — MIRROR src/ghidra_mcp/security/limits.py defaults + .env.example (F7 DoS).
-MEM_LIMIT="${GHIDRA_MCP_WORKER_MEM:-4g}"          # hard memory ceiling (OOM-kills the worker → evict).
-CPU_LIMIT="${GHIDRA_MCP_WORKER_CPUS:-2}"          # CPU quota.
-PIDS_LIMIT="${GHIDRA_MCP_WORKER_PIDS:-512}"       # cap process/thread explosion (fork-bomb defense).
-ANALYSIS_TIMEOUT_S="${GHIDRA_MCP_ANALYSIS_TIMEOUT_SECONDS:-600}"
-TMPFS_SCRATCH_SIZE="${GHIDRA_MCP_WORKER_TMPFS:-2g}"    # JVM/tmp scratch (tmpfs, noexec, nosuid).
-PROJECT_STORE_SIZE="${GHIDRA_MCP_WORKER_PROJECT_TMPFS:-4g}"  # per-session Ghidra project store (tmpfs).
+# Resource bounds — MIRROR src/vivarium/security/limits.py defaults + .env.example (F7 DoS).
+MEM_LIMIT="${VIVARIUM_WORKER_MEM:-4g}"          # hard memory ceiling (OOM-kills the worker → evict).
+CPU_LIMIT="${VIVARIUM_WORKER_CPUS:-2}"          # CPU quota.
+PIDS_LIMIT="${VIVARIUM_WORKER_PIDS:-512}"       # cap process/thread explosion (fork-bomb defense).
+ANALYSIS_TIMEOUT_S="${VIVARIUM_ANALYSIS_TIMEOUT_SECONDS:-600}"
+TMPFS_SCRATCH_SIZE="${VIVARIUM_WORKER_TMPFS:-2g}"    # JVM/tmp scratch (tmpfs, noexec, nosuid).
+PROJECT_STORE_SIZE="${VIVARIUM_WORKER_PROJECT_TMPFS:-4g}"  # per-session Ghidra project store (tmpfs).
 
 # Deterministic per-session container name → the server can target kill/inspect (ADR-002 lifecycle).
-CONTAINER_NAME="ghidra-mcp-worker-${SESSION_ID}"
+CONTAINER_NAME="vivarium-worker-${SESSION_ID}"
 
 # Stricter seccomp profile is OPT-IN after validation (infra/seccomp/README.md); default RuntimeDefault.
-SECCOMP_PROFILE="${GHIDRA_MCP_WORKER_SECCOMP:-RuntimeDefault}"
+SECCOMP_PROFILE="${VIVARIUM_WORKER_SECCOMP:-RuntimeDefault}"
 
 # -----------------------------------------------------------------------------
 # The hardened run command (ADR-004). Each flag annotated with the control it realizes.
@@ -86,23 +86,23 @@ exec podman run \
   --pids-limit "${PIDS_LIMIT}" \
   --oom-kill-disable=false \
   `# --- per-session UDS dir: server-owned, private; the ONLY shared surface (rpc-protocol.md §2) ---` \
-  --volume "${RPC_SOCKET_DIR}/${SESSION_ID}:/run/ghidra-mcp:rw,Z" \
+  --volume "${RPC_SOCKET_DIR}/${SESSION_ID}:/run/vivarium:rw,Z" \
   `# --- the binary (if provided): READ-ONLY mount; the worker can never modify host input ---` \
   ${BINARY_PATH:+--volume "${BINARY_PATH}:/work/input.bin:ro,Z"} \
   `# --- pass resolved bounds into the worker (defense in depth; worker enforces its own too) ---` \
-  --env "GHIDRA_MCP_SESSION_ID=${SESSION_ID}" \
-  --env "GHIDRA_MCP_RPC_SOCKET_DIR=/run/ghidra-mcp" \
-  --env "GHIDRA_MCP_ANALYSIS_TIMEOUT_SECONDS=${ANALYSIS_TIMEOUT_S}" \
+  --env "VIVARIUM_SESSION_ID=${SESSION_ID}" \
+  --env "VIVARIUM_RPC_SOCKET_DIR=/run/vivarium" \
+  --env "VIVARIUM_ANALYSIS_TIMEOUT_SECONDS=${ANALYSIS_TIMEOUT_S}" \
   `# --- no host env leakage; an explicit, minimal allow-list only (the --env lines above) ---` \
   --env-host=false \
   "${WORKER_IMAGE}"
 # ENTRYPOINT CONTRACT (WS3, RECONCILED): the worker image ENTRYPOINT is `python -m worker`
 # (worker/__main__.py). It is ENV-ONLY — it takes NO positional args. It reads:
-#   * GHIDRA_MCP_SESSION_ID      (required; passed above) — names the per-session UDS <sid>.sock,
-#   * GHIDRA_MCP_RPC_SOCKET_DIR  (=/run/ghidra-mcp above) — the bind-mounted private socket dir,
-# derives GHIDRA_MCP_RPC_SOCKET=<dir>/<sid>.sock, then runs worker_main() (rpc-protocol.md §2).
-# Inside the container the socket therefore lands at /run/ghidra-mcp/<SESSION_ID>.sock; the host
+#   * VIVARIUM_SESSION_ID      (required; passed above) — names the per-session UDS <sid>.sock,
+#   * VIVARIUM_RPC_SOCKET_DIR  (=/run/vivarium above) — the bind-mounted private socket dir,
+# derives VIVARIUM_RPC_SOCKET=<dir>/<sid>.sock, then runs worker_main() (rpc-protocol.md §2).
+# Inside the container the socket therefore lands at /run/vivarium/<SESSION_ID>.sock; the host
 # side of that path is "${RPC_SOCKET_DIR}/${SESSION_ID}/<SESSION_ID>.sock" via the volume above —
 # the server's RPC client connects to the host path, the worker binds the in-container path.
-# A missing GHIDRA_MCP_SESSION_ID makes the launcher exit non-zero BEFORE the JVM starts → the
+# A missing VIVARIUM_SESSION_ID makes the launcher exit non-zero BEFORE the JVM starts → the
 # server observes worker-unavailable and evicts (fail closed). Do NOT append args after the image.

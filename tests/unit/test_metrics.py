@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from ghidra_mcp.core.metrics import (
+from vivarium.core.metrics import (
     CallGraphMetricsResult,
     FanEntry,
     compute_call_graph_metrics,

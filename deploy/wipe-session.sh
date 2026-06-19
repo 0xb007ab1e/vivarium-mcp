@@ -22,11 +22,11 @@ set -euo pipefail
 IFS=$'\n\t'
 
 SESSION_ID="${1:?usage: wipe-session.sh <session_id>}"
-RPC_SOCKET_DIR="${GHIDRA_MCP_RPC_SOCKET_DIR:-/run/ghidra-mcp}"
-CONTAINER_NAME="ghidra-mcp-worker-${SESSION_ID}"
+RPC_SOCKET_DIR="${VIVARIUM_RPC_SOCKET_DIR:-/run/vivarium}"
+CONTAINER_NAME="vivarium-worker-${SESSION_ID}"
 SESSION_SOCK_DIR="${RPC_SOCKET_DIR}/${SESSION_ID}"
 # Optional host-side project store (only if a deployment opts out of tmpfs-only stores).
-SESSION_STORE_DIR="${GHIDRA_MCP_PROJECT_STORE_DIR:-}/${SESSION_ID}"
+SESSION_STORE_DIR="${VIVARIUM_PROJECT_STORE_DIR:-}/${SESSION_ID}"
 
 store_wiped=true
 
@@ -38,18 +38,18 @@ podman rm --force "${CONTAINER_NAME}" 2>/dev/null || true
 
 # 2. Remove the host-side per-session socket dir (and the named volume / store dir if used).
 rm -rf -- "${SESSION_SOCK_DIR}" 2>/dev/null || true
-if [ -n "${GHIDRA_MCP_PROJECT_STORE_DIR:-}" ]; then
+if [ -n "${VIVARIUM_PROJECT_STORE_DIR:-}" ]; then
   rm -rf -- "${SESSION_STORE_DIR}" 2>/dev/null || true
 fi
 # If a per-session named podman volume is used instead, remove it too (idempotent).
-podman volume rm --force "ghidra-mcp-store-${SESSION_ID}" 2>/dev/null || true
+podman volume rm --force "vivarium-store-${SESSION_ID}" 2>/dev/null || true
 
 # 3. VERIFY removal (the load-bearing step — an unverified wipe is not a wipe).
 if [ -e "${SESSION_SOCK_DIR}" ]; then
   echo "WIPE FAILURE: socket dir still present: ${SESSION_SOCK_DIR}" >&2
   store_wiped=false
 fi
-if [ -n "${GHIDRA_MCP_PROJECT_STORE_DIR:-}" ] && [ -e "${SESSION_STORE_DIR}" ]; then
+if [ -n "${VIVARIUM_PROJECT_STORE_DIR:-}" ] && [ -e "${SESSION_STORE_DIR}" ]; then
   echo "WIPE FAILURE: project store still present: ${SESSION_STORE_DIR}" >&2
   store_wiped=false
 fi

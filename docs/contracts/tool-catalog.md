@@ -1,7 +1,7 @@
 # Contract: Tier-1 Read-Only Tool Catalog (FROZEN — WS0)
 
-> Pydantic source of truth: [`src/ghidra_mcp/tools/schemas.py`](../../src/ghidra_mcp/tools/schemas.py).
-> Allow-list registry: [`src/ghidra_mcp/tools/registry.py`](../../src/ghidra_mcp/tools/registry.py).
+> Pydantic source of truth: [`src/vivarium/tools/schemas.py`](../../src/vivarium/tools/schemas.py).
+> Allow-list registry: [`src/vivarium/tools/registry.py`](../../src/vivarium/tools/registry.py).
 > **Read-only in v1** — no mutation tools, no `runScript`, no dynamic tool surface (PLAN §2).
 
 ## Conventions (apply to every tool)
@@ -79,7 +79,7 @@
 These drive the client-side workflow of turning Ghidra pseudo-C into well-named, plausibly-
 recompilable C. The **client LLM** does the naming + synthesis (no server-side LLM); the server
 supplies facts + a leaf-first plan. Graph *extraction* is worker-only (ADR-001); the leaf-first
-*ordering* is the **pure server-side core** (`src/ghidra_mcp/core/callgraph.py`). Best-effort C —
+*ordering* is the **pure server-side core** (`src/vivarium/core/callgraph.py`). Best-effort C —
 **compile-rate + behavioral equivalence are MEASURED metrics, NOT guarantees** (ADR-007). All graph
 node `name`s and decompiled C stay `Untrusted` (ADR-005). Bounded (`max_nodes ≤ 50000`,
 `max_edges ≤ 200000`, `max_depth ≤ 256`) — DoS via huge/deep/cyclic graphs (threat-model TB4).

@@ -24,15 +24,15 @@ from typing import cast
 
 import pytest
 
-from ghidra_mcp.config import Config
-from ghidra_mcp.core.envelope import DataOrigin, Untrusted
-from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
-from ghidra_mcp.ghidra.port import GhidraPort
-from ghidra_mcp.security.limits import Limits
-from ghidra_mcp.server.auth import Principal
-from ghidra_mcp.sessions.manager import SessionManager
-from ghidra_mcp.tools import registry as reg
-from ghidra_mcp.tools import schemas as s
+from vivarium.config import Config
+from vivarium.core.envelope import DataOrigin, Untrusted
+from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
+from vivarium.ghidra.port import GhidraPort
+from vivarium.security.limits import Limits
+from vivarium.server.auth import Principal
+from vivarium.sessions.manager import SessionManager
+from vivarium.tools import registry as reg
+from vivarium.tools import schemas as s
 
 _SID = "sid1"
 _OWNER = "local"

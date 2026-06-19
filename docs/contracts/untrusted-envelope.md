@@ -1,6 +1,6 @@
 # Contract: Untrusted-Data Envelope (FROZEN — WS0, ADR-005)
 
-> Pydantic source of truth: [`src/ghidra_mcp/core/envelope.py`](../../src/ghidra_mcp/core/envelope.py).
+> Pydantic source of truth: [`src/vivarium/core/envelope.py`](../../src/vivarium/core/envelope.py).
 > Applies to **all** binary-derived content crossing trust boundary **TB4** to the LLM.
 
 ## Shape

@@ -32,17 +32,17 @@ import pytest
 from pydantic import ValidationError
 from worker import dispatch as wd
 
-from ghidra_mcp.core.errors import ErrorType, GhidraMcpError
-from ghidra_mcp.ghidra import rpc_client as rc
-from ghidra_mcp.ghidra import rpc_framing as f
-from ghidra_mcp.ghidra._jvm_bridge import _monitor_percent
-from ghidra_mcp.ghidra.rpc_client import (
+from vivarium.core.errors import ErrorType, GhidraMcpError
+from vivarium.ghidra import rpc_client as rc
+from vivarium.ghidra import rpc_framing as f
+from vivarium.ghidra._jvm_bridge import _monitor_percent
+from vivarium.ghidra.rpc_client import (
     RpcGhidraAdapter,
     _analyze_params,
     _progress_log_payload,
     _should_relay_progress,
 )
-from ghidra_mcp.tools import schemas as s
+from vivarium.tools import schemas as s
 
 _CAP = 4 * 1024 * 1024
 _RID = "req-abc"
@@ -438,7 +438,7 @@ def _make_adapter(
     adapter = _ConnectedAdapter(
         server_sock=server_sock,
         launcher=lambda sid, path: worker,
-        socket_dir="/tmp/ghidra-mcp-test",  # noqa: S108  # test-only path; no real socket bound
+        socket_dir="/tmp/vivarium-test",  # noqa: S108  # test-only path; no real socket bound
         tool_timeout_s=2.0,
         analysis_timeout_s=analysis_timeout_s,
         max_response_bytes=_CAP,
@@ -575,7 +575,7 @@ def test_deadline_not_extended_by_progress_frames(monkeypatch: pytest.MonkeyPatc
     # returns a time already past the 5s budget, so the loop fails the remaining guard. The progress
     # frames arrive BEFORE that, proving they did not reset/extend the deadline.
     clock = iter([0.0, 100.0, 100.0, 100.0, 100.0])
-    monkeypatch.setattr("ghidra_mcp.ghidra.rpc_client.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("vivarium.ghidra.rpc_client.time.monotonic", lambda: next(clock))
 
     def _serve() -> None:
         # Emit two progress frames, then never send a response (simulate a chatty hang). The
@@ -608,7 +608,7 @@ def test_progress_flood_over_cap_is_protocol_violation_and_kills(
     monkeypatch so the test stays fast and hermetic (behavior under test is the bound, not the
     literal number).
     """
-    monkeypatch.setattr("ghidra_mcp.ghidra.rpc_client._MAX_PROGRESS_FRAMES", 3)
+    monkeypatch.setattr("vivarium.ghidra.rpc_client._MAX_PROGRESS_FRAMES", 3)
     srv, wrk = socket.socketpair(socket.AF_UNIX)
     worker = _FakeWorker()
     adapter = _make_adapter(srv, worker)

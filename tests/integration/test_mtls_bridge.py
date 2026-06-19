@@ -37,10 +37,10 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from starlette.types import ASGIApp
 
-from ghidra_mcp.config import HttpConfig
-from ghidra_mcp.server.app import build_http_asgi_app
-from ghidra_mcp.server.auth import build_authenticator
-from ghidra_mcp.server.http_middleware import SCOPE_PRINCIPAL_KEY
+from vivarium.config import HttpConfig
+from vivarium.server.app import build_http_asgi_app
+from vivarium.server.auth import build_authenticator
+from vivarium.server.http_middleware import SCOPE_PRINCIPAL_KEY
 
 pytestmark = pytest.mark.integration
 
@@ -55,7 +55,7 @@ def _keypair() -> rsa.RSAPrivateKey:
 def _ca() -> tuple[rsa.RSAPrivateKey, x509.Certificate]:
     """Generate a self-signed throwaway CA (used to sign both the server and client certs)."""
     key = _keypair()
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "ghidra-mcp-test-ca")])
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "vivarium-test-ca")])
     now = dt.datetime.now(dt.UTC)
     cert = (
         x509.CertificateBuilder()
@@ -174,7 +174,7 @@ class _LiveTlsServer:
     def __init__(self, http: HttpConfig) -> None:
         import uvicorn
 
-        from ghidra_mcp.server._mtls_protocol import MtlsAwareProtocol
+        from vivarium.server._mtls_protocol import MtlsAwareProtocol
 
         authenticator = build_authenticator("mtls", mtls_principal_field=http.mtls_principal_field)
         asgi = build_http_asgi_app(

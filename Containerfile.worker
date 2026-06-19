@@ -92,7 +92,7 @@ RUN set -eux; \
            /opt/ghidra/Ghidra/Features/GhidraServer 2>/dev/null || true
 
 # =============================================================================
-# Stage 2: pybuilder — build the ghidra_mcp wheel (PEP 517) so the runtime install is OFFLINE.
+# Stage 2: pybuilder — build the vivarium wheel (PEP 517) so the runtime install is OFFLINE.
 # =============================================================================
 # Building from a source tree needs a PEP 517 backend (hatchling), which is NOT in requirements.lock
 # (the lock pins RUNTIME deps only). Resolving the backend is a network action — confined HERE in a
@@ -119,13 +119,13 @@ RUN set -eux; \
 FROM cgr.dev/chainguard/wolfi-base@sha256:0b5fd36c9f36ecc95bf6dbe049fe0a211410e1ba8a9801db0fbe25c7561d81c1 AS runtime
 
 ARG GHIDRA_VERSION
-LABEL org.opencontainers.image.title="ghidra-mcp-worker" \
+LABEL org.opencontainers.image.title="vivarium-worker" \
       org.opencontainers.image.description="Hardened, network-isolated headless Ghidra analysis worker (TB3)." \
       org.opencontainers.image.licenses="Apache-2.0" \
-      org.opencontainers.image.source="https://github.com/OWNER/ghidra-mcp" \
-      org.ghidra-mcp.ghidra-version="${GHIDRA_VERSION}" \
-      org.ghidra-mcp.trust-boundary="TB3-hostile-input" \
-      org.ghidra-mcp.network="none"
+      org.opencontainers.image.source="https://github.com/OWNER/vivarium" \
+      org.vivarium.ghidra-version="${GHIDRA_VERSION}" \
+      org.vivarium.trust-boundary="TB3-hostile-input" \
+      org.vivarium.network="none"
 
 # --- Base packages: Python 3.12 (PyGhidra runtime) + OpenJDK 21 (Ghidra JVM) + the python symlink.
 # Wolfi resolves CURRENT package versions here (auto-patched); the digest-pinned base anchors
@@ -151,11 +151,11 @@ COPY --from=ghidra-fetch --chown=root:root /opt/ghidra /opt/ghidra
 ENV GHIDRA_INSTALL_DIR=/opt/ghidra
 ENV PATH="/opt/ghidra/support:${PATH}"
 
-# --- Python: ghidra_mcp package + PyGhidra + the worker code -------------------------------------
+# --- Python: vivarium package + PyGhidra + the worker code -------------------------------------
 # Install order is supply-chain-deliberate (std-supplychain) and OFFLINE for the final image:
 #   1. Runtime deps from the HASH-PINNED lockfile (`--require-hashes`): tampered/substituted wheel
 #      fails the build (fail closed). mcp + pydantic + transitive closure (cp312 wheels) live here.
-#   2. The ghidra_mcp wheel PREBUILT in pybuilder, installed `--no-deps` + `--no-index`.
+#   2. The vivarium wheel PREBUILT in pybuilder, installed `--no-deps` + `--no-index`.
 #   3. PyGhidra + JPype1 from the wheels BUNDLED inside the SHA-256-verified Ghidra dist, `--no-index`
 #      (offline) — integrity inherited from the verified zip, better than an unpinned PyPI pull.
 # pip is bootstrapped via ensurepip (Wolfi python-3.12 ships none). Installs into system
@@ -164,14 +164,14 @@ ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_ROOT_USER_ACTION=ignore
 
-# Inputs: the hash-pinned runtime lock, the prebuilt ghidra_mcp wheel, and the `worker/` modules.
+# Inputs: the hash-pinned runtime lock, the prebuilt vivarium wheel, and the `worker/` modules.
 # `worker/` is plain modules (NOT in the hatch wheel) on the import path; root-owned + ro-rootfs ⇒
 # the worker user cannot modify its own code at runtime (defense in depth).
-COPY --chown=root:root requirements.lock /opt/ghidra-mcp/requirements.lock
-COPY --from=pybuilder --chown=root:root /build/dist /opt/ghidra-mcp/dist
-COPY --chown=root:root worker/ /opt/ghidra-mcp-worker/worker/
+COPY --chown=root:root requirements.lock /opt/vivarium/requirements.lock
+COPY --from=pybuilder --chown=root:root /build/dist /opt/vivarium/dist
+COPY --chown=root:root worker/ /opt/vivarium-worker/worker/
 
-ENV PYTHONPATH=/opt/ghidra-mcp-worker \
+ENV PYTHONPATH=/opt/vivarium-worker \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
@@ -182,23 +182,23 @@ RUN set -eux; \
     PYGHIDRA_DIST="/opt/ghidra/Ghidra/Features/PyGhidra/pypkg/dist"; \
     python3.12 -m ensurepip --upgrade; \
     python3.12 -m pip install --no-cache-dir --require-hashes \
-        --requirement /opt/ghidra-mcp/requirements.lock; \
+        --requirement /opt/vivarium/requirements.lock; \
     python3.12 -m pip install --no-cache-dir --no-deps --no-index \
-        --find-links /opt/ghidra-mcp/dist ghidra-mcp; \
+        --find-links /opt/vivarium/dist vivarium; \
     test -d "${PYGHIDRA_DIST}" || { echo "PyGhidra dist not found at ${PYGHIDRA_DIST}" >&2; exit 1; }; \
     python3.12 -m pip install --no-cache-dir --no-index \
         --find-links "${PYGHIDRA_DIST}" pyghidra; \
-    rm -rf /opt/ghidra-mcp/dist; \
-    python -c "import ghidra_mcp.ghidra._jvm_bridge"; \
+    rm -rf /opt/vivarium/dist; \
+    python -c "import vivarium.ghidra._jvm_bridge"; \
     python -c "import worker, worker.dispatch, worker.server"; \
     python -c "import pyghidra"
 
 # --- Runtime environment (mirrors security/limits.py defaults; deploy/ also passes these) --------
-ENV GHIDRA_MCP_RPC_SOCKET_DIR=/run/ghidra-mcp \
-    GHIDRA_MCP_ANALYSIS_TIMEOUT_SECONDS=600 \
-    GHIDRA_MCP_TOOL_TIMEOUT_SECONDS=60 \
-    GHIDRA_MCP_MAX_RESPONSE_BYTES=4194304 \
-    GHIDRA_MCP_MAX_BINARY_BYTES=134217728 \
+ENV VIVARIUM_RPC_SOCKET_DIR=/run/vivarium \
+    VIVARIUM_ANALYSIS_TIMEOUT_SECONDS=600 \
+    VIVARIUM_TOOL_TIMEOUT_SECONDS=60 \
+    VIVARIUM_MAX_RESPONSE_BYTES=4194304 \
+    VIVARIUM_MAX_BINARY_BYTES=134217728 \
     # JVM: cap the heap (deploy/ cgroup mem limit is the hard wall); -XX:+ExitOnOutOfMemoryError so a
     # heap OOM self-exits the JVM with code 3 → server classifies it `resource-exhausted` and evicts
     # (ADR-037; a native/off-heap overrun instead trips the cgroup OOM-kill = exit 137). No network
@@ -212,9 +212,9 @@ ENV GHIDRA_MCP_RPC_SOCKET_DIR=/run/ghidra-mcp \
 # provides: the per-session project store + a JVM/tmp scratch. Declared here so the image is
 # self-documenting and the dirs exist with correct ownership for the read-only-rootfs case.
 RUN set -eux; \
-    mkdir -p /run/ghidra-mcp /work/project /tmp/ghidra; \
-    chown -R 65532:65532 /run/ghidra-mcp /work /tmp/ghidra; \
-    chmod 0700 /run/ghidra-mcp /work/project
+    mkdir -p /run/vivarium /work/project /tmp/ghidra; \
+    chown -R 65532:65532 /run/vivarium /work /tmp/ghidra; \
+    chmod 0700 /run/vivarium /work/project
 
 # Ghidra needs a WRITABLE home for its user settings + the JDK-config save and a writable
 # java.io.tmpdir. The rootfs is read-only and the worker user has no created home, so point HOME at
@@ -230,12 +230,12 @@ WORKDIR /work
 # real readiness signal is the RPC `ping` over the UDS (rpc-protocol.md §4), driven by the server.
 # Network-free by design; runs under the read-only rootfs (import-only; PYTHONDONTWRITEBYTECODE set).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
-    CMD ["python", "-c", "import worker, ghidra_mcp.ghidra._jvm_bridge"]
+    CMD ["python", "-c", "import worker, vivarium.ghidra._jvm_bridge"]
 
 # --- Entrypoint ----------------------------------------------------------------------------------
 # The container runs ONLY the Python worker launcher (`worker/__main__.py`). It reconciles the
-# per-session UDS path from GHIDRA_MCP_SESSION_ID + GHIDRA_MCP_RPC_SOCKET_DIR (deploy/worker-run.sh
-# injects both), exports GHIDRA_MCP_RPC_SOCKET, then runs worker_main() which binds the 0600 UDS,
+# per-session UDS path from VIVARIUM_SESSION_ID + VIVARIUM_RPC_SOCKET_DIR (deploy/worker-run.sh
+# injects both), exports VIVARIUM_RPC_SOCKET, then runs worker_main() which binds the 0600 UDS,
 # boots PyGhidra offline, and serves RPC writing only to /work/project + /tmp/ghidra. It exits
 # non-zero on a missing session id or fatal error → the server maps the closed/absent socket to
 # worker-unavailable and evicts (rpc-protocol.md §6).

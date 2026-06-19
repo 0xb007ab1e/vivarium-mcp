@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import pytest
 
-from ghidra_mcp.core import validation as v
-from ghidra_mcp.core.errors import ErrorType, GhidraMcpError
-from ghidra_mcp.tools import schemas as s
+from vivarium.core import validation as v
+from vivarium.core.errors import ErrorType, GhidraMcpError
+from vivarium.tools import schemas as s
 
 
 def _ref(**kw: object) -> s.TypeRef:

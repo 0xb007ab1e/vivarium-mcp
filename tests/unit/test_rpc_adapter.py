@@ -25,12 +25,12 @@ from typing import Any, cast
 import pytest
 from worker import dispatch
 
-from ghidra_mcp.core.envelope import DataOrigin, Untrusted
-from ghidra_mcp.core.errors import ErrorType, GhidraMcpError
-from ghidra_mcp.ghidra import rpc_framing
-from ghidra_mcp.ghidra.rpc_client import RpcGhidraAdapter
-from ghidra_mcp.security.limits import DEFAULT_WORKER_MEM_MIB, Limits
-from ghidra_mcp.tools import schemas as s
+from vivarium.core.envelope import DataOrigin, Untrusted
+from vivarium.core.errors import ErrorType, GhidraMcpError
+from vivarium.ghidra import rpc_framing
+from vivarium.ghidra.rpc_client import RpcGhidraAdapter
+from vivarium.security.limits import DEFAULT_WORKER_MEM_MIB, Limits
+from vivarium.tools import schemas as s
 
 _CAP = 4 * 1024 * 1024
 
@@ -105,7 +105,7 @@ def _make_adapter(server_sock: socket.socket, worker: _FakeWorker) -> _Connected
     adapter = _ConnectedAdapter(
         server_sock=server_sock,
         launcher=lambda sid, path: worker,
-        socket_dir="/tmp/ghidra-mcp-test",  # noqa: S108  # test-only path; no real socket bound
+        socket_dir="/tmp/vivarium-test",  # noqa: S108  # test-only path; no real socket bound
         tool_timeout_s=0.5,
         analysis_timeout_s=1.0,
         max_response_bytes=_CAP,
@@ -292,7 +292,7 @@ def test_worker_crash_mid_call_is_unavailable_and_kills() -> None:
 
 def test_resource_exhausted_factory_envelope() -> None:
     """``_errors.resource_exhausted`` builds a 503, non-retryable, safe envelope (ADR-023)."""
-    from ghidra_mcp.ghidra import _errors
+    from vivarium.ghidra import _errors
 
     err = _errors.resource_exhausted(correlation_id="cid-1")
     env = err.envelope
@@ -309,12 +309,12 @@ def test_resource_exhausted_factory_envelope() -> None:
 def test_resource_exhausted_detail_includes_cap_and_knob() -> None:
     """With ``mem_mib`` the detail names the configured cap + the env knob (ADR-037 §3 sizing hint),
     and still leaks no host path / binary content."""
-    from ghidra_mcp.ghidra import _errors
+    from vivarium.ghidra import _errors
 
     env = _errors.resource_exhausted(4096, correlation_id="cid-2").envelope
     assert env.type is ErrorType.RESOURCE_EXHAUSTED
     assert "4096 MiB" in env.detail
-    assert "GHIDRA_MCP_WORKER_MEM_MIB" in env.detail
+    assert "VIVARIUM_WORKER_MEM_MIB" in env.detail
     assert "(currently 4096)" in env.detail
     # Disclosure safety unchanged: no traceback / host path / binary content.
     assert "Traceback" not in env.detail and "/" not in env.detail
@@ -322,7 +322,7 @@ def test_resource_exhausted_detail_includes_cap_and_knob() -> None:
 
 def test_resource_exhausted_via_make_error_maps() -> None:
     """The generic factory also resolves RESOURCE_EXHAUSTED → 503 / non-retryable / titled."""
-    from ghidra_mcp.ghidra import _errors
+    from vivarium.ghidra import _errors
 
     env = _errors.make_error(ErrorType.RESOURCE_EXHAUSTED, "detail").envelope
     assert env.status == 503
@@ -352,7 +352,7 @@ def test_oom_worker_death_maps_to_resource_exhausted(tmp_path: Path) -> None:
     # binary content / host path.
     detail = ei.value.envelope.detail
     assert "memory" in detail
-    assert "GHIDRA_MCP_WORKER_MEM_MIB" in detail
+    assert "VIVARIUM_WORKER_MEM_MIB" in detail
     assert f"{DEFAULT_WORKER_MEM_MIB} MiB" in detail
     assert "Traceback" not in detail and "/" not in detail
     assert worker.killed == 1
@@ -450,12 +450,12 @@ def test_kill_worker_is_idempotent() -> None:
 def test_socket_path_uses_session_id() -> None:
     adapter = RpcGhidraAdapter(
         launcher=lambda sid, path: _FakeWorker(),
-        socket_dir="/run/ghidra-mcp/",
+        socket_dir="/run/vivarium/",
         tool_timeout_s=1.0,
         analysis_timeout_s=1.0,
         max_response_bytes=_CAP,
     )
-    assert adapter._socket_path("abc") == "/run/ghidra-mcp/abc/abc.sock"
+    assert adapter._socket_path("abc") == "/run/vivarium/abc/abc.sock"
 
 
 # --- #9: untrusted-data wrap chokepoint (ADR-005) ---------------------------------------------
@@ -814,7 +814,7 @@ def _import_adapter(
     adapter = _ConnectedAdapter(
         server_sock=server_sock,
         launcher=lambda sid, path: worker,
-        socket_dir="/tmp/ghidra-mcp-test",  # noqa: S108  # test-only path; no real socket bound
+        socket_dir="/tmp/vivarium-test",  # noqa: S108  # test-only path; no real socket bound
         tool_timeout_s=1.0,
         analysis_timeout_s=1.0,
         max_response_bytes=_CAP,
@@ -907,7 +907,7 @@ def test_preflight_oversized_warns_and_proceeds(caplog: pytest.LogCaptureFixture
     adapter = _ConnectedAdapter(
         server_sock=srv,
         launcher=lambda sid, path: worker,
-        socket_dir="/tmp/ghidra-mcp-test",  # noqa: S108  # test-only path; no real socket bound
+        socket_dir="/tmp/vivarium-test",  # noqa: S108  # test-only path; no real socket bound
         tool_timeout_s=1.0,
         analysis_timeout_s=1.0,
         max_response_bytes=_CAP,
@@ -939,7 +939,7 @@ def test_preflight_not_emitted_for_normal_input(caplog: pytest.LogCaptureFixture
     adapter = _ConnectedAdapter(
         server_sock=srv,
         launcher=lambda sid, path: worker,
-        socket_dir="/tmp/ghidra-mcp-test",  # noqa: S108  # test-only path; no real socket bound
+        socket_dir="/tmp/vivarium-test",  # noqa: S108  # test-only path; no real socket bound
         tool_timeout_s=1.0,
         analysis_timeout_s=1.0,
         max_response_bytes=_CAP,
@@ -972,7 +972,7 @@ def _preflight_adapter(
     adapter = _ConnectedAdapter(
         server_sock=server_sock,
         launcher=lambda sid, path: worker,
-        socket_dir="/tmp/ghidra-mcp-test",  # noqa: S108  # test-only path; no real socket bound
+        socket_dir="/tmp/vivarium-test",  # noqa: S108  # test-only path; no real socket bound
         tool_timeout_s=1.0,
         analysis_timeout_s=1.0,
         max_response_bytes=_CAP,
@@ -1082,7 +1082,7 @@ def test_preflight_unknown_mode_falls_back_to_warn(caplog: pytest.LogCaptureFixt
 # --- analyze param-shaping (ADR-029 B; pure helper) -------------------------------------------
 def test_analyze_params_default_is_no_op() -> None:
     """The default profile yields the PRE-ADR-029 param shape — no ``profile`` key (no-op)."""
-    from ghidra_mcp.ghidra.rpc_client import _analyze_params
+    from vivarium.ghidra.rpc_client import _analyze_params
 
     assert _analyze_params(123, "default") == {"timeout_seconds": 123}
     assert "profile" not in _analyze_params(None, "default")
@@ -1091,7 +1091,7 @@ def test_analyze_params_default_is_no_op() -> None:
 @pytest.mark.parametrize("profile", ["light", "deep"])
 def test_analyze_params_non_default_adds_profile(profile: str) -> None:
     """A non-default profile adds the explicit ``profile`` key alongside the timeout."""
-    from ghidra_mcp.ghidra.rpc_client import _analyze_params
+    from vivarium.ghidra.rpc_client import _analyze_params
 
     assert _analyze_params(None, profile) == {"timeout_seconds": None, "profile": profile}
 
@@ -1163,7 +1163,7 @@ def test_analyze_default_profile_omits_profile_in_rpc() -> None:
 
 def test_default_source_resolver_stats_a_real_file(tmp_path: Path) -> None:
     """The built-in resolver returns the on-disk size (used when no confined resolver is wired)."""
-    from ghidra_mcp.ghidra.rpc_client import _default_source_size
+    from vivarium.ghidra.rpc_client import _default_source_size
 
     f = tmp_path / "blob.bin"
     f.write_bytes(b"abcd")
@@ -1226,11 +1226,11 @@ def test_ensure_connected_retries_until_worker_binds(monkeypatch: pytest.MonkeyP
     would lose the race and fail closed as worker-unavailable. Here connect fails twice (not bound
     yet) then succeeds — the adapter must keep trying within the connect budget.
     """
-    from ghidra_mcp.ghidra import rpc_client as rc
+    from vivarium.ghidra import rpc_client as rc
 
     # String targets (not rc.time/rc.socket attribute access) so --strict mypy doesn't flag the
     # imported modules as non-reexported attributes; monkeypatch resolves them on the module.
-    monkeypatch.setattr("ghidra_mcp.ghidra.rpc_client.time.sleep", lambda *_: None)
+    monkeypatch.setattr("vivarium.ghidra.rpc_client.time.sleep", lambda *_: None)
     attempts = {"n": 0}
 
     class _FlakySock:
@@ -1243,7 +1243,7 @@ def test_ensure_connected_retries_until_worker_binds(monkeypatch: pytest.MonkeyP
 
         def close(self) -> None: ...
 
-    monkeypatch.setattr("ghidra_mcp.ghidra.rpc_client.socket.socket", lambda *a, **k: _FlakySock())
+    monkeypatch.setattr("vivarium.ghidra.rpc_client.socket.socket", lambda *a, **k: _FlakySock())
     adapter = RpcGhidraAdapter(
         launcher=lambda sid, path: _FakeWorker(),
         socket_dir="/run/x",
@@ -1260,11 +1260,11 @@ def test_ensure_connected_retries_until_worker_binds(monkeypatch: pytest.MonkeyP
 
 def test_ensure_connected_gives_up_after_connect_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     """A worker that never binds within the budget makes connect raise (→ worker-unavailable)."""
-    from ghidra_mcp.ghidra import rpc_client as rc
+    from vivarium.ghidra import rpc_client as rc
 
-    monkeypatch.setattr("ghidra_mcp.ghidra.rpc_client.time.sleep", lambda *_: None)
+    monkeypatch.setattr("vivarium.ghidra.rpc_client.time.sleep", lambda *_: None)
     clock = iter([0.0, 100.0])  # start, then a check already past the connect budget
-    monkeypatch.setattr("ghidra_mcp.ghidra.rpc_client.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("vivarium.ghidra.rpc_client.time.monotonic", lambda: next(clock))
 
     class _DeadSock:
         def settimeout(self, *_: object) -> None: ...
@@ -1274,7 +1274,7 @@ def test_ensure_connected_gives_up_after_connect_timeout(monkeypatch: pytest.Mon
 
         def close(self) -> None: ...
 
-    monkeypatch.setattr("ghidra_mcp.ghidra.rpc_client.socket.socket", lambda *a, **k: _DeadSock())
+    monkeypatch.setattr("vivarium.ghidra.rpc_client.socket.socket", lambda *a, **k: _DeadSock())
     adapter = RpcGhidraAdapter(
         launcher=lambda sid, path: _FakeWorker(),
         socket_dir="/run/x",
@@ -1292,14 +1292,14 @@ def test_socket_path_fits_af_unix_limit_with_real_session_id() -> None:
     """The per-session UDS path stays under the AF_UNIX limit with a 256-bit id + default dir.
 
     Regression: using the full 43-char session id for BOTH the dir and the filename overflowed
-    AF_UNIX (~107 bytes) at the default /run/ghidra-mcp (108). The dir is now a short id prefix;
+    AF_UNIX (~107 bytes) at the default /run/vivarium (108). The dir is now a short id prefix;
     the filename keeps the full id (in-container contract unchanged).
     """
     import secrets as _secrets
 
     adapter = RpcGhidraAdapter(
         launcher=lambda sid, path: _FakeWorker(),
-        socket_dir="/run/ghidra-mcp",  # the production default
+        socket_dir="/run/vivarium",  # the production default
         tool_timeout_s=2.0,
         analysis_timeout_s=2.0,
         max_response_bytes=_CAP,

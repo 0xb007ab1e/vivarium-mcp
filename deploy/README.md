@@ -70,21 +70,21 @@ podman build -f Containerfile.worker \
   --build-arg GHIDRA_VERSION=<11.x> \
   --build-arg GHIDRA_ZIP_URL=<url> \
   --build-arg GHIDRA_ZIP_SHA256=<sha256> \
-  -t ghidra-mcp-worker:local .
-podman build -f Containerfile.server -t ghidra-mcp-server:local .
+  -t vivarium-worker:local .
+podman build -f Containerfile.server -t vivarium-server:local .
 ```
 
 ### 2. Scan (fail-closed on HIGH/CRITICAL)
 ```
 hadolint --config infra/hadolint.yaml Containerfile.worker Containerfile.server
-trivy image --config infra/trivy.yaml ghidra-mcp-worker:local
-trivy image --config infra/trivy.yaml ghidra-mcp-server:local
+trivy image --config infra/trivy.yaml vivarium-worker:local
+trivy image --config infra/trivy.yaml vivarium-server:local
 trivy config --config infra/trivy.yaml .            # IaC/misconfig (also covered by ci.yml)
 ```
 
 ### 3. Verify isolation (ADR-004 acceptance — REQUIRED before trusting the worker)
 ```
-GHIDRA_MCP_WORKER_IMAGE=<pinned@sha256> deploy/verify-isolation.sh
+VIVARIUM_WORKER_IMAGE=<pinned@sha256> deploy/verify-isolation.sh
 ```
 
 ### 4. Smoke test (synthetic binary ONLY — no real malware, master §5)

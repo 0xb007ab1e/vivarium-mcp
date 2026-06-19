@@ -1,4 +1,4 @@
-# infra/Makefile — build + scan targets for the ghidra-mcp container images.
+# infra/Makefile — build + scan targets for the vivarium container images.
 #
 # These targets wrap the GATED commands (image build/pull, dependency install, isolation runs).
 # WS3 does NOT execute them — they are the documented, repeatable invocations a maintainer/CI runs
@@ -9,8 +9,8 @@
 # Rules: std-supplychain (digest pin, SBOM, sign), workflow-cicd (scan gates), ADR-003/004.
 
 # --- Pinned references (set after the supply-chain gate; placeholders mirror the Containerfiles) ---
-WORKER_IMAGE  ?= ghcr.io/OWNER/ghidra-mcp-worker
-SERVER_IMAGE  ?= ghcr.io/OWNER/ghidra-mcp-server
+WORKER_IMAGE  ?= ghcr.io/OWNER/vivarium-worker
+SERVER_IMAGE  ?= ghcr.io/OWNER/vivarium-server
 TAG           ?= dev
 GHIDRA_VERSION    ?= 12.1.2
 GHIDRA_ZIP_URL    ?= https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip
@@ -66,7 +66,7 @@ sbom:
 
 .PHONY: verify-isolation
 verify-isolation:
-	GHIDRA_MCP_WORKER_IMAGE=$(WORKER_IMAGE):$(TAG) deploy/verify-isolation.sh
+	VIVARIUM_WORKER_IMAGE=$(WORKER_IMAGE):$(TAG) deploy/verify-isolation.sh
 
 .PHONY: all-checks
 all-checks: lint-dockerfiles build scan-images scan-config sbom

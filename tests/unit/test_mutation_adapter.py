@@ -21,11 +21,11 @@ from typing import cast
 import pytest
 from worker import dispatch
 
-from ghidra_mcp.core.envelope import DataOrigin, Untrusted
-from ghidra_mcp.core.errors import ErrorType, GhidraMcpError
-from ghidra_mcp.ghidra import rpc_framing
-from ghidra_mcp.ghidra.rpc_client import RpcGhidraAdapter
-from ghidra_mcp.tools import schemas as s
+from vivarium.core.envelope import DataOrigin, Untrusted
+from vivarium.core.errors import ErrorType, GhidraMcpError
+from vivarium.ghidra import rpc_framing
+from vivarium.ghidra.rpc_client import RpcGhidraAdapter
+from vivarium.tools import schemas as s
 
 _CAP = 4 * 1024 * 1024
 
@@ -72,7 +72,7 @@ def _make_adapter(server_sock: socket.socket, worker: _FakeWorker) -> _Connected
     adapter = _ConnectedAdapter(
         server_sock=server_sock,
         launcher=lambda sid, path: worker,
-        socket_dir="/tmp/ghidra-mcp-test",  # noqa: S108  # test-only path; no real socket bound
+        socket_dir="/tmp/vivarium-test",  # noqa: S108  # test-only path; no real socket bound
         tool_timeout_s=0.5,
         analysis_timeout_s=1.0,
         max_response_bytes=_CAP,

@@ -30,10 +30,10 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
-_ENV_INTEGRATION = "GHIDRA_MCP_INTEGRATION"
-_ENV_FIXTURES = "GHIDRA_MCP_FIXTURES"
-_ENV_WORKER_IMAGE = "GHIDRA_MCP_WORKER_IMAGE"
-_ENV_ENGINE = "GHIDRA_MCP_CONTAINER_ENGINE"
+_ENV_INTEGRATION = "VIVARIUM_INTEGRATION"
+_ENV_FIXTURES = "VIVARIUM_FIXTURES"
+_ENV_WORKER_IMAGE = "VIVARIUM_WORKER_IMAGE"
+_ENV_ENGINE = "VIVARIUM_CONTAINER_ENGINE"
 
 #: The acceptance harness lives in ``scripts/`` (not an installed package); load it by path.
 _HARNESS_PATH = Path(__file__).resolve().parents[2] / "scripts" / "acceptance_run.py"

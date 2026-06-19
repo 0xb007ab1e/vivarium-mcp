@@ -1,6 +1,6 @@
 # Contract: Error Envelope (FROZEN — WS0)
 
-> Pydantic source of truth: [`src/ghidra_mcp/core/errors.py`](../../src/ghidra_mcp/core/errors.py).
+> Pydantic source of truth: [`src/vivarium/core/errors.py`](../../src/vivarium/core/errors.py).
 > RFC 9457 (Problem Details) style, adapted to the MCP tool context. Returned on **any** failure.
 
 ## Shape
@@ -45,8 +45,8 @@
 > **`resource-exhausted` (v1.3 — ADR-023 / F1):** an ADDITIVE slug — no existing slug is repurposed.
 > Distinct from `worker-unavailable` so a client can surface a precise "increase worker memory or
 > reduce input size" hint. **Not retryable** (the same input against the same memory cap would OOM
-> again — the operator must raise `GHIDRA_MCP_WORKER_MEM_MIB` or the client shrink the input). The
-> `detail` is a safe string that may name the configured cap + the `GHIDRA_MCP_WORKER_MEM_MIB` knob
+> again — the operator must raise `VIVARIUM_WORKER_MEM_MIB` or the client shrink the input). The
+> `detail` is a safe string that may name the configured cap + the `VIVARIUM_WORKER_MEM_MIB` knob
 > (ADR-037 §3 sizing hint) — still no binary content / host paths, and `type`/`title`/`status`/
 > `retryable` are unchanged (`detail` is the non-frozen per-occurrence field). The worker's death is
 > classified server-side via a container-engine metadata query — the `OOMKilled` flag, the cgroup

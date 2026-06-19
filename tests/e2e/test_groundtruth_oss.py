@@ -13,11 +13,11 @@ recovered most of the known functions + edges and produced a leaf-first order co
 true partial order — i.e. the substrate the (client-driven) semantic-naming walk depends on.
 
 GATING (hermetic by default — this never runs in the unit/coverage job):
-    * ``GHIDRA_MCP_INTEGRATION`` truthy — opts into the real-worker suite (gated; PLAN §6).
-    * ``GHIDRA_MCP_FIXTURES`` — dir holding the fixtures-build artifact (``index.json`` +
+    * ``VIVARIUM_INTEGRATION`` truthy — opts into the real-worker suite (gated; PLAN §6).
+    * ``VIVARIUM_FIXTURES`` — dir holding the fixtures-build artifact (``index.json`` +
       ``<tool>.stripped`` + ``<tool>.groundtruth.json``), produced by ``build_fixtures.py``.
-    * ``GHIDRA_MCP_WORKER_IMAGE`` — the pinned-by-digest worker image the adapter runs.
-    * a container engine (``GHIDRA_MCP_CONTAINER_ENGINE``, default ``podman``) on PATH.
+    * ``VIVARIUM_WORKER_IMAGE`` — the pinned-by-digest worker image the adapter runs.
+    * a container engine (``VIVARIUM_CONTAINER_ENGINE``, default ``podman``) on PATH.
 Any missing prerequisite → the whole module skips cleanly (not error/fail), keeping the default
 suite green while the gated fixtures + worker image do not yet exist.
 
@@ -44,10 +44,10 @@ import pytest
 
 from tests.e2e._groundtruth import GroundTruth, Thresholds, compare
 
-_ENV_INTEGRATION = "GHIDRA_MCP_INTEGRATION"
-_ENV_FIXTURES = "GHIDRA_MCP_FIXTURES"
-_ENV_WORKER_IMAGE = "GHIDRA_MCP_WORKER_IMAGE"
-_ENV_ENGINE = "GHIDRA_MCP_CONTAINER_ENGINE"
+_ENV_INTEGRATION = "VIVARIUM_INTEGRATION"
+_ENV_FIXTURES = "VIVARIUM_FIXTURES"
+_ENV_WORKER_IMAGE = "VIVARIUM_WORKER_IMAGE"
+_ENV_ENGINE = "VIVARIUM_CONTAINER_ENGINE"
 
 # Per-tool tolerances. lua's large VM (computed-goto dispatch, many small helpers) and zlib's
 # asm/intrinsic paths give Ghidra slightly more to miss/merge, so their bars are a touch looser;
@@ -132,10 +132,10 @@ async def _drive_one(tool: str, fixtures_dir: Path) -> None:
     # image + engine are taken from the environment (the adapter spawns the worker container).
     params = StdioServerParameters(
         command="python",
-        args=["-m", "ghidra_mcp"],
-        env={**os.environ, "GHIDRA_MCP_IMPORT_ROOT": str(fixtures_dir)},
+        args=["-m", "vivarium"],
+        env={**os.environ, "VIVARIUM_IMPORT_ROOT": str(fixtures_dir)},
     )
-    timeout = timedelta(seconds=int(os.environ.get("GHIDRA_MCP_E2E_TIMEOUT", "600")))
+    timeout = timedelta(seconds=int(os.environ.get("VIVARIUM_E2E_TIMEOUT", "600")))
 
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()

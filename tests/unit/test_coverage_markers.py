@@ -28,11 +28,11 @@ import pytest
 # The four modules designated 100%-critical in pyproject.toml + the session manager
 # (validation, envelope, errors, sessions.manager, security.limits — CLAUDE.md task brief).
 _CRITICAL_MODULES = (
-    "ghidra_mcp.core.validation",
-    "ghidra_mcp.core.envelope",
-    "ghidra_mcp.core.errors",
-    "ghidra_mcp.sessions.manager",
-    "ghidra_mcp.security.limits",
+    "vivarium.core.validation",
+    "vivarium.core.envelope",
+    "vivarium.core.errors",
+    "vivarium.sessions.manager",
+    "vivarium.security.limits",
 )
 
 _REQUIRED_MARKERS = ("critical", "abuse", "integration")
@@ -121,9 +121,9 @@ def test_critical_modules_designated_in_pyproject_comment() -> None:
     """
     text = (_repo_root() / "pyproject.toml").read_text(encoding="utf-8")
     for rel in (
-        "src/ghidra_mcp/core/validation.py",
-        "src/ghidra_mcp/core/envelope.py",
-        "src/ghidra_mcp/sessions/manager.py",
-        "src/ghidra_mcp/security/limits.py",
+        "src/vivarium/core/validation.py",
+        "src/vivarium/core/envelope.py",
+        "src/vivarium/sessions/manager.py",
+        "src/vivarium/security/limits.py",
     ):
         assert rel in text, f"critical-path designation dropped from pyproject: {rel}"

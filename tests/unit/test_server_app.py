@@ -13,15 +13,15 @@ from typing import Any, cast
 
 import pytest
 
-from ghidra_mcp import __main__ as entry
-from ghidra_mcp.config import Config
-from ghidra_mcp.core.envelope import DataOrigin, Untrusted
-from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
-from ghidra_mcp.ghidra.port import GhidraPort
-from ghidra_mcp.security.limits import Limits
-from ghidra_mcp.server import app as srv
-from ghidra_mcp.sessions.manager import SessionManager
-from ghidra_mcp.tools import schemas as s
+from vivarium import __main__ as entry
+from vivarium.config import Config
+from vivarium.core.envelope import DataOrigin, Untrusted
+from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
+from vivarium.ghidra.port import GhidraPort
+from vivarium.security.limits import Limits
+from vivarium.server import app as srv
+from vivarium.sessions.manager import SessionManager
+from vivarium.tools import schemas as s
 
 
 def _config() -> Config:
@@ -169,7 +169,7 @@ def test_build_app_registers_full_catalog() -> None:
 
     app = _build_with_fakes()
     tools = anyio.run(app.list_tools)
-    from ghidra_mcp.tools.registry import TIER1_TOOL_NAMES
+    from vivarium.tools.registry import TIER1_TOOL_NAMES
 
     assert {t.name for t in tools} == set(TIER1_TOOL_NAMES)
 
@@ -311,8 +311,8 @@ def test_main_returns_nonzero_on_collaborator_construction_failure(
 import dataclasses  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
-from ghidra_mcp.server.auth import Principal  # noqa: E402
-from ghidra_mcp.server.http_middleware import SCOPE_PRINCIPAL_KEY  # noqa: E402
+from vivarium.server.auth import Principal  # noqa: E402
+from vivarium.server.http_middleware import SCOPE_PRINCIPAL_KEY  # noqa: E402
 
 
 class _FakeAppWithScope:

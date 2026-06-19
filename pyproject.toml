@@ -3,14 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ghidra-mcp"
-version = "0.8.0"
+name = "vivarium-mcp"
+version = "0.9.0"
 description = "Secure MCP server exposing headless, out-of-process Ghidra to LLM clients as read-only tools."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
-authors = [{ name = "ghidra-mcp authors" }]
+authors = [{ name = "vivarium authors" }]
 keywords = ["mcp", "ghidra", "reverse-engineering", "security", "llm-tools"]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
@@ -83,16 +83,16 @@ sast = [
 #   would pull an unpinned PyPI build and break the version-match + offline-install guarantees).
 
 [project.urls]
-Homepage = "https://github.com/OWNER/ghidra-mcp"
-Repository = "https://github.com/OWNER/ghidra-mcp"
-Issues = "https://github.com/OWNER/ghidra-mcp/issues"
+Homepage = "https://github.com/OWNER/vivarium"
+Repository = "https://github.com/OWNER/vivarium"
+Issues = "https://github.com/OWNER/vivarium/issues"
 
 [project.scripts]
-# stdio entrypoint (the only transport in v1). Implementation stub lives in src/ghidra_mcp/__main__.py.
-ghidra-mcp = "ghidra_mcp.__main__:main"
+# stdio entrypoint (the only transport in v1). Implementation stub lives in src/vivarium/__main__.py.
+vivarium = "vivarium.__main__:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/ghidra_mcp"]
+packages = ["src/vivarium"]
 
 # ---------------------------------------------------------------------------
 # Ruff — lint + format. Docstring mandate enforced mechanically (topic-documentation).
@@ -166,7 +166,7 @@ addopts = [
   "-ra",
   "--strict-markers",
   "--strict-config",
-  "--cov=ghidra_mcp",
+  "--cov=vivarium",
   "--cov-branch",
   "--cov-report=term-missing",
   "--cov-report=xml",
@@ -182,9 +182,9 @@ markers = [
 
 [tool.coverage.run]
 branch = true
-source = ["ghidra_mcp"]
+source = ["vivarium"]
 # Worker-side Ghidra/JVM glue is exercised only in the integration suite (real worker), not unit CI.
-omit = ["src/ghidra_mcp/ghidra/_jvm_bridge.py"]
+omit = ["src/vivarium/ghidra/_jvm_bridge.py"]
 
 [tool.coverage.report]
 show_missing = true
@@ -197,10 +197,10 @@ exclude_lines = [
 
 # Critical paths (target 100% — master §4). Enforced by a dedicated CI job that runs coverage
 # scoped to these modules with --fail-under=100. Listed here as the authoritative designation:
-#   - src/ghidra_mcp/core/validation.py     (trust boundary 1: client args)
-#   - src/ghidra_mcp/core/envelope.py       (trust boundary 4: untrusted-data + error envelopes)
-#   - src/ghidra_mcp/sessions/manager.py    (session isolation / eviction / BOLA prevention)
-#   - src/ghidra_mcp/security/limits.py     (DoS bounds enforced before the worker)
+#   - src/vivarium/core/validation.py     (trust boundary 1: client args)
+#   - src/vivarium/core/envelope.py       (trust boundary 4: untrusted-data + error envelopes)
+#   - src/vivarium/sessions/manager.py    (session isolation / eviction / BOLA prevention)
+#   - src/vivarium/security/limits.py     (DoS bounds enforced before the worker)
 
 [tool.bandit]
 # bandit SAST config; asserts in tests are excluded via the test path, not by skipping checks.

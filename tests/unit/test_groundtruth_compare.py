@@ -18,7 +18,7 @@ from tests.e2e._groundtruth import GroundTruth, Thresholds, compare
 #   compute@0x40 -> helper, leaf_a
 #   main@0x50 -> compute, leaf_b
 _TRUTH_DOC = {
-    "schema": "ghidra-mcp/e2e-groundtruth/1",
+    "schema": "vivarium/e2e-groundtruth/1",
     "tool": "synth",
     "version": "0",
     "functions": [

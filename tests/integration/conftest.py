@@ -3,7 +3,7 @@
 The integration tests require a real, hardened Ghidra worker container pinned by digest (WS3) — an
 image pull and container run are GATED supply-chain/runtime actions (PLAN §6), so they MUST NOT
 run in the unit/coverage CI job. This conftest centralizes the skip guard: every integration test
-is collected but skipped unless ``GHIDRA_MCP_INTEGRATION`` is set to a truthy value AND the worker
+is collected but skipped unless ``VIVARIUM_INTEGRATION`` is set to a truthy value AND the worker
 prerequisites are met.
 
 A skipped (not errored, not failed) integration suite keeps the default ``pytest`` run green while
@@ -16,13 +16,13 @@ import os
 
 import pytest
 
-_ENV_FLAG = "GHIDRA_MCP_INTEGRATION"
+_ENV_FLAG = "VIVARIUM_INTEGRATION"
 
-#: Default worker-image reference for LOCAL validation when ``GHIDRA_MCP_WORKER_IMAGE`` is unset.
+#: Default worker-image reference for LOCAL validation when ``VIVARIUM_WORKER_IMAGE`` is unset.
 #: CI pins the image BY DIGEST via the env var (WS3, std-supplychain); this convenience default is
 #: the locally-built dev tag used by the manual in-worker smoke. It only takes effect once the
 #: integration flag is already set, so the unit/coverage job (flag unset) never reaches it.
-_DEFAULT_WORKER_IMAGE = "localhost/ghidra-mcp-worker:dev"
+_DEFAULT_WORKER_IMAGE = "localhost/vivarium-worker:dev"
 
 
 def _integration_enabled() -> bool:
@@ -46,7 +46,7 @@ def worker_image() -> str:
     exports the pinned-by-digest reference. This fixture is only reached when the integration flag
     is enabled, so the unit/coverage job never depends on an image existing.
     """
-    return os.environ.get("GHIDRA_MCP_WORKER_IMAGE", "").strip() or _DEFAULT_WORKER_IMAGE
+    return os.environ.get("VIVARIUM_WORKER_IMAGE", "").strip() or _DEFAULT_WORKER_IMAGE
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

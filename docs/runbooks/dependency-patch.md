@@ -34,7 +34,7 @@
 1. Identify the fixed Ghidra/JDK version or patched base image.
 2. Rebuild the worker image; obtain the **new `@sha256:` digest**: `<build + inspect digest>`.
 3. **Vet the digest** (provenance/signature where available) and **surface it for human approval**
-   (gated). Update the pinned digest in `deploy/` and `.env.example`'s `GHIDRA_MCP_WORKER_IMAGE`.
+   (gated). Update the pinned digest in `deploy/` and `.env.example`'s `VIVARIUM_WORKER_IMAGE`.
 4. Regenerate the worker **SBOM**; re-run the image/IaC scan (Trivy) → no high/critical remaining.
 
 ## Verification

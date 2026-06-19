@@ -13,7 +13,7 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
-from ghidra_mcp.server.auth import (
+from vivarium.server.auth import (
     ALL_CAPABILITIES,
     CAP_READ,
     CAP_WRITE,
@@ -501,7 +501,7 @@ def test_mtls_principal_field_set_matches_default_membership() -> None:
 # construction; iss/aud/exp/nbf are all validated; sub → Principal; any failure → generic None.
 # ==============================================================================================
 _ISS = "https://idp.example/realm"
-_AUD = "ghidra-mcp"
+_AUD = "vivarium"
 _JWKS = "https://idp.example/realm/jwks"
 
 

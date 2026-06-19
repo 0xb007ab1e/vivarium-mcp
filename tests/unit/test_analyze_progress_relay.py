@@ -24,14 +24,14 @@ from typing import Any, cast
 import anyio
 from mcp.server.fastmcp.tools.base import Tool
 
-from ghidra_mcp.config import Config
-from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
-from ghidra_mcp.ghidra.port import GhidraPort, OnProgress
-from ghidra_mcp.security.limits import Limits
-from ghidra_mcp.server.app import _with_error_boundary
-from ghidra_mcp.sessions.manager import SessionManager
-from ghidra_mcp.tools import registry as reg
-from ghidra_mcp.tools import schemas as s
+from vivarium.config import Config
+from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
+from vivarium.ghidra.port import GhidraPort, OnProgress
+from vivarium.security.limits import Limits
+from vivarium.server.app import _with_error_boundary
+from vivarium.sessions.manager import SessionManager
+from vivarium.tools import registry as reg
+from vivarium.tools import schemas as s
 
 _SID = "S" * 43  # a schema-valid opaque session id
 _PROGRESS_ID = "tok"  # opaque client progressToken (a request id, not a credential)
@@ -299,7 +299,7 @@ def test_end_to_end_client_receives_progress_notifications() -> None:
     """A real in-memory MCP client passing a progress callback receives each relayed frame."""
     from mcp.shared.memory import create_connected_server_and_client_session as _connect
 
-    from ghidra_mcp.server.app import build_app
+    from vivarium.server.app import build_app
 
     port = _FakePort(frames=[(0, "importing"), (60, "analyzing"), (100, "finalizing")])
     app = build_app(
@@ -334,7 +334,7 @@ def test_end_to_end_without_progress_callback_emits_nothing_extra() -> None:
     """No client progress callback ⇒ no progressToken ⇒ the inline path; the call still succeeds."""
     from mcp.shared.memory import create_connected_server_and_client_session as _connect
 
-    from ghidra_mcp.server.app import build_app
+    from vivarium.server.app import build_app
 
     port = _FakePort(frames=[(50, "analyzing")])
     app = build_app(

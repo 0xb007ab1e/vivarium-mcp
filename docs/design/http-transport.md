@@ -9,14 +9,14 @@ New env knobs (12-Factor; `topic-config-environments`). Defaults preserve today'
 
 | Env | Default | Meaning |
 |-----|---------|---------|
-| `GHIDRA_MCP_TRANSPORT` | `stdio` | `stdio` \| `http` |
-| `GHIDRA_MCP_HTTP_BIND` | `127.0.0.1:8765` | `host:port`, or `unix:/path.sock` for UDS |
-| `GHIDRA_MCP_HTTP_TLS_CERT` / `_TLS_KEY` | unset | PEM paths (from secret store); enables in-app TLS |
-| `GHIDRA_MCP_HTTP_AUTH` | `bearer` (TCP) / `none` (loopback,UDS) | `bearer` \| `mtls` \| `oauth` \| `none` |
-| `GHIDRA_MCP_HTTP_BEARER_TOKEN` | unset | bearer secret (env-injected; never logged) |
-| `GHIDRA_MCP_HTTP_CORS_ORIGINS` | `` (none) | explicit allow-list; empty = no cross-origin |
-| `GHIDRA_MCP_HTTP_RATE` / `_BURST` | e.g. `10/s` / `20` | per-client token bucket |
-| `GHIDRA_MCP_HTTP_MAX_BODY` | reuse existing arg caps | request size cap (bytes) |
+| `VIVARIUM_TRANSPORT` | `stdio` | `stdio` \| `http` |
+| `VIVARIUM_HTTP_BIND` | `127.0.0.1:8765` | `host:port`, or `unix:/path.sock` for UDS |
+| `VIVARIUM_HTTP_TLS_CERT` / `_TLS_KEY` | unset | PEM paths (from secret store); enables in-app TLS |
+| `VIVARIUM_HTTP_AUTH` | `bearer` (TCP) / `none` (loopback,UDS) | `bearer` \| `mtls` \| `oauth` \| `none` |
+| `VIVARIUM_HTTP_BEARER_TOKEN` | unset | bearer secret (env-injected; never logged) |
+| `VIVARIUM_HTTP_CORS_ORIGINS` | `` (none) | explicit allow-list; empty = no cross-origin |
+| `VIVARIUM_HTTP_RATE` / `_BURST` | e.g. `10/s` / `20` | per-client token bucket |
+| `VIVARIUM_HTTP_MAX_BODY` | reuse existing arg caps | request size cap (bytes) |
 
 **Startup fail-closed rules** (refuse to boot, clear error — no insecure runtime state):
 1. `transport=http` + non-loopback host (not `127.0.0.1`/`::1`/UDS) ⇒ **require** TLS cert+key

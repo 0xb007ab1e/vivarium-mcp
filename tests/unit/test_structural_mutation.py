@@ -20,16 +20,16 @@ from typing import Any, cast
 
 import pytest
 
-from ghidra_mcp.config import Config
-from ghidra_mcp.core import validation as v
-from ghidra_mcp.core.envelope import DataOrigin, Untrusted
-from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
-from ghidra_mcp.ghidra.port import GhidraPort
-from ghidra_mcp.ghidra.rpc_client import RpcGhidraAdapter, _build_structural_rename_result
-from ghidra_mcp.security.limits import Limits
-from ghidra_mcp.sessions.manager import SessionManager
-from ghidra_mcp.tools import registry as reg
-from ghidra_mcp.tools import schemas as s
+from vivarium.config import Config
+from vivarium.core import validation as v
+from vivarium.core.envelope import DataOrigin, Untrusted
+from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
+from vivarium.ghidra.port import GhidraPort
+from vivarium.ghidra.rpc_client import RpcGhidraAdapter, _build_structural_rename_result
+from vivarium.security.limits import Limits
+from vivarium.sessions.manager import SessionManager
+from vivarium.tools import registry as reg
+from vivarium.tools import schemas as s
 
 _VALID_SID = "sid1"
 
@@ -357,7 +357,7 @@ class _FakeProgram:
 
 
 def _backend_with(program: _FakeProgram) -> Any:
-    from ghidra_mcp.ghidra._jvm_bridge import PyGhidraBackend
+    from vivarium.ghidra._jvm_bridge import PyGhidraBackend
 
     backend = PyGhidraBackend()
     backend._program = program

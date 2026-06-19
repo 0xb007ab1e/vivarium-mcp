@@ -1,4 +1,4 @@
-# ghidra-mcp — project rules
+# vivarium — project rules
 
 > Inherits the master SSDLC ruleset (~/.claude/CLAUDE.md) automatically.
 > Single source of truth for delivery is [`PLAN.md`](./PLAN.md) (APPROVED v2). Honor every

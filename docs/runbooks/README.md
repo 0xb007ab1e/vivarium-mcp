@@ -1,4 +1,4 @@
-# Runbooks — `ghidra-mcp`
+# Runbooks — `vivarium`
 
 Operational procedures, adapted to this service (`workflow-runbooks`). Runbooks are part of "done"
 for a deployable service; they are validated in a drill before being relied on.

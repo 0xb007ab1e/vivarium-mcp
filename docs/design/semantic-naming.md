@@ -33,7 +33,7 @@ All inputs are `frozen`, `extra="forbid"`, session-scoped (authorized server-sid
 
 ## 3. Leaf-first reverse-topological ordering over SCCs (the algorithmic heart)
 
-Implemented in **`src/ghidra_mcp/core/callgraph.py`** — pure, no JVM, no I/O, 100%-tested
+Implemented in **`src/vivarium/core/callgraph.py`** — pure, no JVM, no I/O, 100%-tested
 (critical path). The worker extracts a resolved adjacency map (`caller → callees`); the server
 computes the order:
 
@@ -132,13 +132,13 @@ the v1.1 build):
 
 | Concern | Location | JVM? |
 |---|---|---|
-| Tool schemas (frozen In/Out) | `src/ghidra_mcp/tools/schemas.py` | no |
-| Tool handlers (authorize → validate → delegate) | `src/ghidra_mcp/tools/registry.py` | no |
-| **Leaf-first ordering (pure core)** | `src/ghidra_mcp/core/callgraph.py` | **no** |
-| Adapter: extraction wiring + one-hop/aggregation + wrap | `src/ghidra_mcp/ghidra/rpc_client.py` (`call_graph`/`callees`/`callers`/`analysis_order`/`function_context`, `_one_hop`, `_build_*`) | no |
-| Port interface | `src/ghidra_mcp/ghidra/port.py` | no |
+| Tool schemas (frozen In/Out) | `src/vivarium/tools/schemas.py` | no |
+| Tool handlers (authorize → validate → delegate) | `src/vivarium/tools/registry.py` | no |
+| **Leaf-first ordering (pure core)** | `src/vivarium/core/callgraph.py` | **no** |
+| Adapter: extraction wiring + one-hop/aggregation + wrap | `src/vivarium/ghidra/rpc_client.py` (`call_graph`/`callees`/`callers`/`analysis_order`/`function_context`, `_one_hop`, `_build_*`) | no |
+| Port interface | `src/vivarium/ghidra/port.py` | no |
 | Worker RPC methods (allow-list + dispatch) | `worker/dispatch.py` (`call_graph`, `referenced_strings`) | no |
-| **Graph + string extraction (worker/JVM)** | `src/ghidra_mcp/ghidra/_jvm_bridge.py` (`_gh_call_graph`, `_gh_referenced_strings`) | **yes — worker only (ADR-001)** |
+| **Graph + string extraction (worker/JVM)** | `src/vivarium/ghidra/_jvm_bridge.py` (`_gh_call_graph`, `_gh_referenced_strings`) | **yes — worker only (ADR-001)** |
 
 ## References
 - ADR-007 (decision), ADR-001 (out-of-process), ADR-005 (untrusted envelope), ADR-006 (catalog seam).

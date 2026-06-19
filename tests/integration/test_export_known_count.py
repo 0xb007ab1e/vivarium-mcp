@@ -20,7 +20,7 @@ unit-tested hermetically elsewhere; this test exercises the real chain.
 
 Posture: it drives the **real MCP stdio chain** (mirroring ``scripts/acceptance_run.py``'s client
 setup and ``tests/e2e/test_groundtruth_oss.py``'s stdio journey) — it launches ``python -m
-ghidra_mcp`` (composition root → real ``RpcGhidraAdapter`` → hardened worker container) and drives
+vivarium`` (composition root → real ``RpcGhidraAdapter`` → hardened worker container) and drives
 it as an MCP client. The input is a tiny, benign, locally-built micro-binary (no real malware,
 master §5): the test compiles a 2-function C source into the ``tmp_path`` import root, which the
 server confines + read-only mounts into the worker. (``read_timeout_seconds`` takes a
@@ -28,16 +28,16 @@ server confines + read-only mounts into the worker. (``read_timeout_seconds`` ta
 
 Gating (reused verbatim from ``conftest.py``): this test is ``integration``-marked, so the default
 ``pytest`` / unit-coverage run SKIPS it (kept green + hermetic). It runs only when
-``GHIDRA_MCP_INTEGRATION`` is truthy AND a real worker image + container engine + a C compiler are
+``VIVARIUM_INTEGRATION`` is truthy AND a real worker image + container engine + a C compiler are
 available. The PM performs that live verification on a gated worker-image run.
 
 Honored environment (same as the other integration/e2e tests):
-    * ``GHIDRA_MCP_INTEGRATION`` — truthy ({1,true,yes,on}) enables the suite (see conftest).
-    * ``GHIDRA_MCP_WORKER_IMAGE`` — the pinned-by-digest worker image ref (reaches the adapter).
-    * ``GHIDRA_MCP_CONTAINER_ENGINE`` / ``GHIDRA_MCP_WORKER_RUNTIME`` / ``GHIDRA_MCP_WORKER_UID`` /
-      ``GHIDRA_MCP_WORKER_GID`` / ``GHIDRA_MCP_RPC_SOCKET_DIR`` — worker spawn config (composition
+    * ``VIVARIUM_INTEGRATION`` — truthy ({1,true,yes,on}) enables the suite (see conftest).
+    * ``VIVARIUM_WORKER_IMAGE`` — the pinned-by-digest worker image ref (reaches the adapter).
+    * ``VIVARIUM_CONTAINER_ENGINE`` / ``VIVARIUM_WORKER_RUNTIME`` / ``VIVARIUM_WORKER_UID`` /
+      ``VIVARIUM_WORKER_GID`` / ``VIVARIUM_RPC_SOCKET_DIR`` — worker spawn config (composition
       root reads them from the inherited environment).
-    * ``GHIDRA_MCP_E2E_TIMEOUT`` — per-call MCP read timeout seconds for import/analyze.
+    * ``VIVARIUM_E2E_TIMEOUT`` — per-call MCP read timeout seconds for import/analyze.
 """
 
 from __future__ import annotations
@@ -98,12 +98,12 @@ int main(int argc, char **argv) {
 
 def _read_timeout() -> datetime.timedelta:
     """Build the MCP client per-call read timeout (a ``datetime.timedelta``, NOT an int)."""
-    return datetime.timedelta(seconds=int(os.environ.get("GHIDRA_MCP_E2E_TIMEOUT", "600")))
+    return datetime.timedelta(seconds=int(os.environ.get("VIVARIUM_E2E_TIMEOUT", "600")))
 
 
 def _engine_available() -> bool:
     """Return whether the configured container engine binary is resolvable on ``PATH``."""
-    engine = os.environ.get("GHIDRA_MCP_CONTAINER_ENGINE", "podman").strip() or "podman"
+    engine = os.environ.get("VIVARIUM_CONTAINER_ENGINE", "podman").strip() or "podman"
     return shutil.which(engine) is not None
 
 
@@ -216,8 +216,8 @@ async def _drive_known_count(binary: Path, import_root: Path) -> dict[str, int]:
 
     params = StdioServerParameters(
         command=sys.executable,
-        args=["-m", "ghidra_mcp"],
-        env={**os.environ, "GHIDRA_MCP_IMPORT_ROOT": str(import_root)},
+        args=["-m", "vivarium"],
+        env={**os.environ, "VIVARIUM_IMPORT_ROOT": str(import_root)},
     )
     timeout = _read_timeout()
 
@@ -320,7 +320,7 @@ def test_export_carries_exactly_the_user_authored_writes(tmp_path: Path) -> None
         tmp_path: The pytest temp dir used as the (host) import root the micro-binary is built into.
     """
     if not _engine_available():
-        engine = os.environ.get("GHIDRA_MCP_CONTAINER_ENGINE", "podman").strip() or "podman"
+        engine = os.environ.get("VIVARIUM_CONTAINER_ENGINE", "podman").strip() or "podman"
         pytest.skip(f"container engine {engine!r} not found on PATH")
     if _compiler() is None:
         pytest.skip("no C compiler (cc/gcc) on PATH to build the benign micro-binary")

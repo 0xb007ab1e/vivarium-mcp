@@ -9,7 +9,7 @@ edge only consumes already-parsed identity keys. These tests pin the parsing dec
 
 from __future__ import annotations
 
-from ghidra_mcp.ghidra._jvm_bridge import _parse_export_targets
+from vivarium.ghidra._jvm_bridge import _parse_export_targets
 
 
 def test_parses_full_targets() -> None:

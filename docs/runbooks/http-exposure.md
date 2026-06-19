@@ -21,7 +21,7 @@
 
 ## Prerequisites & access
 
-- The server runs as `python -m ghidra_mcp` with the usual worker config (`GHIDRA_MCP_WORKER_IMAGE`
+- The server runs as `python -m vivarium` with the usual worker config (`VIVARIUM_WORKER_IMAGE`
   etc.). HTTP is selected purely by env (12-Factor; no rebuild).
 - For any network bind: a **TLS cert + key** (PEM) and a **bearer token**, both pulled at runtime
   from the secret store / injected env — **never** in code, VCS, the image, or argv
@@ -35,21 +35,21 @@ aborts with a clear, redacted error (no insecure runtime state).
 
 | Env var | Default | Notes |
 |---|---|---|
-| `GHIDRA_MCP_TRANSPORT` | `stdio` | set `http` to enable HTTP |
-| `GHIDRA_MCP_HTTP_BIND` | `127.0.0.1:8765` | `host:port` (IPv6 as `[::1]:8765`) or `unix:/path.sock` |
-| `GHIDRA_MCP_HTTP_AUTH` | `none` on loopback/UDS · `bearer` on network | `none`/`bearer`/`mtls`/`oauth`/`mtls-proxy` (all implemented — ADR-019/033/034) |
-| `GHIDRA_MCP_HTTP_BEARER_TOKEN` | unset | required for `bearer`; **≥ 16 chars**; never logged |
-| `GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET` | unset | **required** for `mtls-proxy` (the trust anchor); **≥ 16 chars**; never logged |
-| `GHIDRA_MCP_HTTP_PROXY_SECRET_HEADER` / `_PROXY_IDENTITY_HEADER` | `x-proxy-auth` / `x-client-cert-subject` | headers the proxy injects (secret + verified client identity) for `mtls-proxy` |
-| `GHIDRA_MCP_HTTP_TLS_CERT` / `_TLS_KEY` | unset | PEM paths; **both or neither**; required for any network bind |
-| `GHIDRA_MCP_HTTP_CORS_ORIGINS` | _(none)_ | comma-separated explicit origins; `*` is rejected |
-| `GHIDRA_MCP_HTTP_RATE_PER_SECOND` | `10` | per-client token-bucket refill rate |
-| `GHIDRA_MCP_HTTP_RATE_BURST` | `20` | per-client bucket size |
-| `GHIDRA_MCP_HTTP_MAX_BODY_BYTES` | `1048576` | request size cap (1 MiB); `413` over it |
+| `VIVARIUM_TRANSPORT` | `stdio` | set `http` to enable HTTP |
+| `VIVARIUM_HTTP_BIND` | `127.0.0.1:8765` | `host:port` (IPv6 as `[::1]:8765`) or `unix:/path.sock` |
+| `VIVARIUM_HTTP_AUTH` | `none` on loopback/UDS · `bearer` on network | `none`/`bearer`/`mtls`/`oauth`/`mtls-proxy` (all implemented — ADR-019/033/034) |
+| `VIVARIUM_HTTP_BEARER_TOKEN` | unset | required for `bearer`; **≥ 16 chars**; never logged |
+| `VIVARIUM_HTTP_PROXY_SHARED_SECRET` | unset | **required** for `mtls-proxy` (the trust anchor); **≥ 16 chars**; never logged |
+| `VIVARIUM_HTTP_PROXY_SECRET_HEADER` / `_PROXY_IDENTITY_HEADER` | `x-proxy-auth` / `x-client-cert-subject` | headers the proxy injects (secret + verified client identity) for `mtls-proxy` |
+| `VIVARIUM_HTTP_TLS_CERT` / `_TLS_KEY` | unset | PEM paths; **both or neither**; required for any network bind |
+| `VIVARIUM_HTTP_CORS_ORIGINS` | _(none)_ | comma-separated explicit origins; `*` is rejected |
+| `VIVARIUM_HTTP_RATE_PER_SECOND` | `10` | per-client token-bucket refill rate |
+| `VIVARIUM_HTTP_RATE_BURST` | `20` | per-client bucket size |
+| `VIVARIUM_HTTP_MAX_BODY_BYTES` | `1048576` | request size cap (1 MiB); `413` over it |
 
 > **Auth note:** `bearer` (and `none` on loopback/UDS) plus `mtls` + `oauth` (ADR-019) and
 > `mtls-proxy` (ADR-034) are all implemented. `oauth` adds optional scope→per-tool authZ
-> (`GHIDRA_MCP_HTTP_OAUTH_WRITE_SCOPE` — ADR-033). `mtls-proxy` trusts a TLS-terminating reverse
+> (`VIVARIUM_HTTP_OAUTH_WRITE_SCOPE` — ADR-033). `mtls-proxy` trusts a TLS-terminating reverse
 > proxy's forwarded client identity, gated on a shared secret — see the constraint below.
 
 ### Rung 1 — Loopback TCP (same host, simplest)
@@ -58,9 +58,9 @@ Plaintext is permitted (no network hop). Auth defaults to `none` — acceptable 
 is unreachable off-host.
 
 ```bash
-GHIDRA_MCP_TRANSPORT=http \
-GHIDRA_MCP_HTTP_BIND=127.0.0.1:8765 \
-python -m ghidra_mcp
+VIVARIUM_TRANSPORT=http \
+VIVARIUM_HTTP_BIND=127.0.0.1:8765 \
+python -m vivarium
 ```
 
 ### Rung 2 — Unix domain socket (same host, no TCP port)
@@ -69,9 +69,9 @@ Access is gated by **filesystem permissions** on the socket — put it in a dir 
 the MCP host) can reach; no port is opened.
 
 ```bash
-GHIDRA_MCP_TRANSPORT=http \
-GHIDRA_MCP_HTTP_BIND=unix:/run/ghidra-mcp/mcp.sock \
-python -m ghidra_mcp
+VIVARIUM_TRANSPORT=http \
+VIVARIUM_HTTP_BIND=unix:/run/vivarium/mcp.sock \
+python -m vivarium
 # Then: chmod 0700 the containing dir; the socket inherits the process umask.
 ```
 
@@ -84,14 +84,14 @@ unless **both** TLS (cert+key) **and** a non-`none` authenticator are present.
 # 1. Mint a high-entropy token and store it in the secret manager (NOT in a file in the repo):
 #    python -c "import secrets; print(secrets.token_urlsafe(32))"
 # 2. Inject token + TLS paths from the secret store at runtime (example shows env injection):
-GHIDRA_MCP_TRANSPORT=http \
-GHIDRA_MCP_HTTP_BIND=0.0.0.0:8765 \
-GHIDRA_MCP_HTTP_AUTH=bearer \
-GHIDRA_MCP_HTTP_BEARER_TOKEN="$(read-secret ghidra-mcp/bearer)" \
-GHIDRA_MCP_HTTP_TLS_CERT=/etc/ghidra-mcp/tls/cert.pem \
-GHIDRA_MCP_HTTP_TLS_KEY=/etc/ghidra-mcp/tls/key.pem \
-GHIDRA_MCP_HTTP_CORS_ORIGINS="https://your-mcp-host.example" \
-python -m ghidra_mcp
+VIVARIUM_TRANSPORT=http \
+VIVARIUM_HTTP_BIND=0.0.0.0:8765 \
+VIVARIUM_HTTP_AUTH=bearer \
+VIVARIUM_HTTP_BEARER_TOKEN="$(read-secret vivarium/bearer)" \
+VIVARIUM_HTTP_TLS_CERT=/etc/vivarium/tls/cert.pem \
+VIVARIUM_HTTP_TLS_KEY=/etc/vivarium/tls/key.pem \
+VIVARIUM_HTTP_CORS_ORIGINS="https://your-mcp-host.example" \
+python -m vivarium
 ```
 
 Clients send `Authorization: Bearer <token>` over **https**.
@@ -105,7 +105,7 @@ directly; the proxy owns the public cert. Keep the bearer token (or proxy-inject
 #### `mtls-proxy` — trust the proxy's verified client identity (ADR-034)
 
 When the proxy terminates **client-cert (mTLS)** and you want that identity inside the server, set
-`GHIDRA_MCP_HTTP_AUTH=mtls-proxy`. The proxy must inject TWO headers: the **shared secret**
+`VIVARIUM_HTTP_AUTH=mtls-proxy`. The proxy must inject TWO headers: the **shared secret**
 (`x-proxy-auth` by default) and the **verified client identity** it extracted from the cert
 (`x-client-cert-subject` by default, e.g. nginx `proxy_set_header X-Client-Cert-Subject
 $ssl_client_s_dn;`). The server trusts the identity **only** when the secret matches (constant-time).
@@ -114,7 +114,7 @@ $ssl_client_s_dn;`). The server trusts the identity **only** when the secret mat
 > 1. **Network-isolate the server so ONLY the proxy can reach it** (bind loopback/UDS, or a private
 >    interface + firewall/NetworkPolicy). Anyone who can reach the server directly AND knows the
 >    secret can forge any identity.
-> 2. **Set a strong `GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET`** (≥16 chars, from your secret manager;
+> 2. **Set a strong `VIVARIUM_HTTP_PROXY_SHARED_SECRET`** (≥16 chars, from your secret manager;
 >    the mode refuses to boot without one) and have the proxy **strip** any client-supplied
 >    `x-proxy-auth`/`x-client-cert-subject` headers before injecting its own (so a client can't
 >    smuggle them through). Rotate it via `runbooks/secret-rotation.md`.
@@ -131,7 +131,7 @@ $ssl_client_s_dn;`). The server trusts the identity **only** when the secret mat
 
 ## Rate-limit & size tuning
 
-- `GHIDRA_MCP_HTTP_RATE_PER_SECOND` / `_BURST` are a **per-client** token bucket; raise the burst for
+- `VIVARIUM_HTTP_RATE_PER_SECOND` / `_BURST` are a **per-client** token bucket; raise the burst for
   a chatty single operator, lower the rate to harden against a flood. `_MAX_BODY_BYTES` caps request
   size (`413` over it). These are DoS controls (`std-owasp-api` API4) — keep them tight.
 - **Reverse-proxy caveat:** the per-client bucket keys on the **TCP peer IP**. Behind a reverse
@@ -161,12 +161,12 @@ A misconfigured **network bind without TLS or auth must fail to start** — conf
 non-zero with a config error rather than serving:
 
 ```bash
-GHIDRA_MCP_TRANSPORT=http GHIDRA_MCP_HTTP_BIND=0.0.0.0:8765 python -m ghidra_mcp; echo "exit=$?"  # → exit=2
+VIVARIUM_TRANSPORT=http VIVARIUM_HTTP_BIND=0.0.0.0:8765 python -m vivarium; echo "exit=$?"  # → exit=2
 ```
 
 ## Rollback / abort
 
-- **Revert to stdio** instantly: unset `GHIDRA_MCP_TRANSPORT` (or set `stdio`) and restart. No data
+- **Revert to stdio** instantly: unset `VIVARIUM_TRANSPORT` (or set `stdio`) and restart. No data
   migration — sessions are ephemeral (ADR-002).
 - If a network bind is misbehaving, drop to loopback/UDS or pull the bind while you investigate.
 

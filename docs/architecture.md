@@ -1,4 +1,4 @@
-# Architecture Overview — `ghidra-mcp`
+# Architecture Overview — `vivarium`
 
 > Source of truth for delivery: [`PLAN.md`](../PLAN.md). Decisions are recorded as ADRs in
 > [`docs/adr/`](adr/). The threat model is [`docs/security/threat-model.md`](security/threat-model.md).
@@ -6,7 +6,7 @@
 
 ## Purpose
 
-`ghidra-mcp` exposes Ghidra reverse-engineering capabilities to LLM clients as **MCP tools**. The
+`vivarium` exposes Ghidra reverse-engineering capabilities to LLM clients as **MCP tools**. The
 analyzed binary is **hostile input**; the central design goal is to **contain the analyzer** so a
 malicious binary cannot escape, exfiltrate, or destabilize anything, and so its output cannot
 hijack the LLM via prompt injection.
@@ -30,11 +30,11 @@ edges; the core depends on a **port** (`GhidraPort`), not on the concrete worker
 
 ```mermaid
 C4Context
-title System Context — ghidra-mcp (v1)
+title System Context — vivarium (v1)
 Person(user, "Analyst / Operator", "Drives an MCP client")
-System_Boundary(b, "ghidra-mcp") {
+System_Boundary(b, "vivarium") {
   System(client, "MCP Client (LLM host)", "Sends tool calls over stdio")
-  System(server, "ghidra-mcp server", "Python 3.12+, FastMCP, stdio. No JVM. Validates, sessions, envelopes.")
+  System(server, "vivarium server", "Python 3.12+, FastMCP, stdio. No JVM. Validates, sessions, envelopes.")
   System(worker, "Ghidra worker", "Hardened, network-isolated container. Ghidra 12.1.2 / JDK 21. The ONLY place a binary is parsed.")
 }
 System_Ext(binary, "Analyzed binary", "HOSTILE INPUT")
@@ -49,7 +49,7 @@ Rel(worker, server, "structured results", "→ wrapped untrusted (TB4)")
 flowchart LR
   subgraph CLIENT["MCP Client (LLM host)"]
   end
-  subgraph SERVER["ghidra-mcp server process (NO JVM — ADR-001)"]
+  subgraph SERVER["vivarium server process (NO JVM — ADR-001)"]
     direction TB
     SH["server/ (FastMCP stdio shell)"]
     TL["tools/ (Tier-1 allow-list + frozen schemas)"]
@@ -76,7 +76,7 @@ flowchart LR
   classDef hostile fill:#511,stroke:#a00,color:#fff;
 ```
 
-### Package layout (`src/ghidra_mcp/`)
+### Package layout (`src/vivarium/`)
 
 | Path | Role | Workstream |
 |------|------|-----------|

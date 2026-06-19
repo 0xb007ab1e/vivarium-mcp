@@ -20,20 +20,20 @@ from typing import Any, cast
 
 import pytest
 
-from ghidra_mcp.config import Config
-from ghidra_mcp.core.envelope import DataOrigin, Untrusted
-from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
-from ghidra_mcp.ghidra.port import GhidraPort
-from ghidra_mcp.ghidra.rpc_client import (
+from vivarium.config import Config
+from vivarium.core.envelope import DataOrigin, Untrusted
+from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
+from vivarium.ghidra.port import GhidraPort
+from vivarium.ghidra.rpc_client import (
     RpcGhidraAdapter,
     _build_apply_data_type_result,
     _build_set_function_signature_result,
     _type_ref_params,
 )
-from ghidra_mcp.security.limits import Limits
-from ghidra_mcp.sessions.manager import SessionManager
-from ghidra_mcp.tools import registry as reg
-from ghidra_mcp.tools import schemas as s
+from vivarium.security.limits import Limits
+from vivarium.sessions.manager import SessionManager
+from vivarium.tools import registry as reg
+from vivarium.tools import schemas as s
 
 _VALID_SID = "sid1"
 

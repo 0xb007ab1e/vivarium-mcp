@@ -22,11 +22,11 @@ import threading
 import pytest
 from worker import dispatch
 
-from ghidra_mcp.core.envelope import DataOrigin, Untrusted
-from ghidra_mcp.core.errors import ErrorType, GhidraMcpError
-from ghidra_mcp.ghidra import rpc_framing
-from ghidra_mcp.ghidra.rpc_client import RpcGhidraAdapter
-from ghidra_mcp.tools import schemas as s
+from vivarium.core.envelope import DataOrigin, Untrusted
+from vivarium.core.errors import ErrorType, GhidraMcpError
+from vivarium.ghidra import rpc_framing
+from vivarium.ghidra.rpc_client import RpcGhidraAdapter
+from vivarium.tools import schemas as s
 
 _CAP = 4 * 1024 * 1024
 
@@ -62,7 +62,7 @@ def _make_adapter(server_sock: socket.socket, worker: _FakeWorker) -> _Connected
     adapter = _ConnectedAdapter(
         server_sock=server_sock,
         launcher=lambda sid, path: worker,
-        socket_dir="/tmp/ghidra-mcp-test",  # noqa: S108  # test-only path; no real socket bound
+        socket_dir="/tmp/vivarium-test",  # noqa: S108  # test-only path; no real socket bound
         tool_timeout_s=0.5,
         analysis_timeout_s=1.0,
         max_response_bytes=_CAP,
@@ -414,7 +414,7 @@ def test_export_unknown_entry_kind_fails_closed() -> None:
 
 # --- ADR-027: the pure change-log → RPC params shaper (_export_annotations_params) -------------
 def test_export_annotations_params_shapes_targets() -> None:
-    from ghidra_mcp.ghidra.rpc_client import _export_annotations_params
+    from vivarium.ghidra.rpc_client import _export_annotations_params
 
     targets = s.ExportTargets(
         comments=[
@@ -436,7 +436,7 @@ def test_export_annotations_params_shapes_targets() -> None:
 
 
 def test_export_annotations_params_empty_is_empty_lists() -> None:
-    from ghidra_mcp.ghidra.rpc_client import _export_annotations_params
+    from vivarium.ghidra.rpc_client import _export_annotations_params
 
     params = _export_annotations_params(s.ExportTargets())
     assert params == {"targets": {"comments": [], "composites": []}}
@@ -444,7 +444,7 @@ def test_export_annotations_params_empty_is_empty_lists() -> None:
 
 def test_export_annotations_params_emits_only_identity_keys_no_values() -> None:
     # The shaper must NEVER carry a comment text / field value — only addresses, slots, names.
-    from ghidra_mcp.ghidra.rpc_client import _export_annotations_params
+    from vivarium.ghidra.rpc_client import _export_annotations_params
 
     params = _export_annotations_params(
         s.ExportTargets(

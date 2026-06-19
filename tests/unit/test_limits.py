@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import pytest
 
-from ghidra_mcp.core.errors import ErrorType, GhidraMcpError
-from ghidra_mcp.security import limits as lim
-from ghidra_mcp.security.limits import (
+from vivarium.core.errors import ErrorType, GhidraMcpError
+from vivarium.security import limits as lim
+from vivarium.security.limits import (
     DEFAULT_ANALYSIS_TIMEOUT_S,
     DEFAULT_MAX_BINARY_BYTES,
     DEFAULT_MAX_RESPONSE_BYTES,

@@ -19,8 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from ghidra_mcp.core.errors import ErrorType, GhidraMcpError
-from ghidra_mcp.sessions.manager import STATE_EVICTED, STATE_OPEN, SessionManager
+from vivarium.core.errors import ErrorType, GhidraMcpError
+from vivarium.sessions.manager import STATE_EVICTED, STATE_OPEN, SessionManager
 
 
 class _FakeClock:
@@ -260,7 +260,7 @@ def test_wipe_failure_surfaces_store_wiped_false(
     store_path.mkdir(parents=True, exist_ok=True)
 
     # Simulate a wipe that cannot remove the directory: rmtree no-ops, path persists.
-    monkeypatch.setattr("ghidra_mcp.sessions.manager.shutil.rmtree", lambda *a, **k: None)
+    monkeypatch.setattr("vivarium.sessions.manager.shutil.rmtree", lambda *a, **k: None)
     wiped = mgr.evict(sid, reason="close")
     assert wiped is False  # confidentiality incident — alerted on
     assert store_path.exists()
@@ -370,14 +370,14 @@ def test_shutdown_skips_already_evicted_session_in_table() -> None:
 
 
 def test_store_path_no_traversal() -> None:
-    mgr, _ = _mgr(store_root="/var/lib/ghidra-mcp/stores")
+    mgr, _ = _mgr(store_root="/var/lib/vivarium/stores")
     info = mgr.create()
     path = mgr._store_path_for(info.session_id)
     assert path is not None
     # The CSPRNG url-safe id contains no path separators or traversal sequences.
     assert ".." not in info.session_id
     assert "/" not in info.session_id
-    assert path.startswith("/var/lib/ghidra-mcp/stores/")
+    assert path.startswith("/var/lib/vivarium/stores/")
 
 
 # ==============================================================================================
@@ -891,7 +891,7 @@ def test_change_log_is_owner_scoped_record_and_read() -> None:
 @pytest.mark.critical
 def test_change_log_is_bounded_per_session() -> None:
     # Over the per-session cap a NEW target is dropped so the log can't grow unbounded (CWE-400).
-    from ghidra_mcp.sessions.manager import _MAX_CHANGE_LOG_TARGETS
+    from vivarium.sessions.manager import _MAX_CHANGE_LOG_TARGETS
 
     mgr, _ = _mgr(max_sessions=4)
     info = mgr.create(owner=_A)

@@ -1,15 +1,15 @@
-# ghidra-mcp
+# vivarium
 
 A **secure [MCP](https://modelcontextprotocol.io) server** that exposes [Ghidra](https://ghidra-sre.org/)
 reverse-engineering capabilities to LLM clients as **tools**. Ghidra runs **isolated, headless, and
 out-of-process**, reachable only through the server's internal RPC. **The analyzed binary is treated
 as hostile input** — containment of the analyzer is the central security control.
 
-> **Latest release: [v0.8.0](https://github.com/0xb007ab1e/ghidra-mcp/releases/tag/v0.8.0)** (2026-06-19) —
+> **Latest release: [v0.8.0](https://github.com/0xb007ab1e/vivarium/releases/tag/v0.8.0)** (2026-06-19) —
 > the **v1.6** increment: a reliability/observability + supply-chain hardening pass. A worker **heap-OOM
 > is now classified `resource-exhausted` (non-retryable), not `worker-unavailable`** (ADR-037 — the JVM
 > self-exits at its heap ceiling with exit 3, below the cgroup wall), and the error now **names the
-> configured memory cap + the `GHIDRA_MCP_WORKER_MEM_MIB` knob** to raise. The **SAST gate runs fully
+> configured memory cap + the `VIVARIUM_WORKER_MEM_MIB` knob** to raise. The **SAST gate runs fully
 > offline** on vendored Semgrep rulesets (no scan-time registry fetch). No new tools (catalog stays
 > **51**), no RPC/error-envelope contract change. Builds on the gated default-deny write surface, the
 > HTTP transport, analyzer-depth profiles, and multi-principal / OAuth authorization. See the

@@ -10,8 +10,8 @@ metrics — works end to end; the real naming quality is the client LLM's job (d
 stub here emits trivially-compilable bodies to make the pipeline assertion deterministic.
 
 GATING (hermetic by default — never runs in the unit/coverage job): all of
-``GHIDRA_MCP_INTEGRATION`` (truthy), ``GHIDRA_MCP_FIXTURES`` (built fixtures dir),
-``GHIDRA_MCP_WORKER_IMAGE``, a container engine, and ``GHIDRA_MCP_COMPILER_IMAGE`` (the pinned,
+``VIVARIUM_INTEGRATION`` (truthy), ``VIVARIUM_FIXTURES`` (built fixtures dir),
+``VIVARIUM_WORKER_IMAGE``, a container engine, and ``VIVARIUM_COMPILER_IMAGE`` (the pinned,
 verified compiler image for the sandbox) must be present; otherwise the module skips cleanly.
 
 No real malware: the only input is a benign source-available OSS tool (master §5, PLAN §6).
@@ -30,16 +30,16 @@ from typing import Any
 
 import pytest
 
-from ghidra_mcp.naming.compile import ContainerCompileRunner
-from ghidra_mcp.naming.loop import Namer, ProposedName, orchestrate
-from ghidra_mcp.naming.metrics import score
-from ghidra_mcp.tools.schemas import AnalysisOrderOut, FunctionContext
+from vivarium.naming.compile import ContainerCompileRunner
+from vivarium.naming.loop import Namer, ProposedName, orchestrate
+from vivarium.naming.metrics import score
+from vivarium.tools.schemas import AnalysisOrderOut, FunctionContext
 
-_ENV_INTEGRATION = "GHIDRA_MCP_INTEGRATION"
-_ENV_FIXTURES = "GHIDRA_MCP_FIXTURES"
-_ENV_WORKER_IMAGE = "GHIDRA_MCP_WORKER_IMAGE"
-_ENV_ENGINE = "GHIDRA_MCP_CONTAINER_ENGINE"
-_ENV_COMPILER_IMAGE = "GHIDRA_MCP_COMPILER_IMAGE"
+_ENV_INTEGRATION = "VIVARIUM_INTEGRATION"
+_ENV_FIXTURES = "VIVARIUM_FIXTURES"
+_ENV_WORKER_IMAGE = "VIVARIUM_WORKER_IMAGE"
+_ENV_ENGINE = "VIVARIUM_CONTAINER_ENGINE"
+_ENV_COMPILER_IMAGE = "VIVARIUM_COMPILER_IMAGE"
 
 #: Bound the functions named per run — the eval is a pipeline proof, not a full-program pass; this
 #: keeps the per-function ``function_context`` round-trips + the compile fast on CI.
@@ -135,10 +135,10 @@ async def _drive_naming_eval(fixtures_dir: Path) -> None:
     stripped = fixtures_dir / "cjson.stripped"
     params = StdioServerParameters(
         command="python",
-        args=["-m", "ghidra_mcp"],
-        env={**os.environ, "GHIDRA_MCP_IMPORT_ROOT": str(fixtures_dir)},
+        args=["-m", "vivarium"],
+        env={**os.environ, "VIVARIUM_IMPORT_ROOT": str(fixtures_dir)},
     )
-    timeout = timedelta(seconds=int(os.environ.get("GHIDRA_MCP_E2E_TIMEOUT", "600")))
+    timeout = timedelta(seconds=int(os.environ.get("VIVARIUM_E2E_TIMEOUT", "600")))
     truth = _load_ground_truth(fixtures_dir)
 
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
@@ -183,8 +183,8 @@ async def _drive_naming_eval(fixtures_dir: Path) -> None:
     program = orchestrate(order, contexts, _stub_namer(), max_functions=_MAX_FUNCS)
     runner = ContainerCompileRunner(
         compiler_image=os.environ[_ENV_COMPILER_IMAGE],
-        runtime=os.environ.get("GHIDRA_MCP_WORKER_RUNTIME", "runsc"),
-        timeout_s=int(os.environ.get("GHIDRA_MCP_E2E_TIMEOUT", "120")),
+        runtime=os.environ.get("VIVARIUM_WORKER_RUNTIME", "runsc"),
+        timeout_s=int(os.environ.get("VIVARIUM_E2E_TIMEOUT", "120")),
     )
     metrics = score(program, compile_runner=runner, ground_truth=truth)
 

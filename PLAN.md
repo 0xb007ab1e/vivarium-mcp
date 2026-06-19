@@ -1,4 +1,4 @@
-# PLAN — `ghidra-mcp`: Secure MCP Server for Headless Ghidra
+# PLAN — `vivarium`: Secure MCP Server for Headless Ghidra
 
 > Owner: SDLC Project Manager (coordinator). Single source of truth for delivery.
 > Status: **APPROVED (v2)** — red-team consensus reached; cleared to bootstrap. First commit GATED.
@@ -67,10 +67,10 @@ is the central security control.
 | WS | Title | Role | Owned paths (disjoint) |
 |----|-------|------|------------------------|
 | **WS0** | Bootstrap + threat model + **frozen contracts** (sequential, first) | Software Architect | repo root config, `CLAUDE.md`, `pyproject.toml`, CI, `/docs/**` (incl. `docs/security/threat-model.md`), contract specs |
-| **WS1** | MCP protocol & tool layer (stdio) | backend-eng | `src/ghidra_mcp/server/**`, `src/ghidra_mcp/tools/**` |
-| **WS2** | Ghidra worker + RPC adapter + session mgr | backend-eng | `src/ghidra_mcp/ghidra/**`, `ghidra_scripts/**`, `worker/**` |
+| **WS1** | MCP protocol & tool layer (stdio) | backend-eng | `src/vivarium/server/**`, `src/vivarium/tools/**` |
+| **WS2** | Ghidra worker + RPC adapter + session mgr | backend-eng | `src/vivarium/ghidra/**`, `ghidra_scripts/**`, `worker/**` |
 | **WS3** | Isolation & infra | Infra Architect → SRE | `deploy/**`, `Containerfile*`, `infra/**` |
-| **WS4** | Security hardening + abuse/injection tests | security-eng | `src/ghidra_mcp/security/**`, `tests/security/**` |
+| **WS4** | Security hardening + abuse/injection tests | security-eng | `src/vivarium/security/**`, `tests/security/**` |
 | **WS5** | QA & coverage | qa-eng | `tests/unit/**`, `tests/integration/**`, `tests/e2e/**` |
 
 **WS0 must freeze before WS1/WS2 fork (F6):** (1) worker RPC protocol/process boundary, (2) every
@@ -144,7 +144,7 @@ Contract changes route through the PM (batch-atomicity mandate).
     the standard `-dev` (venv build) → shell-free runtime pattern (digests pinned);
     `infra/pin-supply-chain.sh` `BASES` updated (Chainguard for the server, slim now worker-only).
     **Gated build validated** (podman build via cot): builds clean, venv is portable `-dev`→runtime,
-    runs as uid 65532, `import ghidra_mcp` + the `ghidra-mcp` console script resolve, no shell/apk
+    runs as uid 65532, `import vivarium` + the `vivarium` console script resolve, no shell/apk
     (25 Wolfi packages). **Trivy HIGH,CRITICAL scan: 0 findings** — the 5 perl CVEs are eliminated
     (perl absent) and the ncurses CVE is not flagged on Wolfi's build.
     - **Python 3.14 (parity note).** Chainguard's FREE tier is `:latest`-only = **Python 3.14**
@@ -222,7 +222,7 @@ Contract changes route through the PM (batch-atomicity mandate).
   configurable; prod default stays 65532); (4) `_ensure_connected` was single-shot → retry on
   ENOENT/ECONNREFUSED within `connect_timeout_s`; (5) **the per-session UDS host path doubled the
   43-char (256-bit) session id (`{base}/{sid}/{sid}.sock`) and overflowed the AF_UNIX `sun_path`
-  limit — 108 at the default `/run/ghidra-mcp` (a LATENT PROD BUG, not just CI) — fixed by using a
+  limit — 108 at the default `/run/vivarium` (a LATENT PROD BUG, not just CI) — fixed by using a
   short per-session dir token (`session_id[:16]`); the full id stays the socket filename + identity
   (rpc-protocol §2 / ADR-009 updated).** Also added permanent server-side `worker.rpc_failed`
   adapter logging (boundary-safe; named the AF_UNIX cause). **Validated:** ground-truth e2e passes

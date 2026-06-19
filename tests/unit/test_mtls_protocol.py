@@ -1,6 +1,6 @@
 """Unit tests for the mTLS peer-cert → ASGI scope bridge helper (ADR-020, Option A).
 
-Only the **pure** helper :func:`ghidra_mcp.server._mtls_protocol.build_tls_scope_extension` is
+Only the **pure** helper :func:`vivarium.server._mtls_protocol.build_tls_scope_extension` is
 unit-tested here — and it is the one piece ADR-020 requires at **100%**. The uvicorn subclass
 (:class:`MtlsAwareProtocol`) and its ``run_http`` wiring require a real TLS socket and are
 ``# pragma: no cover``; the gated real-TLS integration test
@@ -16,7 +16,7 @@ from typing import Any, cast
 
 import pytest
 
-from ghidra_mcp.server._mtls_protocol import build_tls_scope_extension
+from vivarium.server._mtls_protocol import build_tls_scope_extension
 
 
 class _FakeSslObject:

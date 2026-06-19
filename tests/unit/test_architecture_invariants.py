@@ -11,14 +11,14 @@ from pathlib import Path
 
 import pytest
 
-_SRC = Path(__file__).resolve().parents[2] / "src" / "ghidra_mcp"
+_SRC = Path(__file__).resolve().parents[2] / "src" / "vivarium"
 
 # Server-side packages that MUST NOT touch the JVM/PyGhidra (ADR-001). This INCLUDES the ``ghidra``
 # adapter package — ``rpc_client``/``port`` run IN the server process and are the most tempting
 # place for an accidental JVM import. The worker-only ``_jvm_bridge`` is the sole exception (the
 # only JVM consumer, runs inside the worker), so it is excluded from the scan.
 _SERVER_DIRS = ["core", "sessions", "security", "server", "tools", "ghidra"]
-_FORBIDDEN_IMPORT_SUBSTRINGS = ("pyghidra", "jpype", "ghidra_mcp.ghidra._jvm_bridge")
+_FORBIDDEN_IMPORT_SUBSTRINGS = ("pyghidra", "jpype", "vivarium.ghidra._jvm_bridge")
 #: The worker-only JVM bridge legitimately imports PyGhidra/JPype; it is the documented exception.
 _WORKER_ONLY_FILES = {"_jvm_bridge.py"}
 

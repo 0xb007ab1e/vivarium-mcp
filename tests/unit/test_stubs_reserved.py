@@ -17,7 +17,7 @@ Real behavior/coverage now lives in the per-module suites authored by the owning
 ``test_limits.py``/``test_envelope_wrap.py`` (WS4), and ``tests/security/**`` (WS4 abuse paths).
 
 Still genuinely stubbed (integration-only, intentionally not unit-guarded): the ``_gh_*``
-PyGhidra bindings inside ``ghidra_mcp.ghidra._jvm_bridge`` — they require the pinned Ghidra/JDK
+PyGhidra bindings inside ``vivarium.ghidra._jvm_bridge`` — they require the pinned Ghidra/JDK
 worker image (a GATED supply-chain action) to validate and are exercised only by the real-worker
 integration suite (``tests/integration/**``, WS5 Wave-2). ``_jvm_bridge`` is ``omit``-ed from
 server-side coverage by design.
@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import pytest
 
-from ghidra_mcp.core import validation as v
+from vivarium.core import validation as v
 
 
 def _did_not_revert_to_stub(fn: object, *args: object, **kwargs: object) -> None:
@@ -62,7 +62,7 @@ def test_validation_constants_frozen() -> None:
 
 def test_limits_defaults_and_clamps_present() -> None:
     """The security-limit defaults are frozen; the dataclass is constructible with safe defaults."""
-    from ghidra_mcp.security import limits as lim
+    from vivarium.security import limits as lim
 
     assert lim.DEFAULT_MAX_BINARY_BYTES == 128 * 1024 * 1024
     assert lim.HARD_MAX_BINARY_BYTES == 1024 * 1024 * 1024
@@ -81,7 +81,7 @@ def test_validation_implemented_not_stub() -> None:
 @pytest.mark.critical
 def test_limits_implemented_not_stub() -> None:
     """Critical-path: ``security.limits`` enforcement is implemented (not reverted to stubs)."""
-    from ghidra_mcp.security import limits as lim
+    from vivarium.security import limits as lim
 
     _did_not_revert_to_stub(lim.resolve_limits, {"max_sessions": 2})
     _did_not_revert_to_stub(lim.check_binary_size, 10, lim.Limits())
@@ -90,6 +90,6 @@ def test_limits_implemented_not_stub() -> None:
 @pytest.mark.critical
 def test_envelope_wrap_implemented_not_stub() -> None:
     """Critical-path (TB4): the untrusted-data ``wrap`` chokepoint is implemented (not a stub)."""
-    from ghidra_mcp.core.envelope import wrap
+    from vivarium.core.envelope import wrap
 
     _did_not_revert_to_stub(wrap, "x")

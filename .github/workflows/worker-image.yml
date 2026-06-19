@@ -1,5 +1,5 @@
 # =============================================================================
-# worker-image.yml — build + scan + SBOM + sign the ghidra-mcp container images (WS3)
+# worker-image.yml — build + scan + SBOM + sign the vivarium container images (WS3)
 # =============================================================================
 # Separate from ci.yml (PR gates) — this is the IMAGE supply-chain pipeline (std-supplychain):
 # build the worker + server images, Trivy IMAGE scan (vuln+misconfig+secret), generate a CycloneDX
@@ -64,10 +64,10 @@ jobs:
         include:
           - name: worker
             containerfile: Containerfile.worker
-            image: ghcr.io/${{ github.repository_owner }}/ghidra-mcp-worker
+            image: ghcr.io/${{ github.repository_owner }}/vivarium-worker
           - name: server
             containerfile: Containerfile.server
-            image: ghcr.io/${{ github.repository_owner }}/ghidra-mcp-server
+            image: ghcr.io/${{ github.repository_owner }}/vivarium-server
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # actions/checkout@v6.0.3

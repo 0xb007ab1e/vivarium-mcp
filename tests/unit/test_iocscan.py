@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from ghidra_mcp.core.iocscan import (
+from vivarium.core.iocscan import (
     CRYPTO_SIGNATURES,
     IOC_CATEGORIES,
     MAX_SCAN_LEN,

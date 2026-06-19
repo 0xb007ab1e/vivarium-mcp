@@ -1,7 +1,7 @@
 # `ghidra_scripts/` — headless Ghidra / PyGhidra scripts (worker-only)
 
 Scripts here run **only inside the worker container** (ADR-001/003) and are invoked by the JVM
-bridge (`src/ghidra_mcp/ghidra/_jvm_bridge.py`). They are the sole code permitted to touch the JVM
+bridge (`src/vivarium/ghidra/_jvm_bridge.py`). They are the sole code permitted to touch the JVM
 and the hostile binary.
 
 **v1 status:** empty. The v1 read-only Tier-1 catalog is served via the PyGhidra Python API

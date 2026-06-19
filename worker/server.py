@@ -3,7 +3,7 @@
 Binds the per-session Unix domain socket with restrictive permissions, accepts the single server
 connection, and serves it via :func:`worker.dispatch.serve_connection`. JVM-free: the backend is
 injected, so this bootstrap is testable without Ghidra. The concrete backend wiring (PyGhidra) is
-done by :func:`ghidra_mcp.ghidra._jvm_bridge.worker_main`, which calls :func:`run_server`.
+done by :func:`vivarium.ghidra._jvm_bridge.worker_main`, which calls :func:`run_server`.
 
 Security (rpc-protocol.md §2, ADR-004): the socket is created at ``0600`` (owner-only) inside the
 private socket dir; the worker has **no network**; the socket is the only ingress.

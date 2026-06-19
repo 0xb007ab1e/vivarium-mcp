@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from ghidra_mcp.core import envelope
-from ghidra_mcp.core.envelope import (
+from vivarium.core import envelope
+from vivarium.core.envelope import (
     DataOrigin,
     Untrusted,
     _neutralization_note,
