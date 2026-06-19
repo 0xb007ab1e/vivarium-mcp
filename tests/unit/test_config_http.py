@@ -8,14 +8,14 @@ from __future__ import annotations
 
 import pytest
 
-from ghidra_mcp.config import load_config
-from ghidra_mcp.core.errors import GhidraMcpError
-from ghidra_mcp.server.auth import (
+from vivarium.config import load_config
+from vivarium.core.errors import GhidraMcpError
+from vivarium.server.auth import (
     PROXY_IDENTITY_HEADER_DEFAULT,
     PROXY_SECRET_HEADER_DEFAULT,
 )
 
-_WORKER = {"GHIDRA_MCP_WORKER_IMAGE": "ghcr.io/x/worker@sha256:" + "a" * 64}
+_WORKER = {"VIVARIUM_WORKER_IMAGE": "ghcr.io/x/worker@sha256:" + "a" * 64}
 _TOKEN = "s" * 24  # >= _MIN_BEARER_TOKEN_LEN
 
 
@@ -30,7 +30,7 @@ def test_default_transport_is_stdio_no_http_config() -> None:
 
 
 def test_http_loopback_default_is_plaintext_unauthenticated() -> None:
-    cfg = load_config(_env(GHIDRA_MCP_TRANSPORT="http"))
+    cfg = load_config(_env(VIVARIUM_TRANSPORT="http"))
     assert cfg.transport == "http" and cfg.http is not None
     h = cfg.http
     assert h.bind == "127.0.0.1:8765"
@@ -40,7 +40,7 @@ def test_http_loopback_default_is_plaintext_unauthenticated() -> None:
 
 
 def test_unix_socket_bind_is_not_network() -> None:
-    cfg = load_config(_env(GHIDRA_MCP_TRANSPORT="http", GHIDRA_MCP_HTTP_BIND="unix:/run/gmcp.sock"))
+    cfg = load_config(_env(VIVARIUM_TRANSPORT="http", VIVARIUM_HTTP_BIND="unix:/run/gmcp.sock"))
     assert cfg.http is not None
     assert cfg.http.is_unix_socket is True and cfg.http.is_network is False
     assert cfg.http.auth_mode == "none"
@@ -48,18 +48,18 @@ def test_unix_socket_bind_is_not_network() -> None:
 
 def test_network_bind_without_tls_fails_closed() -> None:
     with pytest.raises(GhidraMcpError, match="requires TLS"):
-        load_config(_env(GHIDRA_MCP_TRANSPORT="http", GHIDRA_MCP_HTTP_BIND="0.0.0.0:8765"))
+        load_config(_env(VIVARIUM_TRANSPORT="http", VIVARIUM_HTTP_BIND="0.0.0.0:8765"))
 
 
 def test_network_bind_with_tls_but_no_auth_fails_closed() -> None:
     with pytest.raises(GhidraMcpError, match="requires an authenticator"):
         load_config(
             _env(
-                GHIDRA_MCP_TRANSPORT="http",
-                GHIDRA_MCP_HTTP_BIND="0.0.0.0:8765",
-                GHIDRA_MCP_HTTP_TLS_CERT="/c.pem",
-                GHIDRA_MCP_HTTP_TLS_KEY="/k.pem",
-                GHIDRA_MCP_HTTP_AUTH="none",
+                VIVARIUM_TRANSPORT="http",
+                VIVARIUM_HTTP_BIND="0.0.0.0:8765",
+                VIVARIUM_HTTP_TLS_CERT="/c.pem",
+                VIVARIUM_HTTP_TLS_KEY="/k.pem",
+                VIVARIUM_HTTP_AUTH="none",
             )
         )
 
@@ -67,11 +67,11 @@ def test_network_bind_with_tls_but_no_auth_fails_closed() -> None:
 def test_network_bind_with_tls_and_bearer_is_valid() -> None:
     cfg = load_config(
         _env(
-            GHIDRA_MCP_TRANSPORT="http",
-            GHIDRA_MCP_HTTP_BIND="0.0.0.0:8765",
-            GHIDRA_MCP_HTTP_TLS_CERT="/c.pem",
-            GHIDRA_MCP_HTTP_TLS_KEY="/k.pem",
-            GHIDRA_MCP_HTTP_BEARER_TOKEN=_TOKEN,
+            VIVARIUM_TRANSPORT="http",
+            VIVARIUM_HTTP_BIND="0.0.0.0:8765",
+            VIVARIUM_HTTP_TLS_CERT="/c.pem",
+            VIVARIUM_HTTP_TLS_KEY="/k.pem",
+            VIVARIUM_HTTP_BEARER_TOKEN=_TOKEN,
         )
     )
     assert cfg.http is not None
@@ -82,9 +82,9 @@ def test_network_bind_with_tls_and_bearer_is_valid() -> None:
 
 @pytest.mark.parametrize("token", ["", "short", "x" * 15])
 def test_bearer_auth_requires_long_token(token: str) -> None:
-    env = _env(GHIDRA_MCP_TRANSPORT="http", GHIDRA_MCP_HTTP_AUTH="bearer")
+    env = _env(VIVARIUM_TRANSPORT="http", VIVARIUM_HTTP_AUTH="bearer")
     if token:
-        env["GHIDRA_MCP_HTTP_BEARER_TOKEN"] = token
+        env["VIVARIUM_HTTP_BEARER_TOKEN"] = token
     # ADR-017: an absent token fails "requires at least one token"; a present-but-short one fails
     # the per-token length floor in the multi-token loader ("token is too short"). Both fail closed
     # at startup as VALIDATION; the 16-char floor is mentioned in either path.
@@ -94,19 +94,19 @@ def test_bearer_auth_requires_long_token(token: str) -> None:
 
 def test_tls_cert_without_key_fails_closed() -> None:
     with pytest.raises(GhidraMcpError, match="both be set or both unset"):
-        load_config(_env(GHIDRA_MCP_TRANSPORT="http", GHIDRA_MCP_HTTP_TLS_CERT="/c.pem"))
+        load_config(_env(VIVARIUM_TRANSPORT="http", VIVARIUM_HTTP_TLS_CERT="/c.pem"))
 
 
 def test_wildcard_cors_rejected() -> None:
     with pytest.raises(GhidraMcpError, match="CORS origins must be explicit"):
-        load_config(_env(GHIDRA_MCP_TRANSPORT="http", GHIDRA_MCP_HTTP_CORS_ORIGINS="*"))
+        load_config(_env(VIVARIUM_TRANSPORT="http", VIVARIUM_HTTP_CORS_ORIGINS="*"))
 
 
 def test_cors_origins_parsed_comma_separated() -> None:
     cfg = load_config(
         _env(
-            GHIDRA_MCP_TRANSPORT="http",
-            GHIDRA_MCP_HTTP_CORS_ORIGINS="https://a.example, https://b.example",
+            VIVARIUM_TRANSPORT="http",
+            VIVARIUM_HTTP_CORS_ORIGINS="https://a.example, https://b.example",
         )
     )
     assert cfg.http is not None
@@ -116,21 +116,21 @@ def test_cors_origins_parsed_comma_separated() -> None:
 @pytest.mark.parametrize("bind", ["nope", "host:notaport", "host:0", "host:99999", "unix:"])
 def test_malformed_bind_fails_closed(bind: str) -> None:
     with pytest.raises(GhidraMcpError):
-        load_config(_env(GHIDRA_MCP_TRANSPORT="http", GHIDRA_MCP_HTTP_BIND=bind))
+        load_config(_env(VIVARIUM_TRANSPORT="http", VIVARIUM_HTTP_BIND=bind))
 
 
 def test_ipv6_loopback_bind_is_not_network() -> None:
-    cfg = load_config(_env(GHIDRA_MCP_TRANSPORT="http", GHIDRA_MCP_HTTP_BIND="[::1]:8765"))
+    cfg = load_config(_env(VIVARIUM_TRANSPORT="http", VIVARIUM_HTTP_BIND="[::1]:8765"))
     assert cfg.http is not None and cfg.http.is_network is False
 
 
 def test_bearer_token_excluded_from_repr() -> None:
     cfg = load_config(
         _env(
-            GHIDRA_MCP_TRANSPORT="http",
-            GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
-            GHIDRA_MCP_HTTP_AUTH="bearer",
-            GHIDRA_MCP_HTTP_BEARER_TOKEN=_TOKEN,
+            VIVARIUM_TRANSPORT="http",
+            VIVARIUM_HTTP_BIND="127.0.0.1:8765",
+            VIVARIUM_HTTP_AUTH="bearer",
+            VIVARIUM_HTTP_BEARER_TOKEN=_TOKEN,
         )
     )
     assert cfg.http is not None
@@ -139,9 +139,9 @@ def test_bearer_token_excluded_from_repr() -> None:
 
 def test_invalid_transport_and_auth_rejected() -> None:
     with pytest.raises(GhidraMcpError):
-        load_config(_env(GHIDRA_MCP_TRANSPORT="grpc"))
+        load_config(_env(VIVARIUM_TRANSPORT="grpc"))
     with pytest.raises(GhidraMcpError):
-        load_config(_env(GHIDRA_MCP_TRANSPORT="http", GHIDRA_MCP_HTTP_AUTH="kerberos"))
+        load_config(_env(VIVARIUM_TRANSPORT="http", VIVARIUM_HTTP_AUTH="kerberos"))
 
 
 # ==============================================================================================
@@ -153,23 +153,21 @@ _TOKEN_B = "b" * 24  # test fixture, not a real secret
 
 def _bearer_env(**extra: str) -> dict[str, str]:
     return _env(
-        GHIDRA_MCP_TRANSPORT="http",
-        GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
-        GHIDRA_MCP_HTTP_AUTH="bearer",
+        VIVARIUM_TRANSPORT="http",
+        VIVARIUM_HTTP_BIND="127.0.0.1:8765",
+        VIVARIUM_HTTP_AUTH="bearer",
         **extra,
     )
 
 
 def test_single_token_back_compat_maps_to_bearer_principal() -> None:
-    cfg = load_config(_bearer_env(GHIDRA_MCP_HTTP_BEARER_TOKEN=_TOKEN))
+    cfg = load_config(_bearer_env(VIVARIUM_HTTP_BEARER_TOKEN=_TOKEN))
     assert cfg.http is not None
     assert cfg.http.bearer_tokens == {_TOKEN: "bearer"}
 
 
 def test_multi_token_map_parsed_from_pairs() -> None:
-    cfg = load_config(
-        _bearer_env(GHIDRA_MCP_HTTP_BEARER_TOKENS=f"alice:{_TOKEN_A}, bob:{_TOKEN_B}")
-    )
+    cfg = load_config(_bearer_env(VIVARIUM_HTTP_BEARER_TOKENS=f"alice:{_TOKEN_A}, bob:{_TOKEN_B}"))
     assert cfg.http is not None
     assert cfg.http.bearer_tokens == {_TOKEN_A: "alice", _TOKEN_B: "bob"}
 
@@ -177,8 +175,8 @@ def test_multi_token_map_parsed_from_pairs() -> None:
 def test_multi_token_map_combines_with_single_token() -> None:
     cfg = load_config(
         _bearer_env(
-            GHIDRA_MCP_HTTP_BEARER_TOKEN=_TOKEN,
-            GHIDRA_MCP_HTTP_BEARER_TOKENS=f"alice:{_TOKEN_A}",
+            VIVARIUM_HTTP_BEARER_TOKEN=_TOKEN,
+            VIVARIUM_HTTP_BEARER_TOKENS=f"alice:{_TOKEN_A}",
         )
     )
     assert cfg.http is not None
@@ -186,49 +184,47 @@ def test_multi_token_map_combines_with_single_token() -> None:
 
 
 def test_multi_token_secrets_excluded_from_repr() -> None:
-    cfg = load_config(_bearer_env(GHIDRA_MCP_HTTP_BEARER_TOKENS=f"alice:{_TOKEN_A}"))
+    cfg = load_config(_bearer_env(VIVARIUM_HTTP_BEARER_TOKENS=f"alice:{_TOKEN_A}"))
     assert cfg.http is not None
     assert _TOKEN_A not in repr(cfg.http)  # the token KEYS are secrets — not in repr
 
 
 def test_multi_token_short_token_fails_closed() -> None:
     with pytest.raises(GhidraMcpError, match="too short"):
-        load_config(_bearer_env(GHIDRA_MCP_HTTP_BEARER_TOKENS="alice:short"))
+        load_config(_bearer_env(VIVARIUM_HTTP_BEARER_TOKENS="alice:short"))
 
 
 def test_multi_token_missing_separator_fails_closed() -> None:
     with pytest.raises(GhidraMcpError, match="id:token"):
-        load_config(_bearer_env(GHIDRA_MCP_HTTP_BEARER_TOKENS=_TOKEN_A))  # no "id:" prefix
+        load_config(_bearer_env(VIVARIUM_HTTP_BEARER_TOKENS=_TOKEN_A))  # no "id:" prefix
 
 
 def test_multi_token_empty_id_fails_closed() -> None:
     with pytest.raises(GhidraMcpError, match="empty id"):
-        load_config(_bearer_env(GHIDRA_MCP_HTTP_BEARER_TOKENS=f":{_TOKEN_A}"))
+        load_config(_bearer_env(VIVARIUM_HTTP_BEARER_TOKENS=f":{_TOKEN_A}"))
 
 
 @pytest.mark.parametrize("bad_id", ["has space", "rtl‮id", "a/b", "x" * 65])
 def test_multi_token_bad_principal_id_fails_closed(bad_id: str) -> None:
     with pytest.raises(GhidraMcpError):
-        load_config(_bearer_env(GHIDRA_MCP_HTTP_BEARER_TOKENS=f"{bad_id}:{_TOKEN_A}"))
+        load_config(_bearer_env(VIVARIUM_HTTP_BEARER_TOKENS=f"{bad_id}:{_TOKEN_A}"))
 
 
 def test_multi_token_ambiguous_token_two_principals_fails_closed() -> None:
     """One token mapping to two principals makes ownership non-deterministic → refuse to boot."""
     with pytest.raises(GhidraMcpError, match="one token to two principals"):
-        load_config(_bearer_env(GHIDRA_MCP_HTTP_BEARER_TOKENS=f"alice:{_TOKEN_A}\nbob:{_TOKEN_A}"))
+        load_config(_bearer_env(VIVARIUM_HTTP_BEARER_TOKENS=f"alice:{_TOKEN_A}\nbob:{_TOKEN_A}"))
 
 
 def test_multi_token_newline_separated_pairs() -> None:
-    cfg = load_config(
-        _bearer_env(GHIDRA_MCP_HTTP_BEARER_TOKENS=f"alice:{_TOKEN_A}\nbob:{_TOKEN_B}")
-    )
+    cfg = load_config(_bearer_env(VIVARIUM_HTTP_BEARER_TOKENS=f"alice:{_TOKEN_A}\nbob:{_TOKEN_B}"))
     assert cfg.http is not None
     assert cfg.http.bearer_tokens == {_TOKEN_A: "alice", _TOKEN_B: "bob"}
 
 
 def test_multi_token_ignores_blank_items_from_trailing_separators() -> None:
     """Empty items (trailing/extra commas or blank lines) are skipped, not errors."""
-    cfg = load_config(_bearer_env(GHIDRA_MCP_HTTP_BEARER_TOKENS=f"alice:{_TOKEN_A}, ,\n"))
+    cfg = load_config(_bearer_env(VIVARIUM_HTTP_BEARER_TOKENS=f"alice:{_TOKEN_A}, ,\n"))
     assert cfg.http is not None
     assert cfg.http.bearer_tokens == {_TOKEN_A: "alice"}
 
@@ -237,7 +233,7 @@ def test_multi_token_value_too_long_fails_closed() -> None:
     """An oversized token-map value is rejected at startup (bounds startup input — CWE-400)."""
     huge = ",".join(f"p{i}:{'x' * 24}" for i in range(1000))
     with pytest.raises(GhidraMcpError, match="is too long"):
-        load_config(_bearer_env(GHIDRA_MCP_HTTP_BEARER_TOKENS=huge))
+        load_config(_bearer_env(VIVARIUM_HTTP_BEARER_TOKENS=huge))
 
 
 # ==============================================================================================
@@ -247,11 +243,11 @@ def test_multi_token_value_too_long_fails_closed() -> None:
 def _mtls_env(**extra: str) -> dict[str, str]:
     """A loopback HTTP env with auth=mtls + server TLS (mTLS requires server TLS — ADR-019)."""
     return _env(
-        GHIDRA_MCP_TRANSPORT="http",
-        GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
-        GHIDRA_MCP_HTTP_AUTH="mtls",
-        GHIDRA_MCP_HTTP_TLS_CERT="/c.pem",
-        GHIDRA_MCP_HTTP_TLS_KEY="/k.pem",
+        VIVARIUM_TRANSPORT="http",
+        VIVARIUM_HTTP_BIND="127.0.0.1:8765",
+        VIVARIUM_HTTP_AUTH="mtls",
+        VIVARIUM_HTTP_TLS_CERT="/c.pem",
+        VIVARIUM_HTTP_TLS_KEY="/k.pem",
         **extra,
     )
 
@@ -261,16 +257,16 @@ def test_mtls_without_server_tls_fails_closed() -> None:
     with pytest.raises(GhidraMcpError, match="requires server TLS"):
         load_config(
             _env(
-                GHIDRA_MCP_TRANSPORT="http",
-                GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
-                GHIDRA_MCP_HTTP_AUTH="mtls",
-                GHIDRA_MCP_HTTP_TLS_CLIENT_CA="/ca.pem",
+                VIVARIUM_TRANSPORT="http",
+                VIVARIUM_HTTP_BIND="127.0.0.1:8765",
+                VIVARIUM_HTTP_AUTH="mtls",
+                VIVARIUM_HTTP_TLS_CLIENT_CA="/ca.pem",
             )
         )
 
 
 def test_mtls_with_client_ca_defaults_to_cn_field() -> None:
-    cfg = load_config(_mtls_env(GHIDRA_MCP_HTTP_TLS_CLIENT_CA="/etc/ca/clients.pem"))
+    cfg = load_config(_mtls_env(VIVARIUM_HTTP_TLS_CLIENT_CA="/etc/ca/clients.pem"))
     assert cfg.http is not None
     assert cfg.http.auth_mode == "mtls"
     assert cfg.http.tls_client_ca == "/etc/ca/clients.pem"
@@ -287,8 +283,8 @@ def test_mtls_without_client_ca_fails_closed() -> None:
 def test_mtls_principal_field_accepts_each_valid_choice(field_name: str) -> None:
     cfg = load_config(
         _mtls_env(
-            GHIDRA_MCP_HTTP_TLS_CLIENT_CA="/ca.pem",
-            GHIDRA_MCP_HTTP_MTLS_PRINCIPAL_FIELD=field_name,
+            VIVARIUM_HTTP_TLS_CLIENT_CA="/ca.pem",
+            VIVARIUM_HTTP_MTLS_PRINCIPAL_FIELD=field_name,
         )
     )
     assert cfg.http is not None
@@ -299,8 +295,8 @@ def test_mtls_principal_field_rejects_unknown_choice() -> None:
     with pytest.raises(GhidraMcpError, match="unsupported value"):
         load_config(
             _mtls_env(
-                GHIDRA_MCP_HTTP_TLS_CLIENT_CA="/ca.pem",
-                GHIDRA_MCP_HTTP_MTLS_PRINCIPAL_FIELD="serial",
+                VIVARIUM_HTTP_TLS_CLIENT_CA="/ca.pem",
+                VIVARIUM_HTTP_MTLS_PRINCIPAL_FIELD="serial",
             )
         )
 
@@ -310,10 +306,10 @@ def test_mtls_over_network_bind_requires_server_tls_too() -> None:
     with pytest.raises(GhidraMcpError, match="requires TLS"):
         load_config(
             _env(
-                GHIDRA_MCP_TRANSPORT="http",
-                GHIDRA_MCP_HTTP_BIND="0.0.0.0:8765",
-                GHIDRA_MCP_HTTP_AUTH="mtls",
-                GHIDRA_MCP_HTTP_TLS_CLIENT_CA="/ca.pem",
+                VIVARIUM_TRANSPORT="http",
+                VIVARIUM_HTTP_BIND="0.0.0.0:8765",
+                VIVARIUM_HTTP_AUTH="mtls",
+                VIVARIUM_HTTP_TLS_CLIENT_CA="/ca.pem",
             )
         )
 
@@ -321,13 +317,13 @@ def test_mtls_over_network_bind_requires_server_tls_too() -> None:
 def test_mtls_network_bind_full_valid_config() -> None:
     cfg = load_config(
         _env(
-            GHIDRA_MCP_TRANSPORT="http",
-            GHIDRA_MCP_HTTP_BIND="0.0.0.0:8765",
-            GHIDRA_MCP_HTTP_AUTH="mtls",
-            GHIDRA_MCP_HTTP_TLS_CERT="/c.pem",
-            GHIDRA_MCP_HTTP_TLS_KEY="/k.pem",
-            GHIDRA_MCP_HTTP_TLS_CLIENT_CA="/ca.pem",
-            GHIDRA_MCP_HTTP_MTLS_PRINCIPAL_FIELD="san-uri",
+            VIVARIUM_TRANSPORT="http",
+            VIVARIUM_HTTP_BIND="0.0.0.0:8765",
+            VIVARIUM_HTTP_AUTH="mtls",
+            VIVARIUM_HTTP_TLS_CERT="/c.pem",
+            VIVARIUM_HTTP_TLS_KEY="/k.pem",
+            VIVARIUM_HTTP_TLS_CLIENT_CA="/ca.pem",
+            VIVARIUM_HTTP_MTLS_PRINCIPAL_FIELD="san-uri",
         )
     )
     assert cfg.http is not None
@@ -340,10 +336,10 @@ def test_non_mtls_config_leaves_client_ca_none() -> None:
     """The client CA is read but irrelevant for non-mtls modes; bearer leaves it None by default."""
     cfg = load_config(
         _env(
-            GHIDRA_MCP_TRANSPORT="http",
-            GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
-            GHIDRA_MCP_HTTP_AUTH="bearer",
-            GHIDRA_MCP_HTTP_BEARER_TOKEN=_TOKEN,
+            VIVARIUM_TRANSPORT="http",
+            VIVARIUM_HTTP_BIND="127.0.0.1:8765",
+            VIVARIUM_HTTP_AUTH="bearer",
+            VIVARIUM_HTTP_BEARER_TOKEN=_TOKEN,
         )
     )
     assert cfg.http is not None
@@ -357,16 +353,16 @@ def test_non_mtls_config_leaves_client_ca_none() -> None:
 # Fail-closed startup: oauth without iss/aud/jwks, or an unsafe algorithm, must refuse to boot.
 # ==============================================================================================
 _ISS = "https://idp.example/realm"
-_AUD = "ghidra-mcp"
+_AUD = "vivarium"
 _JWKS = "https://idp.example/realm/jwks"
 
 
 def _oauth_env(**extra: str) -> dict[str, str]:
     """A loopback HTTP env with auth=oauth (no server TLS needed on loopback — like bearer)."""
     return _env(
-        GHIDRA_MCP_TRANSPORT="http",
-        GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
-        GHIDRA_MCP_HTTP_AUTH="oauth",
+        VIVARIUM_TRANSPORT="http",
+        VIVARIUM_HTTP_BIND="127.0.0.1:8765",
+        VIVARIUM_HTTP_AUTH="oauth",
         **extra,
     )
 
@@ -374,9 +370,9 @@ def _oauth_env(**extra: str) -> dict[str, str]:
 def test_oauth_full_valid_config_defaults() -> None:
     cfg = load_config(
         _oauth_env(
-            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
-            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
-            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+            VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+            VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+            VIVARIUM_HTTP_OAUTH_JWKS_URI=_JWKS,
         )
     )
     assert cfg.http is not None
@@ -392,8 +388,8 @@ def test_oauth_without_issuer_fails_closed() -> None:
     with pytest.raises(GhidraMcpError, match="oauth auth requires an issuer"):
         load_config(
             _oauth_env(
-                GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
-                GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+                VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+                VIVARIUM_HTTP_OAUTH_JWKS_URI=_JWKS,
             )
         )
 
@@ -402,8 +398,8 @@ def test_oauth_without_audience_fails_closed() -> None:
     with pytest.raises(GhidraMcpError, match="oauth auth requires an issuer"):
         load_config(
             _oauth_env(
-                GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
-                GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+                VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+                VIVARIUM_HTTP_OAUTH_JWKS_URI=_JWKS,
             )
         )
 
@@ -412,8 +408,8 @@ def test_oauth_without_jwks_uri_fails_closed() -> None:
     with pytest.raises(GhidraMcpError, match="oauth auth requires an issuer"):
         load_config(
             _oauth_env(
-                GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
-                GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
+                VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+                VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
             )
         )
 
@@ -421,10 +417,10 @@ def test_oauth_without_jwks_uri_fails_closed() -> None:
 def test_oauth_principal_claim_configurable() -> None:
     cfg = load_config(
         _oauth_env(
-            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
-            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
-            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
-            GHIDRA_MCP_HTTP_OAUTH_PRINCIPAL_CLAIM="email",
+            VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+            VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+            VIVARIUM_HTTP_OAUTH_JWKS_URI=_JWKS,
+            VIVARIUM_HTTP_OAUTH_PRINCIPAL_CLAIM="email",
         )
     )
     assert cfg.http is not None
@@ -434,10 +430,10 @@ def test_oauth_principal_claim_configurable() -> None:
 def test_oauth_algorithms_parsed_and_deduped() -> None:
     cfg = load_config(
         _oauth_env(
-            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
-            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
-            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
-            GHIDRA_MCP_HTTP_OAUTH_ALGORITHMS="ES256, RS256 , ES256",  # dup + spaces
+            VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+            VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+            VIVARIUM_HTTP_OAUTH_JWKS_URI=_JWKS,
+            VIVARIUM_HTTP_OAUTH_ALGORITHMS="ES256, RS256 , ES256",  # dup + spaces
         )
     )
     assert cfg.http is not None
@@ -450,10 +446,10 @@ def test_oauth_unsafe_algorithm_fails_closed(bad: str) -> None:
     with pytest.raises(GhidraMcpError, match="unsupported algorithm"):
         load_config(
             _oauth_env(
-                GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
-                GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
-                GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
-                GHIDRA_MCP_HTTP_OAUTH_ALGORITHMS=bad,
+                VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+                VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+                VIVARIUM_HTTP_OAUTH_JWKS_URI=_JWKS,
+                VIVARIUM_HTTP_OAUTH_ALGORITHMS=bad,
             )
         )
 
@@ -463,10 +459,10 @@ def test_oauth_empty_algorithm_list_after_parse_fails_closed() -> None:
     with pytest.raises(GhidraMcpError, match="at least one algorithm"):
         load_config(
             _oauth_env(
-                GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
-                GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
-                GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
-                GHIDRA_MCP_HTTP_OAUTH_ALGORITHMS=" , ,",
+                VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+                VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+                VIVARIUM_HTTP_OAUTH_JWKS_URI=_JWKS,
+                VIVARIUM_HTTP_OAUTH_ALGORITHMS=" , ,",
             )
         )
 
@@ -474,10 +470,10 @@ def test_oauth_empty_algorithm_list_after_parse_fails_closed() -> None:
 def test_oauth_leeway_configurable() -> None:
     cfg = load_config(
         _oauth_env(
-            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
-            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
-            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
-            GHIDRA_MCP_HTTP_OAUTH_LEEWAY_SECONDS="5",
+            VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+            VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+            VIVARIUM_HTTP_OAUTH_JWKS_URI=_JWKS,
+            VIVARIUM_HTTP_OAUTH_LEEWAY_SECONDS="5",
         )
     )
     assert cfg.http is not None
@@ -488,10 +484,10 @@ def test_oauth_leeway_non_positive_fails_closed() -> None:
     with pytest.raises(GhidraMcpError, match="positive integer"):
         load_config(
             _oauth_env(
-                GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
-                GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
-                GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
-                GHIDRA_MCP_HTTP_OAUTH_LEEWAY_SECONDS="0",
+                VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+                VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+                VIVARIUM_HTTP_OAUTH_JWKS_URI=_JWKS,
+                VIVARIUM_HTTP_OAUTH_LEEWAY_SECONDS="0",
             )
         )
 
@@ -500,10 +496,10 @@ def test_oauth_principal_claim_too_long_fails_closed() -> None:
     with pytest.raises(GhidraMcpError, match="too long"):
         load_config(
             _oauth_env(
-                GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
-                GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
-                GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
-                GHIDRA_MCP_HTTP_OAUTH_PRINCIPAL_CLAIM="c" * 65,
+                VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+                VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+                VIVARIUM_HTTP_OAUTH_JWKS_URI=_JWKS,
+                VIVARIUM_HTTP_OAUTH_PRINCIPAL_CLAIM="c" * 65,
             )
         )
 
@@ -513,12 +509,12 @@ def test_oauth_over_network_bind_requires_server_tls() -> None:
     with pytest.raises(GhidraMcpError, match="requires TLS"):
         load_config(
             _env(
-                GHIDRA_MCP_TRANSPORT="http",
-                GHIDRA_MCP_HTTP_BIND="0.0.0.0:8765",
-                GHIDRA_MCP_HTTP_AUTH="oauth",
-                GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
-                GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
-                GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+                VIVARIUM_TRANSPORT="http",
+                VIVARIUM_HTTP_BIND="0.0.0.0:8765",
+                VIVARIUM_HTTP_AUTH="oauth",
+                VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+                VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+                VIVARIUM_HTTP_OAUTH_JWKS_URI=_JWKS,
             )
         )
 
@@ -526,14 +522,14 @@ def test_oauth_over_network_bind_requires_server_tls() -> None:
 def test_oauth_network_bind_full_valid_config() -> None:
     cfg = load_config(
         _env(
-            GHIDRA_MCP_TRANSPORT="http",
-            GHIDRA_MCP_HTTP_BIND="0.0.0.0:8765",
-            GHIDRA_MCP_HTTP_AUTH="oauth",
-            GHIDRA_MCP_HTTP_TLS_CERT="/c.pem",
-            GHIDRA_MCP_HTTP_TLS_KEY="/k.pem",
-            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
-            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
-            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+            VIVARIUM_TRANSPORT="http",
+            VIVARIUM_HTTP_BIND="0.0.0.0:8765",
+            VIVARIUM_HTTP_AUTH="oauth",
+            VIVARIUM_HTTP_TLS_CERT="/c.pem",
+            VIVARIUM_HTTP_TLS_KEY="/k.pem",
+            VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+            VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+            VIVARIUM_HTTP_OAUTH_JWKS_URI=_JWKS,
         )
     )
     assert cfg.http is not None
@@ -546,10 +542,10 @@ def test_non_oauth_config_leaves_oauth_fields_default() -> None:
     """For bearer, the OAuth fields keep their (harmless) defaults — None issuer, default algs."""
     cfg = load_config(
         _env(
-            GHIDRA_MCP_TRANSPORT="http",
-            GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
-            GHIDRA_MCP_HTTP_AUTH="bearer",
-            GHIDRA_MCP_HTTP_BEARER_TOKEN=_TOKEN,
+            VIVARIUM_TRANSPORT="http",
+            VIVARIUM_HTTP_BIND="127.0.0.1:8765",
+            VIVARIUM_HTTP_AUTH="bearer",
+            VIVARIUM_HTTP_BEARER_TOKEN=_TOKEN,
         )
     )
     assert cfg.http is not None
@@ -562,9 +558,9 @@ def test_oauth_token_not_present_in_repr() -> None:
     """OAuth config is non-secret (no stored token) — but the repr must still be benign/loggable."""
     cfg = load_config(
         _oauth_env(
-            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
-            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
-            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+            VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+            VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+            VIVARIUM_HTTP_OAUTH_JWKS_URI=_JWKS,
         )
     )
     assert cfg.http is not None
@@ -573,7 +569,7 @@ def test_oauth_token_not_present_in_repr() -> None:
 
 
 # ==============================================================================================
-# ADR-033 — OAuth write-scope config (opt-in per-tool authZ). ``GHIDRA_MCP_HTTP_OAUTH_WRITE_SCOPE``
+# ADR-033 — OAuth write-scope config (opt-in per-tool authZ). ``VIVARIUM_HTTP_OAUTH_WRITE_SCOPE``
 # is OPTIONAL and non-secret: unset ⇒ None (scope-gating off, identity-only — pre-ADR-033); set ⇒
 # the scope that grants the ``write`` capability. Over-length is rejected at startup like the
 # principal-claim (fail closed, same _MAX_OAUTH_CLAIM_LEN bound).
@@ -581,10 +577,10 @@ def test_oauth_token_not_present_in_repr() -> None:
 def test_oauth_write_scope_set_is_parsed() -> None:
     cfg = load_config(
         _oauth_env(
-            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
-            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
-            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
-            GHIDRA_MCP_HTTP_OAUTH_WRITE_SCOPE="ghidra:write",
+            VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+            VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+            VIVARIUM_HTTP_OAUTH_JWKS_URI=_JWKS,
+            VIVARIUM_HTTP_OAUTH_WRITE_SCOPE="ghidra:write",
         )
     )
     assert cfg.http is not None
@@ -595,9 +591,9 @@ def test_oauth_write_scope_unset_defaults_none() -> None:
     """Omitting the write-scope leaves gating OFF (``None``) — backward-compatible default."""
     cfg = load_config(
         _oauth_env(
-            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
-            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
-            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
+            VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+            VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+            VIVARIUM_HTTP_OAUTH_JWKS_URI=_JWKS,
         )
     )
     assert cfg.http is not None
@@ -609,10 +605,10 @@ def test_oauth_write_scope_too_long_fails_closed() -> None:
     with pytest.raises(GhidraMcpError, match="too long"):
         load_config(
             _oauth_env(
-                GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
-                GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
-                GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
-                GHIDRA_MCP_HTTP_OAUTH_WRITE_SCOPE="w" * 65,
+                VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+                VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+                VIVARIUM_HTTP_OAUTH_JWKS_URI=_JWKS,
+                VIVARIUM_HTTP_OAUTH_WRITE_SCOPE="w" * 65,
             )
         )
 
@@ -621,10 +617,10 @@ def test_oauth_write_scope_at_max_len_accepted() -> None:
     """A boundary write-scope (exactly 64 chars) is accepted (off-by-one guard)."""
     cfg = load_config(
         _oauth_env(
-            GHIDRA_MCP_HTTP_OAUTH_ISSUER=_ISS,
-            GHIDRA_MCP_HTTP_OAUTH_AUDIENCE=_AUD,
-            GHIDRA_MCP_HTTP_OAUTH_JWKS_URI=_JWKS,
-            GHIDRA_MCP_HTTP_OAUTH_WRITE_SCOPE="w" * 64,
+            VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+            VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+            VIVARIUM_HTTP_OAUTH_JWKS_URI=_JWKS,
+            VIVARIUM_HTTP_OAUTH_WRITE_SCOPE="w" * 64,
         )
     )
     assert cfg.http is not None
@@ -635,10 +631,10 @@ def test_non_oauth_config_leaves_write_scope_none() -> None:
     """For bearer, the write-scope field keeps its harmless default (None)."""
     cfg = load_config(
         _env(
-            GHIDRA_MCP_TRANSPORT="http",
-            GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
-            GHIDRA_MCP_HTTP_AUTH="bearer",
-            GHIDRA_MCP_HTTP_BEARER_TOKEN=_TOKEN,
+            VIVARIUM_TRANSPORT="http",
+            VIVARIUM_HTTP_BIND="127.0.0.1:8765",
+            VIVARIUM_HTTP_AUTH="bearer",
+            VIVARIUM_HTTP_BEARER_TOKEN=_TOKEN,
         )
     )
     assert cfg.http is not None
@@ -662,22 +658,22 @@ _CUSTOM_IDENTITY_HEADER_LC = "x-my-client-id"
 def _proxy_env(**extra: str) -> dict[str, str]:
     """A loopback HTTP env with auth=mtls-proxy (TLS is terminated at the proxy, not here)."""
     return _env(
-        GHIDRA_MCP_TRANSPORT="http",
-        GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
-        GHIDRA_MCP_HTTP_AUTH="mtls-proxy",
+        VIVARIUM_TRANSPORT="http",
+        VIVARIUM_HTTP_BIND="127.0.0.1:8765",
+        VIVARIUM_HTTP_AUTH="mtls-proxy",
         **extra,
     )
 
 
 def test_mtls_proxy_is_an_accepted_auth_mode() -> None:
     """``mtls-proxy`` passes the auth-mode allow-list (no 'unsupported value' error)."""
-    cfg = load_config(_proxy_env(GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET=_PROXY_SECRET))
+    cfg = load_config(_proxy_env(VIVARIUM_HTTP_PROXY_SHARED_SECRET=_PROXY_SECRET))
     assert cfg.http is not None
     assert cfg.http.auth_mode == "mtls-proxy"
 
 
 def test_mtls_proxy_full_valid_config_defaults() -> None:
-    cfg = load_config(_proxy_env(GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET=_PROXY_SECRET))
+    cfg = load_config(_proxy_env(VIVARIUM_HTTP_PROXY_SHARED_SECRET=_PROXY_SECRET))
     assert cfg.http is not None
     h = cfg.http
     assert h.auth_mode == "mtls-proxy"
@@ -696,19 +692,19 @@ def test_mtls_proxy_without_secret_fails_closed() -> None:
 def test_mtls_proxy_short_secret_fails_closed(secret: str) -> None:
     """A present-but-too-short secret (<16) is refused at startup (length floor)."""
     with pytest.raises(GhidraMcpError, match="requires a shared secret"):
-        load_config(_proxy_env(GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET=secret))
+        load_config(_proxy_env(VIVARIUM_HTTP_PROXY_SHARED_SECRET=secret))
 
 
 def test_mtls_proxy_secret_at_min_len_accepted() -> None:
     """A boundary secret (exactly 16 chars) is accepted (off-by-one guard)."""
-    cfg = load_config(_proxy_env(GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET="x" * 16))
+    cfg = load_config(_proxy_env(VIVARIUM_HTTP_PROXY_SHARED_SECRET="x" * 16))
     assert cfg.http is not None
     assert cfg.http.proxy_shared_secret == "x" * 16
 
 
 def test_mtls_proxy_secret_excluded_from_repr() -> None:
     """The shared secret is the credential — it must not leak via repr/logs (workflow-secrets)."""
-    cfg = load_config(_proxy_env(GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET=_PROXY_SECRET))
+    cfg = load_config(_proxy_env(VIVARIUM_HTTP_PROXY_SHARED_SECRET=_PROXY_SECRET))
     assert cfg.http is not None
     assert _PROXY_SECRET not in repr(cfg.http)
 
@@ -718,9 +714,9 @@ def test_mtls_proxy_custom_header_names_lowercased() -> None:
     cfg = load_config(
         _proxy_env(
             **{
-                "GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET": _PROXY_SECRET,
-                "GHIDRA_MCP_HTTP_PROXY_SECRET_HEADER": _CUSTOM_SECRET_HEADER_IN,
-                "GHIDRA_MCP_HTTP_PROXY_IDENTITY_HEADER": _CUSTOM_IDENTITY_HEADER_IN,
+                "VIVARIUM_HTTP_PROXY_SHARED_SECRET": _PROXY_SECRET,
+                "VIVARIUM_HTTP_PROXY_SECRET_HEADER": _CUSTOM_SECRET_HEADER_IN,
+                "VIVARIUM_HTTP_PROXY_IDENTITY_HEADER": _CUSTOM_IDENTITY_HEADER_IN,
             }
         )
     )
@@ -731,7 +727,7 @@ def test_mtls_proxy_custom_header_names_lowercased() -> None:
 
 def test_mtls_proxy_unset_header_names_default_lowercased() -> None:
     """Unset header-name envs fall back to the lowercased defaults."""
-    cfg = load_config(_proxy_env(GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET=_PROXY_SECRET))
+    cfg = load_config(_proxy_env(VIVARIUM_HTTP_PROXY_SHARED_SECRET=_PROXY_SECRET))
     assert cfg.http is not None
     assert cfg.http.proxy_secret_header == PROXY_SECRET_HEADER_DEFAULT
     assert cfg.http.proxy_identity_header == PROXY_IDENTITY_HEADER_DEFAULT
@@ -741,12 +737,12 @@ def test_mtls_proxy_network_bind_full_valid_config() -> None:
     """A network mtls-proxy bind needs server TLS too (generic is_network rule) + the secret."""
     cfg = load_config(
         _env(
-            GHIDRA_MCP_TRANSPORT="http",
-            GHIDRA_MCP_HTTP_BIND="0.0.0.0:8765",
-            GHIDRA_MCP_HTTP_AUTH="mtls-proxy",
-            GHIDRA_MCP_HTTP_TLS_CERT="/c.pem",
-            GHIDRA_MCP_HTTP_TLS_KEY="/k.pem",
-            GHIDRA_MCP_HTTP_PROXY_SHARED_SECRET=_PROXY_SECRET,
+            VIVARIUM_TRANSPORT="http",
+            VIVARIUM_HTTP_BIND="0.0.0.0:8765",
+            VIVARIUM_HTTP_AUTH="mtls-proxy",
+            VIVARIUM_HTTP_TLS_CERT="/c.pem",
+            VIVARIUM_HTTP_TLS_KEY="/k.pem",
+            VIVARIUM_HTTP_PROXY_SHARED_SECRET=_PROXY_SECRET,
         )
     )
     assert cfg.http is not None
@@ -759,10 +755,10 @@ def test_non_proxy_config_leaves_proxy_fields_default() -> None:
     """For bearer, the proxy fields keep their harmless defaults — None secret, default headers."""
     cfg = load_config(
         _env(
-            GHIDRA_MCP_TRANSPORT="http",
-            GHIDRA_MCP_HTTP_BIND="127.0.0.1:8765",
-            GHIDRA_MCP_HTTP_AUTH="bearer",
-            GHIDRA_MCP_HTTP_BEARER_TOKEN=_TOKEN,
+            VIVARIUM_TRANSPORT="http",
+            VIVARIUM_HTTP_BIND="127.0.0.1:8765",
+            VIVARIUM_HTTP_AUTH="bearer",
+            VIVARIUM_HTTP_BEARER_TOKEN=_TOKEN,
         )
     )
     assert cfg.http is not None

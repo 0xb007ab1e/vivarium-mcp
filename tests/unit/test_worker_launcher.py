@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from ghidra_mcp.ghidra.launcher import (
+from vivarium.ghidra.launcher import (
     ContainerWorkerLauncher,
     ContainerWorkerProcess,
     WorkerLaunchError,
@@ -37,7 +37,7 @@ class _Recorder:
 
 def _launcher(tmp_path: Path, runner: _Recorder, **kw: object) -> ContainerWorkerLauncher:
     return ContainerWorkerLauncher(
-        worker_image="ghcr.io/o/ghidra-mcp-worker@sha256:" + "a" * 64,
+        worker_image="ghcr.io/o/vivarium-worker@sha256:" + "a" * 64,
         import_root=str(tmp_path / "imports"),
         runner=runner,
         **kw,  # type: ignore[arg-type]
@@ -53,7 +53,7 @@ def test_launch_builds_hardened_podman_argv(tmp_path: Path) -> None:
     proc = launcher("sid1", str(sock))
 
     assert isinstance(proc, ContainerWorkerProcess)
-    assert proc.container_name == "ghidra-mcp-worker-sid1"
+    assert proc.container_name == "vivarium-worker-sid1"
     # The per-session socket dir was created, private (0700).
     sess_dir = sock.parent
     assert sess_dir.is_dir()
@@ -70,13 +70,13 @@ def test_launch_builds_hardened_podman_argv(tmp_path: Path) -> None:
     assert "65532:65532" in argv  # non-root
     assert "--pids-limit" in argv and "--memory" in argv  # DoS bounds
     # Mounts: per-session socket dir read-write; import root read-only at the same path.
-    assert f"{sess_dir}:/run/ghidra-mcp:rw,Z" in argv
+    assert f"{sess_dir}:/run/vivarium:rw,Z" in argv
     assert f"{tmp_path / 'imports'}:{tmp_path / 'imports'}:ro,Z" in argv
     # Env: session identity + socket dir; no host env leakage.
-    assert "GHIDRA_MCP_SESSION_ID=sid1" in argv
+    assert "VIVARIUM_SESSION_ID=sid1" in argv
     assert "--env-host=false" in argv
     # The image is the final argument.
-    assert argv[-1] == "ghcr.io/o/ghidra-mcp-worker@sha256:" + "a" * 64
+    assert argv[-1] == "ghcr.io/o/vivarium-worker@sha256:" + "a" * 64
     # Default seccomp ("RuntimeDefault") = the engine's built-in profile, applied by OMITTING the
     # flag (passing the literal value would be read as a profile path and fail to launch). So no
     # explicit seccomp option is present for the default; only no-new-privileges.

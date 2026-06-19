@@ -15,10 +15,10 @@ import logging
 
 import pytest
 
-from ghidra_mcp import config as cfgmod
-from ghidra_mcp import logging as glog
-from ghidra_mcp.core.errors import ErrorType, GhidraMcpError
-from ghidra_mcp.security.limits import Limits
+from vivarium import config as cfgmod
+from vivarium import logging as glog
+from vivarium.core.errors import ErrorType, GhidraMcpError
+from vivarium.security.limits import Limits
 
 
 @pytest.fixture
@@ -38,7 +38,7 @@ def fake_resolve_limits(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, int] 
     return calls
 
 
-_MINIMAL_ENV = {"GHIDRA_MCP_WORKER_IMAGE": "ghcr.io/x/worker@sha256:" + "a" * 64}
+_MINIMAL_ENV = {"VIVARIUM_WORKER_IMAGE": "ghcr.io/x/worker@sha256:" + "a" * 64}
 
 
 def test_load_config_minimal_uses_secure_defaults(
@@ -52,7 +52,7 @@ def test_load_config_minimal_uses_secure_defaults(
     assert cfg.worker_runtime == "runsc"
     assert cfg.worker_uid == 65532
     assert cfg.worker_gid == 65532
-    assert cfg.rpc_socket_dir == "/run/ghidra-mcp"
+    assert cfg.rpc_socket_dir == "/run/vivarium"
     assert isinstance(cfg.limits, Limits)
     # No overrides set → resolve_limits called with None.
     assert fake_resolve_limits == [None]
@@ -63,8 +63,8 @@ def test_load_config_worker_uid_gid_overridable(
 ) -> None:
     """A host-run server can align the worker uid/gid to its own (ADR-009 socket-dir mapping)."""
     env = dict(_MINIMAL_ENV)
-    env["GHIDRA_MCP_WORKER_UID"] = "1000"
-    env["GHIDRA_MCP_WORKER_GID"] = "1000"
+    env["VIVARIUM_WORKER_UID"] = "1000"
+    env["VIVARIUM_WORKER_GID"] = "1000"
     cfg = cfgmod.load_config(env)
     assert cfg.worker_uid == 1000
     assert cfg.worker_gid == 1000
@@ -74,8 +74,8 @@ def test_load_config_collects_only_set_limit_overrides(
     fake_resolve_limits: list[dict[str, int] | None],
 ) -> None:
     env = dict(_MINIMAL_ENV)
-    env["GHIDRA_MCP_MAX_SESSIONS"] = "2"
-    env["GHIDRA_MCP_TOOL_TIMEOUT_SECONDS"] = "30"
+    env["VIVARIUM_MAX_SESSIONS"] = "2"
+    env["VIVARIUM_TOOL_TIMEOUT_SECONDS"] = "30"
     cfgmod.load_config(env)
     assert fake_resolve_limits == [{"max_sessions": 2, "tool_timeout_s": 30}]
 
@@ -97,8 +97,8 @@ def test_load_config_worker_resources_overrides_collected_and_clamped(
 ) -> None:
     """Explicitly-set worker-resource env vars are collected, validated, and clamped (ADR-023)."""
     env = dict(_MINIMAL_ENV)
-    env["GHIDRA_MCP_WORKER_MEM_MIB"] = "8192"  # tuned up, below ceiling → honored
-    env["GHIDRA_MCP_WORKER_CPUS"] = "99"  # above the cpu ceiling (16) → clamped DOWN
+    env["VIVARIUM_WORKER_MEM_MIB"] = "8192"  # tuned up, below ceiling → honored
+    env["VIVARIUM_WORKER_CPUS"] = "99"  # above the cpu ceiling (16) → clamped DOWN
     cfg = cfgmod.load_config(env)
     assert cfg.worker_resources.mem_mib == 8192
     assert cfg.worker_resources.cpus == 16  # clamped to HARD_MAX_WORKER_CPUS
@@ -109,7 +109,7 @@ def test_load_config_worker_resources_reject_invalid(
 ) -> None:
     """A non-integer worker-resource env value fails closed as VALIDATION (refuse to boot)."""
     env = dict(_MINIMAL_ENV)
-    env["GHIDRA_MCP_WORKER_MEM_MIB"] = "lots"
+    env["VIVARIUM_WORKER_MEM_MIB"] = "lots"
     with pytest.raises(GhidraMcpError) as exc:
         cfgmod.load_config(env)
     assert exc.value.envelope.type is ErrorType.VALIDATION
@@ -118,7 +118,7 @@ def test_load_config_worker_resources_reject_invalid(
 def test_load_config_preflight_mode_defaults_to_warn(
     fake_resolve_limits: list[dict[str, int] | None],
 ) -> None:
-    """Unset GHIDRA_MCP_WORKER_PREFLIGHT → secure default ``warn`` (v1.3 behaviour — ADR-029)."""
+    """Unset VIVARIUM_WORKER_PREFLIGHT → secure default ``warn`` (v1.3 behaviour — ADR-029)."""
     cfg = cfgmod.load_config(dict(_MINIMAL_ENV))
     assert cfg.worker_preflight_mode == "warn"
 
@@ -130,7 +130,7 @@ def test_load_config_preflight_mode_parses_each_valid_value(
 ) -> None:
     """Each allow-listed pre-flight mode parses to itself (ADR-029 C)."""
     env = dict(_MINIMAL_ENV)
-    env["GHIDRA_MCP_WORKER_PREFLIGHT"] = mode
+    env["VIVARIUM_WORKER_PREFLIGHT"] = mode
     cfg = cfgmod.load_config(env)
     assert cfg.worker_preflight_mode == mode
 
@@ -142,7 +142,7 @@ def test_load_config_preflight_mode_rejects_invalid_fails_closed(
 ) -> None:
     """An invalid pre-flight mode → VALIDATION error; refuse to boot (fail closed, ADR-029 C)."""
     env = dict(_MINIMAL_ENV)
-    env["GHIDRA_MCP_WORKER_PREFLIGHT"] = bad
+    env["VIVARIUM_WORKER_PREFLIGHT"] = bad
     with pytest.raises(GhidraMcpError) as exc:
         cfgmod.load_config(env)
     assert exc.value.envelope.type is ErrorType.VALIDATION
@@ -161,19 +161,19 @@ def test_load_config_missing_required_worker_image_fails_closed(
 @pytest.mark.parametrize(
     "env",
     [
-        {**_MINIMAL_ENV, "GHIDRA_MCP_LOG_LEVEL": "NOPE"},
-        {**_MINIMAL_ENV, "GHIDRA_MCP_LOG_FORMAT": "xml"},
-        {**_MINIMAL_ENV, "GHIDRA_MCP_SESSION_TTL_SECONDS": "0"},
-        {**_MINIMAL_ENV, "GHIDRA_MCP_SESSION_TTL_SECONDS": "-5"},
-        {**_MINIMAL_ENV, "GHIDRA_MCP_MAX_SESSIONS": "abc"},
-        {**_MINIMAL_ENV, "GHIDRA_MCP_MAX_SESSIONS": "0x10"},
+        {**_MINIMAL_ENV, "VIVARIUM_LOG_LEVEL": "NOPE"},
+        {**_MINIMAL_ENV, "VIVARIUM_LOG_FORMAT": "xml"},
+        {**_MINIMAL_ENV, "VIVARIUM_SESSION_TTL_SECONDS": "0"},
+        {**_MINIMAL_ENV, "VIVARIUM_SESSION_TTL_SECONDS": "-5"},
+        {**_MINIMAL_ENV, "VIVARIUM_MAX_SESSIONS": "abc"},
+        {**_MINIMAL_ENV, "VIVARIUM_MAX_SESSIONS": "0x10"},
         {
             **_MINIMAL_ENV,
-            "GHIDRA_MCP_SESSION_IDLE_SECONDS": "9999",
-            "GHIDRA_MCP_SESSION_TTL_SECONDS": "10",
+            "VIVARIUM_SESSION_IDLE_SECONDS": "9999",
+            "VIVARIUM_SESSION_TTL_SECONDS": "10",
         },
-        {**_MINIMAL_ENV, "GHIDRA_MCP_WORKER_IMAGE": "img\x00bad"},
-        {"GHIDRA_MCP_WORKER_IMAGE": "a" * 600},  # too long
+        {**_MINIMAL_ENV, "VIVARIUM_WORKER_IMAGE": "img\x00bad"},
+        {"VIVARIUM_WORKER_IMAGE": "a" * 600},  # too long
     ],
 )
 def test_load_config_rejects_invalid_values(
@@ -188,7 +188,7 @@ def test_load_config_blank_values_treated_as_unset(
     fake_resolve_limits: list[dict[str, int] | None],
 ) -> None:
     env = dict(_MINIMAL_ENV)
-    env["GHIDRA_MCP_SESSION_TTL_SECONDS"] = "   "  # whitespace → use default
+    env["VIVARIUM_SESSION_TTL_SECONDS"] = "   "  # whitespace → use default
     cfg = cfgmod.load_config(env)
     assert cfg.session_ttl_s == 3600
 
@@ -207,8 +207,8 @@ def test_load_config_rejects_idle_below_analysis_timeout(
         cfgmod, "resolve_limits", lambda overrides=None: Limits(analysis_timeout_s=700)
     )
     env = dict(_MINIMAL_ENV)
-    env["GHIDRA_MCP_SESSION_IDLE_SECONDS"] = "650"
-    env["GHIDRA_MCP_SESSION_TTL_SECONDS"] = "3600"
+    env["VIVARIUM_SESSION_IDLE_SECONDS"] = "650"
+    env["VIVARIUM_SESSION_TTL_SECONDS"] = "3600"
     with pytest.raises(GhidraMcpError) as exc:
         cfgmod.load_config(env)
     assert exc.value.envelope.type is ErrorType.VALIDATION
@@ -222,8 +222,8 @@ def test_load_config_accepts_idle_equal_to_analysis_timeout(
         cfgmod, "resolve_limits", lambda overrides=None: Limits(analysis_timeout_s=700)
     )
     env = dict(_MINIMAL_ENV)
-    env["GHIDRA_MCP_SESSION_IDLE_SECONDS"] = "700"
-    env["GHIDRA_MCP_SESSION_TTL_SECONDS"] = "3600"
+    env["VIVARIUM_SESSION_IDLE_SECONDS"] = "700"
+    env["VIVARIUM_SESSION_TTL_SECONDS"] = "3600"
     cfg = cfgmod.load_config(env)
     assert cfg.session_idle_s == 700
     assert cfg.limits.analysis_timeout_s == 700
@@ -241,7 +241,7 @@ def test_load_config_defaults_satisfy_liveness_invariant(
 
 # --- logging -------------------------------------------------------------------------
 def _make_record(**extra: object) -> logging.LogRecord:
-    rec = logging.LogRecord("ghidra_mcp.test", logging.INFO, "p.py", 10, "an.event", None, None)
+    rec = logging.LogRecord("vivarium.test", logging.INFO, "p.py", 10, "an.event", None, None)
     for key, value in extra.items():
         setattr(rec, key, value)
     return rec
@@ -251,7 +251,7 @@ def test_json_formatter_emits_structured_schema() -> None:
     out = glog._RedactingJsonFormatter().format(_make_record(session="opaque", size=42))
     doc = json.loads(out)
     assert doc["level"] == "INFO"
-    assert doc["logger"] == "ghidra_mcp.test"
+    assert doc["logger"] == "vivarium.test"
     assert doc["event"] == "an.event"
     assert doc["session"] == "opaque"
     assert doc["size"] == 42
@@ -300,7 +300,7 @@ def test_configure_logging_rejects_bad_level() -> None:
 
 
 def test_get_logger_returns_named_logger() -> None:
-    assert glog.get_logger("ghidra_mcp.x").name == "ghidra_mcp.x"
+    assert glog.get_logger("vivarium.x").name == "vivarium.x"
 
 
 # --- ADR-024 PR-1: traceback rendering + reserved-key guard ----------------------------------
@@ -312,7 +312,7 @@ def _record_with_exc(exc: BaseException) -> logging.LogRecord:
         import sys
 
         return logging.LogRecord(
-            "ghidra_mcp.test", logging.ERROR, "p.py", 10, "an.event", None, sys.exc_info()
+            "vivarium.test", logging.ERROR, "p.py", 10, "an.event", None, sys.exc_info()
         )
 
 
@@ -405,7 +405,7 @@ def test_reserved_key_guard_handles_empty_and_none() -> None:
 def test_redacting_logger_does_not_crash_on_reserved_extra() -> None:
     """End-to-end: a reserved ``extra`` key does NOT raise KeyError (the makeRecord guard)."""
     glog.configure_logging(level="DEBUG", fmt="json")
-    log = glog.get_logger("ghidra_mcp.reserved_test")
+    log = glog.get_logger("vivarium.reserved_test")
     handler = logging.getLogger().handlers[0]
     captured: list[str] = []
     orig_emit = handler.emit

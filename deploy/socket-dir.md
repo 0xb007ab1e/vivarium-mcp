@@ -7,7 +7,7 @@ Concretizes the socket-permission + container-mount wiring that `docs/contracts/
 ## Layout
 
 ```
-${GHIDRA_MCP_RPC_SOCKET_DIR}            default /run/ghidra-mcp
+${VIVARIUM_RPC_SOCKET_DIR}            default /run/vivarium
    owner = server user (65532:65532), mode 0700  (private; not world-readable)
    │
    ├── <session_id_A>/                  per-session subdir, 0700, server-owned
@@ -24,7 +24,7 @@ ${GHIDRA_MCP_RPC_SOCKET_DIR}            default /run/ghidra-mcp
   defense — a client cannot guess another session's socket path, and even if it did, the file perms
   + the no-network worker make it unreachable).
 - **Only that one subdir** is bind-mounted into the corresponding worker
-  (`--volume ${RPC_SOCKET_DIR}/<session_id>:/run/ghidra-mcp` in `deploy/worker-run.sh`). A worker
+  (`--volume ${RPC_SOCKET_DIR}/<session_id>:/run/vivarium` in `deploy/worker-run.sh`). A worker
   therefore sees **only its own** session socket directory — never any other session's. This is the
   cross-session isolation boundary at the filesystem layer (defense in depth with ADR-002's
   one-worker-per-session).

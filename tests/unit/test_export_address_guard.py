@@ -7,7 +7,7 @@ opaque ``internal worker error`` on a real, renamed program because step 4 of th
 
 The JVM enumeration loop itself is ``# pragma: no cover - JVM edge`` (validated only in the gated
 real-worker integration suite), but the *decision* was extracted into the pure, duck-typed
-predicate :func:`ghidra_mcp.ghidra._jvm_bridge._is_address_keyable` so the guard logic is testable
+predicate :func:`vivarium.ghidra._jvm_bridge._is_address_keyable` so the guard logic is testable
 hermetically with fakes — no JVM, no real worker (ADR-001). These tests pin every branch of that
 predicate: ``None``, a null-like memory-less address, a register/stack/external (non-memory)
 address, a concrete memory address, and a malformed/foreign object (fails closed, never crashes).
@@ -15,7 +15,7 @@ address, a concrete memory address, and a malformed/foreign object (fails closed
 
 from __future__ import annotations
 
-from ghidra_mcp.ghidra._jvm_bridge import _is_address_keyable
+from vivarium.ghidra._jvm_bridge import _is_address_keyable
 
 
 class _FakeAddress:

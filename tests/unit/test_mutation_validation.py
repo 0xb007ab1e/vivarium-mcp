@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import pytest
 
-from ghidra_mcp.core import validation as v
-from ghidra_mcp.core.errors import ErrorType, GhidraMcpError
+from vivarium.core import validation as v
+from vivarium.core.errors import ErrorType, GhidraMcpError
 
 pytestmark = pytest.mark.critical
 

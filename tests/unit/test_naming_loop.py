@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from ghidra_mcp.core.envelope import DataOrigin, Untrusted
-from ghidra_mcp.naming.loop import Namer, ProposedName, orchestrate
-from ghidra_mcp.tools.schemas import (
+from vivarium.core.envelope import DataOrigin, Untrusted
+from vivarium.naming.loop import Namer, ProposedName, orchestrate
+from vivarium.tools.schemas import (
     AnalysisOrderOut,
     CallGraphNode,
     FunctionContext,

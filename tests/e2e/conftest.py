@@ -3,7 +3,7 @@
 The end-to-end tests drive the real server over the MCP **stdio** transport with a
 :class:`tests.conftest.FakeGhidraPort` injected at the composition root — no real Ghidra worker is
 needed (the fake stands in for the adapter), but the server application factory and stdio runner
-(``ghidra_mcp.server.app.build_app`` / ``run_stdio``) are WS1 stubs in Wave-1. Until they are
+(``vivarium.server.app.build_app`` / ``run_stdio``) are WS1 stubs in Wave-1. Until they are
 implemented, these tests must skip cleanly rather than error.
 
 The guard probes whether ``build_app`` is still a reserved stub; if so, every e2e test is skipped.
@@ -29,7 +29,7 @@ def _server_shell_ready() -> bool:
     satisfy the (now-tightened) typed ``build_app`` signature — the call deliberately passes
     placeholder ``None`` args only to distinguish "reserved stub" from "implemented".
     """
-    from ghidra_mcp.server import app
+    from vivarium.server import app
 
     build_app = cast(Any, app.build_app)
     try:
@@ -54,7 +54,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     if _server_shell_ready():
         return
     skip_e2e = pytest.mark.skip(
-        reason="e2e disabled: ghidra_mcp.server.app.build_app is still a WS1 stub (Wave-1)"
+        reason="e2e disabled: vivarium.server.app.build_app is still a WS1 stub (Wave-1)"
     )
     for item in items:
         item.add_marker(skip_e2e)

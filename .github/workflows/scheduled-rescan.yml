@@ -80,7 +80,7 @@ jobs:
           file: ${{ matrix.containerfile }}
           push: false
           load: true # load into the local daemon so Trivy can scan by image-ref
-          tags: ghidra-mcp-${{ matrix.name }}:rescan
+          tags: vivarium-${{ matrix.name }}:rescan
           build-args: |
             GHIDRA_VERSION=${{ vars.GHIDRA_VERSION }}
             GHIDRA_RELEASE_TAG=${{ vars.GHIDRA_RELEASE_TAG }}
@@ -91,7 +91,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          image-ref: ghidra-mcp-${{ matrix.name }}:rescan
+          image-ref: vivarium-${{ matrix.name }}:rescan
           # Identical gate to the release pipeline: same config + the same time-boxed waivers, so a
           # waiver that expires here re-blocks exactly as it would at release time.
           trivy-config: infra/trivy.yaml

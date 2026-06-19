@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from ghidra_mcp.core.envelope import DataOrigin, Untrusted, wrap
+from vivarium.core.envelope import DataOrigin, Untrusted, wrap
 
 
 @pytest.mark.critical

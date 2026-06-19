@@ -1,5 +1,5 @@
 {
-  "schema": "ghidra-mcp/behavioral-equivalence-vectors/1",
+  "schema": "vivarium/behavioral-equivalence-vectors/1",
   "comment": "ADR-016 D3 synthetic, non-sensitive input vectors for the cJSON differential-run harness. Each `stdin` is a benign JSON document fed (UTF-8) to BOTH builds — (A) the trusted cJSON source + differential_driver_cjson.c, and (B) the candidate recompiled renamed-decompiled-C + the same driver — under the TB5 sandbox. The driver parses stdin and prints a deterministic summary to stdout; the oracle compares (exit_code, stdout) byte-exactly (D2). NO real malware / no PII (master §5) — these are ordinary JSON literals and a couple of deliberately invalid documents to exercise the parse-failure path.",
   "vectors": [
     {"name": "object", "stdin": "{\"name\":\"fixture\",\"n\":42}"},

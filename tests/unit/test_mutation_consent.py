@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import pytest
 
-from ghidra_mcp.core.errors import ErrorType, GhidraMcpError
-from ghidra_mcp.sessions.manager import SessionManager
+from vivarium.core.errors import ErrorType, GhidraMcpError
+from vivarium.sessions.manager import SessionManager
 
 pytestmark = pytest.mark.critical
 

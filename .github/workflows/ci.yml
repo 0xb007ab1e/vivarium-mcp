@@ -29,7 +29,7 @@ jobs:
     # Run the package from `src/` (src-layout) instead of an editable install, so the install step
     # fetches NOTHING unpinned (an editable build would pull the `hatchling` backend, which is not in
     # the dev lock). PYTHONPATH/MYPYPATH cover pytest, mypy (files=["src","tests"]), and any spawned
-    # `python -m ghidra_mcp`. Same pattern the integration suite already uses.
+    # `python -m vivarium`. Same pattern the integration suite already uses.
     env:
       PYTHONPATH: src
       MYPYPATH: src
@@ -60,13 +60,13 @@ jobs:
         run: |
           # Critical modules (see pyproject [tool.coverage] note): validation, envelope, errors,
           # sessions.manager, security.limits. Enforce 100% SCOPED to these.
-          # NOTE: pyproject `[tool.coverage.run] source = ["ghidra_mcp"]` forces whole-package
+          # NOTE: pyproject `[tool.coverage.run] source = ["vivarium"]` forces whole-package
           # measurement, so `--cov=<module> --cov-fail-under=100` would (wrongly) gate the whole
           # package. Instead: measure once, then `coverage report --include=<the 5 files>
           # --fail-under=100` to gate exactly the critical paths.
-          pytest -m "not integration" --cov=ghidra_mcp --cov-report=
+          pytest -m "not integration" --cov=vivarium --cov-report=
           coverage report --fail-under=100 \
-            --include='*/ghidra_mcp/core/validation.py,*/ghidra_mcp/core/envelope.py,*/ghidra_mcp/core/errors.py,*/ghidra_mcp/sessions/manager.py,*/ghidra_mcp/security/limits.py'
+            --include='*/vivarium/core/validation.py,*/vivarium/core/envelope.py,*/vivarium/core/errors.py,*/vivarium/sessions/manager.py,*/vivarium/security/limits.py'
       - name: Upload coverage artifact
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # actions/upload-artifact@v7.0.1

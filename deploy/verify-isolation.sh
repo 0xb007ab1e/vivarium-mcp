@@ -16,9 +16,9 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-WORKER_IMAGE="${GHIDRA_MCP_WORKER_IMAGE:?set GHIDRA_MCP_WORKER_IMAGE to the pinned @sha256 digest}"
-WORKER_RUNTIME="${GHIDRA_MCP_WORKER_RUNTIME:-runsc}"
-SECCOMP_PROFILE="${GHIDRA_MCP_WORKER_SECCOMP:-RuntimeDefault}"
+WORKER_IMAGE="${VIVARIUM_WORKER_IMAGE:?set VIVARIUM_WORKER_IMAGE to the pinned @sha256 digest}"
+WORKER_RUNTIME="${VIVARIUM_WORKER_RUNTIME:-runsc}"
+SECCOMP_PROFILE="${VIVARIUM_WORKER_SECCOMP:-RuntimeDefault}"
 
 fail() { echo "ISOLATION CHECK FAILED: $*" >&2; exit 1; }
 pass() { echo "  [PASS] $*"; }

@@ -30,15 +30,6 @@ from typing import Literal, cast
 
 import pytest
 
-from ghidra_mcp.core import validation as v
-from ghidra_mcp.core.envelope import DataOrigin, Untrusted
-from ghidra_mcp.core.errors import ErrorType, GhidraMcpError
-from ghidra_mcp.ghidra.port import GhidraPort
-from ghidra_mcp.ghidra.rpc_client import _build_exported_entry
-from ghidra_mcp.sessions.manager import SessionManager
-from ghidra_mcp.tools import registry as reg
-from ghidra_mcp.tools import schemas as s
-
 # Reuse the persistence test's import-path fakes (one disjoint source of truth for the fake
 # SessionManager/Port + ToolContext wiring — no duplication, no drift).
 from tests.unit.test_annotation_persistence import (
@@ -49,6 +40,14 @@ from tests.unit.test_annotation_persistence import (
     _ctx,
     _port,
 )
+from vivarium.core import validation as v
+from vivarium.core.envelope import DataOrigin, Untrusted
+from vivarium.core.errors import ErrorType, GhidraMcpError
+from vivarium.ghidra.port import GhidraPort
+from vivarium.ghidra.rpc_client import _build_exported_entry
+from vivarium.sessions.manager import SessionManager
+from vivarium.tools import registry as reg
+from vivarium.tools import schemas as s
 
 # --------------------------------------------------------------------------------------------------
 # Builders — bare (import) and exported composite specs

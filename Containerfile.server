@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # =============================================================================
-# Containerfile.server — the ghidra-mcp MCP control-plane server
+# Containerfile.server — the vivarium MCP control-plane server
 # =============================================================================
 # The TRUSTED control plane (validation, sessions, transport, worker lifecycle). Per ADR-001 it
 # NEVER loads the JVM or parses a binary — so this image carries NO Ghidra and NO JDK. It speaks
@@ -85,13 +85,13 @@ RUN set -eux; \
     /venv/bin/pip install --no-cache-dir --no-deps .; \
     # Bake the per-session socket-dir mount point with the runtime user's ownership: the runtime
     # stage is shell-free (cannot mkdir), and deploy/ tmpfs-mounts over this path at run time.
-    mkdir -p /run/ghidra-mcp; \
-    chown 65532:65532 /run/ghidra-mcp; \
-    chmod 0700 /run/ghidra-mcp; \
+    mkdir -p /run/vivarium; \
+    chown 65532:65532 /run/vivarium; \
+    chmod 0700 /run/vivarium; \
     # Build-time smoke: the venv must import the package AND resolve the console script. This is the
     # one place a venv/Python-minor mismatch between `-dev` and the runtime base would surface early.
-    /venv/bin/python -c "import ghidra_mcp"; \
-    test -x /venv/bin/ghidra-mcp
+    /venv/bin/python -c "import vivarium"; \
+    test -x /venv/bin/vivarium
 
 # =============================================================================
 # Stage 2: runtime — minimal, shell-free Chainguard python + the venv. No build tools, no pip.
@@ -100,13 +100,13 @@ RUN set -eux; \
 # hadolint ignore=DL3007
 FROM cgr.dev/chainguard/python:latest@sha256:37e0742458293f7bfa45573297955574ec7430c5fc9c02344e541706e20f2007 AS runtime
 
-LABEL org.opencontainers.image.title="ghidra-mcp-server" \
+LABEL org.opencontainers.image.title="vivarium-server" \
       org.opencontainers.image.description="Secure MCP control-plane server for headless Ghidra (stdio, v1)." \
       org.opencontainers.image.licenses="Apache-2.0" \
-      org.opencontainers.image.source="https://github.com/OWNER/ghidra-mcp" \
-      org.ghidra-mcp.role="control-plane" \
-      org.ghidra-mcp.transport="stdio" \
-      org.ghidra-mcp.ports="none"
+      org.opencontainers.image.source="https://github.com/OWNER/vivarium-mcp" \
+      org.vivarium.role="control-plane" \
+      org.vivarium.transport="stdio" \
+      org.vivarium.ports="none"
 
 # No JVM here (ADR-001) — server only. The non-root `nonroot` user (uid/gid 65532) is built into the
 # Chainguard base; there is no shell/useradd to create one (and none is needed).
@@ -114,18 +114,18 @@ ENV PATH="/venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     # Structured JSON logs to stdout/stderr (12-Factor / topic-logging-observability).
-    GHIDRA_MCP_LOG_FORMAT=json \
-    GHIDRA_MCP_LOG_LEVEL=INFO \
+    VIVARIUM_LOG_FORMAT=json \
+    VIVARIUM_LOG_LEVEL=INFO \
     # Per-session RPC sockets live here; deploy/ mounts this as a private 0700 dir shared with
     # workers (server is owner). No network surface (rpc-protocol.md §2).
-    GHIDRA_MCP_RPC_SOCKET_DIR=/run/ghidra-mcp
+    VIVARIUM_RPC_SOCKET_DIR=/run/vivarium
 
 # The venv (root-owned, read-only at runtime) and the pre-owned socket-dir mount point, both lifted
 # from the builder (the runtime stage has no shell to create them). integration-validate: the venv
 # is portable because `-dev` and this runtime share the same Chainguard CPython install path; the
-# gated build's smoke (above) + the post-build `ghidra-mcp` import confirm it.
+# gated build's smoke (above) + the post-build `vivarium` import confirm it.
 COPY --from=builder --chown=root:root /venv /venv
-COPY --from=builder --chown=65532:65532 /run/ghidra-mcp /run/ghidra-mcp
+COPY --from=builder --chown=65532:65532 /run/vivarium /run/vivarium
 
 USER 65532:65532
 WORKDIR /home/nonroot
@@ -134,4 +134,4 @@ WORKDIR /home/nonroot
 # (the MCP client over stdio is the health signal). Adding a network probe would be misleading.
 
 # stdio MCP entrypoint (the only transport in v1). NO EXPOSE — no ports in v1.
-ENTRYPOINT ["ghidra-mcp"]
+ENTRYPOINT ["vivarium"]

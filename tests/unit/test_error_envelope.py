@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
+from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 
 
 @pytest.mark.critical

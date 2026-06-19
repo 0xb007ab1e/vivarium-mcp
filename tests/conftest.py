@@ -1,18 +1,18 @@
-"""Shared pytest fixtures for the ghidra-mcp test suite (WS5 — QA infrastructure).
+"""Shared pytest fixtures for the vivarium test suite (WS5 — QA infrastructure).
 
 This module provides the test doubles and helpers that depend ONLY on the frozen contracts
-(``docs/contracts/*`` and their pydantic source of truth in ``src/ghidra_mcp/``), so the suite
+(``docs/contracts/*`` and their pydantic source of truth in ``src/vivarium/``), so the suite
 is buildable while the implementation workstreams (WS1/WS2/WS4) are still reserved stubs.
 
 Provided fixtures and helpers:
 
 - :class:`FakeGhidraPort` — a complete, deterministic, schema-valid implementation of the frozen
-  :class:`ghidra_mcp.ghidra.port.GhidraPort` Protocol, with a ``failure`` switch to simulate
+  :class:`vivarium.ghidra.port.GhidraPort` Protocol, with a ``failure`` switch to simulate
   timeout / worker crash / oversized-frame / poison conditions for abuse and reliability tests.
 - :class:`FrozenClock` — an injectable, monotonic-and-wall-clock test clock (no wall-clock
   dependence; TTL/idle eviction tests advance it explicitly — topic-numeric-correctness).
 - :class:`FakeSessionManager` — an in-memory session manager honoring the frozen
-  :class:`ghidra_mcp.sessions.manager.SessionManager` surface, driven by the frozen clock.
+  :class:`vivarium.sessions.manager.SessionManager` surface, driven by the frozen clock.
 - Assertion helpers for the error-envelope and untrusted-data envelope shapes.
 
 Everything here is deterministic and hermetic: no real network, no wall-clock, no unseeded
@@ -29,12 +29,12 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
 
-from ghidra_mcp.core.envelope import DataOrigin, Untrusted
-from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
-from ghidra_mcp.tools import schemas as s
+from vivarium.core.envelope import DataOrigin, Untrusted
+from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
+from vivarium.tools import schemas as s
 
 if TYPE_CHECKING:
-    from ghidra_mcp.ghidra.port import GhidraPort
+    from vivarium.ghidra.port import GhidraPort
 
 # ---------------------------------------------------------------------------------------------
 # Failure injection
@@ -809,7 +809,7 @@ class FakeSessionManager:
 class _SessionManagerLike(Protocol):
     """The session-manager surface the suite (and tool handlers) depend on (structural).
 
-    Mirrors the public methods of the frozen :class:`ghidra_mcp.sessions.manager.SessionManager`
+    Mirrors the public methods of the frozen :class:`vivarium.sessions.manager.SessionManager`
     that the server shell and abuse/e2e tests exercise. :class:`FakeSessionManager` is asserted
     to satisfy this below so its signatures cannot silently drift from the real manager.
     """

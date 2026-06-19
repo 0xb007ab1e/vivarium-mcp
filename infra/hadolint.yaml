@@ -29,7 +29,7 @@ ignored:
   - DL3009
   # DL3013: pin pip versions with `==`. This project pins its Python supply chain the STRONGER way —
   #         the runtime install uses `--require-hashes -r requirements.lock` (hash-pinned), the
-  #         ghidra_mcp wheel + bundled PyGhidra install offline via `--no-index --find-links`
+  #         vivarium wheel + bundled PyGhidra install offline via `--no-index --find-links`
   #         (resolved from an already-SHA-256-verified Ghidra dist / a locally-built wheel), and the
   #         pybuilder's `build`/`hatchling` are throwaway build-only tooling. A bare `==` pin adds
   #         nothing over hashes + offline resolution, so DL3013 is a false positive for our install

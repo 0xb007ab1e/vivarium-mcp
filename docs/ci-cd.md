@@ -1,4 +1,4 @@
-# CI/CD Gates & Branch Protection — `ghidra-mcp`
+# CI/CD Gates & Branch Protection — `vivarium`
 
 > Implements `@rules/workflow-cicd.md` + `@rules/std-supplychain.md`. CI lives in
 > [`.github/workflows/ci.yml`](../.github/workflows/ci.yml). A failing gate **blocks merge** — no

@@ -14,11 +14,11 @@ the fraction of vectors whose ``(exit_code, stdout)`` match byte-exactly (D2). L
 honest: a stub or non-recompiling candidate fails to build/link and scores ~0 — that is the point.
 
 GATING (hermetic by default — never runs in the unit/coverage job): mirrors
-``test_naming_eval_oss`` — all of ``GHIDRA_MCP_INTEGRATION`` (truthy), ``GHIDRA_MCP_FIXTURES`` (the
-built fixtures dir with ``index.json``), ``GHIDRA_MCP_WORKER_IMAGE``, a container engine, and
-``GHIDRA_MCP_COMPILER_IMAGE`` (the pinned, verified compiler image for the TB5 sandbox) must be
+``test_naming_eval_oss`` — all of ``VIVARIUM_INTEGRATION`` (truthy), ``VIVARIUM_FIXTURES`` (the
+built fixtures dir with ``index.json``), ``VIVARIUM_WORKER_IMAGE``, a container engine, and
+``VIVARIUM_COMPILER_IMAGE`` (the pinned, verified compiler image for the TB5 sandbox) must be
 present; otherwise this module skips cleanly. The fixtures-build job must additionally emit the
-cJSON **source** alongside the stripped binary (``GHIDRA_MCP_CJSON_SOURCE``) so build A/B have the
+cJSON **source** alongside the stripped binary (``VIVARIUM_CJSON_SOURCE``) so build A/B have the
 amalgamated TU + driver to compile — absent it, the test skips.
 """
 
@@ -35,19 +35,19 @@ from typing import Any
 
 import pytest
 
-from ghidra_mcp.naming.compile import ContainerExecRunner
-from ghidra_mcp.naming.loop import Namer, ProposedName, orchestrate
-from ghidra_mcp.naming.metrics import generate_fuzz_vectors, score
-from ghidra_mcp.tools.schemas import AnalysisOrderOut, FunctionContext
+from vivarium.naming.compile import ContainerExecRunner
+from vivarium.naming.loop import Namer, ProposedName, orchestrate
+from vivarium.naming.metrics import generate_fuzz_vectors, score
+from vivarium.tools.schemas import AnalysisOrderOut, FunctionContext
 
-_ENV_INTEGRATION = "GHIDRA_MCP_INTEGRATION"
-_ENV_FIXTURES = "GHIDRA_MCP_FIXTURES"
-_ENV_WORKER_IMAGE = "GHIDRA_MCP_WORKER_IMAGE"
-_ENV_ENGINE = "GHIDRA_MCP_CONTAINER_ENGINE"
-_ENV_COMPILER_IMAGE = "GHIDRA_MCP_COMPILER_IMAGE"
+_ENV_INTEGRATION = "VIVARIUM_INTEGRATION"
+_ENV_FIXTURES = "VIVARIUM_FIXTURES"
+_ENV_WORKER_IMAGE = "VIVARIUM_WORKER_IMAGE"
+_ENV_ENGINE = "VIVARIUM_CONTAINER_ENGINE"
+_ENV_COMPILER_IMAGE = "VIVARIUM_COMPILER_IMAGE"
 #: The gated fixtures-build job emits the amalgamated cJSON source (cJSON.c text) so the e2e can
 #: build the TRUSTED reference (A) from known source — never from the hostile binary (D1).
-_ENV_CJSON_SOURCE = "GHIDRA_MCP_CJSON_SOURCE"
+_ENV_CJSON_SOURCE = "VIVARIUM_CJSON_SOURCE"
 
 _HERE = Path(__file__).resolve().parent
 _FIXTURES_OSS = _HERE.parent / "fixtures" / "oss"
@@ -165,10 +165,10 @@ async def _collect_candidate(fixtures_dir: Path) -> str:
     stripped = fixtures_dir / "cjson.stripped"
     params = StdioServerParameters(
         command="python",
-        args=["-m", "ghidra_mcp"],
-        env={**os.environ, "GHIDRA_MCP_IMPORT_ROOT": str(fixtures_dir)},
+        args=["-m", "vivarium"],
+        env={**os.environ, "VIVARIUM_IMPORT_ROOT": str(fixtures_dir)},
     )
-    timeout = timedelta(seconds=int(os.environ.get("GHIDRA_MCP_E2E_TIMEOUT", "600")))
+    timeout = timedelta(seconds=int(os.environ.get("VIVARIUM_E2E_TIMEOUT", "600")))
 
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
@@ -207,8 +207,8 @@ async def _collect_candidate(fixtures_dir: Path) -> str:
 def _exec_runner() -> ContainerExecRunner:
     return ContainerExecRunner(
         compiler_image=os.environ[_ENV_COMPILER_IMAGE],
-        runtime=os.environ.get("GHIDRA_MCP_WORKER_RUNTIME", "runsc"),
-        timeout_s=int(os.environ.get("GHIDRA_MCP_E2E_TIMEOUT", "120")),
+        runtime=os.environ.get("VIVARIUM_WORKER_RUNTIME", "runsc"),
+        timeout_s=int(os.environ.get("VIVARIUM_E2E_TIMEOUT", "120")),
     )
 
 

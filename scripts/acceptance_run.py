@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real-chain, progress-reporting acceptance-run harness for ghidra-mcp (dogfooding gap-finder).
+"""Real-chain, progress-reporting acceptance-run harness for vivarium (dogfooding gap-finder).
 
 A CLI driver that runs the *actual* analysis + (optional) naming workflow against an arbitrary
 (possibly blind, possibly hostile) binary through the real, hardened worker chain, and dumps
@@ -11,7 +11,7 @@ Containment is the EXISTING worker isolation (ADR-001/002/004): the driver runs 
 code (it never loads the JVM or parses the binary itself); the out-of-process, network-isolated,
 resource-bounded worker container does all binary parsing, and is killed + its store wiped on
 session close. The driver brings the chain up exactly as the gated e2e suite does — it launches the
-real MCP server (``python -m ghidra_mcp``) over the **stdio** transport and drives it as an MCP
+real MCP server (``python -m vivarium``) over the **stdio** transport and drives it as an MCP
 client, so the full composition root (FastMCP app → ``RpcGhidraAdapter`` → hardened worker) is what
 runs. FAIL CLOSED with a clear message if the worker image / container engine is unavailable.
 
@@ -56,9 +56,9 @@ from typing import Any
 
 # The driver runs SERVER-SIDE code only (ADR-001): the pure naming core + frozen schemas. The worker
 # (spawned by the server it launches as a subprocess) is the sole thing that parses the binary.
-from ghidra_mcp.naming.loop import ProposedName, orchestrate
-from ghidra_mcp.naming.metrics import score
-from ghidra_mcp.tools.schemas import AnalysisOrderOut, FunctionContext
+from vivarium.naming.loop import ProposedName, orchestrate
+from vivarium.naming.metrics import score
+from vivarium.tools.schemas import AnalysisOrderOut, FunctionContext
 
 #: Default cap on functions selected/named in one pass (DoS / cost bound — a hostile or huge binary
 #: must not drive an unbounded loop; honestly surfaced as "selected N of total" in the summary).
@@ -166,21 +166,21 @@ def _preflight(import_root: Path) -> None:
     Raises:
         HarnessError: If any prerequisite for the real chain is missing.
     """
-    if not _truthy(os.environ.get("GHIDRA_MCP_INTEGRATION")):
+    if not _truthy(os.environ.get("VIVARIUM_INTEGRATION")):
         raise HarnessError(
-            "GHIDRA_MCP_INTEGRATION is not set — this harness runs the REAL hardened worker "
-            "(a gated image pull + container run). Set GHIDRA_MCP_INTEGRATION=1 and provide a "
-            "pinned GHIDRA_MCP_WORKER_IMAGE to run it."
+            "VIVARIUM_INTEGRATION is not set — this harness runs the REAL hardened worker "
+            "(a gated image pull + container run). Set VIVARIUM_INTEGRATION=1 and provide a "
+            "pinned VIVARIUM_WORKER_IMAGE to run it."
         )
-    if not os.environ.get("GHIDRA_MCP_WORKER_IMAGE", "").strip():
+    if not os.environ.get("VIVARIUM_WORKER_IMAGE", "").strip():
         raise HarnessError(
-            "GHIDRA_MCP_WORKER_IMAGE is not set — a pinned-by-digest worker image is required "
-            "(e.g. localhost/ghidra-mcp-worker:dev for local validation)."
+            "VIVARIUM_WORKER_IMAGE is not set — a pinned-by-digest worker image is required "
+            "(e.g. localhost/vivarium-worker:dev for local validation)."
         )
-    engine = os.environ.get("GHIDRA_MCP_CONTAINER_ENGINE", "podman").strip() or "podman"
+    engine = os.environ.get("VIVARIUM_CONTAINER_ENGINE", "podman").strip() or "podman"
     if shutil.which(engine) is None:
         raise HarnessError(
-            f"container engine {engine!r} not found on PATH (set GHIDRA_MCP_CONTAINER_ENGINE)."
+            f"container engine {engine!r} not found on PATH (set VIVARIUM_CONTAINER_ENGINE)."
         )
     if not import_root.is_dir():
         raise HarnessError(f"import root {import_root} is not a directory")
@@ -190,11 +190,11 @@ def _preflight(import_root: Path) -> None:
 async def _mcp_session(import_root: Path) -> Any:
     """Launch the real MCP stdio server and yield an initialized client session.
 
-    Brings the chain up exactly as the gated e2e suite does: spawns ``python -m ghidra_mcp`` (the
+    Brings the chain up exactly as the gated e2e suite does: spawns ``python -m vivarium`` (the
     composition root → real ``RpcGhidraAdapter`` → hardened worker container) over stdio with the
     import root pointed at the binary's directory, and hands back an initialized
     :class:`mcp.ClientSession`. The current environment is inherited so the operator's pinned
-    ``GHIDRA_MCP_WORKER_IMAGE`` / engine / runtime config reaches the adapter.
+    ``VIVARIUM_WORKER_IMAGE`` / engine / runtime config reaches the adapter.
 
     Args:
         import_root: Directory (read-only mounted into the worker) the binary must live under.
@@ -207,8 +207,8 @@ async def _mcp_session(import_root: Path) -> Any:
 
     params = StdioServerParameters(
         command=sys.executable,
-        args=["-m", "ghidra_mcp"],
-        env={**os.environ, "GHIDRA_MCP_IMPORT_ROOT": str(import_root)},
+        args=["-m", "vivarium"],
+        env={**os.environ, "VIVARIUM_IMPORT_ROOT": str(import_root)},
     )
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
@@ -593,7 +593,7 @@ def _build_manifest(
             for comp in order.components
         ],
         "order_truncated": order.truncated,
-        "ghidra_version": os.environ.get("GHIDRA_MCP_GHIDRA_VERSION", "12.1.2"),
+        "ghidra_version": os.environ.get("VIVARIUM_GHIDRA_VERSION", "12.1.2"),
         "generated_at": _utc_now_iso(),
     }
 
@@ -733,7 +733,7 @@ def _maybe_measure(*, names: dict[str, dict[str, Any]], out: Path, progress: Pro
     """Attempt the ADR-016 metrics build; skip-with-message when no buildable reference exists.
 
     Reuses the pure naming core + scorer (``orchestrate`` + ``score``) and the sandboxed
-    :class:`~ghidra_mcp.naming.compile.ContainerExecRunner` (TB5) exactly as the gated
+    :class:`~vivarium.naming.compile.ContainerExecRunner` (TB5) exactly as the gated
     behavioral-equivalence e2e does. A blind binary typically has NO trusted reference source, so
     behavioral-equivalence is honestly unavailable — recorded as a skip reason rather than
     fabricated (the metric returns ``None`` for an absent reference). Name-coverage IS always
@@ -756,12 +756,12 @@ def _maybe_measure(*, names: dict[str, dict[str, Any]], out: Path, progress: Pro
         _write_metrics(out, metrics, behavioral_available=False, note=msg)
         return msg
 
-    compiler_image = os.environ.get("GHIDRA_MCP_COMPILER_IMAGE", "").strip()
-    reference_source = os.environ.get("GHIDRA_MCP_REFERENCE_SOURCE", "").strip()
+    compiler_image = os.environ.get("VIVARIUM_COMPILER_IMAGE", "").strip()
+    reference_source = os.environ.get("VIVARIUM_REFERENCE_SOURCE", "").strip()
     if not compiler_image or not reference_source or not Path(reference_source).is_file():
         msg = (
             "behavioral-equivalence skipped: blind binary has no trusted reference build "
-            "(set GHIDRA_MCP_COMPILER_IMAGE + GHIDRA_MCP_REFERENCE_SOURCE to enable) — "
+            "(set VIVARIUM_COMPILER_IMAGE + VIVARIUM_REFERENCE_SOURCE to enable) — "
             "name-coverage reported"
         )
         progress.emit(f"  measure: {msg}")
@@ -771,15 +771,15 @@ def _maybe_measure(*, names: dict[str, dict[str, Any]], out: Path, progress: Pro
         return msg
 
     # A trusted reference + sandbox IS available: run the A-vs-B differential exactly like the e2e.
-    from ghidra_mcp.naming.compile import ContainerExecRunner
-    from ghidra_mcp.naming.metrics import generate_fuzz_vectors
+    from vivarium.naming.compile import ContainerExecRunner
+    from vivarium.naming.metrics import generate_fuzz_vectors
 
     progress.emit("  measure: building A (reference) and B (candidate) in the TB5 sandbox")
     program = _program_from_names(names)
     runner = ContainerExecRunner(
         compiler_image=compiler_image,
-        runtime=os.environ.get("GHIDRA_MCP_WORKER_RUNTIME", "runsc"),
-        timeout_s=int(os.environ.get("GHIDRA_MCP_E2E_TIMEOUT", "120")),
+        runtime=os.environ.get("VIVARIUM_WORKER_RUNTIME", "runsc"),
+        timeout_s=int(os.environ.get("VIVARIUM_E2E_TIMEOUT", "120")),
     )
     vectors = generate_fuzz_vectors(seed=0xC0FFEE, count=16, max_len=64)
     runs_a = runner(Path(reference_source).read_text(encoding="utf-8"), vectors)
@@ -804,10 +804,10 @@ def _program_from_names(names: dict[str, dict[str, Any]]) -> Any:
         names: The filled names map.
 
     Returns:
-        The :class:`~ghidra_mcp.naming.loop.RenamedProgram` for scoring.
+        The :class:`~vivarium.naming.loop.RenamedProgram` for scoring.
     """
-    from ghidra_mcp.core.envelope import DataOrigin, Untrusted
-    from ghidra_mcp.tools.schemas import OrderedComponent
+    from vivarium.core.envelope import DataOrigin, Untrusted
+    from vivarium.tools.schemas import OrderedComponent
 
     addresses = sorted(names)
     order = AnalysisOrderOut(
@@ -839,7 +839,7 @@ def _write_metrics(out: Path, metrics: Any, *, behavioral_available: bool, note:
 
     Args:
         out: The artifact output directory.
-        metrics: The :class:`~ghidra_mcp.naming.metrics.NamingMetrics`.
+        metrics: The :class:`~vivarium.naming.metrics.NamingMetrics`.
         behavioral_available: Whether a trusted reference build was available.
         note: A short, safe status note recorded alongside the numbers.
     """
@@ -892,7 +892,7 @@ def _resolve_apply_binary(manifest: dict[str, Any], out: Path) -> Path:
     """Resolve the binary to re-import for apply mode (explicit env override, else manifest sha).
 
     Apply mode re-imports the SAME binary the analyze run targeted. The path is supplied via
-    ``GHIDRA_MCP_APPLY_BINARY`` (the operator points at the exact file again — the harness never
+    ``VIVARIUM_APPLY_BINARY`` (the operator points at the exact file again — the harness never
     writes the sample into the repo or the out dir). The binary's SHA-256 is cross-checked against
     the manifest to fail closed on a mismatched binary.
 
@@ -906,20 +906,20 @@ def _resolve_apply_binary(manifest: dict[str, Any], out: Path) -> Path:
     Raises:
         HarnessError: If the override is unset/missing or its hash does not match the manifest.
     """
-    override = os.environ.get("GHIDRA_MCP_APPLY_BINARY", "").strip()
+    override = os.environ.get("VIVARIUM_APPLY_BINARY", "").strip()
     if not override:
         raise HarnessError(
-            "set GHIDRA_MCP_APPLY_BINARY to the SAME binary the analyze run used "
+            "set VIVARIUM_APPLY_BINARY to the SAME binary the analyze run used "
             f"(its sha256 must match manifest.json in {out})"
         )
     binary = Path(override).resolve()
     if not binary.is_file():
-        raise HarnessError(f"GHIDRA_MCP_APPLY_BINARY {binary} is not a file")
+        raise HarnessError(f"VIVARIUM_APPLY_BINARY {binary} is not a file")
     actual = _sha256_file(binary)
     expected = manifest.get("binary_sha256")
     if expected and actual != expected:
         raise HarnessError(
-            "GHIDRA_MCP_APPLY_BINARY does not match the analyze-run binary (sha256 mismatch)"
+            "VIVARIUM_APPLY_BINARY does not match the analyze-run binary (sha256 mismatch)"
         )
     return binary
 
@@ -985,7 +985,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="acceptance_run",
         description=(
-            "Real-chain acceptance harness for ghidra-mcp (analyze a binary + dump artifacts; "
+            "Real-chain acceptance harness for vivarium (analyze a binary + dump artifacts; "
             "apply a filled names map). Runs the REAL hardened worker — gated; honors ADR-001."
         ),
     )

@@ -10,8 +10,8 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from ghidra_mcp.tools import schemas as s
-from ghidra_mcp.tools.registry import TIER1_TOOL_NAMES
+from vivarium.tools import schemas as s
+from vivarium.tools.registry import TIER1_TOOL_NAMES
 
 
 @pytest.mark.critical
@@ -108,7 +108,7 @@ def test_catalog_count_matches_registry() -> None:
 @pytest.mark.critical
 def test_output_models_carry_untrusted_fields() -> None:
     # Spot-check that binary-derived output is wrapped, not bare (ADR-005 at the type level).
-    from ghidra_mcp.core.envelope import DataOrigin, Untrusted
+    from vivarium.core.envelope import DataOrigin, Untrusted
 
     out = s.DecompiledFunction(
         address="0x1000",

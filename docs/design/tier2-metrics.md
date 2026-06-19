@@ -21,7 +21,7 @@
 `*` = `Untrusted[...]` (binary-derived). Addresses (server-normalized), counts, ratios, categories,
 and algorithm labels (closed vocabulary) are bare.
 
-## 2. Pure cores (JVM-free, 100%-tested — `src/ghidra_mcp/core/`)
+## 2. Pure cores (JVM-free, 100%-tested — `src/vivarium/core/`)
 
 ### `core/metrics.py`
 - `cyclomatic_complexity(block_count, edge_count) -> int` — McCabe `M = E − N + 2` for a single
@@ -79,14 +79,14 @@ field wrapped (ADR-005). A one-shot triage report; the heavy lists stay in the d
 
 | Concern | Location | JVM? |
 |---|---|---|
-| Tool schemas (frozen In/Out) | `src/ghidra_mcp/tools/schemas.py` | no |
-| Tool handlers (authorize → validate → delegate) | `src/ghidra_mcp/tools/registry.py` | no |
-| **Complexity + call-graph metrics (pure)** | `src/ghidra_mcp/core/metrics.py` | **no** |
-| **IOC + crypto-signature scan (pure)** | `src/ghidra_mcp/core/iocscan.py` | **no** |
-| Adapter: compose RPCs + wrap + invoke cores | `src/ghidra_mcp/ghidra/rpc_client.py` | no |
-| Port interface | `src/ghidra_mcp/ghidra/port.py` | no |
+| Tool schemas (frozen In/Out) | `src/vivarium/tools/schemas.py` | no |
+| Tool handlers (authorize → validate → delegate) | `src/vivarium/tools/registry.py` | no |
+| **Complexity + call-graph metrics (pure)** | `src/vivarium/core/metrics.py` | **no** |
+| **IOC + crypto-signature scan (pure)** | `src/vivarium/core/iocscan.py` | **no** |
+| Adapter: compose RPCs + wrap + invoke cores | `src/vivarium/ghidra/rpc_client.py` | no |
+| Port interface | `src/vivarium/ghidra/port.py` | no |
 | Worker RPC methods (allow-list + dispatch) | `worker/dispatch.py` (`function_cfg`, `imports`, `exports`, `coverage`) | no |
-| **CFG / imports / exports / coverage extraction** | `src/ghidra_mcp/ghidra/_jvm_bridge.py` | **yes — worker only** |
+| **CFG / imports / exports / coverage extraction** | `src/vivarium/ghidra/_jvm_bridge.py` | **yes — worker only** |
 
 ## References
 - ADR-008 (decision), ADR-001 (out-of-process), ADR-005 (untrusted envelope), ADR-006 (catalog seam),

@@ -39,7 +39,7 @@ class GroundTruth:
     def from_json(cls, doc: Mapping[str, object]) -> GroundTruth:
         """Build from a ``extract_ground_truth.py`` JSON document (validates the schema tag)."""
         schema = str(doc.get("schema", ""))
-        if not schema.startswith("ghidra-mcp/e2e-groundtruth/"):
+        if not schema.startswith("vivarium/e2e-groundtruth/"):
             msg = f"unexpected ground-truth schema: {schema!r}"
             raise ValueError(msg)
         funcs = doc.get("functions") or []

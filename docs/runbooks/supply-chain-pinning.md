@@ -181,9 +181,9 @@ uv run ruff check . && uv run ruff format --check .          # gate 2 (incl. D d
 uv run mypy                                                  # gate 3 (strict)
 uv run pytest -m "not integration"                           # gate 4 (>=90% line+branch baseline)
 uv run pytest -m "not integration" \
-  --cov=ghidra_mcp.core.validation --cov=ghidra_mcp.core.envelope \
-  --cov=ghidra_mcp.core.errors --cov=ghidra_mcp.sessions.manager \
-  --cov=ghidra_mcp.security.limits --cov-fail-under=100       # 100% critical paths
+  --cov=vivarium.core.validation --cov=vivarium.core.envelope \
+  --cov=vivarium.core.errors --cov=vivarium.sessions.manager \
+  --cov=vivarium.security.limits --cov-fail-under=100       # 100% critical paths
 uv run bandit -r src -c pyproject.toml                       # gate 5 SAST
 ```
 
@@ -200,7 +200,7 @@ uv run bandit -r src -c pyproject.toml                       # gate 5 SAST
    make -f infra/Makefile build GHIDRA_VERSION="$GHIDRA_VERSION" GHIDRA_ZIP_URL="$GHIDRA_ZIP_URL" GHIDRA_ZIP_SHA256="$GHIDRA_ZIP_SHA256"
    make -f infra/Makefile scan-images scan-config sbom
    # then pin the BUILT image digests into deploy/*.sh + .env.example (REPLACE_WITH_PINNED_DIGEST):
-   #   ghcr.io/OWNER/ghidra-mcp-worker@sha256:...   ghcr.io/OWNER/ghidra-mcp-server@sha256:...
+   #   ghcr.io/OWNER/vivarium-worker@sha256:...   ghcr.io/OWNER/vivarium-server@sha256:...
    ```
 2. **ADR-004 isolation acceptance** on a gVisor-capable host: `deploy/verify-isolation.sh`.
 3. **First commit** of the integrated tree (separate gate — `@rules/workflow-git.md`, noreply email).

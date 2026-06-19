@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import pytest
 
-from ghidra_mcp.core.envelope import DataOrigin, Untrusted, wrap
-from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
-from ghidra_mcp.security.limits import Limits, check_binary_size, resolve_limits
+from vivarium.core.envelope import DataOrigin, Untrusted, wrap
+from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
+from vivarium.security.limits import Limits, check_binary_size, resolve_limits
 
 pytestmark = pytest.mark.abuse
 
@@ -125,7 +125,7 @@ def test_oversized_binary_rejected_before_worker() -> None:
 @pytest.mark.critical
 def test_size_cap_cannot_be_widened_past_hard_ceiling() -> None:
     """A misconfigured huge ``max_binary_bytes`` is clamped, so the pre-worker cap stays bounded."""
-    from ghidra_mcp.security.limits import HARD_MAX_BINARY_BYTES
+    from vivarium.security.limits import HARD_MAX_BINARY_BYTES
 
     widened = resolve_limits({"max_binary_bytes": HARD_MAX_BINARY_BYTES * 5})
     assert widened.max_binary_bytes == HARD_MAX_BINARY_BYTES
@@ -265,7 +265,7 @@ def test_cross_session_project_store_isolation() -> None:
 import ast  # noqa: E402  # local to the TB7 block; mirrors test_architecture_invariants' scan
 from pathlib import Path  # noqa: E402
 
-from ghidra_mcp.core import validation as _v  # noqa: E402
+from vivarium.core import validation as _v  # noqa: E402
 
 _VALID_SID = "tb7-sid"
 
@@ -279,7 +279,7 @@ class _ConsentManager:
 
     This is a deliberate WS4-owned hermetic double (the abuse suite asserts the *control contract*,
     not the WS2 wiring). The SAME contract is verified end-to-end against the **real**
-    :class:`~ghidra_mcp.sessions.manager.SessionManager` in ``tests/unit/test_mutation_consent.py``
+    :class:`~vivarium.sessions.manager.SessionManager` in ``tests/unit/test_mutation_consent.py``
     (default-deny, enable/disable, ``allow_structural`` opt-in, BOLA ``SESSION_INVALID``) and
     through ``build_handlers`` in ``test_mutation_registry.py`` — proven against real code, not
     only this double.
@@ -389,7 +389,7 @@ def test_failed_write_rolls_back_to_analysis_failed() -> None:
     (ADR-012 §4), returning the ``analysis-failed`` slug. Here we assert the server-side slug→type
     mapping that classifies a rolled-back write as a Ghidra refusal, not a server bug.
     """
-    from ghidra_mcp.ghidra import _errors
+    from vivarium.ghidra import _errors
 
     assert _errors.map_worker_slug("analysis-failed") is ErrorType.ANALYSIS_FAILED
     # Fail-closed: an absent slug must not leak as something specific — it maps to INTERNAL.
@@ -452,14 +452,14 @@ def test_write_handlers_do_not_import_jvm_or_pyghidra() -> None:
     adapter write methods), proving ADR-001 still holds for the new write handlers (the architecture
     test's package-wide scan covers them too; this is the TB7-specific assertion).
     """
-    src = Path(__file__).resolve().parents[2] / "src" / "ghidra_mcp"
+    src = Path(__file__).resolve().parents[2] / "src" / "vivarium"
     write_path_modules = [
         src / "tools" / "registry.py",
         src / "core" / "validation.py",
         src / "sessions" / "manager.py",
         src / "ghidra" / "rpc_client.py",
     ]
-    forbidden = ("pyghidra", "jpype", "ghidra_mcp.ghidra._jvm_bridge")
+    forbidden = ("pyghidra", "jpype", "vivarium.ghidra._jvm_bridge")
     offenders: list[str] = []
     for path in write_path_modules:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -485,7 +485,7 @@ def test_write_handlers_do_not_import_jvm_or_pyghidra() -> None:
 # worker (resolution-before-transaction, commit-time re-flow, map-confinement) keep the
 # ``skip``-marked integration convention used above for write-flood.
 # ==============================================================================================
-from ghidra_mcp.tools import schemas as _s  # noqa: E402  # local to the TB7 Phase-B block
+from vivarium.tools import schemas as _s  # noqa: E402  # local to the TB7 Phase-B block
 
 
 def _typeref(**kw: object) -> _s.TypeRef:
@@ -697,14 +697,14 @@ def test_phase_b_write_path_does_not_import_jvm_or_pyghidra() -> None:
     registry handlers, the structured-type validators, the consent gate, the adapter); the
     architecture test's package-wide scan covers them too (ADR-014 §7 case 39).
     """
-    src = Path(__file__).resolve().parents[2] / "src" / "ghidra_mcp"
+    src = Path(__file__).resolve().parents[2] / "src" / "vivarium"
     write_path_modules = [
         src / "tools" / "registry.py",
         src / "core" / "validation.py",
         src / "sessions" / "manager.py",
         src / "ghidra" / "rpc_client.py",
     ]
-    forbidden = ("pyghidra", "jpype", "ghidra_mcp.ghidra._jvm_bridge")
+    forbidden = ("pyghidra", "jpype", "vivarium.ghidra._jvm_bridge")
     offenders: list[str] = []
     for path in write_path_modules:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -1019,14 +1019,14 @@ def test_phase_c_write_path_does_not_import_jvm_or_pyghidra() -> None:
     and the ``addDataType`` write run only in the worker. Scopes the AST scan to the modules gaining
     the composite-creation surface (the registry handlers, the composite validators, the consent
     gate, the adapter); the architecture test's package-wide scan covers them too (ADR-015 §53)."""
-    src = Path(__file__).resolve().parents[2] / "src" / "ghidra_mcp"
+    src = Path(__file__).resolve().parents[2] / "src" / "vivarium"
     write_path_modules = [
         src / "tools" / "registry.py",
         src / "core" / "validation.py",
         src / "sessions" / "manager.py",
         src / "ghidra" / "rpc_client.py",
     ]
-    forbidden = ("pyghidra", "jpype", "ghidra_mcp.ghidra._jvm_bridge")
+    forbidden = ("pyghidra", "jpype", "vivarium.ghidra._jvm_bridge")
     offenders: list[str] = []
     for path in write_path_modules:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -1066,8 +1066,8 @@ def test_define_struct_commit_failure_rolls_back() -> None:
 # ==============================================================================================
 import subprocess  # noqa: E402  # local to the TB5 differential-run block (fake bytes-runner)
 
-from ghidra_mcp.naming.compile import ContainerExecRunner  # noqa: E402
-from ghidra_mcp.naming.metrics import RunResult, behavioral_equivalence  # noqa: E402
+from vivarium.naming.compile import ContainerExecRunner  # noqa: E402
+from vivarium.naming.metrics import RunResult, behavioral_equivalence  # noqa: E402
 
 _EXEC_IMG = "ghcr.io/o/cc@sha256:" + "c" * 64
 
@@ -1188,19 +1188,19 @@ def test_exec_sandbox_isolation_parity() -> None:
 # ==============================================================================================
 # TB6 (multi-principal) — cross-principal authorization abuse cases 61-66 (threat-model §10,
 # ADR-017). The per-principal owner check is the load-bearing BOLA control (API1) once a second
-# principal exists. These run against the REAL :class:`~ghidra_mcp.sessions.manager.SessionManager`
-# and the REAL :class:`~ghidra_mcp.server.auth.MultiTokenBearerAuthenticator` — hermetic (injected
+# principal exists. These run against the REAL :class:`~vivarium.sessions.manager.SessionManager`
+# and the REAL :class:`~vivarium.server.auth.MultiTokenBearerAuthenticator` — hermetic (injected
 # clock, distinct synthetic principal ids, synthetic tokens; NO real secrets/worker). Each FAILS the
 # attack: principal B presenting A's session id is denied the SAME ``SESSION_INVALID`` as an unknown
 # id (D2 — no oracle), across read/write/close; the spoof attempts get a generic reject; the
 # per-owner cap bounds noisy-neighbor.
 # ==============================================================================================
-from ghidra_mcp.server.auth import (  # noqa: E402  # local to the TB6 multi-principal block
+from vivarium.server.auth import (  # noqa: E402  # local to the TB6 multi-principal block
     AuthContext,
     MultiTokenBearerAuthenticator,
     Principal,
 )
-from ghidra_mcp.sessions.manager import SessionManager  # noqa: E402
+from vivarium.sessions.manager import SessionManager  # noqa: E402
 
 _OWNER_A = "principal-A"
 _OWNER_B = "principal-B"
@@ -1345,14 +1345,14 @@ def test_per_owner_session_cap_isolates_noisy_neighbor() -> None:
 # TB6 (delta) — mTLS identity-source abuse cases 67-71 (threat-model §13, ADR-019 increment A).
 # mTLS = server-terminated, in-app: the TLS handshake (uvicorn CERT_REQUIRED + the client-CA bundle)
 # is the FIRST gate (rejects any client without a CA-signed cert — integration-gated below); the
-# :class:`~ghidra_mcp.server.auth.MtlsAuthenticator` is the in-app SECOND gate, mapping the VERIFIED
+# :class:`~vivarium.server.auth.MtlsAuthenticator` is the in-app SECOND gate, mapping the VERIFIED
 # peer cert's configured field → principal (fail closed, no oracle). These run against the REAL
 # ``MtlsAuthenticator`` driven with SYNTHETIC parsed-cert dicts (the shape ``ssl.getpeercert()``
 # returns) — hermetic, no real keys/secrets. Each FAILS the attack: an absent/empty identity is a
 # generic reject; distinct certs become distinct owner-scoped principals (composing ADR-017); the
 # cert material is never logged.
 # ==============================================================================================
-from ghidra_mcp.server.auth import MtlsAuthenticator  # noqa: E402  # local to the TB6 mTLS block
+from vivarium.server.auth import MtlsAuthenticator  # noqa: E402  # local to the TB6 mTLS block
 
 
 def _peer(cn: str) -> dict[str, object]:
@@ -1460,10 +1460,10 @@ import time  # noqa: E402  # local to the TB6 OAuth block
 import jwt  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import rsa as _rsa  # noqa: E402
 
-from ghidra_mcp.server.auth import OAuthResourceAuthenticator  # noqa: E402
+from vivarium.server.auth import OAuthResourceAuthenticator  # noqa: E402
 
 _OAUTH_ISS = "https://idp.example/realm"
-_OAUTH_AUD = "ghidra-mcp"
+_OAUTH_AUD = "vivarium"
 _OAUTH_JWKS = "https://idp.example/realm/jwks"
 
 
@@ -1848,7 +1848,7 @@ def test_batch_write_path_does_not_parse_c() -> None:
     the write-path modules for a ``CParser(``/``DataTypeParser(`` call — the structured TypeRef
     model eliminates the parser surface by construction (ADR-014). (A docstring may NAME the parser
     to explain its absence; only an instantiation call would be the vulnerability.)"""
-    src = Path(__file__).resolve().parents[2] / "src" / "ghidra_mcp"
+    src = Path(__file__).resolve().parents[2] / "src" / "vivarium"
     for path in (
         src / "tools" / "registry.py",
         src / "core" / "validation.py",

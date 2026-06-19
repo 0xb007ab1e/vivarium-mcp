@@ -10,12 +10,12 @@ from __future__ import annotations
 import io
 import subprocess
 
-from ghidra_mcp.naming.compile import (
+from vivarium.naming.compile import (
     ContainerCompileRunner,
     ContainerExecRunner,
     _read_capped,
 )
-from ghidra_mcp.naming.metrics import RunResult
+from vivarium.naming.metrics import RunResult
 
 _IMG = "ghcr.io/o/cc@sha256:" + "a" * 64
 

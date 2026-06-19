@@ -73,7 +73,7 @@ jobs:
 
       - name: Verify + pull the signed worker image (by digest)
         env:
-          WORKER_IMAGE: ghcr.io/${{ github.repository_owner }}/ghidra-mcp-worker@${{ vars.WORKER_IMAGE_DIGEST }}
+          WORKER_IMAGE: ghcr.io/${{ github.repository_owner }}/vivarium-worker@${{ vars.WORKER_IMAGE_DIGEST }}
         run: |
           set -euo pipefail
           if [ -z "${{ vars.WORKER_IMAGE_DIGEST }}" ]; then
@@ -86,21 +86,21 @@ jobs:
             --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/worker-image.yml@" \
             "$WORKER_IMAGE"
           podman pull "$WORKER_IMAGE"
-          echo "GHIDRA_MCP_WORKER_IMAGE=$WORKER_IMAGE" >> "$GITHUB_ENV"
+          echo "VIVARIUM_WORKER_IMAGE=$WORKER_IMAGE" >> "$GITHUB_ENV"
 
       - name: Run ground-truth e2e (gated real-worker suite)
         env:
-          GHIDRA_MCP_INTEGRATION: "1"
-          GHIDRA_MCP_FIXTURES: ${{ github.workspace }}/_fixtures
-          GHIDRA_MCP_CONTAINER_ENGINE: podman
+          VIVARIUM_INTEGRATION: "1"
+          VIVARIUM_FIXTURES: ${{ github.workspace }}/_fixtures
+          VIVARIUM_CONTAINER_ENGINE: podman
           # This is a CORRECTNESS ground-truth gate (does Ghidra recover the call graph), not an
           # isolation-tier test. Stock GitHub runners have no gVisor (runsc) — the production
           # strong-isolation runtime (ADR-004) — so run under crun (podman's default OCI runtime,
           # always present). The OCI runtime does not change Ghidra's recovered output; the gVisor
           # tier is validated separately at deploy. Without this the worker spawn fails fast
           # (`--runtime runsc` rejected) → every tool returns worker-unavailable.
-          GHIDRA_MCP_WORKER_RUNTIME: crun
-          GHIDRA_MCP_E2E_TIMEOUT: "900"
+          VIVARIUM_WORKER_RUNTIME: crun
+          VIVARIUM_E2E_TIMEOUT: "900"
         run: |
           set -euo pipefail
           # The e2e drives a HOST-run server (not containerized). Under rootless podman + --userns
@@ -110,30 +110,30 @@ jobs:
           # hardened defaults (deploy/socket-dir.md, ADR-009).
           # Keep the socket dir SHORT: the per-session UDS path must fit AF_UNIX (~107 bytes); a
           # long RUNNER_TEMP prefix + the session id overflowed it. /tmp is writable on the runner.
-          export GHIDRA_MCP_RPC_SOCKET_DIR="/tmp/gmcp-run"
-          export GHIDRA_MCP_WORKER_UID="$(id -u)"
-          export GHIDRA_MCP_WORKER_GID="$(id -g)"
-          mkdir -p "$GHIDRA_MCP_RPC_SOCKET_DIR"
+          export VIVARIUM_RPC_SOCKET_DIR="/tmp/gmcp-run"
+          export VIVARIUM_WORKER_UID="$(id -u)"
+          export VIVARIUM_WORKER_GID="$(id -g)"
+          mkdir -p "$VIVARIUM_RPC_SOCKET_DIR"
           pytest tests/e2e/test_groundtruth_oss.py -m integration -v --no-cov
 
       - name: Run naming-eval e2e (reference loop + sandboxed compile; ADR-010 / TB5)
         env:
-          GHIDRA_MCP_INTEGRATION: "1"
-          GHIDRA_MCP_FIXTURES: ${{ github.workspace }}/_fixtures
-          GHIDRA_MCP_CONTAINER_ENGINE: podman
-          GHIDRA_MCP_WORKER_RUNTIME: crun     # no gVisor on stock runners — see note above.
-          GHIDRA_MCP_E2E_TIMEOUT: "900"
+          VIVARIUM_INTEGRATION: "1"
+          VIVARIUM_FIXTURES: ${{ github.workspace }}/_fixtures
+          VIVARIUM_CONTAINER_ENGINE: podman
+          VIVARIUM_WORKER_RUNTIME: crun     # no gVisor on stock runners — see note above.
+          VIVARIUM_E2E_TIMEOUT: "900"
           # The compile sandbox (TB5) needs a C compiler image, pinned BY DIGEST + immutable
           # (std-supplychain). Public docker.io gcc digest (multi-arch; resolves on amd64 runners).
-          GHIDRA_MCP_COMPILER_IMAGE: docker.io/library/gcc@sha256:5e927c284bf55a7dc796262e311a0703344f62f41f5621eb56843111b1d37e15
+          VIVARIUM_COMPILER_IMAGE: docker.io/library/gcc@sha256:5e927c284bf55a7dc796262e311a0703344f62f41f5621eb56843111b1d37e15
         run: |
           set -euo pipefail
           # Same host-run-server / rootless-keep-id constraints as the ground-truth step above:
           # short socket dir for AF_UNIX, worker runs as this runner's uid/gid (ADR-009).
-          export GHIDRA_MCP_RPC_SOCKET_DIR="/tmp/gmcp-run"
-          export GHIDRA_MCP_WORKER_UID="$(id -u)"
-          export GHIDRA_MCP_WORKER_GID="$(id -g)"
-          mkdir -p "$GHIDRA_MCP_RPC_SOCKET_DIR"
+          export VIVARIUM_RPC_SOCKET_DIR="/tmp/gmcp-run"
+          export VIVARIUM_WORKER_UID="$(id -u)"
+          export VIVARIUM_WORKER_GID="$(id -g)"
+          mkdir -p "$VIVARIUM_RPC_SOCKET_DIR"
           # Pre-pull the pinned compiler image so the timed sandbox run isn't racing the pull.
-          podman pull "$GHIDRA_MCP_COMPILER_IMAGE"
+          podman pull "$VIVARIUM_COMPILER_IMAGE"
           pytest tests/e2e/test_naming_eval_oss.py -m integration -v --no-cov

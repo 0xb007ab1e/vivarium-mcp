@@ -14,7 +14,7 @@
 # the Ghidra-zip and action-digest pins elsewhere in this repo. build_fixtures.py FAILS CLOSED on
 # any unresolved placeholder.
 
-schema = "ghidra-mcp/e2e-fixtures/1"
+schema = "vivarium/e2e-fixtures/1"
 
 # --- cJSON: single-file MIT JSON parser; small, rich internal call graph (parse_*/print_*). -----
 [[tool]]

@@ -166,7 +166,7 @@ def extract(binary: str, tool: str, version: str) -> dict[str, Any]:
         edges = _collect_edges(funcs, text_vaddr, text)
         entry = int(elf.header["e_entry"])
     return {
-        "schema": "ghidra-mcp/e2e-groundtruth/1",
+        "schema": "vivarium/e2e-groundtruth/1",
         "tool": tool,
         "version": version,
         "entry": entry,

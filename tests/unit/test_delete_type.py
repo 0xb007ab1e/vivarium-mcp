@@ -24,14 +24,14 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
-from ghidra_mcp.config import Config
-from ghidra_mcp.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
-from ghidra_mcp.ghidra.port import GhidraPort
-from ghidra_mcp.ghidra.rpc_client import RpcGhidraAdapter, _build_delete_type_result
-from ghidra_mcp.security.limits import Limits
-from ghidra_mcp.sessions.manager import SessionManager
-from ghidra_mcp.tools import registry as reg
-from ghidra_mcp.tools import schemas as s
+from vivarium.config import Config
+from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
+from vivarium.ghidra.port import GhidraPort
+from vivarium.ghidra.rpc_client import RpcGhidraAdapter, _build_delete_type_result
+from vivarium.security.limits import Limits
+from vivarium.sessions.manager import SessionManager
+from vivarium.tools import registry as reg
+from vivarium.tools import schemas as s
 
 _VALID_SID = "sid1"
 # A session-authored composite name (a valid write-name identity) — a module constant so no test

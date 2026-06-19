@@ -1,10 +1,34 @@
 # Changelog
 
-All notable changes to `ghidra-mcp` are documented here. The format follows
+All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.9.0] — 2026-06-19
+
+**Project renamed `ghidra-mcp` → `Vivarium`** (ADR-038). Vivarium = a sealed enclosure to safely keep and
+observe a live, dangerous specimen — the per-session isolated, hostile-binary worker (contain) you then
+inspect (reveal). No capability change; the catalog stays **51 tools**. The project remains a secure MCP
+server exposing **Ghidra** — "Ghidra" still names the engine throughout.
+
+### Changed (BREAKING — operator + integrator action required)
+- **Import package `ghidra_mcp` → `vivarium`**; module entry point `python -m ghidra_mcp` → `python -m
+  vivarium`; **distribution name → `vivarium-mcp`** (matches the GitHub repo); console script
+  `ghidra-mcp` → `vivarium`.
+- **Environment-variable prefix `GHIDRA_MCP_*` → `VIVARIUM_*` (clean break, no fallback — ADR-038 D2).**
+  Every config var is renamed (e.g. `GHIDRA_MCP_WORKER_MEM_MIB` → `VIVARIUM_WORKER_MEM_MIB`); the server
+  reads **only** `VIVARIUM_*`. Update all deployment/launch env and local recipes before upgrading.
+- **MCP server display name `ghidra-mcp` → `vivarium`** (the handshake name MCP clients see).
+- **Container images `ghidra-mcp-{worker,server}` → `vivarium-{worker,server}`** (`ghcr.io/0xb007ab1e/…`);
+  the new images publish on this release tag. Prior `ghidra-mcp-*` images remain as historical artifacts.
+
+### Notes
+- **History preserved (ADR-038 D8):** historical ADRs (001–037), prior CHANGELOG entries, and the roadmaps
+  keep the `ghidra-mcp` name as it was at the time — they are an immutable record and were not rewritten.
+- The GitHub repository is renamed `ghidra-mcp` → `vivarium-mcp`; GitHub auto-redirects old links, clones, and
+  the prior release URLs.
 
 ## [0.8.0] — 2026-06-19
 

@@ -2,9 +2,9 @@
 
 This module is the worker's *imperative shell* around a JVM-touching *backend*. It is deliberately
 JVM-free: it speaks the frozen length-prefixed JSON-RPC protocol (via
-:mod:`ghidra_mcp.ghidra.rpc_framing`), validates each request against the worker-facing method
+:mod:`vivarium.ghidra.rpc_framing`), validates each request against the worker-facing method
 allow-list, and routes to a :class:`GhidraBackend` whose concrete implementation
-(:mod:`ghidra_mcp.ghidra._jvm_bridge`) is the only code that loads the JVM.
+(:mod:`vivarium.ghidra._jvm_bridge`) is the only code that loads the JVM.
 
 Because the backend is injected behind a ``Protocol``, the entire dispatch/framing path is
 unit-testable with a fake backend — no Ghidra, no JVM, no container (topic-architecture-patterns:
@@ -26,8 +26,8 @@ import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
-from ghidra_mcp.ghidra import rpc_framing
-from ghidra_mcp.ghidra.rpc_framing import FramingError, RpcProtocolError
+from vivarium.ghidra import rpc_framing
+from vivarium.ghidra.rpc_framing import FramingError, RpcProtocolError
 
 #: A worker-side progress emitter: ``emit_progress(percent, phase)`` frames + sends one
 #: ``$/progress`` notification on the session socket (ADR-030 Phase 1). Threaded into ``analyze``
@@ -151,7 +151,7 @@ class GhidraBackend(Protocol):
 
     Every method takes the request ``params`` (the tool schema minus ``session_id``) and returns a
     plain, JSON-serializable, **size-capped** dict matching the corresponding output schema. The
-    concrete implementation (:class:`ghidra_mcp.ghidra._jvm_bridge.PyGhidraBackend`) is the sole
+    concrete implementation (:class:`vivarium.ghidra._jvm_bridge.PyGhidraBackend`) is the sole
     JVM consumer; this Protocol lets the dispatcher be tested with a fake.
     """
 
