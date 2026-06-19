@@ -1,46 +1,94 @@
-# vivarium
+# Vivarium
 
-A **secure [MCP](https://modelcontextprotocol.io) server** that exposes [Ghidra](https://ghidra-sre.org/)
-reverse-engineering capabilities to LLM clients as **tools**. Ghidra runs **isolated, headless, and
-out-of-process**, reachable only through the server's internal RPC. **The analyzed binary is treated
-as hostile input** — containment of the analyzer is the central security control.
+Vivarium is a secure [MCP](https://modelcontextprotocol.io) server that lets an AI assistant use
+[Ghidra](https://ghidra-sre.org/) to analyze a program binary. It exposes Ghidra's reverse-engineering
+features (decompiling, disassembly, cross-references, strings, and more) as MCP tools that a client
+like Claude can call.
 
-> **Latest release: [v0.8.0](https://github.com/0xb007ab1e/vivarium-mcp/releases/tag/v0.8.0)** (2026-06-19) —
-> the **v1.6** increment: a reliability/observability + supply-chain hardening pass. A worker **heap-OOM
-> is now classified `resource-exhausted` (non-retryable), not `worker-unavailable`** (ADR-037 — the JVM
-> self-exits at its heap ceiling with exit 3, below the cgroup wall), and the error now **names the
-> configured memory cap + the `VIVARIUM_WORKER_MEM_MIB` knob** to raise. The **SAST gate runs fully
-> offline** on vendored Semgrep rulesets (no scan-time registry fetch). No new tools (catalog stays
-> **51**), no RPC/error-envelope contract change. Builds on the gated default-deny write surface, the
-> HTTP transport, analyzer-depth profiles, and multi-principal / OAuth authorization. See the
-> [CHANGELOG](./CHANGELOG.md) for what's new, and [`PLAN.md`](./PLAN.md) for the delivery plan, locked
-> decisions, architecture, trust boundaries, and ADRs.
+The point of Vivarium is safety. The binary you analyze is treated as hostile input. Ghidra never runs
+in the same process as the server. Instead, each analysis runs inside a locked-down, throwaway
+container with no network access, and every piece of data that comes back from the binary is wrapped
+and marked as untrusted before it reaches the model.
 
-## At a glance (v0.8.0)
-- **Tool scope:** 51 tools — Tier-1 read-only core (decompile, disassemble, functions, xrefs, strings,
-  symbols, data types, comments, memory map, bounded read/search, program metadata) + Tier-2
-  reporting/metrics + semantic-naming + a **gated, default-deny write tier** (annotation + structural
-  rename / signature / type-apply / composite-create / type-delete / `define_types` batch
-  round-trip).
-- **Analysis:** configurable worker resources + selectable **analyzer-depth profiles**
-  (`default` / `light` / `deep`, fail-closed on an unknown/renamed preset option) and a
-  size-vs-memory pre-flight (`warn` / `reject` / `off`) for large binaries; optional **streamed
-  `analyze` progress** to the client (token-gated, percent + phase only).
-- **Transport:** stdio (default) or **HTTP** (MCP Streamable; secure-by-default exposure, bearer auth,
-  **OAuth scope → per-tool read/write authZ** with a dedicated **`forbidden` / 403** denial, opt-in
-  **reverse-proxy mTLS**, multi-principal per-session ownership).
-- **Sessions:** persistent per-binary, TTL + idle eviction (in-flight-safe); one isolated worker per
-  session; **writes require explicit per-session consent**.
-- **Runtime:** container-only; Ghidra 12.1.2 + JDK 21 pinned by digest; rootless podman/OCI isolation
-  (gVisor/runsc in production). Signed, SBOM'd, provenance-attested release images.
-- **Eval (advisory):** on-demand naming-accuracy scorer (`scripts/naming_eval.py`) over debuginfod /
-  ELF / JSON ground truth — reads only DWARF metadata, never executes or Ghidra-parses the binary.
+The name fits the design: a vivarium is a sealed enclosure where you can safely keep and observe a live
+specimen. Here the specimen is an untrusted binary.
+
+> Current release: **v0.9.0** (2026-06-19). This release renames the project from `ghidra-mcp` to
+> Vivarium; what the tools do is unchanged. See the [CHANGELOG](./CHANGELOG.md) for details. Vivarium is
+> pre-1.0, so the tool set and internal contracts may still change before 1.0.
+
+## What it can do
+
+- **Read and explore a binary.** Decompile and disassemble functions, list functions, imports, exports,
+  strings, symbols, data types, and comments, follow cross-references, read the memory map, and search
+  bytes or strings. Every read tool takes size and count limits so a response cannot grow without bound.
+- **Summarize and measure.** Report cyclomatic complexity, code and data coverage, a call-graph summary,
+  scan for indicators of compromise and common crypto constants, and produce a whole-program summary.
+- **Suggest names.** Helper tools support a client-driven workflow for proposing human-readable function
+  names from the decompiled code.
+- **Make changes, only with consent.** Renaming functions and symbols, setting comments, applying or
+  defining data types, and similar edits are off by default. A session must explicitly enable writes
+  before any change is allowed, and edits can be exported and re-imported as a portable annotation file.
+
+There are 51 tools in total. The full list, with the inputs and outputs for each, is in
+[`docs/contracts/tool-catalog.md`](./docs/contracts/tool-catalog.md).
+
+## How it works
+
+Vivarium has two parts:
+
+1. **The server** is the process your MCP client talks to. It holds no binary-parsing code and never
+   loads Ghidra. It validates every request, enforces limits, and manages sessions.
+2. **The worker** is a separate, hardened container that actually runs Ghidra. The server starts one
+   worker per session and talks to it over a private local socket. When a session ends or times out,
+   the server kills the worker and wipes its scratch storage.
+
+You connect a client over **stdio** (the default) or over **HTTP**. HTTP adds bearer, OAuth, or
+reverse-proxy mTLS authentication and is meant for running Vivarium as a shared service.
+
+## Install and run
+
+See **[`docs/getting-started.md`](./docs/getting-started.md)** for a step-by-step setup: prerequisites,
+building the two container images, installing the package, running the server, connecting a client, and
+a first analysis. The short version:
+
+```
+git clone https://github.com/0xb007ab1e/vivarium-mcp.git
+cd vivarium-mcp
+# build the worker and server images (this downloads Ghidra; see getting-started for the pinned values)
+# create a Python 3.12+ virtual environment and install the package
+# point the server at the worker image and an import directory, then run: python -m vivarium
+```
+
+Vivarium runs on Linux and uses rootless [podman](https://podman.io) to launch worker containers.
+
+## Safety model in plain terms
+
+- **The binary is untrusted.** Everything Ghidra reports about it (decompiled code, strings, names,
+  bytes) is wrapped as untrusted data. Do not execute it, evaluate it, or render it as code.
+- **The analyzer is contained.** The worker runs as a non-root user, with a read-only root filesystem,
+  no network, dropped Linux capabilities, a seccomp profile, and memory and CPU limits. In production it
+  also runs under gVisor for an extra isolation boundary.
+- **Workers are disposable.** One worker per session, killed and wiped on eviction or timeout.
+- **Writes are gated.** No tool can change the analysis until the session owner turns writes on.
+- **The supply chain is pinned.** Ghidra, the JDK, and the base images are pinned by digest. Release
+  images are scanned, signed, and published with a software bill of materials and build provenance.
+
+The full design rationale is in the decision records under [`docs/adr/`](./docs/adr/) and the
+[threat model](./docs/security/threat-model.md).
 
 ## Documentation
-- [`PLAN.md`](./PLAN.md) — delivery plan & decisions
-- [`CHANGELOG.md`](./CHANGELOG.md) — release history (Keep a Changelog)
-- `docs/` — architecture, ADRs (001–036), threat model, contracts, runbooks
-- `SECURITY.md` — vulnerability reporting
+
+- [`docs/getting-started.md`](./docs/getting-started.md): set up and run Vivarium from scratch.
+- [`docs/architecture.md`](./docs/architecture.md): how the pieces fit together.
+- [`docs/contracts/`](./docs/contracts/): the tool catalog, RPC protocol, and data envelopes.
+- [`docs/runbooks/`](./docs/runbooks/): operational procedures (deploy, rollback, incident response, and
+  more), including [HTTP exposure](./docs/runbooks/http-exposure.md).
+- [`docs/adr/`](./docs/adr/): the numbered design decisions (ADR-001 through ADR-038).
+- [`SECURITY.md`](./SECURITY.md): how to report a vulnerability.
+- [`CHANGELOG.md`](./CHANGELOG.md): release history.
+- [`PLAN.md`](./PLAN.md): the delivery plan and locked decisions.
 
 ## License
-[Apache License 2.0](./LICENSE) — aligned with Ghidra's own license. See [`NOTICE`](./NOTICE).
+
+[Apache License 2.0](./LICENSE), matching Ghidra's own license. See [`NOTICE`](./NOTICE).
