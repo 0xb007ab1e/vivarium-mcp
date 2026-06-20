@@ -1,0 +1,7 @@
+# The fixture binary is built on demand by build-openssl-fixture.sh and is
+# deliberately never committed (repo policy: no large binary blobs in git;
+# benign/synthetic fixtures only). Regenerate it locally when needed.
+openssl.blind
+openssl.blind.unstripped
+*.o
+*.tar.gz

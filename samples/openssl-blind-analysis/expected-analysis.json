@@ -1,0 +1,91 @@
+{
+  "schema_version": "1.0",
+  "fixture_candidate": true,
+  "subject": {
+    "name": "openssl.blind",
+    "program": "OpenSSL command-line tool",
+    "version": "4.0.1",
+    "sha256": "fba4556e7bba19522230cd0aab531d9cb380e6e6ebc0dc3a79defefadcb83060",
+    "size_bytes": 8316656,
+    "size_mib": 7.9,
+    "format": "ELF 64-bit LSB executable, x86-64, statically linked, stripped",
+    "build": "gcc, ./Configure no-shared no-docs no-tests -static linux-x86_64, then strip --strip-all",
+    "source_tarball_sha256": "2db3f3a0d6ea4b59e1f094ace2c8cd536dffb87cdc39084c5afa1e6f7f37dd09",
+    "symbols_present": false
+  },
+  "program_level": {
+    "function_count": 17223,
+    "import_count": 0,
+    "export_count": 1,
+    "string_count": 18048,
+    "entry_point": "0x402400",
+    "coverage": {
+      "code_ratio": 0.6488,
+      "data_ratio": 0.1743,
+      "undefined_bytes": 1480415
+    },
+    "call_graph": {
+      "node_sample": 10000,
+      "edge_count": 38203,
+      "leaf_count": 2864,
+      "root_count": 4728,
+      "recursive_component_count": 31
+    },
+    "crypto_algorithms": ["AES", "MD5"],
+    "crypto_constants": [
+      {"algorithm": "AES", "kind": "sbox", "address": "0x00a30d80"},
+      {"algorithm": "AES", "kind": "sbox", "address": "0x00a30e80"},
+      {"algorithm": "AES", "kind": "sbox", "address": "0x00a30f80"},
+      {"algorithm": "AES", "kind": "sbox", "address": "0x00a31080"},
+      {"algorithm": "MD5", "kind": "iv", "address": "0x009fb310"}
+    ],
+    "ioc_verdict": "benign; dominated by false positives (ASN.1 OIDs read as IPv4, ASN.1 time strings read as IPv6, assembly attribution URL, charset-table maintainer email, example-certificate domains)"
+  },
+  "function_identifications": [
+    {"id": 1,  "address": "0x005c31c0", "surfaced": "fan-in 2194", "blind_id": "error subsystem: records file/line/func into the per-thread error state top slot", "source_symbol": "ERR_set_debug", "source_signature": "void ERR_set_debug(const char *file, int line, const char *func)", "source_location": "crypto/err/err_blocks.c:27", "evidence": ["embedded path crypto/err/err_local.h", "exact body match: free+strdup file, set line, free+strdup func", "fan-in rank #1"], "confidence": 97, "verification": "CONFIRMED"},
+    {"id": 2,  "address": "0x005c30a0", "surfaced": "fan-in 2193", "blind_id": "error subsystem: clear/advance the top error slot for a new error", "source_symbol": "ERR_new", "source_signature": "void ERR_new(void)", "source_location": "crypto/err/err_blocks.c:14", "evidence": ["embedded path crypto/err/err_local.h (lines 0x6d/0x6f free err_file/err_func)", "16-entry error ring manipulation", "fan-in rank #2"], "confidence": 88, "verification": "CONFIRMED"},
+    {"id": 3,  "address": "0x005c32e0", "surfaced": "fan-in 1921", "blind_id": "error subsystem: record library id and reason code", "source_symbol": "ERR_set_error", "source_signature": "void ERR_set_error(int lib, int reason, const char *fmt, ...)", "source_location": "crypto/err/err_blocks.c:38", "evidence": ["called as (0xf=ERR_LIB_CRYPTO, reason, 0) from the malloc-failure path", "third of the ERR_new/ERR_set_debug/ERR_set_error raise trio", "fan-in rank #3"], "confidence": 85, "verification": "CONFIRMED"},
+    {"id": 4,  "address": "0x00605a50", "surfaced": "fan-in 1151", "blind_id": "free with pluggable allocator (overridable function pointer, default libc free)", "source_symbol": "CRYPTO_free", "source_signature": "void CRYPTO_free(void *str, const char *file, int line)", "source_location": "crypto/mem.c:323", "evidence": ["overridable global fn-ptr then default", "callers pass (ptr, file, line)", "fan-in rank #4"], "confidence": 95, "verification": "CONFIRMED"},
+    {"id": 5,  "address": "0x00605a70", "surfaced": "fan-in 312", "blind_id": "malloc with pluggable allocator; raises a malloc-failure error", "source_symbol": "CRYPTO_malloc", "source_signature": "void *CRYPTO_malloc(size_t num, const char *file, int line)", "source_location": "crypto/mem.c:189", "evidence": ["overridable global fn-ptr, default libc malloc", "on failure: ERR_new + ERR_set_debug + ERR_set_error(ERR_LIB_CRYPTO)"], "confidence": 95, "verification": "CONFIRMED"},
+    {"id": 6,  "address": "0x00605c60", "surfaced": "fan-in 342", "blind_id": "zeroing malloc (malloc then memset 0)", "source_symbol": "CRYPTO_zalloc", "source_signature": "void *CRYPTO_zalloc(size_t num, const char *file, int line)", "source_location": "crypto/mem.c:222", "evidence": ["same allocator pointer as CRYPTO_malloc", "memset(ptr,0,num) after allocation"], "confidence": 96, "verification": "CONFIRMED"},
+    {"id": 7,  "address": "0x005bfa90", "surfaced": "shared callee of the ERR trio", "blind_id": "return the per-thread error state structure", "source_symbol": "ERR_get_state / ossl_err_get_state_int", "source_signature": "ERR_STATE *ERR_get_state(void)", "source_location": "crypto/err/err.c", "evidence": ["called first by ERR_new/ERR_set_debug/ERR_set_error", "returns a 16-entry error ring structure"], "confidence": 80, "verification": "CONFIRMED"},
+    {"id": 8,  "address": "0x00652bd0", "surfaced": "fan-in 503", "blind_id": "stack accessor: return count, or -1 when NULL", "source_symbol": "OPENSSL_sk_num", "source_signature": "int OPENSSL_sk_num(const OPENSSL_STACK *st)", "source_location": "crypto/stack/stack.c:482", "evidence": ["return *p (num at offset 0) or -1 for NULL", "very high fan-in typical of the stack primitive"], "confidence": 90, "verification": "CONFIRMED"},
+    {"id": 9,  "address": "0x0043f5c0", "surfaced": "fan-out 181, no callers", "blind_id": "openssl s_client subcommand entry point", "source_symbol": "s_client_main", "source_signature": "int s_client_main(int argc, char **argv)", "source_location": "apps/s_client.c:980", "evidence": ["embedded path apps/s_client.c", "localhost:4433 default, -connect/-proxy/-servername/-4/-6/ECH/SRP options"], "confidence": 99, "verification": "CONFIRMED"},
+    {"id": 10, "address": "0x004387f0", "surfaced": "fan-out 133, no callers", "blind_id": "openssl req subcommand entry point", "source_symbol": "req_main", "source_signature": "int req_main(int argc, char **argv)", "source_location": "apps/req.c:275", "evidence": ["embedded path apps/req.c", "req_extensions/x509_extensions/-addext/string_mask"], "confidence": 99, "verification": "CONFIRMED"},
+    {"id": 11, "address": "0x004656e0", "surfaced": "fan-out 149, no callers", "blind_id": "openssl x509 subcommand entry point", "source_symbol": "x509_main", "source_signature": "int x509_main(int argc, char **argv)", "source_location": "apps/x509.c:367", "evidence": ["distinctive 'Serial number supplied twice' (apps/x509.c:534)", "serial/CA key/-not_after/-days/x509toreq options"], "confidence": 92, "verification": "CONFIRMED"},
+    {"id": 12, "address": "0x00455bf0", "surfaced": "fan-out 145, no callers", "blind_id": "openssl speed benchmark subcommand entry point", "source_symbol": "speed_main", "source_signature": "int speed_main(int argc, char **argv)", "source_location": "apps/speed.c:1816", "evidence": ["embedded path apps/speed.c", "OpenSSL PKCS#1 RSA, rsa512/rsa1024, async_jobs"], "confidence": 99, "verification": "CONFIRMED"},
+    {"id": 13, "address": "0x00406be0", "surfaced": "fan-out 130, no callers", "blind_id": "openssl ca subcommand entry point", "source_symbol": "ca_main", "source_signature": "int ca_main(int argc, char **argv)", "source_location": "apps/ca.c:303", "evidence": ["embedded path apps/ca.c", "default_ca/unique_subject/oid_file/no config database"], "confidence": 99, "verification": "CONFIRMED"},
+    {"id": 14, "address": "0x00a30d80", "surfaced": "crypto-constant scan", "blind_id": "AES lookup tables (four S-box/T-tables)", "source_symbol": "Te0..Te3 (AES_encrypt tables)", "source_signature": "static const u32 Te0[256] = { ... }", "source_location": "crypto/aes/aes_core.c:706", "evidence": ["four 256-entry table constants flagged as AES S-boxes"], "confidence": 90, "verification": "CONFIRMED"},
+    {"id": 15, "address": "0x009fb310", "surfaced": "crypto-constant scan", "blind_id": "MD5 initialization vector", "source_symbol": "MD5_Init (INIT_DATA_A..D)", "source_signature": "int MD5_Init(MD5_CTX *c)", "source_location": "crypto/md5/md5_dgst.c:24,29", "evidence": ["IV constants 0x67452301.. flagged as MD5", "MD5 genuinely present (unlike the SQLite case); SHA-1 also present sharing the same first four words (crypto/sha/sha_local.h:60)"], "confidence": 80, "verification": "CONFIRMED"}
+  ],
+  "scoring_summary": {
+    "total_identifications": 15,
+    "confirmed": 15,
+    "partial": 0,
+    "refuted": 0,
+    "identification_accuracy": 1.0,
+    "mean_confidence": 92.3,
+    "high_confidence_refutations": 0,
+    "calibration_note": "No over-confidence: every identification confirmed, including the lowest-confidence ones (ERR_get_state 80, MD5 80). The model was slightly under-confident, never over-confident."
+  },
+  "fixture_promotion": {
+    "acceptance_criteria": {
+      "identification_accuracy_min": 0.90,
+      "mean_confidence_min": 0.85,
+      "high_confidence_refutations_max": 0,
+      "reproducible_build": true,
+      "benign_subject": true,
+      "binary_committed_to_git": false
+    },
+    "evaluation": {
+      "identification_accuracy": 1.0,
+      "mean_confidence_normalized": 0.923,
+      "high_confidence_refutations": 0,
+      "reproducible_build": true,
+      "benign_subject": true,
+      "binary_committed_to_git": false
+    },
+    "recommendation": "PROMOTE (all acceptance criteria met). Promotion is gated and requires human approval. If rejected, discard the samples/openssl-blind-analysis directory.",
+    "promotion_mechanics_note": "The 7.9 MiB binary is NOT committed (repo policy: no large blobs, benign/synthetic fixtures only). A promoted fixture consists of this golden file plus build-openssl-fixture.sh, which deterministically rebuilds the binary and asserts its sha256. A CI test using it is integration-tier (needs the Ghidra worker), not a unit test."
+  }
+}
