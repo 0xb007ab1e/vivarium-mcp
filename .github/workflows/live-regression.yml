@@ -80,6 +80,15 @@ jobs:
         with:
           lfs: true # fetch the OpenSSL golden-fixture binary (samples/**/*.blind) for the advisory test
 
+      # End-user status reporting (ADR-039): annotate the run page, append to the job summary, and
+      # push to ntfy if STATUS_NTFY_URL is set, so dispatched/scheduled runs are no longer silent.
+      - name: Notify start
+        uses: ./.github/actions/run-status
+        with:
+          phase: start
+          message: "started — run ${{ github.run_id }} (${{ github.event_name }} on ${{ github.ref_name }})"
+          ntfy-url: ${{ secrets.STATUS_NTFY_URL }}
+
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # actions/setup-python@v6.2.0
         with:
@@ -277,7 +286,8 @@ jobs:
           git lfs pull --include="samples/openssl-blind-analysis/openssl.blind" || true
           pytest -m integration --no-cov -v \
             --junit-xml=golden-fixture-junit.xml \
-            tests/integration/test_golden_fixture_openssl_blind.py || true
+            tests/integration/test_golden_fixture_openssl_blind.py \
+            tests/integration/test_analyze_progress_client.py || true
 
       - name: Upload golden-fixture JUnit
         if: always()
@@ -286,3 +296,54 @@ jobs:
           name: golden-fixture-junit
           path: golden-fixture-junit.xml
           if-no-files-found: ignore
+
+      # End-user status reporting (ADR-039): on completion, summarize every gate + the advisory
+      # tests into the job summary and push the overall result to ntfy (if configured). `always()`
+      # so it reports failures too. Reads the hard-gate + advisory JUnit reports written above.
+      - name: Report run status
+        if: always()
+        env:
+          STATUS_NTFY_URL: ${{ secrets.STATUS_NTFY_URL }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          summarize() {  # $1=junit file  $2=label  -> echoes "label: N tests, F failed, E errors, S skipped"
+            python3 - "$1" "$2" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          path, label = sys.argv[1], sys.argv[2]
+          import os
+          if not os.path.exists(path):
+              print(f"{label}: (no report)"); raise SystemExit
+          try:
+              root = ET.parse(path).getroot()
+          except Exception as exc:  # noqa: BLE001 — report parse failure, never crash the notifier
+              print(f"{label}: (unparseable: {exc})"); raise SystemExit
+          t = f = e = s = 0
+          for suite in (list(root.iter("testsuite")) or [root]):
+              t += int(suite.get("tests", 0)); f += int(suite.get("failures", 0))
+              e += int(suite.get("errors", 0)); s += int(suite.get("skipped", 0))
+          print(f"{label}: {t} tests, {f} failed, {e} errors, {s} skipped")
+          PY
+          }
+          HARD=$(summarize live-regression-junit.xml "Hard gates")
+          ADV=$(summarize golden-fixture-junit.xml "Advisory (golden + progress)")
+          ICON="white_check_mark"; STATE="notice"
+          [ "${JOB_STATUS}" != "success" ] && { ICON="x"; STATE="error"; }
+          {
+            echo "## live-regression: ${JOB_STATUS}"
+            echo ""
+            echo "- ${HARD}"
+            echo "- ${ADV}"
+            echo "- [run log](${RUN_URL})"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          MSG="${JOB_STATUS} — ${HARD}; ${ADV}"
+          echo "::${STATE}::live-regression ${JOB_STATUS} — ${HARD}; ${ADV}"
+          if [ -n "${STATUS_NTFY_URL}" ]; then
+            curl -fsS --max-time 15 \
+              -H "Title: vivarium live-regression" \
+              -H "Priority: $([ "${JOB_STATUS}" = success ] && echo default || echo high)" \
+              -H "Tags: ${ICON}" \
+              --data-binary "${MSG} — ${RUN_URL}" \
+              "${STATUS_NTFY_URL}" >/dev/null 2>&1 || echo "::warning::status push to ntfy failed (non-fatal)"
+          fi

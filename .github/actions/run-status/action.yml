@@ -1,0 +1,54 @@
+name: Report run status
+description: >-
+  Surface a workflow run's status to the end user: a GitHub annotation (visible on the run page
+  during the run), an optional line appended to the job summary, and an optional push to an ntfy
+  topic so it reaches a phone/desktop. The push is a no-op when no ntfy URL is supplied, so the
+  action is safe in forks/PRs without the secret.
+inputs:
+  phase:
+    description: Short phase label (e.g. start, gates, golden, done).
+    required: true
+  message:
+    description: Human-readable status message (workflow-authored; no binary-derived content).
+    required: true
+  state:
+    description: Annotation level — "notice" or "error".
+    required: false
+    default: notice
+  ntfy-url:
+    description: ntfy topic URL to POST the message to (push skipped if empty).
+    required: false
+    default: ""
+  summary:
+    description: Optional markdown appended to $GITHUB_STEP_SUMMARY.
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      # Inputs are passed via env (never interpolated into the script body) to avoid command
+      # injection (the messages are workflow-authored, but this keeps the pattern safe to reuse).
+      env:
+        PHASE: ${{ inputs.phase }}
+        MESSAGE: ${{ inputs.message }}
+        STATE: ${{ inputs.state }}
+        NTFY_URL: ${{ inputs.ntfy-url }}
+        SUMMARY: ${{ inputs.summary }}
+      run: |
+        set -uo pipefail
+        echo "::${STATE}::[${PHASE}] ${MESSAGE}"
+        if [ -n "${SUMMARY}" ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+          printf '%s\n' "${SUMMARY}" >> "${GITHUB_STEP_SUMMARY}"
+        fi
+        if [ -n "${NTFY_URL}" ]; then
+          # ntfy: the request body is the message; Title/Priority/Tags are headers. Best-effort,
+          # short timeout, never fail the job on a notification hiccup.
+          PRIO="default"; TAGS="hourglass_flowing_sand"
+          [ "${STATE}" = "error" ] && { PRIO="high"; TAGS="rotating_light"; }
+          curl -fsS --max-time 15 \
+            -H "Title: vivarium ${GITHUB_WORKFLOW:-workflow}" \
+            -H "Priority: ${PRIO}" -H "Tags: ${TAGS}" \
+            --data-binary "[${PHASE}] ${MESSAGE}" \
+            "${NTFY_URL}" >/dev/null 2>&1 || echo "::warning::status push to ntfy failed (non-fatal)"
+        fi
