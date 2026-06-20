@@ -1,0 +1,75 @@
+{
+  "schema_version": "1.0",
+  "deliverable": "Full first-party decompilation of OpenSSL 4.0.1 (openssl CLI)",
+  "subject": {
+    "program": "OpenSSL command-line tool",
+    "version": "4.0.1",
+    "binary_decompiled": "apps/openssl (symbol-bearing build, used so the first-party filter and names are exact)",
+    "unstripped_sha256": "71d4dc59c2f29d4593d285a63fe02b6d141095f85646e3e0d4879c49fddf10c6",
+    "unstripped_size_bytes": 9436440,
+    "stripped_blind_twin_sha256": "fba4556e7bba19522230cd0aab531d9cb380e6e6ebc0dc3a79defefadcb83060",
+    "source_tarball_sha256": "2db3f3a0d6ea4b59e1f094ace2c8cd536dffb87cdc39084c5afa1e6f7f37dd09"
+  },
+  "tooling": {
+    "decompiler": "Ghidra headless (analyzeHeadless)",
+    "ghidra_version": "10.3.2",
+    "jdk": "OpenJDK 25.0.3",
+    "note": "This one-off full decompile used the host Ghidra 10.3.2. The vivarium worker pins Ghidra 12.1.2; results via the MCP path may differ slightly. Recorded for honesty."
+  },
+  "scope": {
+    "filter": "first-party OpenSSL only (libcrypto + libssl + apps); bundled glibc/CRT excluded",
+    "allowlist_symbol_count": 15750,
+    "allowlist_source": "defined text symbols (T/t) from libcrypto.a, libssl.a, apps/libapps.a, apps/*.o"
+  },
+  "results": {
+    "functions_decompiled": 15423,
+    "ok": 15412,
+    "failed": 11,
+    "skipped_large": 0,
+    "success_rate": 0.99929,
+    "allowlist_not_emitted": 327,
+    "allowlist_not_emitted_reason": "symbols with no distinct function body in the binary (aliases, weak symbols, inlined/folded)",
+    "decompiled_c_lines": 788037,
+    "decompiled_c_bytes": 23409267,
+    "decompiled_c_sha256": "11751c3a7bf632ec76ca2a25fc97d0f133dac9c53311eb56b71b920dd5ce57ce",
+    "index_csv_sha256": "b48719cf9842de5ac3b5833de2f08f0c8423524eac2c03726896cc9fce35c612",
+    "artifact_targz_sha256": "ef0b170df763123fce080a7424f7385fa83934f97fbb4c9c2f3e4c2baf39abf5",
+    "artifact_targz_bytes": 3461120,
+    "artifact_filename": "openssl-firstparty-decompiled.tar.gz (NOT committed; rebuildable)"
+  },
+  "failed_functions": [
+    {"name": "print_out", "size_bytes": 1317},
+    {"name": "SSL_client_hello_get1_extensions_present", "size_bytes": 597},
+    {"name": "SSL_client_hello_get_extension_order", "size_bytes": 494},
+    {"name": "custom_exts_copy_conn", "size_bytes": 903},
+    {"name": "bn_mod_exp_mont_fixed_top", "size_bytes": 4266},
+    {"name": "sk_reserve", "size_bytes": 382},
+    {"name": "ChaCha20_ssse3", "size_bytes": 35},
+    {"name": "ChaCha20_4x", "size_bytes": 3008},
+    {"name": "DES_cfb_encrypt", "size_bytes": 2415},
+    {"name": "ossl_ed25519_verify", "size_bytes": 7755},
+    {"name": "sha256_multi_block", "size_bytes": 10185}
+  ],
+  "failed_functions_note": "Heavily-unrolled or SIMD/assembly crypto primitives plus a few large-expression functions whose decompilation explodes the decompiler. The memory guards (payload cap + per-function timeout + oversize guard) made them abort gracefully and be recorded, rather than OOM the host.",
+  "module_breakdown": {
+    "ossl core (OSSL_/ossl_)": 3177,
+    "SSL/TLS": 1084,
+    "EVP": 978,
+    "ASN.1": 855,
+    "X509": 743,
+    "EC": 334,
+    "RSA": 307,
+    "BIGNUM": 256,
+    "PKCS": 233,
+    "BIO": 214,
+    "CRYPTO/util": 200,
+    "apps (subcommands)": 48,
+    "other": 6994
+  },
+  "memory_guards_applied": {
+    "dispose_decompiler_every_n_functions": 50,
+    "max_payload_mb": 30,
+    "decompile_timeout_seconds": 30,
+    "max_function_bytes": 40000
+  }
+}

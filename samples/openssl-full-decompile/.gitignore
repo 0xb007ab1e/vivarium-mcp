@@ -1,0 +1,6 @@
+# The full decompilation listing (22 MiB) and its compressed artifact are not
+# committed (repo policy: no large blobs). They are rebuildable via reproduce.md and
+# verifiable against the SHA-256 values in manifest.json.
+openssl_firstparty_decompiled.c
+openssl-firstparty-decompiled.tar.gz
+*.tar.gz

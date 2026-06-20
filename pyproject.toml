@@ -101,6 +101,10 @@ packages = ["src/vivarium"]
 target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
+# samples/ holds reference artifacts (decompiled C, Ghidra Jython tooling, allow-lists),
+# not project source. Ghidra scripts run under Jython with engine-injected globals and are
+# not lintable as project Python, so exclude the tree from ruff check/format.
+extend-exclude = ["samples"]
 
 [tool.ruff.lint]
 select = [
