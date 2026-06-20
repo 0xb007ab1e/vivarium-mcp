@@ -111,22 +111,29 @@ direct evidence:
    A resume test confirmed the run crosses the bomb zone with the bomb recorded as a
    single `failed` entry and memory returning to baseline.
 
-3. **The execution framework does not reap child process trees on a daemon kill.**
-   When the kernel OOM-kills the daemon's cgroup, the job's Ghidra `java` and native
-   `decompile` children can be orphaned and keep holding multiple GB, which made each
-   subsequent run OOM sooner. This is a reliability gap in the out-of-band execution
-   tool: the lifecycle the Vivarium worker itself enforces (kill-on-evict with a
-   verified wipe, ADR-002) is exactly what the generic executor was missing. It is
-   worth filing as a separate bug.
+3. **No per-job memory isolation in the execution framework.** These runs executed
+   under the host's out-of-band execution daemon (cotd), where every job shares the
+   daemon's cgroup with no per-job memory bound (no `setrlimit`, no transient scope,
+   `MemoryMax=infinity`). A runaway job's memory therefore counts against the shared
+   daemon cgroup, so the kernel OOM-killer takes down the whole daemon (and every
+   concurrent job with it) rather than just the offending job. This is a reliability
+   gap distinct from the Vivarium worker's own bounded lifecycle (kill-on-evict with
+   a verified wipe, ADR-002). Filed as claude-tools#11; the fix is a per-job memory
+   cap (`setrlimit` via `preexec_fn`, a transient `systemd-run` scope, or a
+   daemon-level `MemoryMax`/`OOMScoreAdjust`). Note: on a cot-initiated timeout the
+   runner already kills the job's process group, so this is specifically about an
+   unbounded job triggering a daemon-wide kernel OOM, not orphaned processes.
 
 Incidental finding: `analyzeHeadless` hardcodes `MAXMEM=2G` as a plain assignment
 (not `${MAXMEM:-2G}`), so an inherited `MAXMEM` environment variable is silently
 ignored and the JVM heap is fixed at 2 GB. This is not the leak (it keeps the heap
 small); the runaway memory was native, off-heap, in the decompiler process.
 
-With all three addressed, the full remaining decompilation (about 7,200 functions)
-completed in 124 seconds with bounded memory and no OOM, versus tens of minutes of
-OOM-looping before. The guards applied are recorded in `manifest.json`.
+With causes 1 and 2 fixed in the harness and cause 3 worked around by keeping the
+job's own memory well under the host ceiling, the full remaining decompilation
+(about 7,200 functions) completed in 124 seconds with bounded memory and no OOM,
+versus tens of minutes of OOM-looping before. The guards applied are recorded in
+`manifest.json`.
 
 ## 4. Files in this directory
 
