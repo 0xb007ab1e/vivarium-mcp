@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import os
 import shutil
 import sys
@@ -65,10 +66,24 @@ def _structured(result: object) -> dict[str, Any]:
         raise AssertionError(f"tool returned an error envelope: {getattr(result, 'content', None)}")
     structured = getattr(result, "structuredContent", None)
     if isinstance(structured, dict):
-        if {"type", "title", "retryable"} <= structured.keys() and "status" in structured:
-            raise AssertionError(f"tool returned error envelope: {structured.get('type')!r}")
+        _assert_not_error_envelope(structured)
         return structured
+    # Fall back to a JSON text content block: some tools/transports deliver the result as a
+    # content block rather than populating ``structuredContent`` (the analyze SessionInfo does
+    # this in the live chain), so parse it instead of failing closed prematurely.
+    for block in getattr(result, "content", []) or []:
+        text = getattr(block, "text", None)
+        if text:
+            parsed: dict[str, Any] = json.loads(text)
+            _assert_not_error_envelope(parsed)
+            return parsed
     raise AssertionError("tool result carried no structured content")
+
+
+def _assert_not_error_envelope(payload: dict[str, Any]) -> None:
+    """Fail closed when ``payload`` is the frozen error envelope rather than a tool result."""
+    if {"type", "title", "retryable"} <= payload.keys() and "status" in payload:
+        raise AssertionError(f"tool returned error envelope: {payload.get('type')!r}")
 
 
 async def _drive_progress(
