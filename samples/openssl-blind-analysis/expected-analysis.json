@@ -88,6 +88,7 @@
     "recommendation": "PROMOTE (all acceptance criteria met).",
     "status": "PROMOTED",
     "promoted_test": "tests/integration/test_golden_fixture_openssl_blind.py",
-    "promotion_mechanics_note": "The 7.9 MiB binary is NOT committed (repo policy: no large blobs, benign/synthetic fixtures only). A promoted fixture consists of this golden file plus build-openssl-fixture.sh, which deterministically rebuilds the binary and asserts its sha256. The promoted integration test (promoted_test) is integration-tier (needs the Ghidra worker, gated by VIVARIUM_INTEGRATION) and runs as an advisory step in .github/workflows/live-regression.yml."
+    "binary_storage": "git-lfs (samples/openssl-blind-analysis/openssl.blind; repo-root .gitattributes *.blind)",
+    "promotion_mechanics_note": "The OpenSSL static build is NOT byte-reproducible across toolchains (a CI rebuild produced a different sha256), so the exact 7.9 MiB subject bytes are pinned via Git LFS rather than rebuilt. The promoted integration test (promoted_test) loads that binary (lfs:true checkout), verifies its sha256 against subject.sha256, and asserts the program-level facts + 15 function addresses reproduce against a real Ghidra worker. It is integration-tier (gated by VIVARIUM_INTEGRATION) and runs as an advisory step in .github/workflows/live-regression.yml. build-openssl-fixture.sh is retained for provenance only."
   }
 }
