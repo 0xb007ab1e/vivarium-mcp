@@ -13,9 +13,12 @@ conclusion verified against the original source.
 - `expected-analysis.json` — the golden, machine-readable results: subject
   hashes, program-level metrics, the fifteen identifications with confidence and
   verification outcome, and the fixture acceptance evaluation.
-- `build-openssl-fixture.sh` — deterministically rebuilds the subject binary from
-  pinned source and verifies its SHA-256.
-- `.gitignore` — keeps the 7.9 MiB binary out of git (rebuild it on demand).
+- `openssl.blind` — the exact 7.9 MiB subject binary, committed via **Git LFS**
+  (repo-root `.gitattributes`: `*.blind`). The OpenSSL static build is not
+  byte-reproducible across toolchains, so the recorded bytes are pinned rather than
+  rebuilt; the golden test loads this directly.
+- `build-openssl-fixture.sh` — provenance: how the subject was built from pinned
+  source (kept for documentation/local comparison; the LFS bytes are authoritative).
 
 ## Headline result
 
@@ -25,14 +28,18 @@ high-confidence refutations. No indicators of malicious behavior.
 
 ## Fixture-promotion status
 
-The subject meets the acceptance criteria defined in `REPORT.md` section 9 and is
-recommended for promotion to a test fixture. Promotion is a gated action requiring
-human approval. The binary itself is never committed (repo policy); a promoted
-fixture is the golden file plus the build script. If promotion is rejected,
-discard this directory.
+PROMOTED. The golden integration test is
+`tests/integration/test_golden_fixture_openssl_blind.py` (gated `@pytest.mark.integration`,
+runs as an advisory step in `.github/workflows/live-regression.yml`). It loads the
+LFS-committed `openssl.blind`, re-runs the real analysis, and asserts it reproduces the
+golden facts in `expected-analysis.json`.
 
-## Regenerate
+## Provenance / regenerate
+
+`build-openssl-fixture.sh` documents how the subject was built (OpenSSL 4.0.1, static,
+stripped). Note the byte layout is toolchain-dependent, so a rebuild will not match the
+LFS-pinned SHA-256; the committed bytes are authoritative.
 
 ```
-./build-openssl-fixture.sh            # rebuild openssl.blind and check its hash
+git lfs pull --include="samples/openssl-blind-analysis/openssl.blind"   # fetch the subject
 ```

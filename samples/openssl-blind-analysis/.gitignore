@@ -1,7 +1,7 @@
-# The fixture binary is built on demand by build-openssl-fixture.sh and is
-# deliberately never committed (repo policy: no large binary blobs in git;
-# benign/synthetic fixtures only). Regenerate it locally when needed.
-openssl.blind
+# The exact subject binary (openssl.blind) IS committed, via Git LFS (see the repo-root
+# .gitattributes: *.blind -> LFS). The OpenSSL static build is not byte-reproducible across
+# toolchains, so the recorded bytes are pinned in LFS rather than rebuilt. Ignore only the
+# build intermediates from build-openssl-fixture.sh (used for provenance/local comparison).
 openssl.blind.unstripped
 *.o
 *.tar.gz

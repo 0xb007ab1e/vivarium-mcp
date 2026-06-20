@@ -77,6 +77,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # actions/checkout@v6.0.3
+        with:
+          lfs: true # fetch the OpenSSL golden-fixture binary (samples/**/*.blind) for the advisory test
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # actions/setup-python@v6.2.0
@@ -246,12 +248,14 @@ jobs:
           path: live-regression-junit.xml
 
       # --- ADVISORY: OpenSSL blind golden fixture (not a hard gate) --------------------------------
-      # Promotes samples/openssl-blind-analysis/ into a reproducible regression check: rebuild the
-      # (uncommitted, 7.9 MiB) subject, re-run the real analysis, and assert it reproduces the golden
-      # program-level facts + 15 function addresses in expected-analysis.json. Kept ADVISORY
-      # (continue-on-error, separate JUnit not read by the fail-loud guard) because the OpenSSL build
-      # needs network + a few minutes and may legitimately be unavailable; a skip here must NOT break
-      # the deterministic hard gates above.
+      # Promotes samples/openssl-blind-analysis/ into a regression check: re-run the real analysis
+      # against the LFS-committed subject binary (samples/openssl-blind-analysis/openssl.blind,
+      # fetched by the lfs:true checkout) and assert it reproduces the golden program-level facts +
+      # 15 function addresses in expected-analysis.json. The OpenSSL static build is not
+      # byte-reproducible across toolchains, so the exact bytes are pinned in LFS rather than rebuilt
+      # (the test verifies the binary SHA-256 against the golden subject hash). Kept ADVISORY
+      # (continue-on-error, separate JUnit not read by the fail-loud guard) until the analysis is
+      # confirmed stable on the CI worker's Ghidra; function_count drift then prompts a re-gold.
       - name: Golden fixture (OpenSSL blind) — advisory
         if: always()
         continue-on-error: true
@@ -270,9 +274,7 @@ jobs:
           export VIVARIUM_WORKER_UID="$(id -u)"
           export VIVARIUM_WORKER_GID="$(id -g)"
           mkdir -p "$VIVARIUM_RPC_SOCKET_DIR"
-          # Build the uncommitted fixture binary (~5 min, network). If it fails, the test skips.
-          bash samples/openssl-blind-analysis/build-openssl-fixture.sh \
-            samples/openssl-blind-analysis/openssl.blind || echo "::warning::openssl fixture build failed; golden test will skip"
+          git lfs pull --include="samples/openssl-blind-analysis/openssl.blind" || true
           pytest -m integration --no-cov -v \
             --junit-xml=golden-fixture-junit.xml \
             tests/integration/test_golden_fixture_openssl_blind.py || true

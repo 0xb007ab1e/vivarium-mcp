@@ -41,7 +41,6 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -50,10 +49,9 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
-#: Repo-relative location of the promoted sample (golden file + reproducible build script).
+#: Repo-relative location of the promoted sample (golden file + the LFS-committed subject binary).
 _SAMPLE_DIR = Path(__file__).resolve().parents[2] / "samples" / "openssl-blind-analysis"
 _GOLDEN_FILE = _SAMPLE_DIR / "expected-analysis.json"
-_BUILD_SCRIPT = _SAMPLE_DIR / "build-openssl-fixture.sh"
 _BINARY = _SAMPLE_DIR / "openssl.blind"
 
 
@@ -90,29 +88,22 @@ def _addr_int(addr: object) -> int:
 
 
 def _ensure_binary() -> Path | None:
-    """Return the fixture binary path, building it via the reproducible script if absent.
+    """Return the committed fixture binary, or ``None`` if absent / an unsmudged LFS pointer.
 
-    The 7.9 MiB binary is never committed (repo policy); it is built on demand. Returns ``None``
-    when it is absent and cannot be built (no build script, or the build fails), so the caller can
-    skip rather than fail.
+    The exact 7.9 MiB subject is committed via Git LFS (``.gitattributes``: ``*.blind``); the
+    OpenSSL static build is not byte-reproducible across toolchains, so the recorded bytes are
+    preserved rather than rebuilt. On a checkout that did not fetch LFS objects the path is a tiny
+    text pointer (``version https://git-lfs...``), not the binary; return ``None`` then so the
+    caller skips with a ``git lfs pull`` hint instead of failing the SHA-256 gate on pointer bytes.
 
     Returns:
-        The path to the verified binary, or ``None`` if it could not be made available.
+        The path to the real binary, or ``None`` if absent or not yet pulled from LFS.
     """
-    if _BINARY.is_file():
-        return _BINARY
-    if not _BUILD_SCRIPT.is_file():
+    if not _BINARY.is_file():
         return None
-    bash = shutil.which("bash")
-    if bash is None:
-        return None
-    proc = subprocess.run(  # noqa: S603 — argv list (no shell); resolved bash + repo-relative script.
-        [bash, str(_BUILD_SCRIPT), str(_BINARY)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode != 0 or not _BINARY.is_file():
+    if _BINARY.stat().st_size < 4096 and _BINARY.read_bytes()[:64].startswith(
+        b"version https://git-lfs"
+    ):
         return None
     return _BINARY
 
@@ -224,10 +215,7 @@ def test_openssl_blind_golden_fixture_reproduces(tmp_path: Path) -> None:
         pytest.skip(f"container engine {engine!r} not found on PATH")
     binary = _ensure_binary()
     if binary is None:
-        pytest.skip(
-            "openssl.blind fixture absent and could not be built "
-            "(run samples/openssl-blind-analysis/build-openssl-fixture.sh)"
-        )
+        pytest.skip("openssl.blind fixture absent or not pulled from Git LFS (run: git lfs pull)")
 
     golden = _load_golden()
     subject = golden["subject"]
