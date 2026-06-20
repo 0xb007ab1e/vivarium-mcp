@@ -85,7 +85,9 @@
       "benign_subject": true,
       "binary_committed_to_git": false
     },
-    "recommendation": "PROMOTE (all acceptance criteria met). Promotion is gated and requires human approval. If rejected, discard the samples/openssl-blind-analysis directory.",
-    "promotion_mechanics_note": "The 7.9 MiB binary is NOT committed (repo policy: no large blobs, benign/synthetic fixtures only). A promoted fixture consists of this golden file plus build-openssl-fixture.sh, which deterministically rebuilds the binary and asserts its sha256. A CI test using it is integration-tier (needs the Ghidra worker), not a unit test."
+    "recommendation": "PROMOTE (all acceptance criteria met).",
+    "status": "PROMOTED",
+    "promoted_test": "tests/integration/test_golden_fixture_openssl_blind.py",
+    "promotion_mechanics_note": "The 7.9 MiB binary is NOT committed (repo policy: no large blobs, benign/synthetic fixtures only). A promoted fixture consists of this golden file plus build-openssl-fixture.sh, which deterministically rebuilds the binary and asserts its sha256. The promoted integration test (promoted_test) is integration-tier (needs the Ghidra worker, gated by VIVARIUM_INTEGRATION) and runs as an advisory step in .github/workflows/live-regression.yml."
   }
 }

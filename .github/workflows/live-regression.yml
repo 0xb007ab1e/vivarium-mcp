@@ -244,3 +244,43 @@ jobs:
         with:
           name: live-regression-junit
           path: live-regression-junit.xml
+
+      # --- ADVISORY: OpenSSL blind golden fixture (not a hard gate) --------------------------------
+      # Promotes samples/openssl-blind-analysis/ into a reproducible regression check: rebuild the
+      # (uncommitted, 7.9 MiB) subject, re-run the real analysis, and assert it reproduces the golden
+      # program-level facts + 15 function addresses in expected-analysis.json. Kept ADVISORY
+      # (continue-on-error, separate JUnit not read by the fail-loud guard) because the OpenSSL build
+      # needs network + a few minutes and may legitimately be unavailable; a skip here must NOT break
+      # the deterministic hard gates above.
+      - name: Golden fixture (OpenSSL blind) — advisory
+        if: always()
+        continue-on-error: true
+        env:
+          PYTHONPATH: src
+          VIVARIUM_INTEGRATION: "1"
+          VIVARIUM_WORKER_IMAGE: ${{ steps.image.outputs.image }}
+          VIVARIUM_CONTAINER_ENGINE: podman
+          VIVARIUM_WORKER_RUNTIME: crun
+          VIVARIUM_E2E_TIMEOUT: "1200"
+          VIVARIUM_SESSION_TTL_SECONDS: "2400"
+          VIVARIUM_SESSION_IDLE_SECONDS: "2400"
+        run: |
+          set -uo pipefail
+          export VIVARIUM_RPC_SOCKET_DIR="/tmp/gmcp-run"
+          export VIVARIUM_WORKER_UID="$(id -u)"
+          export VIVARIUM_WORKER_GID="$(id -g)"
+          mkdir -p "$VIVARIUM_RPC_SOCKET_DIR"
+          # Build the uncommitted fixture binary (~5 min, network). If it fails, the test skips.
+          bash samples/openssl-blind-analysis/build-openssl-fixture.sh \
+            samples/openssl-blind-analysis/openssl.blind || echo "::warning::openssl fixture build failed; golden test will skip"
+          pytest -m integration --no-cov -v \
+            --junit-xml=golden-fixture-junit.xml \
+            tests/integration/test_golden_fixture_openssl_blind.py || true
+
+      - name: Upload golden-fixture JUnit
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact@v7.0.1
+        with:
+          name: golden-fixture-junit
+          path: golden-fixture-junit.xml
+          if-no-files-found: ignore
