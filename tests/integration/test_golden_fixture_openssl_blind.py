@@ -12,7 +12,8 @@ reproduces the golden facts:
 * the built binary's SHA-256 matches the golden subject hash (reproducibility gate), and
 * ``program_summary`` returns the golden ``function_count`` / ``import_count`` / ``export_count``
   / ``entry_point``, and
-* every one of the 15 golden function addresses still resolves to a function.
+* every recorded function address still resolves to a function (the 13 function
+  identifications; the 2 crypto-constant findings are data, checked via crypto_algorithms).
 
 It does NOT re-assert the human-verified source identities (e.g. ``ERR_set_debug``): the subject
 is stripped, so the tool emits ``FUN_<addr>`` names. The source identity lives in the report; the
@@ -150,7 +151,14 @@ async def _drive_golden(binary: Path, import_root: Path) -> dict[str, Any]:
     from mcp.client.stdio import StdioServerParameters, stdio_client
 
     golden = _load_golden()
-    golden_addrs = {_addr_int(f["address"]) for f in golden["function_identifications"]}
+    # Only the function identifications are checked for function resolution; the
+    # "crypto-constant scan" entries (ids 14/15: the AES S-box and MD5 IV) are DATA
+    # addresses, not functions, so get_function would (correctly) not resolve them.
+    golden_addrs = {
+        _addr_int(f["address"])
+        for f in golden["function_identifications"]
+        if "crypto-constant" not in str(f.get("surfaced", "")).lower()
+    }
 
     params = StdioServerParameters(
         command=sys.executable,
@@ -247,7 +255,15 @@ def test_openssl_blind_golden_fixture_reproduces(tmp_path: Path) -> None:
         f"entry_point drift: got {entry!r}, golden {program['entry_point']!r}"
     )
 
-    # 3) Every recorded function address still resolves to a function.
+    # The crypto-constant findings (AES S-box, MD5 IV) are data, validated here at the
+    # program level rather than as functions.
+    golden_crypto = {str(a).upper() for a in program.get("crypto_algorithms", [])}
+    actual_crypto = {str(a).upper() for a in (summary.get("crypto_algorithms") or [])}
+    assert golden_crypto <= actual_crypto, (
+        f"crypto algorithms missing: golden {sorted(golden_crypto)}, got {sorted(actual_crypto)}"
+    )
+
+    # 3) Every recorded function (non-data) address still resolves to a function.
     missing = result["golden_addrs"] - result["resolved_addrs"]
     assert not missing, (
         f"{len(missing)} golden function address(es) no longer resolve: "
