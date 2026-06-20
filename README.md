@@ -82,6 +82,8 @@ The full design rationale is in the decision records under [`docs/adr/`](./docs/
 - [`docs/getting-started.md`](./docs/getting-started.md): set up and run Vivarium from scratch.
 - [`docs/architecture.md`](./docs/architecture.md): how the pieces fit together.
 - [`docs/contracts/`](./docs/contracts/): the tool catalog, RPC protocol, and data envelopes.
+- [`docs/examples/`](./docs/examples/): worked examples, including a [blind analysis of a stripped
+  SQLite binary](./docs/examples/blind-analysis-sqlite.md) compared against the original source.
 - [`docs/runbooks/`](./docs/runbooks/): operational procedures (deploy, rollback, incident response, and
   more), including [HTTP exposure](./docs/runbooks/http-exposure.md).
 - [`docs/adr/`](./docs/adr/): the numbered design decisions (ADR-001 through ADR-038).
