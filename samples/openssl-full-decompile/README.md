@@ -16,8 +16,9 @@ validation in `../openssl-blind-analysis/`.
 
 Completing this required finding and fixing a real memory leak in the extraction
 path (Ghidra's native decompiler growing unbounded without periodic disposal, plus
-pathological functions ballooning it, plus the execution framework not reaping child
-processes on an OOM kill). With the fix, the full run completes in about two minutes
+pathological functions ballooning it), compounded by the execution framework having
+no per-job memory isolation so a runaway job OOM-killed the whole daemon
+(filed as claude-tools#11). With the fix, the full run completes in about two minutes
 with bounded memory. See REPORT.md section 3.
 
 ## Contents
