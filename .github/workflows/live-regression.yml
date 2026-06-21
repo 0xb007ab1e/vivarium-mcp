@@ -18,6 +18,11 @@
 #     well-formed, bounded result (tests/integration/test_identify_functions_fid.py, ADR-042 Phase 1).
 #     Guards the `processProgram(Program, FidQueryService, float, TaskMonitor)` JVM-edge binding (the
 #     live test already caught a wrong-arity call). ELF micro-binary → 0 MSVC-DB matches (empty OK).
+#   * FID self-match — a self-built FID DB makes a micro-binary self-match, exercising the NON-EMPTY
+#     inner loop (getFunctionRecord/getLibraryRecord/getOverallScore) + the headless custom-`.fidb`
+#     ingest+attach+activate chain, i.e. Phase-2 SPIKE-1 (tests/integration/
+#     test_identify_functions_selfmatch.py). Hermetic — DB from the binary's own functions, no MSVC/
+#     licensing.
 # Naming-accuracy / behavioral-equivalence is ADVISORY (NOT a hard gate, NOT run with an LLM in CI)
 # and is deliberately NOT part of this job — see e2e-groundtruth.yml for the gated naming-eval e2e.
 # Per-profile recovered-function counts are recorded into the JUnit XML as an advisory trend.
@@ -223,7 +228,8 @@ jobs:
             tests/integration/test_export_annotations_after_rename.py \
             tests/integration/test_export_known_count.py \
             tests/integration/test_analyze_profiles.py \
-            tests/integration/test_identify_functions_fid.py
+            tests/integration/test_identify_functions_fid.py \
+            tests/integration/test_identify_functions_selfmatch.py
 
       # --- FAIL-LOUD ON SKIP: a skipped hard gate is a FAILURE, not a silent pass ------------------
       - name: Assert all hard gates actually RAN (fail-loud on skip)
