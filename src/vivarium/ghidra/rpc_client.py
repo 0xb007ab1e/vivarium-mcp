@@ -391,7 +391,8 @@ class RpcGhidraAdapter:
             args: Import arguments (digest verification happens in the worker).
 
         Returns:
-            Updated :class:`SessionInfo` (server-computed fields only — no binary-derived content).
+            Updated :class:`SessionInfo` (server-computed fields only — no binary-derived content),
+            carrying the server-resolved ``binary_size`` overlaid onto the worker's reply.
 
         Raises:
             GhidraMcpError: ``VALIDATION`` if the ref cannot be resolved; ``LIMIT_EXCEEDED`` if over
@@ -414,7 +415,12 @@ class RpcGhidraAdapter:
             {"source_ref": args.source_ref, "expected_sha256": args.expected_sha256},
             timeout_s=self._tool_timeout_s,
         )
-        return _validate(s.SessionInfo, result)
+        info = _validate(s.SessionInfo, result)
+        # Overlay the server-resolved input byte size onto the worker's reply (ADR-018 provenance).
+        # The size is known here from the confined resolver — computed BEFORE any byte reached the
+        # JVM (ADR-001: no binary parse) — and the worker does not report it. Advisory provenance
+        # only, surfaced on ``SessionInfo`` like ``binary_sha256`` (server-computed, safe).
+        return info.model_copy(update={"binary_size": size_bytes})
 
     def _preflight_check(self, size_bytes: int) -> None:
         """Apply the over-plausible-size pre-flight per the configured mode (ADR-029 C).

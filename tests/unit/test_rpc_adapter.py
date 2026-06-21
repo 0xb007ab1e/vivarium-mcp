@@ -876,7 +876,39 @@ def test_import_within_cap_feeds_worker() -> None:
     info = adapter.import_binary("s", s.SessionImportIn(session_id="s", source_ref="ok"))
     t.join(timeout=2)
     assert info.state == "importing"
+    # Item 2 (ADR-018): the server-resolved input size is overlaid onto the worker's reply, even
+    # though the worker reply carried no ``binary_size`` (it does not report it).
+    assert info.binary_size == 4096
     assert worker.killed == 0
+    wrk.close()
+
+
+def test_import_overlays_resolved_size_over_any_worker_reported_size() -> None:
+    """Item 2 (ADR-018): the server-resolved size is authoritative over a worker-claimed one.
+
+    The adapter computes the size from the confined resolver pre-Ghidra (ADR-001) and overlays it;
+    a (hostile/buggy) worker cannot dictate the recorded provenance.
+    """
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _import_adapter(
+        srv, worker, limits=Limits(max_binary_bytes=1 << 20), resolver=lambda ref: 1234
+    )
+    result = {
+        "session_id": "s",
+        "state": "importing",
+        "created_at": 1,
+        "expires_at": 2,
+        "binary_sha256": "b" * 64,
+        "binary_size": 999_999,  # worker-forged size — MUST be discarded for the resolved value
+    }
+    t = threading.Thread(
+        target=_serve_one, args=(wrk, {"jsonrpc": "2.0", "result": result}), daemon=True
+    )
+    t.start()
+    info = adapter.import_binary("s", s.SessionImportIn(session_id="s", source_ref="ok"))
+    t.join(timeout=2)
+    assert info.binary_size == 1234  # the server-resolved size, not the worker's claim
     wrk.close()
 
 

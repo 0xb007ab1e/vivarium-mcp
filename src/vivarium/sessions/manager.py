@@ -129,6 +129,11 @@ class _Session:
         ttl_s: Absolute lifetime in seconds.
         idle_s: Idle timeout in seconds.
         binary_sha256: Server-computed digest once a binary is imported, else ``None``.
+        binary_size: Server-resolved byte size of the imported binary (computed pre-Ghidra when the
+            bytes are read under confinement — ADR-001), else ``None``. Advisory provenance.
+        binary_name: Advisory basename label of the import ``source_ref`` (server-derived, not
+            binary-parsed), else ``None``. NOT surfaced on ``SessionInfo`` — read only by the
+            annotation-export handler for the document's advisory ``binary.name`` (ADR-018).
         analysis_profile: The analyzer-depth preset last run (ADR-029 B:
             ``"default"``/``"light"``/``"deep"``), else ``None`` before any analyze. Echoes the
             effective input profile; server-authoritative.
@@ -151,6 +156,8 @@ class _Session:
     idle_s: int
     in_flight: int = 0
     binary_sha256: str | None = None
+    binary_size: int | None = None
+    binary_name: str | None = None
     analysis_profile: Literal["default", "light", "deep"] | None = None
     store_path: str | None = None
     worker_started: bool = False
@@ -589,7 +596,13 @@ class SessionManager:
             self._flush_evicted()
 
     def record_binary_hash(
-        self, session_id: str, sha256: str, *, caller: str = _LOCAL_PRINCIPAL_ID
+        self,
+        session_id: str,
+        sha256: str,
+        *,
+        size: int | None = None,
+        name: str | None = None,
+        caller: str = _LOCAL_PRINCIPAL_ID,
     ) -> None:
         """Persist the worker-computed program hash on a caller-owned session (ADR-018 binding).
 
@@ -600,12 +613,22 @@ class SessionManager:
         different binary is rejected because its hash will not match this. Owner-scoped via the
         shared chokepoint (a foreign caller cannot stamp another principal's session — ADR-017).
 
+        The optional advisory provenance — ``size`` (the server-resolved input byte count, computed
+        pre-Ghidra) and ``name`` (the basename label of the import ref) — is recorded in the SAME
+        owner-scoped chokepoint pass so all import metadata is stamped together. Both are non-load-
+        bearing (advisory only; never used for authZ or binding); ``None`` leaves the field
+        unchanged so an existing value is never clobbered.
+
         Idempotent for a stable binary (re-import of the same bytes records the same hash). Set once
-        per imported binary; never client-supplied.
+        per imported binary; never client-supplied beyond the resolved ref's basename.
 
         Args:
             session_id: The opaque id of a live, caller-owned session.
             sha256: The worker-computed hex SHA-256 of the imported binary.
+            size: Optional server-resolved input byte size (advisory provenance), or ``None`` to
+                leave it unchanged.
+            name: Optional advisory basename label of the import ref, or ``None`` to leave it
+                unchanged.
             caller: The authenticated, server-derived calling-principal id (ADR-017).
 
         Raises:
@@ -615,6 +638,35 @@ class SessionManager:
             with self._lock:
                 sess = self._get_live_locked(session_id, caller=caller)
                 sess.binary_sha256 = sha256
+                if size is not None:
+                    sess.binary_size = size
+                if name is not None:
+                    sess.binary_name = name
+        finally:
+            self._flush_evicted()
+
+    def binary_name(self, session_id: str, *, caller: str = _LOCAL_PRINCIPAL_ID) -> str | None:
+        """Read back the session's advisory binary-name label for export (ADR-018 provenance).
+
+        Owner-scoped accessor used by the annotation-export handler to populate the document's
+        advisory ``binary.name`` (the basename of the import ref). It is NOT surfaced on the public
+        :class:`SessionInfo` (a resolved-ref basename is not session-state we expose); it lives only
+        on the session for the export document. Advisory only — never trusted for application.
+
+        Args:
+            session_id: The opaque id of a live, caller-owned session.
+            caller: The authenticated, server-derived calling-principal id (ADR-017).
+
+        Returns:
+            The advisory basename label, or ``None`` if no binary has been imported.
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` if unknown/expired/evicted/foreign (BOLA-safe).
+        """
+        try:
+            with self._lock:
+                sess = self._get_live_locked(session_id, caller=caller)
+                return sess.binary_name
         finally:
             self._flush_evicted()
 
@@ -1068,6 +1120,7 @@ class SessionManager:
             created_at=sess.created_at,
             expires_at=sess.created_at + sess.ttl_s,
             binary_sha256=sess.binary_sha256,
+            binary_size=sess.binary_size,
             analysis_profile=sess.analysis_profile,
             writes_enabled=sess.writes_enabled,
             allow_structural=sess.allow_structural,

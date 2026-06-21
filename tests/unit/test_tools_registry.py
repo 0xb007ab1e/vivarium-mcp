@@ -73,6 +73,8 @@ class FakeSessionManager:
         self.evicted: list[tuple[str, str]] = []
         self.ensured: list[str] = []
         self.recorded_hashes: list[tuple[str, str]] = []  # ADR-018: program-hash binding records
+        # ADR-018 advisory provenance (size/name) recorded alongside the hash.
+        self.recorded_metadata: list[tuple[str, int | None, str | None]] = []
         self.recorded_profiles: list[tuple[str, str]] = []  # ADR-029 B: effective analysis profile
         self.created = 0
         # ADR-025 / F4: in-flight markers the dispatch chokepoint wraps session-scoped calls with.
@@ -115,9 +117,18 @@ class FakeSessionManager:
         self.evicted.append((session_id, reason))
         return True
 
-    def record_binary_hash(self, session_id: str, sha256: str, *, caller: str = "local") -> None:
-        """Record the worker-computed program hash (the import handler calls this — ADR-018)."""
+    def record_binary_hash(
+        self,
+        session_id: str,
+        sha256: str,
+        *,
+        size: int | None = None,
+        name: str | None = None,
+        caller: str = "local",
+    ) -> None:
+        """Record the worker-computed hash + advisory provenance (import handler — ADR-018)."""
         self.recorded_hashes.append((session_id, sha256))
+        self.recorded_metadata.append((session_id, size, name))
 
     def record_analysis_profile(
         self, session_id: str, profile: str, *, caller: str = "local"
@@ -617,6 +628,41 @@ def test_session_import_uses_manager_lifecycle_keeps_worker_sha256(ctx: reg.Tool
     assert sessions.ensured == [_VALID_SID]
     # The worker-computed program hash is recorded on the session (ADR-018 binding source).
     assert sessions.recorded_hashes == [(_VALID_SID, "a" * 64)]
+    # Advisory provenance is stamped in the SAME chokepoint: the basename of the resolved ref and
+    # (here) the worker's absent size (None — the default fake reports no size; ADR-018 fill).
+    assert sessions.recorded_metadata == [(_VALID_SID, None, "upload-1")]
+
+
+@pytest.mark.critical
+def test_session_import_records_resolved_binary_size_and_basename_name() -> None:
+    """Item 2 (ADR-018): the import handler stamps advisory size + basename provenance.
+
+    The adapter overlays the server-resolved ``binary_size``; the handler records it plus the
+    basename of the (possibly path-like) ``source_ref`` — no binary parse (ADR-001).
+    """
+
+    class _SizePort(FakePort):
+        def import_binary(self, sid: str, a: s.SessionImportIn) -> s.SessionInfo:
+            self._rec("import_binary", sid)
+            return s.SessionInfo(
+                session_id="WORKER-FORGED",
+                state="worker-forged",
+                created_at=1,
+                expires_at=2,
+                binary_sha256="c" * 64,
+                binary_size=8192,
+            )
+
+    sessions = FakeSessionManager()
+    ctx2 = reg.ToolContext(
+        config=_config(),
+        sessions=cast(SessionManager, sessions),
+        port=cast(GhidraPort, _SizePort()),
+    )
+    handlers = reg.build_handlers(ctx2)
+    handlers["session_import"](session_id=_VALID_SID, source_ref="/work/imports/firmware.bin")
+    # size from the adapter overlay; name is the BASENAME of the ref (a path → label, CWE-22 safe).
+    assert sessions.recorded_metadata == [(_VALID_SID, 8192, "firmware.bin")]
 
 
 @pytest.mark.critical

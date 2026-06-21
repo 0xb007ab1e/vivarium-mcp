@@ -67,6 +67,10 @@ class FakeSessionManager:
         self._writes = False
         self._structural = False
         self._hash: str | None = _SHA
+        # ADR-018 advisory provenance recorded at import; surfaced by export (size on SessionInfo,
+        # name via the owner-scoped accessor).
+        self._size: int | None = 4096
+        self._name: str | None = "sample.bin"
         self.consent_checks: list[tuple[str, bool]] = []
         self.comment_targets: set[tuple[str, str]] = set()
         self.composite_targets: set[str] = set()
@@ -82,9 +86,15 @@ class FakeSessionManager:
             created_at=0,
             expires_at=10,
             binary_sha256=self._hash,
+            binary_size=self._size,
             writes_enabled=self._writes,
             allow_structural=self._structural,
         )
+
+    def binary_name(self, session_id: str, *, caller: str = _OWNER) -> str | None:
+        """Read back the advisory basename label for export (ADR-018 provenance)."""
+        self._check(session_id, caller)
+        return self._name
 
     def begin_call(self, session_id: str) -> None:
         """In-flight marker (ADR-025 / F4) — no-op for these dispatch tests."""
@@ -343,6 +353,68 @@ def test_export_keeps_worker_binding_when_session_has_no_recorded_hash() -> None
     handlers = reg.build_handlers(ctx)
     out = handlers["session_export_annotations"](session_id=_SID)
     assert out.document.binary.sha256 == "0" * 64  # the worker placeholder, not overlaid
+
+
+@pytest.mark.critical
+def test_export_populates_binary_name_and_size_from_session(ctx: reg.ToolContext) -> None:
+    """Item 2 (ADR-018): the export doc's advisory ``name``/``size`` are filled server-side.
+
+    The worker reports them as ``None`` (it does not know the import label/size); the server fills
+    ``name`` from the owner-scoped advisory accessor (wrapped ``Untrusted`` — read-back values are
+    untrusted regardless of author, ADR-005) and ``size`` from the session's ``binary_size``. No
+    binary parse (ADR-001).
+    """
+
+    class _NullProvenancePort(FakePort):
+        def export_annotations(
+            self,
+            sid: str,
+            a: s.SessionExportAnnotationsIn,
+            *,
+            targets: s.ExportTargets,
+        ) -> s.SessionExportAnnotationsOut:
+            self.calls.append(("export_annotations", sid))
+            self.export_targets_seen = targets
+            return s.SessionExportAnnotationsOut(
+                document=s.ExportedAnnotationDocument(
+                    schema_version=s.ANNOTATION_SCHEMA_VERSION,
+                    # Worker leaves provenance NULL — the server is the source of name/size.
+                    binary=s.ExportedBinaryRef(sha256="0" * 64, name=None, size=None),
+                    entries=[],
+                )
+            )
+
+    sessions = FakeSessionManager()
+    sessions._size = 8192
+    sessions._name = "firmware.bin"
+    ctx2 = reg.ToolContext(
+        config=ctx.config,
+        sessions=cast(SessionManager, sessions),
+        port=cast(GhidraPort, _NullProvenancePort()),
+    )
+    handlers = reg.build_handlers(ctx2)
+    out = handlers["session_export_annotations"](session_id=_SID)
+    binary = out.document.binary
+    assert binary.sha256 == _SHA  # authoritative hash still overlaid
+    assert binary.size == 8192  # filled from SessionInfo.binary_size
+    # ``name`` is filled from the session label and wrapped as Untrusted (read-back is untrusted).
+    assert isinstance(binary.name, Untrusted)
+    assert binary.name.value == "firmware.bin"
+    assert binary.name.origin is DataOrigin.BINARY
+
+
+@pytest.mark.critical
+def test_export_omits_provenance_when_no_binary_imported() -> None:
+    """No recorded hash ⇒ no overlay at all (the server cannot bind/provenance an absent binary)."""
+    ctx = _ctx()
+    sessions = _sessions(ctx)
+    sessions._hash = None
+    sessions._size = None
+    sessions._name = None
+    handlers = reg.build_handlers(ctx)
+    out = handlers["session_export_annotations"](session_id=_SID)
+    # The worker placeholder binding survives untouched (sha256 + its own name/size).
+    assert out.document.binary.sha256 == "0" * 64
 
 
 @pytest.mark.critical
