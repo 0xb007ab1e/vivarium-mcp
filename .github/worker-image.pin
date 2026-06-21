@@ -1,0 +1,9 @@
+# Trusted vivarium worker image digest (ghcr.io/<owner>/vivarium-worker@<digest>).
+#
+# This is the single source of truth for the image live-regression.yml cosign-verifies and
+# pulls on its default ("test what you ship") path. It is auto-bumped by a REVIEWED pull
+# request opened by worker-image.yml on each release tag (the human merges to advance trust).
+# Do not hand-edit casually: changing this changes what CI trusts (a supply-chain decision).
+#
+# Format: a single `sha256:<64 hex>` token (comments/blank lines ignored).
+sha256:93fd5d1d85e8ee6da873efa05135aedae4abe57c4305a8c80a21aacdbad99cd9

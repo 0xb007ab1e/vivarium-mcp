@@ -73,17 +73,29 @@ jobs:
 
       - name: Verify + pull the signed worker image (by digest)
         env:
-          WORKER_IMAGE: ghcr.io/${{ github.repository_owner }}/vivarium-worker@${{ vars.WORKER_IMAGE_DIGEST }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.repository }}
+          # Legacy fallback only — the trusted pin is the committed file .github/worker-image.pin
+          # (auto-bumped by a reviewed PR from worker-image.yml on release).
+          WORKER_IMAGE_DIGEST_VAR: ${{ vars.WORKER_IMAGE_DIGEST }}
         run: |
           set -euo pipefail
-          if [ -z "${{ vars.WORKER_IMAGE_DIGEST }}" ]; then
-            echo "::error::vars.WORKER_IMAGE_DIGEST is unset — set it to the signed worker digest" >&2
+          # Single source of truth: the committed pin file; fall back to the legacy repo variable.
+          PIN_FILE=".github/worker-image.pin"
+          DIGEST=""
+          if [ -f "${PIN_FILE}" ]; then
+            DIGEST="$(grep -oiE 'sha256:[0-9a-f]{64}' "${PIN_FILE}" | head -n1 || true)"
+          fi
+          [ -z "${DIGEST}" ] && DIGEST="${WORKER_IMAGE_DIGEST_VAR:-}"
+          if [ -z "${DIGEST}" ]; then
+            echo "::error::no worker-image pin (.github/worker-image.pin / vars.WORKER_IMAGE_DIGEST)" >&2
             exit 1
           fi
+          WORKER_IMAGE="ghcr.io/${OWNER}/vivarium-worker@${DIGEST}"
           # Keyless cosign verify scoped to THIS repo's worker-image.yml OIDC identity before trust.
           cosign verify \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/worker-image.yml@" \
+            --certificate-identity-regexp "^https://github.com/${REPO}/.github/workflows/worker-image.yml@" \
             "$WORKER_IMAGE"
           podman pull "$WORKER_IMAGE"
           echo "VIVARIUM_WORKER_IMAGE=$WORKER_IMAGE" >> "$GITHUB_ENV"
