@@ -1993,13 +1993,16 @@ class PyGhidraBackend:
         Returns:
             ``{"matches": [{"address","matched_name","library","score"}], "truncated": bool}``.
         """
-        # integration-validate (real-worker, ADR-042 follow-up): FidService().processProgram(
-        #   program, monitor) -> List<FidSearchResult>; FidSearchResult has PUBLIC FIELDS
-        #   .function (a Function; .getEntryPoint().toString() = address) and .matches
-        #   (List<FidMatch>). FidMatch getters: getFunctionRecord().getName() = library function
-        #   name; getLibraryRecord() -> getLibraryFamilyName()/getLibraryVersion()/
-        #   getLibraryVariant(); getOverallScore() -> float. Threshold:
-        #   FidService().getDefaultScoreThreshold().
+        # FID service path — signature VERIFIED live against Ghidra 12.1.2 (the live integration
+        # test caught the original two-arg call; processProgram needs a FidQueryService +
+        # threshold):
+        #   svc.openFidQueryService(Language, processLibraries=False) -> FidQueryService (active);
+        #   svc.processProgram(Program, FidQueryService, scoreThreshold, TaskMonitor)
+        #     -> List<FidSearchResult>. FidSearchResult has PUBLIC FIELDS .function (a Function;
+        #     .getEntryPoint().toString() = address) and .matches (List<FidMatch>). FidMatch:
+        #     getOverallScore() -> float; getFunctionRecord().getName() = library function name;
+        #     getLibraryRecord() -> getLibraryFamilyName()/Version()/Variant().
+        #   Threshold default: svc.getDefaultScoreThreshold(). The query service MUST be closed.
         from ghidra.feature.fid.service import FidService  # type: ignore[import-not-found]
 
         # NOTE: ghidra.util.task is already missing-import-ignored at its first import site
@@ -2010,34 +2013,43 @@ class PyGhidraBackend:
         program = self._require_program()
         service = FidService()
         threshold = float(service.getDefaultScoreThreshold()) if min_score is None else min_score
-        results = service.processProgram(program, ConsoleTaskMonitor())
+        language = program.getLanguage()
+        if not service.canProcess(language):
+            # No FID database covers this processor → no matches (well-formed empty result).
+            return {"matches": [], "truncated": False}
+        query_service = service.openFidQueryService(language, False)
         rows: list[dict[str, Any]] = []
         truncated = False
-        for search_result in results:
-            address = str(search_result.function.getEntryPoint().toString())
-            for match in search_result.matches:
-                score = float(match.getOverallScore())
-                if score < threshold:
-                    continue
+        try:
+            monitor = ConsoleTaskMonitor()
+            results = service.processProgram(program, query_service, threshold, monitor)
+            for search_result in results:
+                address = str(search_result.function.getEntryPoint().toString())
+                for match in search_result.matches:
+                    score = float(match.getOverallScore())
+                    if score < threshold:
+                        continue
+                    if len(rows) >= limit:
+                        truncated = True
+                        break
+                    library = match.getLibraryRecord()
+                    rows.append(
+                        {
+                            "address": address,
+                            "matched_name": _to_text(match.getFunctionRecord().getName()),
+                            "library": _to_text(
+                                f"{library.getLibraryFamilyName()} "
+                                f"{library.getLibraryVersion()} "
+                                f"{library.getLibraryVariant()}"
+                            ),
+                            "score": score,
+                        }
+                    )
                 if len(rows) >= limit:
                     truncated = True
                     break
-                library = match.getLibraryRecord()
-                rows.append(
-                    {
-                        "address": address,
-                        "matched_name": _to_text(match.getFunctionRecord().getName()),
-                        "library": _to_text(
-                            f"{library.getLibraryFamilyName()} "
-                            f"{library.getLibraryVersion()} "
-                            f"{library.getLibraryVariant()}"
-                        ),
-                        "score": score,
-                    }
-                )
-            if len(rows) >= limit:
-                truncated = True
-                break
+        finally:
+            query_service.close()
         return {"matches": rows, "truncated": truncated}
 
     # --- private JVM helpers (lazy imports only; never at module scope) -----------------------
