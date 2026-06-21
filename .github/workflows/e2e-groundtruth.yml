@@ -16,8 +16,8 @@
 #
 # GATED (PLAN §6, std-supplychain): manual dispatch only. Source tarballs are SHA-256-pinned in
 # tests/fixtures/oss/manifest.toml (build fails closed on a mismatch). Actions are pinned BY DIGEST.
-# The worker image is pulled BY DIGEST (vars.WORKER_IMAGE_DIGEST — the signed digest from the most
-# recent worker-image.yml run) and cosign-verified before it is trusted/run.
+# The worker image is pulled BY DIGEST (from .github/worker-image.pin — the signed digest
+# auto-bumped via a reviewed PR by worker-image.yml on release) and cosign-verified before trust.
 name: e2e-groundtruth
 
 on:
