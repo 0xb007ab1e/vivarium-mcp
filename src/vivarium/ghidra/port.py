@@ -14,9 +14,10 @@ WS0 freezes the interface; WS2 implements the adapter.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Protocol
 
+from vivarium.jobs import streaming as st
 from vivarium.tools import schemas as s
 
 #: Progress relay callback (ADR-030 Phase 2). The adapter invokes it for each (already coalesced +
@@ -71,6 +72,46 @@ class GhidraPort(Protocol):
     # --- read-only tool operations (one per Tier-1 tool that touches Ghidra) ---
     def decompile_function(self, sid: str, a: s.DecompileFunctionIn) -> s.DecompiledFunction:
         """Decompile one function."""
+        ...
+
+    # --- streaming-decompile capability (ADR-040; worker → server INCREMENTAL delivery) ---
+    def decompile_stream(self, sid: str, a: st.DecompileStreamIn) -> Iterator[s.DecompiledFunction]:
+        """Stream decompiled functions one at a time as they are produced (ADR-040).
+
+        The worker-streaming source that feeds a :class:`~vivarium.jobs.streaming.StreamingJob`: it
+        yields each :class:`~vivarium.tools.schemas.DecompiledFunction` (binary-derived fields
+        already :class:`~vivarium.core.envelope.Untrusted`-wrapped) AS it is decompiled, enabling
+        the extraction/inference overlap (design §4 axis 2 — genuine incremental delivery, not
+        chunking a complete result). Bounded by ``a.limit`` functions. A failure mid-iteration
+        raises a safe :class:`~vivarium.core.errors.GhidraMcpError`, which the job machinery turns
+        into a terminal error (honest end — never an ambiguous early stop). The server NEVER buffers
+        the whole stream: it pulls one unit at a time under the job's bounded buffer + backpressure.
+
+        For THIS increment the concrete worker emit is out of scope; the deterministic fake yields
+        synthetic per-function chunks so the job machinery is testable hermetically.
+        """
+        ...
+
+    # --- streaming job management (ADR-040; server-side job machinery over decompile_stream) ---
+    # These authorize through the session-ownership chokepoint (BOLA), bind the job to its session,
+    # and bound the buffer with backpressure (jobs.streaming). They are SERVER-SIDE orchestration on
+    # top of decompile_stream — not a worker RPC each (the worker only streams units).
+    def start_decompile_stream(self, sid: str, a: st.DecompileStreamIn, *, caller: str) -> str:
+        """Start a bounded bulk-decompile streaming job; return its opaque handle (ADR-040)."""
+        ...
+
+    def fetch_job_results(
+        self, sid: str, a: st.FetchJobResultsIn, *, caller: str
+    ) -> st.StreamFetchResult:
+        """Pull the next bounded, ordered batch of chunks from a job (cursor resume — ADR-040)."""
+        ...
+
+    def job_status(self, sid: str, a: st.JobHandleIn, *, caller: str) -> st.StreamJobStatus:
+        """Return a job's server-authored status (counts/state/ETA; no binary content — ADR-040)."""
+        ...
+
+    def cancel_job(self, sid: str, a: st.JobHandleIn, *, caller: str) -> st.StreamJobStatus:
+        """Cancel a job (free the worker early), returning its terminal status (ADR-040)."""
         ...
 
     def disassemble(self, sid: str, a: s.DisassembleIn) -> s.DisassembleOut:

@@ -184,6 +184,7 @@ class SessionManager:
         max_sessions_per_owner: int | None = _DEFAULT_MAX_SESSIONS_PER_OWNER,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], int] = lambda: int(time.time()),
+        on_evict: Callable[[str], None] | None = None,
     ) -> None:
         """Initialize the session manager with injected collaborators.
 
@@ -201,8 +202,15 @@ class SessionManager:
                 applies) — the single-principal default.
             clock: Monotonic clock injection (for deterministic tests — topic-numeric-correctness).
             wall_clock: Wall-clock epoch-seconds injection (for ``SessionInfo`` timestamps).
+            on_evict: Optional callback invoked with a session id when that session is evicted (any
+                reason). The streaming-job manager registers ``discard_session`` here so a session's
+                streaming jobs end and their buffers are discarded when the session goes away
+                (ADR-040 / ADR-002 — a job lives only inside its session's lifetime). Best-effort:
+                a callback exception is logged, never aborting the eviction (no binary-derived
+                content is logged — topic-resource-management graceful teardown).
         """
         self._port = port
+        self._on_evict = on_evict
         self._store_root = store_root
         self._ttl_s = ttl_s
         self._idle_s = idle_s
@@ -212,6 +220,11 @@ class SessionManager:
         self._wall_clock = wall_clock
         self._sessions: dict[str, _Session] = {}
         self._lock = threading.RLock()
+        #: Session ids evicted under the lock whose ``on_evict`` callback is yet to run. Drained by
+        #: :meth:`_flush_evicted` AFTER the lock is released, so the callback (which may take
+        #: another lock, e.g. the streaming-job manager's) never runs while ``_lock`` is held —
+        #: avoiding a lock-ordering inversion with the streaming authorizer (topic-concurrency).
+        self._pending_evicted: list[str] = []
 
     def create(self, *, owner: str = _LOCAL_PRINCIPAL_ID, label: str | None = None) -> SessionInfo:
         """Open a new session with an opaque id, owned by ``owner``; spawn nothing until import.
@@ -306,8 +319,13 @@ class SessionManager:
         Raises:
             GhidraMcpError: ``SESSION_INVALID`` for unknown/expired/evicted/foreign ids (BOLA-safe).
         """
-        with self._lock:
-            return self._to_info(self._get_live_locked(session_id, caller=caller))
+        try:
+            with self._lock:
+                return self._to_info(self._get_live_locked(session_id, caller=caller))
+        finally:
+            # A lazy expiry inside _get_live_locked may have queued an on-evict callback; run it now
+            # that the lock is released (lock-ordering safety — see _flush_evicted).
+            self._flush_evicted()
 
     def begin_call(self, session_id: str) -> None:
         """Mark a session in-flight for the duration of a tool call (ADR-025 / F4); refresh idle.
@@ -427,20 +445,23 @@ class SessionManager:
         Raises:
             GhidraMcpError: ``SESSION_INVALID`` for unknown/expired/evicted/foreign ids (BOLA-safe).
         """
-        with self._lock:
-            sess = self._get_live_locked(session_id, caller=caller)
-            sess.writes_enabled = True
-            sess.allow_structural = allow_structural
-            _LOG.info(
-                "session.writes_enabled",
-                extra={
-                    "event": "session_writes_enabled",
-                    "session_id": session_id,
-                    "principal_id": caller,
-                    "allow_structural": allow_structural,
-                },
-            )
-            return self._to_info(sess)
+        try:
+            with self._lock:
+                sess = self._get_live_locked(session_id, caller=caller)
+                sess.writes_enabled = True
+                sess.allow_structural = allow_structural
+                _LOG.info(
+                    "session.writes_enabled",
+                    extra={
+                        "event": "session_writes_enabled",
+                        "session_id": session_id,
+                        "principal_id": caller,
+                        "allow_structural": allow_structural,
+                    },
+                )
+                return self._to_info(sess)
+        finally:
+            self._flush_evicted()
 
     def disable_writes(self, session_id: str, *, caller: str = _LOCAL_PRINCIPAL_ID) -> SessionInfo:
         """Revoke write consent for a caller-owned session (return it to read-only).
@@ -455,19 +476,22 @@ class SessionManager:
         Raises:
             GhidraMcpError: ``SESSION_INVALID`` for unknown/expired/evicted/foreign ids (BOLA-safe).
         """
-        with self._lock:
-            sess = self._get_live_locked(session_id, caller=caller)
-            sess.writes_enabled = False
-            sess.allow_structural = False
-            _LOG.info(
-                "session.writes_disabled",
-                extra={
-                    "event": "session_writes_disabled",
-                    "session_id": session_id,
-                    "principal_id": caller,
-                },
-            )
-            return self._to_info(sess)
+        try:
+            with self._lock:
+                sess = self._get_live_locked(session_id, caller=caller)
+                sess.writes_enabled = False
+                sess.allow_structural = False
+                _LOG.info(
+                    "session.writes_disabled",
+                    extra={
+                        "event": "session_writes_disabled",
+                        "session_id": session_id,
+                        "principal_id": caller,
+                    },
+                )
+                return self._to_info(sess)
+        finally:
+            self._flush_evicted()
 
     def require_write_consent(
         self,
@@ -498,23 +522,26 @@ class SessionManager:
             GhidraMcpError: ``SESSION_INVALID`` (BOLA-safe) for a bad/foreign id, or ``FORBIDDEN``
                 (ADR-036) when the owned session has not been granted (structural) write consent.
         """
-        with self._lock:
-            sess = self._get_live_locked(session_id, caller=caller)
-            if not sess.writes_enabled:
-                # FORBIDDEN (ADR-036): authenticated + owns the session (the owner check in
-                # _get_live_locked already passed), but write consent was never granted — a
-                # permission denial, not a malformed request. Distinct from the BOLA-safe
-                # SESSION_INVALID a foreign caller gets at the owner check above.
-                raise _errors.make_error(
-                    ErrorType.FORBIDDEN,
-                    "session is read-only; write consent not granted",
-                )
-            if structural and not sess.allow_structural:
-                raise _errors.make_error(
-                    ErrorType.FORBIDDEN,
-                    "structural writes not permitted for this session",
-                )
-            return self._to_info(sess)
+        try:
+            with self._lock:
+                sess = self._get_live_locked(session_id, caller=caller)
+                if not sess.writes_enabled:
+                    # FORBIDDEN (ADR-036): authenticated + owns the session (the owner check in
+                    # _get_live_locked already passed), but write consent was never granted — a
+                    # permission denial, not a malformed request. Distinct from the BOLA-safe
+                    # SESSION_INVALID a foreign caller gets at the owner check above.
+                    raise _errors.make_error(
+                        ErrorType.FORBIDDEN,
+                        "session is read-only; write consent not granted",
+                    )
+                if structural and not sess.allow_structural:
+                    raise _errors.make_error(
+                        ErrorType.FORBIDDEN,
+                        "structural writes not permitted for this session",
+                    )
+                return self._to_info(sess)
+        finally:
+            self._flush_evicted()
 
     def ensure_worker(self, session_id: str, *, caller: str = _LOCAL_PRINCIPAL_ID) -> None:
         """Idempotently spawn a caller-owned session's worker (manager owns lifetime — ADR-002).
@@ -538,21 +565,24 @@ class SessionManager:
         Raises:
             GhidraMcpError: ``SESSION_INVALID`` if unknown/evicted/foreign (BOLA-safe).
         """
-        with self._lock:
-            # Owner-gate via the shared chokepoint before spawning (complete mediation — ADR-017): a
-            # foreign caller never reaches start_worker.
-            sess = self._get_live_locked(session_id, caller=caller)
-            if sess.worker_started or self._port is None:
-                return
-            # Spawn BEFORE flipping the flag: if the launcher raises, the session has no worker and
-            # eviction won't try to kill a non-existent one (fail closed — the import then surfaces
-            # worker-unavailable from the adapter).
-            self._port.start_worker(session_id)
-            sess.worker_started = True
-            _LOG.info(
-                "session.worker_started",
-                extra={"event": "worker_started", "session_id": session_id},
-            )
+        try:
+            with self._lock:
+                # Owner-gate via the shared chokepoint before spawning (complete mediation —
+                # ADR-017): a foreign caller never reaches start_worker.
+                sess = self._get_live_locked(session_id, caller=caller)
+                if sess.worker_started or self._port is None:
+                    return
+                # Spawn BEFORE flipping the flag: if the launcher raises, the session has no worker
+                # and eviction won't try to kill a non-existent one (fail closed — the import then
+                # surfaces worker-unavailable from the adapter).
+                self._port.start_worker(session_id)
+                sess.worker_started = True
+                _LOG.info(
+                    "session.worker_started",
+                    extra={"event": "worker_started", "session_id": session_id},
+                )
+        finally:
+            self._flush_evicted()
 
     def record_binary_hash(
         self, session_id: str, sha256: str, *, caller: str = _LOCAL_PRINCIPAL_ID
@@ -577,9 +607,12 @@ class SessionManager:
         Raises:
             GhidraMcpError: ``SESSION_INVALID`` if unknown/expired/evicted/foreign (BOLA-safe).
         """
-        with self._lock:
-            sess = self._get_live_locked(session_id, caller=caller)
-            sess.binary_sha256 = sha256
+        try:
+            with self._lock:
+                sess = self._get_live_locked(session_id, caller=caller)
+                sess.binary_sha256 = sha256
+        finally:
+            self._flush_evicted()
 
     # --- session-scoped change-log (ADR-027 D2/D4; comments + composites export selection) -------
     def record_comment_target(
@@ -617,16 +650,19 @@ class SessionManager:
             GhidraMcpError: ``SESSION_INVALID`` if unknown/expired/evicted/foreign (BOLA-safe).
         """
         key = (address, comment_type)
-        with self._lock:
-            sess = self._get_live_locked(session_id, caller=caller)
-            if cleared:
-                sess.comment_targets.discard(key)
-                return
-            if key in sess.comment_targets:
-                return  # already logged — free re-add, never counts against the cap
-            if len(sess.comment_targets) >= _MAX_CHANGE_LOG_TARGETS:
-                return  # bounded: write succeeded, but the log is full → export fails closed
-            sess.comment_targets.add(key)
+        try:
+            with self._lock:
+                sess = self._get_live_locked(session_id, caller=caller)
+                if cleared:
+                    sess.comment_targets.discard(key)
+                    return
+                if key in sess.comment_targets:
+                    return  # already logged — free re-add, never counts against the cap
+                if len(sess.comment_targets) >= _MAX_CHANGE_LOG_TARGETS:
+                    return  # bounded: write succeeded, but the log is full → export fails closed
+                sess.comment_targets.add(key)
+        finally:
+            self._flush_evicted()
 
     def record_composite_target(
         self, session_id: str, *, name: str, caller: str = _LOCAL_PRINCIPAL_ID
@@ -652,13 +688,16 @@ class SessionManager:
         Raises:
             GhidraMcpError: ``SESSION_INVALID`` if unknown/expired/evicted/foreign (BOLA-safe).
         """
-        with self._lock:
-            sess = self._get_live_locked(session_id, caller=caller)
-            if name in sess.composite_targets:
-                return  # already logged — free re-add
-            if len(sess.composite_targets) >= _MAX_CHANGE_LOG_TARGETS:
-                return  # bounded: write succeeded, but the log is full → export fails closed
-            sess.composite_targets.add(name)
+        try:
+            with self._lock:
+                sess = self._get_live_locked(session_id, caller=caller)
+                if name in sess.composite_targets:
+                    return  # already logged — free re-add
+                if len(sess.composite_targets) >= _MAX_CHANGE_LOG_TARGETS:
+                    return  # bounded: write succeeded, but the log is full → export fails closed
+                sess.composite_targets.add(name)
+        finally:
+            self._flush_evicted()
 
     def is_composite_target(
         self, session_id: str, *, name: str, caller: str = _LOCAL_PRINCIPAL_ID
@@ -680,9 +719,12 @@ class SessionManager:
         Raises:
             GhidraMcpError: ``SESSION_INVALID`` if unknown/expired/evicted/foreign (BOLA-safe).
         """
-        with self._lock:
-            sess = self._get_live_locked(session_id, caller=caller)
-            return name in sess.composite_targets
+        try:
+            with self._lock:
+                sess = self._get_live_locked(session_id, caller=caller)
+                return name in sess.composite_targets
+        finally:
+            self._flush_evicted()
 
     def forget_composite_target(
         self, session_id: str, *, name: str, caller: str = _LOCAL_PRINCIPAL_ID
@@ -702,9 +744,12 @@ class SessionManager:
         Raises:
             GhidraMcpError: ``SESSION_INVALID`` if unknown/expired/evicted/foreign (BOLA-safe).
         """
-        with self._lock:
-            sess = self._get_live_locked(session_id, caller=caller)
-            sess.composite_targets.discard(name)
+        try:
+            with self._lock:
+                sess = self._get_live_locked(session_id, caller=caller)
+                sess.composite_targets.discard(name)
+        finally:
+            self._flush_evicted()
 
     def export_targets(
         self, session_id: str, *, caller: str = _LOCAL_PRINCIPAL_ID
@@ -729,9 +774,12 @@ class SessionManager:
         Raises:
             GhidraMcpError: ``SESSION_INVALID`` if unknown/expired/evicted/foreign (BOLA-safe).
         """
-        with self._lock:
-            sess = self._get_live_locked(session_id, caller=caller)
-            return sorted(sess.comment_targets), sorted(sess.composite_targets)
+        try:
+            with self._lock:
+                sess = self._get_live_locked(session_id, caller=caller)
+                return sorted(sess.comment_targets), sorted(sess.composite_targets)
+        finally:
+            self._flush_evicted()
 
     def evict(self, session_id: str, *, reason: str, caller: str | None = None) -> bool:
         """Evict a session: kill its worker and verified-wipe its store. Idempotent.
@@ -755,12 +803,15 @@ class SessionManager:
             GhidraMcpError: ``SESSION_INVALID`` when ``caller`` is set and is not the owner (or the
                 id is unknown/expired/evicted) — BOLA-safe, no oracle.
         """
-        with self._lock:
-            if caller is not None:
-                # Tool-initiated close: prove ownership through the shared chokepoint BEFORE the
-                # eviction so a foreign caller cannot tear down another's session (ADR-017).
-                self._get_live_locked(session_id, caller=caller)
-            return self._evict_locked(session_id, reason=reason)
+        try:
+            with self._lock:
+                if caller is not None:
+                    # Tool-initiated close: prove ownership through the shared chokepoint BEFORE the
+                    # eviction so a foreign caller cannot tear down another's session (ADR-017).
+                    self._get_live_locked(session_id, caller=caller)
+                return self._evict_locked(session_id, reason=reason)
+        finally:
+            self._flush_evicted()
 
     def reap_expired(self) -> int:
         """Evict all sessions past their TTL or idle timeout (called by a periodic sweeper).
@@ -775,19 +826,22 @@ class SessionManager:
         Returns:
             Number of sessions evicted.
         """
-        with self._lock:
-            now = self._clock()
-            expired = [
-                sid
-                for sid, sess in self._sessions.items()
-                if sess.state != STATE_EVICTED
-                and sess.in_flight == 0
-                and self._is_expired(sess, now)
-            ]
-            for sid in expired:
-                reason = "ttl" if self._ttl_expired(self._sessions[sid], now) else "idle"
-                self._evict_locked(sid, reason=reason)
-            return len(expired)
+        try:
+            with self._lock:
+                now = self._clock()
+                expired = [
+                    sid
+                    for sid, sess in self._sessions.items()
+                    if sess.state != STATE_EVICTED
+                    and sess.in_flight == 0
+                    and self._is_expired(sess, now)
+                ]
+                for sid in expired:
+                    reason = "ttl" if self._ttl_expired(self._sessions[sid], now) else "idle"
+                    self._evict_locked(sid, reason=reason)
+                return len(expired)
+        finally:
+            self._flush_evicted()
 
     def shutdown(self) -> None:
         """Evict all sessions on graceful server shutdown (drain → kill workers → wipe stores).
@@ -795,11 +849,40 @@ class SessionManager:
         Each eviction is independent; a failure on one does not abort the rest (best-effort drain —
         topic-resource-management). Wipe failures are logged for alerting.
         """
+        try:
+            with self._lock:
+                for sid in list(self._sessions.keys()):
+                    if self._sessions[sid].state != STATE_EVICTED:
+                        self._evict_locked(sid, reason="shutdown")
+                self._sessions.clear()
+        finally:
+            self._flush_evicted()
+
+    def _flush_evicted(self) -> None:
+        """Run the queued ``on_evict`` callbacks for sessions evicted since the last flush.
+
+        Called by every public method AFTER releasing ``_lock`` (in a ``finally``), so the callback
+        — which may acquire another lock (e.g. the streaming-job manager's) — never runs while this
+        manager's lock is held. That breaks the otherwise-possible lock-ordering inversion with the
+        streaming authorizer (which takes the session lock while holding the streaming lock):
+        eviction now only ever takes session-lock-then-callback-lock with the session lock already
+        released. Best-effort + idempotent: the pending list is drained under a short lock, then
+        each callback runs unlocked; a callback exception is logged (no binary content) never aborts
+        the rest (topic-resource-management graceful teardown).
+        """
+        if self._on_evict is None:
+            return
         with self._lock:
-            for sid in list(self._sessions.keys()):
-                if self._sessions[sid].state != STATE_EVICTED:
-                    self._evict_locked(sid, reason="shutdown")
-            self._sessions.clear()
+            pending = self._pending_evicted
+            self._pending_evicted = []
+        for sid in pending:
+            try:
+                self._on_evict(sid)
+            except Exception:
+                _LOG.error(
+                    "session.evict.callback_failed",
+                    extra={"event": "evict_callback_failed", "session_id": sid},
+                )
 
     # --- internals (caller holds the lock) --------------------------------------------------
     def _evict_locked(self, session_id: str, *, reason: str) -> bool:
@@ -833,6 +916,11 @@ class SessionManager:
         # 3) Mark evicted and drop from the table (idempotent: re-evict is a no-op success).
         sess.state = STATE_EVICTED
         self._sessions.pop(session_id, None)
+
+        # 4) Queue the on-evict callback to run AFTER the lock is released (lock-ordering safety —
+        #    the callback may take another lock; never call out while holding ``_lock``).
+        if self._on_evict is not None:
+            self._pending_evicted.append(session_id)
 
         _LOG.info(
             "session.evict",

@@ -35,7 +35,7 @@ import functools
 import socket
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -50,6 +50,8 @@ from vivarium.ghidra.rpc_framing import (
     RpcCallError,
     RpcProtocolError,
 )
+from vivarium.jobs import streaming as st
+from vivarium.jobs.streaming import StreamingJobManager
 from vivarium.logging import get_logger
 from vivarium.security.limits import (
     DEFAULT_PREFLIGHT_MODE,
@@ -284,6 +286,7 @@ class RpcGhidraAdapter:
         connect_timeout_s: float = 30.0,
         worker_mem_mib: int = DEFAULT_WORKER_MEM_MIB,
         preflight_mode: str = DEFAULT_PREFLIGHT_MODE,
+        stream_jobs: StreamingJobManager | None = None,
     ) -> None:
         """Initialize the adapter with injected runtime collaborators.
 
@@ -307,6 +310,11 @@ class RpcGhidraAdapter:
                 (skip the check). Defaults to :data:`DEFAULT_PREFLIGHT_MODE`. The caller (config) is
                 responsible for validating the value against the allow-list; an unrecognized value
                 is treated as ``warn`` here (fail safe — never silently disables the heads-up).
+            stream_jobs: Optional :class:`~vivarium.jobs.streaming.StreamingJobManager` that owns
+                streaming-decompile jobs (ADR-040). Injected at the composition root so it shares
+                the server's session-ownership authorizer + limits. ``None`` (the default) means
+                streaming is not wired (the four stream methods then fail closed with a clear
+                ``worker-unavailable``) — used by the non-streaming code paths/tests.
         """
         self._launcher = launcher
         self._socket_dir = socket_dir
@@ -320,6 +328,7 @@ class RpcGhidraAdapter:
         # Defense in depth: config already allow-lists this, but if a bad value reaches us, fall
         # back to the safe warn mode rather than the silent ``off`` (never weaken the guard).
         self._preflight_mode = preflight_mode if preflight_mode in PREFLIGHT_MODES else "warn"
+        self._stream_jobs = stream_jobs
         self._sessions: dict[str, _Session] = {}
 
     # --- worker/session lifecycle -----------------------------------------------------------
@@ -489,6 +498,125 @@ class RpcGhidraAdapter:
         return _build_decompiled(
             self._tool_call(sid, "decompile_function", {"function": a.function})
         )
+
+    # --- streaming-decompile (ADR-040) -----------------------------------------------------------
+    def decompile_stream(self, sid: str, a: st.DecompileStreamIn) -> Iterator[s.DecompiledFunction]:
+        """Stream decompiled functions incrementally from the worker (ADR-040 — increment 2b).
+
+        The worker-side incremental emit (``start_decompile_stream`` RPC + ``$/chunk`` frames) is a
+        LATER increment; until then this fails closed with a safe ``worker-unavailable`` rather than
+        silently producing nothing. The server-side job machinery (buffer/backpressure/cursor/BOLA)
+        is complete and exercised hermetically via the fake streaming port.
+
+        Args:
+            sid: The session id.
+            a: The stream-start arguments (bounded function range).
+
+        Returns:
+            An iterator of decompiled functions (this increment: raises before producing any).
+
+        Raises:
+            GhidraMcpError: ``WORKER_UNAVAILABLE`` — worker streaming is not wired this increment.
+        """
+        raise _errors.make_error(
+            ErrorType.WORKER_UNAVAILABLE,
+            "worker streaming is not available in this build",
+        )
+
+    def _require_stream_jobs(self) -> StreamingJobManager:
+        """Return the wired streaming-job manager or fail closed if streaming is not configured.
+
+        Returns:
+            The injected :class:`StreamingJobManager`.
+
+        Raises:
+            GhidraMcpError: ``WORKER_UNAVAILABLE`` when no manager was injected (streaming off).
+        """
+        if self._stream_jobs is None:
+            raise _errors.make_error(
+                ErrorType.WORKER_UNAVAILABLE,
+                "streaming is not enabled on this server",
+            )
+        return self._stream_jobs
+
+    def start_decompile_stream(self, sid: str, a: st.DecompileStreamIn, *, caller: str) -> str:
+        """Start a bounded bulk-decompile streaming job, returning its opaque handle (ADR-040).
+
+        Delegates to the injected :class:`StreamingJobManager`, feeding it the worker-streaming
+        producer (:meth:`decompile_stream`) bounded to ``a.limit`` functions. The manager
+        authorizes the session (BOLA), enforces one-active-job-per-session, and pumps the first
+        batch under the bounded buffer.
+
+        Args:
+            sid: The session id.
+            a: The stream-start arguments.
+            caller: The authenticated, server-derived calling-principal id (ADR-017).
+
+        Returns:
+            The opaque job handle.
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` (BOLA-safe), ``LIMIT_EXCEEDED`` (already active), or
+                ``WORKER_UNAVAILABLE`` (streaming off / worker emit not wired this increment).
+        """
+        jobs = self._require_stream_jobs()
+        return jobs.start_job(
+            sid, producer=self.decompile_stream(sid, a), total=a.limit, caller=caller
+        )
+
+    def fetch_job_results(
+        self, sid: str, a: st.FetchJobResultsIn, *, caller: str
+    ) -> st.StreamFetchResult:
+        """Pull the next bounded, ordered batch of chunks from a job (cursor resume — ADR-040).
+
+        Args:
+            sid: The session id.
+            a: The fetch arguments (job handle, optional cursor, batch limit).
+            caller: The authenticated, server-derived calling-principal id (ADR-017).
+
+        Returns:
+            The :class:`~vivarium.jobs.streaming.StreamFetchResult` batch + resume cursor + state.
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` (BOLA-safe), ``VALIDATION`` (bad cursor/limit), or
+                ``WORKER_UNAVAILABLE`` (streaming off).
+        """
+        jobs = self._require_stream_jobs()
+        return jobs.fetch(sid, a.job_id, cursor=a.cursor, limit=a.limit, caller=caller)
+
+    def job_status(self, sid: str, a: st.JobHandleIn, *, caller: str) -> st.StreamJobStatus:
+        """Return a job's server-authored status (counts/state/ETA; no binary content — ADR-040).
+
+        Args:
+            sid: The session id.
+            a: The job-handle arguments.
+            caller: The authenticated, server-derived calling-principal id (ADR-017).
+
+        Returns:
+            The :class:`~vivarium.jobs.streaming.StreamJobStatus` snapshot.
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` (BOLA-safe) or ``WORKER_UNAVAILABLE`` (no stream).
+        """
+        jobs = self._require_stream_jobs()
+        return jobs.status(sid, a.job_id, caller=caller)
+
+    def cancel_job(self, sid: str, a: st.JobHandleIn, *, caller: str) -> st.StreamJobStatus:
+        """Cancel a job (free the worker early), returning its terminal status (ADR-040).
+
+        Args:
+            sid: The session id.
+            a: The job-handle arguments.
+            caller: The authenticated, server-derived calling-principal id (ADR-017).
+
+        Returns:
+            The job's terminal :class:`~vivarium.jobs.streaming.StreamJobStatus`.
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` (BOLA-safe) or ``WORKER_UNAVAILABLE`` (no stream).
+        """
+        jobs = self._require_stream_jobs()
+        return jobs.cancel(sid, a.job_id, caller=caller)
 
     def disassemble(self, sid: str, a: s.DisassembleIn) -> s.DisassembleOut:
         """Disassemble a bounded range or function."""

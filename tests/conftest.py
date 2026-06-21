@@ -31,6 +31,7 @@ import pytest
 
 from vivarium.core.envelope import DataOrigin, Untrusted
 from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
+from vivarium.jobs import streaming as st
 from vivarium.tools import schemas as s
 
 if TYPE_CHECKING:
@@ -142,6 +143,15 @@ class FakeGhidraPort:
         self.events: list[tuple[str, str]] = []
         self.killed: list[str] = []
         self.started: list[str] = []
+        #: Number of synthetic functions the streaming source yields per job (deterministic).
+        self.stream_count: int = 0
+        #: When set, the streaming source raises this after ``stream_fail_after`` chunks (terminal
+        #: error path) so error-stream tests are hermetic.
+        self.stream_fail_after: int | None = None
+        #: A permissive in-memory streaming-job manager so the four stream-management methods are a
+        #: drop-in for the real adapter. Tests that exercise BOLA construct their own manager with a
+        #: real session authorizer; this default authorizer accepts any caller (no session table).
+        self._stream_jobs = st.StreamingJobManager(authorize=lambda _sid, _caller: None)
 
     def fail_next(self, mode: PortFailure) -> None:
         """Arm the fake to fail the next Ghidra-touching call with ``mode``."""
@@ -212,6 +222,50 @@ class FakeGhidraPort:
             c_code=_ug("int FUN_00401000(void) {\n  return 0;\n}\n"),
             signature=_ug("int FUN_00401000(void)"),
         )
+
+    # --- streaming-decompile capability (ADR-040; deterministic synthetic source) ---
+    def decompile_stream(self, sid: str, a: st.DecompileStreamIn) -> Iterator[s.DecompiledFunction]:
+        """Yield deterministic per-function decompiler output, honoring the configured stream size.
+
+        Produces ``min(self.stream_count, a.limit)`` synthetic functions, each with binary-derived
+        fields :class:`Untrusted`-wrapped (the per-chunk envelope rule). When ``stream_fail_after``
+        is set, raises a safe :class:`GhidraMcpError` after that many chunks so the job machinery's
+        terminal-error path is testable. Fully deterministic — no clock, no randomness.
+        """
+        n = min(self.stream_count, a.limit)
+        for i in range(n):
+            if self.stream_fail_after is not None and i >= self.stream_fail_after:
+                raise _error(ErrorType.ANALYSIS_FAILED, status=422)
+            addr = 0x00401000 + i * 0x10
+            yield s.DecompiledFunction(
+                address=f"0x{addr:08x}",
+                name=_ug(f"FUN_{addr:08x}"),
+                c_code=_ug(f"int FUN_{addr:08x}(void) {{\n  return {i};\n}}\n"),
+                signature=_ug(f"int FUN_{addr:08x}(void)"),
+            )
+
+    def start_decompile_stream(self, sid: str, a: st.DecompileStreamIn, *, caller: str) -> str:
+        """Start a streaming job backed by the deterministic source (ADR-040)."""
+        return self._stream_jobs.start_job(
+            sid,
+            producer=self.decompile_stream(sid, a),
+            total=min(self.stream_count, a.limit),
+            caller=caller,
+        )
+
+    def fetch_job_results(
+        self, sid: str, a: st.FetchJobResultsIn, *, caller: str
+    ) -> st.StreamFetchResult:
+        """Pull the next batch from a streaming job (ADR-040)."""
+        return self._stream_jobs.fetch(sid, a.job_id, cursor=a.cursor, limit=a.limit, caller=caller)
+
+    def job_status(self, sid: str, a: st.JobHandleIn, *, caller: str) -> st.StreamJobStatus:
+        """Return a streaming job's server-authored status (ADR-040)."""
+        return self._stream_jobs.status(sid, a.job_id, caller=caller)
+
+    def cancel_job(self, sid: str, a: st.JobHandleIn, *, caller: str) -> st.StreamJobStatus:
+        """Cancel a streaming job (ADR-040)."""
+        return self._stream_jobs.cancel(sid, a.job_id, caller=caller)
 
     def disassemble(self, sid: str, a: s.DisassembleIn) -> s.DisassembleOut:
         """Return a bounded, deterministic instruction list."""

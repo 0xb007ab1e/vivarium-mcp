@@ -1,0 +1,103 @@
+"""Unit tests for the SessionManager on-evict callback wiring (ADR-040 streaming-job lifetime).
+
+A streaming job lives only inside its session's lifetime (ADR-040 §6 / ADR-002): the manager fires
+an injected ``on_evict(session_id)`` callback on EVERY eviction path (close, TTL, idle, shutdown,
+lazy-expiry-on-authorize) so the streaming-job manager can discard the session's jobs + buffers.
+The callback runs AFTER the lock is released (lock-ordering safety) and is best-effort (a callback
+exception never aborts the eviction). Hermetic: injected :class:`FrozenClock`, no real worker.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+
+import pytest
+
+from tests.conftest import FrozenClock
+from vivarium.core.errors import GhidraMcpError
+from vivarium.sessions.manager import SessionManager
+
+
+def _manager(clock: FrozenClock, on_evict: Callable[[str], None] | None) -> SessionManager:
+    return SessionManager(
+        ttl_s=100,
+        idle_s=50,
+        clock=clock.monotonic,
+        wall_clock=clock.time,
+        on_evict=on_evict,
+    )
+
+
+@pytest.mark.critical
+def test_on_evict_fires_on_explicit_close() -> None:
+    clock = FrozenClock()
+    seen: list[str] = []
+    mgr = _manager(clock, seen.append)
+    info = mgr.create()
+    mgr.evict(info.session_id, reason="close")
+    assert seen == [info.session_id]
+
+
+@pytest.mark.critical
+def test_on_evict_fires_on_ttl_reap() -> None:
+    clock = FrozenClock()
+    seen: list[str] = []
+    mgr = _manager(clock, seen.append)
+    info = mgr.create()
+    clock.advance(101)  # past TTL
+    assert mgr.reap_expired() == 1
+    assert seen == [info.session_id]
+
+
+@pytest.mark.critical
+def test_on_evict_fires_on_idle_reap() -> None:
+    clock = FrozenClock()
+    seen: list[str] = []
+    mgr = _manager(clock, seen.append)
+    info = mgr.create()
+    clock.advance(51)  # past idle, within TTL
+    assert mgr.reap_expired() == 1
+    assert seen == [info.session_id]
+
+
+@pytest.mark.critical
+def test_on_evict_fires_on_lazy_expiry_during_authorize() -> None:
+    clock = FrozenClock()
+    seen: list[str] = []
+    mgr = _manager(clock, seen.append)
+    info = mgr.create()
+    clock.advance(101)  # past TTL
+    # The next authorize lazily evicts the expired session AND fires the callback after the lock.
+    with pytest.raises(GhidraMcpError):
+        mgr.authorize(info.session_id)
+    assert seen == [info.session_id]
+
+
+@pytest.mark.critical
+def test_on_evict_fires_for_every_session_on_shutdown() -> None:
+    clock = FrozenClock()
+    seen: list[str] = []
+    mgr = _manager(clock, seen.append)
+    ids = {mgr.create().session_id for _ in range(3)}
+    mgr.shutdown()
+    assert set(seen) == ids
+
+
+def test_on_evict_callback_exception_does_not_abort_eviction() -> None:
+    clock = FrozenClock()
+
+    def boom(_sid: str) -> None:
+        raise RuntimeError("callback failed")
+
+    mgr = _manager(clock, boom)
+    info = mgr.create()
+    # The eviction itself must still succeed (verified-wipe True) despite the callback fault.
+    assert mgr.evict(info.session_id, reason="close") is True
+
+
+def test_no_callback_when_on_evict_is_none() -> None:
+    # The default (no callback) path must not break and must not collect anything.
+    clock = FrozenClock()
+    mgr = SessionManager(clock=clock.monotonic, wall_clock=clock.time)
+    info = mgr.create()
+    assert mgr.evict(info.session_id, reason="close") is True
