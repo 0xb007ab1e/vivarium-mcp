@@ -63,6 +63,10 @@ _STREAM_LIMIT = 64
 #: Small per-fetch batch so the cursor loop pulls in several rounds (a chunk lands early enough to
 #: cancel right after the first one).
 _FETCH_LIMIT = 3
+#: Tiny server stream-buffer cap (<< _STREAM_LIMIT) so backpressure gates the worker: it produces
+#: only ~this many chunks then pauses, so a mid-stream cancel genuinely stops it before the full
+#: set (the worker can't run ahead and finish a sub-cap set). Via VIVARIUM_MAX_STREAM_BUFFER_CHUNKS.
+_BUFFER_CAP = 4
 
 
 def _read_timeout() -> datetime.timedelta:
@@ -129,7 +133,17 @@ async def _drive_cancel(binary: Path, import_root: Path) -> dict[str, Any]:
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "vivarium"],
-        env={**os.environ, "VIVARIUM_IMPORT_ROOT": str(import_root)},
+        # Shrink the server's stream buffer so backpressure GATES the worker: with a tiny cap and a
+        # set far larger than it, the worker produces only ~cap chunks then PAUSES (it cannot run
+        # ahead and finish the whole set), so a mid-stream cancel genuinely stops the worker early
+        # (it never decompiles the rest) — that is what this test must prove (ADR-041), not just a
+        # client that stopped reading. Without this the default 256-cap would let a sub-256 set
+        # fully buffer and the worker would finish regardless of the cancel.
+        env={
+            **os.environ,
+            "VIVARIUM_IMPORT_ROOT": str(import_root),
+            "VIVARIUM_MAX_STREAM_BUFFER_CHUNKS": str(_BUFFER_CAP),
+        },
     )
     timeout = _read_timeout()
 

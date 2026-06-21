@@ -497,11 +497,17 @@ class _StreamingJob:
     def cancel(self) -> None:
         """Mark the job cancelled and drop any buffered chunks (free the worker early — design §6).
 
-        Idempotent: cancelling a terminal job is a no-op (a ``done`` job stays ``done``; a
-        re-cancel stays ``cancelled``). Discarding the buffer is a confidentiality + resource win
-        (no un-fetched binary-derived chunks linger).
+        Idempotent against the **effective** terminal view, NOT the internal one: a job whose
+        producer has finished (internal ``done``) but still has un-fetched chunks buffered is
+        ``effective_state == running`` to the client — so the client can still ``cancel`` it (to
+        discard the remaining buffer and stop), and that cancel must take effect. Guarding on the
+        internal ``is_terminal`` here would silently no-op such a cancel (the client sees
+        ``running`` yet ``cancel_job`` reports not-cancelled — the bug the live test caught). Only a
+        job **truly** complete (terminal AND its buffer drained, ``effective_done``) is a no-op:
+        a fully-delivered ``done`` stays ``done``; a re-cancel stays ``cancelled``. Discarding the
+        buffer is a confidentiality + resource win (no un-fetched binary-derived chunks linger).
         """
-        if self.is_terminal:
+        if self.effective_done:
             return
         self._state = JobState.CANCELLED
         self._buffer.clear()
