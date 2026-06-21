@@ -244,3 +244,95 @@ def test_oversized_chunk_frame_rejected_by_size_cap() -> None:
     frame = f.build_chunk(_RID, 0, "function", huge)
     with pytest.raises(f.FramingError):
         f.encode_frame(frame, max_frame_bytes=64)  # far below the body size
+
+
+# --- $/cancel notification (ADR-041; server → worker) ------------------------------------------
+def test_build_cancel_shape_has_no_top_level_id() -> None:
+    """A built $/cancel is a notification (no top-level id), with params.id = the target id."""
+    frame = f.build_cancel(_RID)
+    assert frame == {"jsonrpc": "2.0", "method": "$/cancel", "params": {"id": _RID}}
+    assert "id" not in frame
+
+
+def test_is_cancel_notification_true_for_well_formed() -> None:
+    assert f.is_cancel_notification(f.build_cancel(_RID)) is True
+
+
+def test_is_cancel_notification_false_when_top_level_id_present() -> None:
+    """A $/cancel method that ALSO carries a top-level id is NOT a cancel (fail closed)."""
+    frame = {"jsonrpc": "2.0", "id": _RID, "method": "$/cancel", "params": {"id": _RID}}
+    assert f.is_cancel_notification(frame) is False
+
+
+def test_is_cancel_notification_false_for_response_frame() -> None:
+    assert f.is_cancel_notification({"jsonrpc": "2.0", "id": _RID, "result": {}}) is False
+
+
+def test_is_cancel_notification_false_for_chunk_frame() -> None:
+    """A $/chunk frame is not classified as a $/cancel (distinct closed methods)."""
+    assert f.is_cancel_notification(f.build_chunk(_RID, 0, "function", {})) is False
+
+
+def test_is_cancel_notification_false_for_missing_method() -> None:
+    assert f.is_cancel_notification({"jsonrpc": "2.0", "params": {"id": _RID}}) is False
+
+
+def test_parse_cancel_accepts_valid_frame() -> None:
+    cancel = f.parse_cancel(f.build_cancel(_RID), expected_id=_RID)
+    assert isinstance(cancel, f.RpcCancel)
+    assert cancel.request_id == _RID
+
+
+def test_parse_cancel_returns_id_even_when_unmatched() -> None:
+    """A $/cancel for ANOTHER id parses fine (the caller decides no-op vs. cancel — ADR-041 D6)."""
+    cancel = f.parse_cancel(f.build_cancel("other-id"), expected_id=_RID)
+    assert cancel.request_id == "other-id"
+
+
+def test_parse_cancel_rejects_wrong_jsonrpc_version() -> None:
+    frame = {"jsonrpc": "1.0", "method": "$/cancel", "params": {"id": _RID}}
+    with pytest.raises(f.RpcProtocolError):
+        f.parse_cancel(frame, expected_id=_RID)
+
+
+def test_parse_cancel_rejects_frame_with_top_level_id() -> None:
+    frame = {"jsonrpc": "2.0", "id": _RID, "method": "$/cancel", "params": {"id": _RID}}
+    with pytest.raises(f.RpcProtocolError):
+        f.parse_cancel(frame, expected_id=_RID)
+
+
+def test_parse_cancel_rejects_missing_method() -> None:
+    with pytest.raises(f.RpcProtocolError):
+        f.parse_cancel({"jsonrpc": "2.0", "params": {"id": _RID}}, expected_id=_RID)
+
+
+def test_parse_cancel_rejects_non_object_params() -> None:
+    frame = {"jsonrpc": "2.0", "method": "$/cancel", "params": [1, 2, 3]}
+    with pytest.raises(f.RpcProtocolError):
+        f.parse_cancel(frame, expected_id=_RID)
+
+
+def test_parse_cancel_rejects_missing_params_id() -> None:
+    frame = {"jsonrpc": "2.0", "method": "$/cancel", "params": {}}
+    with pytest.raises(f.RpcProtocolError):
+        f.parse_cancel(frame, expected_id=_RID)
+
+
+@pytest.mark.parametrize("bad", [7, 1.5, True, None, ["x"]])
+def test_parse_cancel_rejects_non_string_params_id(bad: object) -> None:
+    frame = {"jsonrpc": "2.0", "method": "$/cancel", "params": {"id": bad}}
+    with pytest.raises(f.RpcProtocolError):
+        f.parse_cancel(frame, expected_id=_RID)
+
+
+def test_cancel_frame_is_not_parsed_as_a_response() -> None:
+    """parse_response REJECTS a cancel notification (no result/error member)."""
+    frame = f.build_cancel(_RID)
+    assert f.is_cancel_notification(frame) is True
+    with pytest.raises(f.RpcProtocolError):
+        f.parse_response(frame, expected_id=_RID)
+
+
+def test_build_cancel_then_parse_round_trips() -> None:
+    parsed = f.parse_cancel(f.build_cancel("abc-123"), expected_id="abc-123")
+    assert parsed.request_id == "abc-123"

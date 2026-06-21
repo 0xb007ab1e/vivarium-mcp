@@ -194,11 +194,6 @@ class PyGhidraBackend:
         self._sha256: str | None = None
         #: Whether Ghidra auto-analysis has completed for the open program.
         self._analyzed: bool = False
-        #: Per-stream cancel flag (ADR-040 D6). ``cancel_stream`` sets it; the streaming backend
-        #: checks it BETWEEN functions so a client that has seen enough frees worker capacity early.
-        #: A plain bool is sufficient: the worker serves ONE connection single-threaded, so there is
-        #: no concurrent producer to race (topic-concurrency: confinement, not a shared mutable).
-        self._stream_cancelled: bool = False
 
     # --- lifecycle ---------------------------------------------------------------------------
     def import_binary(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -250,6 +245,7 @@ class PyGhidraBackend:
         params: dict[str, Any],
         *,
         emit_chunk: Callable[[int, str, dict[str, Any]], None] | None = None,
+        poll_cancel: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Stream a bounded bulk decompile, emitting one ``$/chunk`` per function (ADR-040 Phase 2).
 
@@ -259,20 +255,23 @@ class PyGhidraBackend:
         produced, then returns the terminal summary. The per-function decompiler is disposed each
         iteration (the ADR-002 memory discipline). Read-only/output-only (ADR-001).
 
-        The cancel flag (set by :meth:`cancel_stream`) is reset at the start and checked BETWEEN
-        functions so a cancel stops production promptly (ADR-040 D6); a cancelled stream ends with
-        ``done: True`` having emitted the chunks produced so far (honest partial — the server marks
-        the job cancelled).
+        Mid-stream cancellation (ADR-041): ``poll_cancel`` is the dispatch-supplied predicate the
+        decompile loop consults BETWEEN functions. It is a non-blocking check for a server→worker
+        ``$/cancel`` notification; when it returns ``True`` the stream stops at the next function
+        boundary and ends with ``done: True`` having emitted the chunks produced so far (an honest
+        partial — the server has already marked the job cancelled). The backend calls a plain
+        callable only — it NEVER touches the socket (ADR-001: dispatch owns ``conn``). When
+        ``poll_cancel`` is ``None`` (a fake/no-poll path) the stream runs to completion.
 
         Args:
             params: ``{"functions"?: list[str], "offset"?: int, "limit"?: int}`` — server-validated.
             emit_chunk: The dispatch-supplied socket-bound emitter (``None`` for a fake/no-emit
                 path, which then produces only the terminal summary).
+            poll_cancel: The dispatch-supplied non-blocking cancel poll (``None`` ⇒ never cancels).
 
         Returns:
             A plain ``{"total": int, "truncated": bool, "done": True}`` terminal summary.
         """
-        self._stream_cancelled = False
         functions = params.get("functions")
         names: list[str] | None = None
         if isinstance(functions, list):
@@ -282,29 +281,13 @@ class PyGhidraBackend:
             names = [str(fn) for fn in functions]
         offset = max(0, int(params.get("offset", 0)))
         limit = _clamp_count(int(params.get("limit", 100)))
+        # is_cancelled defers to the dispatch-supplied poll; with no poll (fake path) it is a
+        # constant False so the stream runs to completion. A new closure per call — no per-instance
+        # cancel state survives between streams (the cancel signal now lives on the socket).
+        is_cancelled = poll_cancel if poll_cancel is not None else (lambda: False)
         return self._gh_decompile_stream(
-            names, offset, limit, emit_chunk=emit_chunk, is_cancelled=lambda: self._stream_cancelled
+            names, offset, limit, emit_chunk=emit_chunk, is_cancelled=is_cancelled
         )
-
-    def cancel_stream(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Request the in-flight streaming call stop early — idempotent (ADR-040 D6).
-
-        Sets the per-stream cancel flag the streaming backend checks BETWEEN functions. Idempotent:
-        calling it when no stream is active simply leaves the flag set for the next stream's reset
-        (a fresh ``start_decompile_stream`` clears it). The ``params.id`` correlation is enforced by
-        the dispatch/contract; this method needs no argument beyond confirming a cancel was
-        requested. (In the synchronous single-connection worker the operative early-free of a
-        blocked stream is the server SIGKILL on ``cancel_job``; this flag is the contract-complete
-        hook + the future async-loop path.)
-
-        Args:
-            params: Ignored (the streaming call is identified by the socket/contract).
-
-        Returns:
-            ``{"cancelled": True}``.
-        """
-        self._stream_cancelled = True
-        return {"cancelled": True}
 
     def disassemble(self, params: dict[str, Any]) -> dict[str, Any]:
         """Disassemble a bounded range or function."""
@@ -983,9 +966,11 @@ class PyGhidraBackend:
           ``[offset, offset+limit)`` window; ``truncated`` is ``True`` iff more functions existed
           beyond the window.
 
-        Cancellation (ADR-040 D6): ``is_cancelled()`` is checked BEFORE each function so a cancel
-        stops production promptly; the call then returns ``done: True`` with the chunks produced so
-        far (an honest partial — the server marks the job cancelled).
+        Cancellation (ADR-040 D6 / ADR-041): ``is_cancelled()`` is checked BEFORE each function so a
+        cancel stops production promptly; the call then returns ``done: True`` with the chunks
+        produced so far (an honest partial — the server marks the job cancelled). The predicate is
+        the dispatch-supplied non-blocking ``$/cancel`` poll (ADR-041) — the backend only calls it
+        and never touches the socket itself (ADR-001 boundary).
 
         Args:
             names: Explicit function identifiers (addresses/names), or ``None`` to window the

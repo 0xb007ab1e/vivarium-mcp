@@ -72,6 +72,13 @@ CHUNK_METHOD = "$/chunk"
 #: a different unit adds its own kind here behind the same contract.
 CHUNK_KINDS: frozenset[str] = frozenset({"function"})
 
+#: JSON-RPC method name for the additive SERVER→WORKER mid-stream cancel NOTIFICATION (ADR-041,
+#: rpc-protocol.md §4). Framed exactly like ``$/progress``/``$/chunk`` (a notification carries NO
+#: top-level ``id``), it supersedes the former ``cancel_stream`` request method: the worker polls
+#: for it BETWEEN functions during ``start_decompile_stream`` and ends the stream early at the next
+#: function boundary. Sending is best-effort (the §6 deadline + eviction remain the backstop).
+CANCEL_METHOD = "$/cancel"
+
 
 @dataclass(frozen=True, slots=True)
 class RpcError:
@@ -138,6 +145,23 @@ class RpcChunk:
     seq: int
     kind: str
     payload: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class RpcCancel:
+    """A decoded ``$/cancel`` mid-stream cancel notification (ADR-041; rpc-protocol.md §4).
+
+    A SERVER→WORKER notification, NOT a request: it carries no top-level ``id`` and asks the worker
+    to stop the in-flight streaming call for ``request_id`` at the next function boundary. The
+    minimal shape — a single correlation id in ``params.id`` — mirrors ``$/progress``/``$/chunk``.
+
+    Attributes:
+        request_id: The id of the streaming call this cancel targets (a ``params`` field, not the
+            JSON-RPC top-level ``id`` — notifications have none). The worker cancels iff this
+            correlates to the in-flight call; an unknown id is a safe no-op (ADR-041 D6).
+    """
+
+    request_id: str
 
 
 class RpcCallError(Exception):
@@ -492,6 +516,82 @@ def build_chunk(request_id: str, seq: int, kind: str, payload: dict[str, Any]) -
         "method": CHUNK_METHOD,
         "params": {"id": request_id, "seq": seq, "kind": kind, "payload": payload},
     }
+
+
+def is_cancel_notification(obj: dict[str, Any]) -> bool:
+    """Classify a decoded frame as a ``$/cancel`` mid-stream cancel notification (ADR-041).
+
+    A frame is a cancel notification iff it declares ``method == "$/cancel"`` AND carries NO
+    top-level ``id`` (per JSON-RPC 2.0 a notification has no id) — identical to the
+    ``$/progress``/``$/chunk`` invariant. The worker uses this on the SERVER→WORKER stream socket;
+    a frame carrying BOTH a ``$/cancel`` method AND a top-level id is NOT treated as a cancel (it is
+    not a notification — the worker rejects any non-cancel frame on the stream socket as a §6
+    protocol violation).
+
+    Args:
+        obj: The decoded frame object.
+
+    Returns:
+        ``True`` only for a well-formed cancel notification (method matches, no top-level id).
+    """
+    return obj.get("method") == CANCEL_METHOD and "id" not in obj
+
+
+def parse_cancel(obj: dict[str, Any], *, expected_id: str) -> RpcCancel:
+    """Validate a ``$/cancel`` notification and return its correlation id (ADR-041).
+
+    Strict, fail-closed validation: the method must be ``$/cancel`` with no top-level id, and
+    ``params`` must be an object whose ``id`` is a string. Unlike a ``$/cancel`` for the in-flight
+    stream, a cancel whose ``params.id`` does NOT equal ``expected_id`` is **not** an error — the
+    worker treats an unknown/stale id as a safe no-op (ADR-041 D6). Whether the id matched is the
+    caller's decision; this parser only guarantees the frame is a well-formed ``$/cancel`` and
+    surfaces its (validated) ``request_id`` so the caller can compare. A structurally malformed
+    frame (wrong version, top-level id, non-object params, non-string params.id) raises.
+
+    Args:
+        obj: The decoded notification object (already classified by :func:`is_cancel_notification`
+            in the loop, but re-checked here so the parser is safe to call standalone).
+        expected_id: The id of the in-flight streaming request (used only for the docstring's
+            contract clarity; the caller compares ``RpcCancel.request_id`` against it to decide
+            no-op vs. cancel — see ADR-041 D6).
+
+    Returns:
+        The validated :class:`RpcCancel` carrying the frame's ``params.id``.
+
+    Raises:
+        RpcProtocolError: If the frame is not a structurally valid ``$/cancel`` notification.
+    """
+    # expected_id is part of the documented signature (it mirrors parse_progress/parse_chunk and
+    # makes the "unknown id is a no-op" contract explicit at the call site); the no-op vs. cancel
+    # decision is the caller's, so we validate shape here and return the id, not raise on mismatch.
+    del expected_id
+    if obj.get("jsonrpc") != "2.0":
+        raise RpcProtocolError("cancel: missing or wrong jsonrpc version")
+    if obj.get("method") != CANCEL_METHOD or "id" in obj:
+        raise RpcProtocolError("cancel: not a $/cancel notification")
+    params = obj.get("params")
+    if not isinstance(params, dict):
+        raise RpcProtocolError("cancel: params is not a JSON object")
+    request_id = params.get("id")
+    if not isinstance(request_id, str):
+        raise RpcProtocolError("cancel: params.id is not a string")
+    return RpcCancel(request_id=request_id)
+
+
+def build_cancel(request_id: str) -> dict[str, Any]:
+    """Construct a ``$/cancel`` JSON-RPC notification (server → worker; ADR-041).
+
+    Used by the adapter side to stop an in-flight ``start_decompile_stream`` promptly on client
+    ``cancel_job``. The result carries NO top-level ``id`` (notification); ``params.id`` is the
+    in-flight streaming request's id so the worker can confirm correlation before cancelling.
+
+    Args:
+        request_id: The streaming request id this cancel targets (placed in ``params.id``).
+
+    Returns:
+        A JSON-RPC 2.0 notification dict ready to encode + frame.
+    """
+    return {"jsonrpc": "2.0", "method": CANCEL_METHOD, "params": {"id": request_id}}
 
 
 def _parse_error(err: Any) -> RpcError:

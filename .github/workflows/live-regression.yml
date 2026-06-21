@@ -300,7 +300,8 @@ jobs:
             --junit-xml=golden-fixture-junit.xml \
             tests/integration/test_golden_fixture_openssl_blind.py \
             tests/integration/test_analyze_progress_client.py \
-            tests/integration/test_decompile_stream_openssl_blind.py || true
+            tests/integration/test_decompile_stream_openssl_blind.py \
+            tests/integration/test_decompile_stream_cancel_latency.py || true
 
       - name: Upload golden-fixture JUnit
         if: always()

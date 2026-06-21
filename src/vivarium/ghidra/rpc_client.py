@@ -256,9 +256,13 @@ class _Session:
         worker: The spawned worker process/container handle.
         sock: The connected UDS stream socket, or ``None`` before connect / after close.
         socket_path: Filesystem path of the per-session UDS.
+        active_stream_id: The request id of the in-flight ``start_decompile_stream`` call (ADR-041),
+            or ``None`` when no stream is producing. Set when the streaming generator sends its RPC
+            and cleared when it terminates; ``cancel_job`` sends a ``$/cancel`` targeting THIS id so
+            the worker stops the right call between functions.
     """
 
-    __slots__ = ("sock", "socket_path", "worker")
+    __slots__ = ("active_stream_id", "sock", "socket_path", "worker")
 
     def __init__(self, worker: WorkerProcess, socket_path: str) -> None:
         """Initialize per-session state.
@@ -270,6 +274,7 @@ class _Session:
         self.worker = worker
         self.sock: socket.socket | None = None
         self.socket_path = socket_path
+        self.active_stream_id: str | None = None
 
 
 class RpcGhidraAdapter:
@@ -579,6 +584,10 @@ class RpcGhidraAdapter:
         try:
             sock = self._ensure_connected(sess)
             self._send_all_with_timeout(sock, frame, self._analysis_timeout_s)
+            # Record the in-flight streaming id so a concurrent cancel_job can send a $/cancel that
+            # targets THIS call (ADR-041). Set only after the start RPC is on the wire (so a cancel
+            # before the worker even sees the start cannot mis-target an unsent id).
+            sess.active_stream_id = request_id
             yield from self._read_stream_chunks(
                 sock, sid, expected_id=request_id, deadline=deadline, terminal=terminal
             )
@@ -619,6 +628,14 @@ class RpcGhidraAdapter:
             if diagnosis == "oom":
                 raise _errors.resource_exhausted(self._worker_mem_mib) from exc
             raise _errors.make_error(ErrorType.WORKER_UNAVAILABLE, "worker unavailable") from exc
+        finally:
+            # The stream is no longer producing (clean completion, error, or generator close): clear
+            # the active id so a later cancel_job does not target a finished call (ADR-041 D6 — a
+            # $/cancel for a finished id is a worker no-op anyway, but not sending one is cleaner).
+            # Re-fetch by sid: the session may have been evicted/replaced during the stream.
+            live = self._sessions.get(sid)
+            if live is sess and live.active_stream_id == request_id:
+                live.active_stream_id = None
 
     def _read_stream_chunks(
         self,
@@ -784,16 +801,15 @@ class RpcGhidraAdapter:
         """Cancel a job (free the worker early), returning its terminal status (ADR-040 D6).
 
         The manager authorizes (BOLA) + marks the job cancelled + drops its buffer FIRST (so an
-        unauthorized caller never causes a worker side effect). On a successful cancel of a job
-        that was still producing, a best-effort ``cancel_stream`` RPC is sent to the worker to set
-        its per-stream cancel flag, freeing worker capacity early without waiting for the deadline.
+        unauthorized caller never causes a worker side effect). On a successful cancel of a job that
+        was still producing, a best-effort ``$/cancel`` notification (ADR-041) is sent to the worker
+        targeting the in-flight streaming call's request id, freeing worker capacity promptly: the
+        worker polls for it BETWEEN functions and stops production at the next function boundary,
+        rather than decompiling the whole bounded set after the client has cancelled.
 
-        NOTE (synchronous worker): while the worker is mid-stream the single-connection loop is
-        blocked in the streaming call, so it cannot read a ``cancel_stream`` frame until that call
-        returns; in practice a blocked stream is freed by the bounded deadline + eviction (and the
-        ``cancel_stream`` flag is honored promptly only by the future async worker loop). The
-        best-effort send is therefore wrapped to never let a worker hiccup fail the (already
-        applied) server-side cancel — the authoritative cancel is the manager state change.
+        The send is best-effort — wrapped so a worker hiccup never fails the (already applied)
+        server-side cancel, which is the authoritative state change. The §6 deadline + eviction
+        remain the backstop if the notification is never observed.
 
         Args:
             sid: The session id.
@@ -812,15 +828,18 @@ class RpcGhidraAdapter:
         # for, and never let it raise (the server-side cancel above is authoritative + done).
         if sid in self._sessions:
             with contextlib.suppress(Exception):
-                self._send_cancel_stream(sid)
+                self._send_cancel(sid)
         return status
 
-    def _send_cancel_stream(self, sid: str) -> None:
-        """Send the idempotent ``cancel_stream`` control RPC to a session's worker (ADR-040 D6).
+    def _send_cancel(self, sid: str) -> None:
+        """Send a best-effort ``$/cancel`` notification to a session's worker (ADR-041).
 
-        A short, bounded request: it sets the worker's per-stream cancel flag (checked between
-        functions). Best-effort — the caller suppresses failures. NOTE: in the synchronous worker a
-        mid-stream loop cannot service this until the call returns; see :meth:`cancel_job`.
+        Targets the session's in-flight ``start_decompile_stream`` request id (``active_stream_id``)
+        so the worker — polling between functions — stops the right call at the next boundary. A
+        notification, NOT a request: it adds no request/response pair to the streaming socket
+        (ADR-041 D1). Best-effort — the caller suppresses failures; when no stream is active or no
+        connection exists there is nothing to signal (a no-op). The send serializes against the
+        adapter's own socket use via the session lock model (single-threaded server request path).
 
         Args:
             sid: The session id whose worker to signal.
@@ -828,9 +847,11 @@ class RpcGhidraAdapter:
         sess = self._sessions.get(sid)
         if sess is None or sess.sock is None:
             return  # no live connection to signal on
-        request_id = uuid.uuid4().hex
+        stream_id = sess.active_stream_id
+        if stream_id is None:
+            return  # no in-flight stream to cancel — nothing to target (a no-op)
         frame = rpc_framing.encode_frame(
-            rpc_framing.build_request(request_id, "cancel_stream", {}),
+            rpc_framing.build_cancel(stream_id),
             max_frame_bytes=self._max_response_bytes,
         )
         sess.sock.sendall(frame)
