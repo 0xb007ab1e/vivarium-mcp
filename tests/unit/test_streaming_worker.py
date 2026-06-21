@@ -539,8 +539,14 @@ class _CancelAwareBackend:
     threads it) is exercised end to end over a real socketpair, without a JVM.
     """
 
-    def __init__(self, n_functions: int) -> None:
+    def __init__(self, n_functions: int, *, gate: threading.Event | None = None) -> None:
         self.n_functions = n_functions
+        #: Optional barrier: when set, the producer BLOCKS after emitting the first chunk until the
+        #: test releases it. This makes the mid-stream control-frame tests deterministic — the test
+        #: injects its $/cancel (or bad frame) into the socket and only THEN releases the producer,
+        #: so the next between-functions poll is guaranteed to observe it (no scheduler race; the
+        #: 3.14 scheduler exposed the prior race where the fast producer emitted all chunks first).
+        self._gate = gate
 
     def start_decompile_stream(
         self, params: dict[str, Any], *, emit_chunk: Any = None, poll_cancel: Any = None
@@ -552,6 +558,9 @@ class _CancelAwareBackend:
             if emit_chunk is not None:
                 emit_chunk(seq, "function", {"address": f"0x{seq:08x}"})
             seq += 1
+            # Block after the first chunk until the test has injected its mid-stream control frame.
+            if self._gate is not None and seq == 1:
+                self._gate.wait(timeout=5.0)
         return {"total": seq, "truncated": False, "done": True}
 
     def __getattr__(self, name: str) -> Any:
@@ -561,7 +570,8 @@ class _CancelAwareBackend:
 def test_serve_connection_stops_stream_on_cancel_notification() -> None:
     """The full loop: a $/cancel sent server→worker mid-stream stops production early (ADR-041)."""
     a, b = socket.socketpair(socket.AF_UNIX)
-    be = _CancelAwareBackend(64)
+    gate = threading.Event()
+    be = _CancelAwareBackend(64, gate=gate)
     server = threading.Thread(
         target=wd.serve_connection,
         args=(a,),
@@ -571,11 +581,14 @@ def test_serve_connection_stops_stream_on_cancel_notification() -> None:
     server.start()
     try:
         # Start the stream, read the first chunk, then send the $/cancel — the worker loop's poll
-        # picks it up at the next boundary and ends the stream early with a terminal summary.
+        # picks it up at the next boundary and ends the stream early with a terminal summary. The
+        # producer is gated after the first chunk so the $/cancel is in the socket before its next
+        # poll (deterministic — no scheduler race).
         _send_frame(b, f.build_request("rid-stream", "start_decompile_stream", {"limit": 64}))
         first = wd.read_frame(b, max_frame_bytes=_CAP)
         assert f.is_chunk_notification(first)
         _send_frame(b, f.build_cancel("rid-stream"))
+        gate.set()  # release the producer; its next between-functions poll observes the $/cancel
         # Drain frames until the terminal response; count the chunks that came through.
         chunks = 1
         while True:
@@ -601,7 +614,8 @@ def test_serve_connection_stops_stream_on_cancel_notification() -> None:
 def test_serve_connection_kills_on_bad_control_frame_mid_stream() -> None:
     """A non-$/cancel frame server→worker mid-stream → the loop returns (kill + evict, ADR-041)."""
     a, b = socket.socketpair(socket.AF_UNIX)
-    be = _CancelAwareBackend(64)
+    gate = threading.Event()
+    be = _CancelAwareBackend(64, gate=gate)
     server = threading.Thread(
         target=wd.serve_connection,
         args=(a,),
@@ -614,8 +628,11 @@ def test_serve_connection_kills_on_bad_control_frame_mid_stream() -> None:
         first = wd.read_frame(b, max_frame_bytes=_CAP)
         assert f.is_chunk_notification(first)
         # An illegal server→worker frame on the stream socket (a request, not a $/cancel) → §6
-        # protocol violation: the loop returns and the worker exits (the server evicts it).
+        # protocol violation: the loop returns and the worker exits (the server evicts it). The
+        # producer is gated after the first chunk so the bad frame is in the socket before its next
+        # poll observes it mid-stream (deterministic — no scheduler race).
         _send_frame(b, f.build_request("evil", "ping", {}))
+        gate.set()  # release the producer; its next between-functions poll hits the illegal frame
         server.join(timeout=2)
         assert not server.is_alive()  # the loop returned on the protocol violation
     finally:
