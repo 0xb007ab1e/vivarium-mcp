@@ -23,10 +23,20 @@ DEFAULT_TOOL_TIMEOUT_S = 60
 DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024  # 4 MiB
 DEFAULT_MAX_SESSIONS = 4
 
+# Streaming-job buffer caps (ADR-040 / streaming-partial-results — the design-doc §6 "Bounds and
+# backpressure" controls). A streaming job buffers un-fetched chunks until the client drains them;
+# the buffer is bounded by BOTH a chunk COUNT and a total BYTE size, and the producer PAUSES (never
+# drops/reorders, never grows unbounded) when either bound is reached (topic-reliability
+# backpressure / std-owasp-llm LLM04 cost-DoS). Conservative defaults; clamped DOWN like the rest.
+DEFAULT_MAX_STREAM_BUFFER_CHUNKS = 256
+DEFAULT_MAX_STREAM_BUFFER_BYTES = 4 * 1024 * 1024  # 4 MiB — mirrors a single response cap
+
 # Hard clamps — config can never exceed these (defense against misconfig widening the surface).
 HARD_MAX_BINARY_BYTES = 1024 * 1024 * 1024  # 1 GiB absolute ceiling
 HARD_MAX_ANALYSIS_TIMEOUT_S = 3600
 HARD_MAX_SESSIONS = 32
+HARD_MAX_STREAM_BUFFER_CHUNKS = 4096
+HARD_MAX_STREAM_BUFFER_BYTES = 64 * 1024 * 1024  # 64 MiB absolute buffer ceiling per job
 
 # Worker container resource bounds (ADR-023 / F1). Integer-MiB memory/tmpfs + whole-CPU + pid caps
 # the launcher renders to engine spelling at argv build. Defaults mirror the previously-hardcoded
@@ -58,6 +68,8 @@ _HARD_CEILINGS: dict[str, int] = {
     "max_response_bytes": DEFAULT_MAX_RESPONSE_BYTES,
     "max_sessions": HARD_MAX_SESSIONS,
     "max_sessions_per_owner": HARD_MAX_SESSIONS,
+    "max_stream_buffer_chunks": HARD_MAX_STREAM_BUFFER_CHUNKS,
+    "max_stream_buffer_bytes": HARD_MAX_STREAM_BUFFER_BYTES,
 }
 
 # Per-field hard ceiling for worker-resource overrides (ADR-023 / F1). Same clamp-down semantics as
@@ -94,6 +106,10 @@ class Limits:
         max_sessions_per_owner: Optional per-principal session cap (multi-principal
             noisy-neighbor fairness — ADR-017); ``None`` = off (the global ``max_sessions``
             still bounds total exhaustion). Set below ``max_sessions`` for multi-principal.
+        max_stream_buffer_chunks: Max un-fetched chunks a streaming job buffers before the producer
+            pauses (backpressure — ADR-040 / streaming design §6). Bounds chunk COUNT.
+        max_stream_buffer_bytes: Max total buffered (un-fetched) chunk bytes before the producer
+            pauses. Bounds buffer SIZE independently of the count so a few large chunks also pause.
     """
 
     max_binary_bytes: int = DEFAULT_MAX_BINARY_BYTES
@@ -102,6 +118,8 @@ class Limits:
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
     max_sessions: int = DEFAULT_MAX_SESSIONS
     max_sessions_per_owner: int | None = None
+    max_stream_buffer_chunks: int = DEFAULT_MAX_STREAM_BUFFER_CHUNKS
+    max_stream_buffer_bytes: int = DEFAULT_MAX_STREAM_BUFFER_BYTES
 
 
 def _validation_error(detail: str) -> GhidraMcpError:
