@@ -34,6 +34,13 @@ from vivarium.ghidra.rpc_framing import FramingError, RpcProtocolError
 #: ONLY when the request opted in; the default-path backend never receives one (byte-for-byte same).
 ProgressEmitter = Callable[[int | None, str], None]
 
+#: A worker-side partial-result emitter: ``emit_chunk(seq, kind, payload)`` frames + sends one
+#: ``$/chunk`` notification on the session socket (ADR-040 Phase 2). Threaded into
+#: ``start_decompile_stream`` so the backend streams one chunk per decompiled function BEFORE the
+#: terminal response. ``payload`` is the plain (un-enveloped) unit — the server envelopes on
+#: receipt; the worker never envelopes (rpc-protocol.md §4).
+ChunkEmitter = Callable[[int, str, dict[str, Any]], None]
+
 #: Worker-side minimum spacing between EMITTED progress frames (ADR-030 Phase 1). The worker
 #: coalesces (drops) progress callbacks arriving sooner than this so a Ghidra ``TaskMonitor`` that
 #: fires very frequently cannot flood the socket; the server ALSO bounds count/interval (defense in
@@ -113,6 +120,12 @@ RPC_METHODS = frozenset(
         # annotation persistence (v1.2 — ADR-018; export read-out ONLY — import is server-side
         # orchestration that replays the EXISTING write methods above, NO new import RPC).
         "export_annotations",
+        # streaming bulk decompile (v1.x — ADR-040 Phase 2; worker-only, read-only/output-only per
+        # ADR-001). ``start_decompile_stream`` is the long call that emits one ``$/chunk`` per
+        # decompiled function then a terminal ``{total, truncated, done}`` response;
+        # ``cancel_stream`` is its idempotent control hook to request the in-flight stream stop.
+        "start_decompile_stream",
+        "cancel_stream",
         "ping",
         "shutdown",
     }
@@ -330,6 +343,32 @@ class GhidraBackend(Protocol):
         """
         ...
 
+    # --- streaming bulk decompile (v1.x — ADR-040 Phase 2; emits $/chunk per function) ---
+    def start_decompile_stream(
+        self, params: dict[str, Any], *, emit_chunk: ChunkEmitter | None = None
+    ) -> dict[str, Any]:
+        """Stream a bounded bulk decompile, emitting one ``$/chunk`` per function — v1.x / ADR-040.
+
+        Iterates the (optionally name-filtered) function set, decompiles each (disposing the
+        decompiler per function — the ADR-002 memory discipline), and calls ``emit_chunk(seq,
+        "function", payload)`` for each as it is produced (the dispatch supplies the socket-bound
+        emitter). Returns a plain terminal ``{"total": int, "truncated": bool, "done": True}``
+        AFTER the last chunk. Read-only/output-only (ADR-001). When ``emit_chunk`` is ``None`` (a
+        fake/no-emitter path) the backend still produces no chunks — only the terminal summary.
+        """
+        ...
+
+    def cancel_stream(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Request the in-flight streaming call for ``params.id`` stop early — v1.x / ADR-040.
+
+        Idempotent control hook (rpc-protocol.md §4): sets a per-stream cancel flag the streaming
+        backend checks BETWEEN functions so a client that has seen enough frees worker capacity
+        without waiting for the per-call deadline. Returns ``{"cancelled": bool}``. (In the
+        synchronous single-connection worker the operative early-free is the server SIGKILL on
+        ``cancel_job``; this flag is the contract-complete hook + future async-loop path.)
+        """
+        ...
+
 
 def dispatch(
     backend: GhidraBackend,
@@ -337,6 +376,7 @@ def dispatch(
     params: dict[str, Any],
     *,
     emit_progress: ProgressEmitter | None = None,
+    emit_chunk: ChunkEmitter | None = None,
 ) -> dict[str, Any]:
     """Route one validated request to the backend; control methods are handled here.
 
@@ -344,15 +384,18 @@ def dispatch(
     backend). Both bypass the backend.
 
     The ``emit_progress`` callable (built by the loop, bound to the session socket) is forwarded to
-    ``analyze`` ONLY when the request opted in (ADR-030 Phase 1: ``params["progress"]`` truthy). For
-    every other method — and for an ``analyze`` that did NOT opt in — the backend is called exactly
-    as before (no emitter), so the default path is byte-for-byte unchanged.
+    ``analyze`` ONLY when the request opted in (ADR-030 Phase 1: ``params["progress"]`` truthy). The
+    ``emit_chunk`` callable (also socket-bound) is forwarded to ``start_decompile_stream`` so it can
+    stream one ``$/chunk`` per function BEFORE its terminal response (ADR-040 Phase 2). For every
+    other method — and for an ``analyze`` that did NOT opt in — the backend is called exactly as
+    before (no emitter), so the default path is byte-for-byte unchanged.
 
     Args:
         backend: The JVM-touching backend.
         method: The RPC method name (already known to be in :data:`RPC_METHODS`).
         params: The request parameters.
         emit_progress: The socket-bound progress emitter from the loop, or ``None``.
+        emit_chunk: The socket-bound partial-result emitter from the loop, or ``None``.
 
     Returns:
         The backend's plain result dict (or ``{"ok": true}`` for ``ping``).
@@ -373,6 +416,12 @@ def dispatch(
         # that ignores it (or a fake) still satisfies the contract.
         analyzed: dict[str, Any] = backend.analyze(params, emit_progress=emit_progress)
         return analyzed
+    if method == "start_decompile_stream":
+        # Streaming bulk decompile: thread the socket-bound chunk emitter so the backend streams one
+        # $/chunk per function BEFORE the terminal {total, truncated, done} response (ADR-040
+        # Phase 2). Keyword-only so a fake backend that ignores it still satisfies the contract.
+        streamed: dict[str, Any] = backend.start_decompile_stream(params, emit_chunk=emit_chunk)
+        return streamed
     result: dict[str, Any] = handler(params)  # narrow the dynamic getattr result to the contract
     return result
 
@@ -461,19 +510,22 @@ def handle_request(
     obj: dict[str, Any],
     *,
     emit_progress: ProgressEmitter | None = None,
+    emit_chunk: ChunkEmitter | None = None,
 ) -> dict[str, Any]:
     """Validate one decoded request and produce its response (success or error).
 
     Pure of socket I/O for the request/response itself (it returns the response object the loop
-    frames); the optional ``emit_progress`` (built by the loop, bound to the session socket) is the
-    only side-effecting collaborator — forwarded to :func:`dispatch` so an opted-in ``analyze`` can
-    stream bounded ``$/progress`` frames BEFORE this response (ADR-030 Phase 1). ``None`` (the
-    default, and every non-``analyze`` call) leaves the path byte-for-byte unchanged.
+    frames); the optional ``emit_progress`` / ``emit_chunk`` (built by the loop, bound to the
+    session socket) are the only side-effecting collaborators — forwarded to :func:`dispatch` so an
+    opted-in ``analyze`` can stream bounded ``$/progress`` frames (ADR-030 Phase 1) and
+    ``start_decompile_stream`` can stream ``$/chunk`` frames (ADR-040 Phase 2) BEFORE this response.
+    ``None`` (the default, and every other call) leaves the path byte-for-byte unchanged.
 
     Args:
         backend: The JVM-touching backend.
         obj: The decoded JSON-RPC request object.
         emit_progress: The socket-bound progress emitter from the loop, or ``None``.
+        emit_chunk: The socket-bound partial-result emitter from the loop, or ``None``.
 
     Returns:
         The JSON-RPC response object to frame and send.
@@ -488,7 +540,9 @@ def handle_request(
     if not isinstance(params, dict):
         return build_error(request_id, CODE_INVALID_PARAMS, "params must be an object")
     try:
-        result = dispatch(backend, method, params, emit_progress=emit_progress)
+        result = dispatch(
+            backend, method, params, emit_progress=emit_progress, emit_chunk=emit_chunk
+        )
     except WorkerError as exc:
         # exc.detail (when set) is the redacted, log-only ADR-024 ``data.detail`` — the server logs
         # it under a correlation id; it never reaches the client envelope. Default None ⇒ no detail.
@@ -619,6 +673,39 @@ def _make_progress_emitter(
     return emit_progress
 
 
+def _make_chunk_emitter(conn: _Conn, request_id: str, *, max_frame_bytes: int) -> ChunkEmitter:
+    """Build a socket-bound ``$/chunk`` emitter for one streaming request (ADR-040 Phase 2).
+
+    The returned ``emit_chunk(seq, kind, payload)`` frames a ``$/chunk`` notification (correlated to
+    ``request_id``) and sends it on ``conn``, BEFORE the streaming call's terminal response. It is
+    the worker side of the additive partial-result protocol.
+
+    Unlike the progress emitter, it does **NOT** coalesce or swallow: every chunk MUST be delivered
+    in ``seq`` order with no drop or reorder (ADR-040 D5 — backpressure is a pause via UDS flow
+    control, never shedding). A frame is sent unconditionally; if the build/send fails the
+    exception propagates to the streaming backend, which surfaces it as a terminal error (an honest
+    end — ADR-005), never a silently truncated success.
+
+    Args:
+        conn: The session connection to send frames on.
+        request_id: The id of the streaming request these chunks correlate to.
+        max_frame_bytes: Hard frame cap (shared §3 cap).
+
+    Returns:
+        An ``emit_chunk(seq, kind, payload)`` callable.
+    """
+
+    def emit_chunk(seq: int, kind: str, payload: dict[str, Any]) -> None:
+        # build_chunk asserts kind ∈ vocab + seq ≥ 0 (loud on a coding mistake); encode_frame
+        # enforces the shared size cap; sendall pushes the frame (UDS flow control applies the
+        # backpressure pause naturally when the server stops reading). No coalesce, no swallow.
+        notification = rpc_framing.build_chunk(request_id, seq, kind, payload)
+        frame = rpc_framing.encode_frame(notification, max_frame_bytes=max_frame_bytes)
+        conn.sendall(frame)
+
+    return emit_chunk
+
+
 def serve_connection(conn: _Conn, backend: GhidraBackend, *, max_frame_bytes: int) -> None:
     """Serve requests on one accepted connection until shutdown/EOF/protocol error.
 
@@ -627,8 +714,10 @@ def serve_connection(conn: _Conn, backend: GhidraBackend, *, max_frame_bytes: in
     worker-unavailable and evicts — rpc-protocol.md §6).
 
     For an opted-in ``analyze`` (ADR-030 Phase 1) a per-request, socket-bound progress emitter is
-    built and threaded through :func:`handle_request`; the backend's ``TaskMonitor`` calls it to
-    stream bounded ``$/progress`` frames BEFORE the response. Every other request path is unchanged.
+    built and threaded through :func:`handle_request`; for ``start_decompile_stream`` (ADR-040
+    Phase 2) a socket-bound chunk emitter is built instead. The backend calls the relevant emitter
+    to stream bounded ``$/progress`` / ``$/chunk`` frames BEFORE the response. Every other request
+    path is unchanged.
 
     Args:
         conn: The accepted stream connection.
@@ -641,13 +730,17 @@ def serve_connection(conn: _Conn, backend: GhidraBackend, *, max_frame_bytes: in
         except (FramingError, RpcProtocolError, EOFError, OSError):
             return  # close the connection; worker will exit and be evicted by the server
         emitter: ProgressEmitter | None = None
+        chunk_emitter: ChunkEmitter | None = None
+        method = obj.get("method")
         request_id = obj.get("id")
-        if obj.get("method") == "analyze" and isinstance(request_id, str):
+        if method == "analyze" and isinstance(request_id, str):
             # Build the emitter for any analyze with a valid id; dispatch only USES it when the
             # request actually opted in (_progress_opted_in), so building it unconditionally here is
             # cheap and keeps the opt-in decision in one place.
             emitter = _make_progress_emitter(conn, request_id, max_frame_bytes=max_frame_bytes)
-        response = handle_request(backend, obj, emit_progress=emitter)
+        elif method == "start_decompile_stream" and isinstance(request_id, str):
+            chunk_emitter = _make_chunk_emitter(conn, request_id, max_frame_bytes=max_frame_bytes)
+        response = handle_request(backend, obj, emit_progress=emitter, emit_chunk=chunk_emitter)
         try:
             frame = rpc_framing.encode_frame(response, max_frame_bytes=max_frame_bytes)
             conn.sendall(frame)

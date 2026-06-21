@@ -40,6 +40,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -93,6 +94,28 @@ _TERMINAL_STATES: frozenset[JobState] = frozenset(
     {JobState.DONE, JobState.ERROR, JobState.CANCELLED}
 )
 
+
+@dataclass
+class StreamTerminal:
+    """Mutable holder for a stream's worker-reported terminal summary (ADR-040 D8).
+
+    The producer is an ``Iterator[DecompiledFunction]`` — it cannot itself *return* the job-level
+    ``{total, truncated}`` the worker reports in its terminal response. The adapter passes ONE of
+    these to both the producer (which fills it on clean completion) and the job (which reads it),
+    decoupling the per-function stream from the job-level honesty flag. ``truncated`` is ``True``
+    iff the requested function set exceeded the decompile total cap and was honestly bounded (never
+    silently cut). Default-safe: ``truncated`` starts ``False`` (no over-cap until the worker says
+    so), ``total`` ``None`` (unknown until the terminal response lands).
+
+    Attributes:
+        total: Worker-reported count of functions actually streamed (``None`` until completion).
+        truncated: Whether the requested set exceeded the cap (honest bound).
+    """
+
+    total: int | None = None
+    truncated: bool = False
+
+
 #: Bounds for the streaming request models (mirror ``tools.schemas`` conventions). Kept literal
 #: here so this provisional surface is self-contained (see the module-level note: the client-facing
 #: tool schemas are frozen-contract additions for a LATER increment — these are server-side shapes).
@@ -109,12 +132,18 @@ class DecompileStreamIn(s._SessionScopedIn):  # reuse the frozen session-scoped 
     addition for a later increment and is intentionally NOT defined here.
 
     Attributes:
-        offset: Zero-based start index into the program's function list.
+        offset: Zero-based start index into the program's function list (used only when
+            ``functions`` is omitted — the windowed path).
         limit: Maximum functions to stream (the job's total upper bound; capped at ``_MAX_LIMIT``).
+        functions: Optional explicit set of function entry addresses (hex) OR names to decompile.
+            When given, the worker decompiles exactly those (the list IS the bound) and ignores the
+            window; when omitted, the ``[offset, offset+limit)`` window of the program is streamed.
+            Each identifier is a bounded, untrusted string (the client schema length-caps the list).
     """
 
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=100, ge=1, le=_MAX_LIMIT)
+    functions: list[str] | None = Field(default=None, max_length=_MAX_LIMIT)
 
 
 class FetchJobResultsIn(s._SessionScopedIn):  # reuse the frozen session-scoped base
@@ -175,6 +204,9 @@ class StreamFetchResult(BaseModel):
         state: The job's state AFTER this fetch (``running``/``paused``/``done``/``error``/
             ``cancelled``).
         done: Convenience flag — ``True`` iff ``state`` is terminal (no more chunks will arrive).
+        truncated: ``True`` iff the worker reported the requested function set exceeded the
+            decompile total cap and was honestly bounded (ADR-040 D8; never silently cut). ``False``
+            until the worker's terminal summary lands.
         error: The terminal error envelope when ``state`` is ``error`` (else ``None``) — explicit,
             never a silent early stop.
     """
@@ -186,6 +218,7 @@ class StreamFetchResult(BaseModel):
     cursor: int = Field(ge=0)
     state: JobState
     done: bool
+    truncated: bool = False
     error: ErrorEnvelope | None = None
 
 
@@ -207,6 +240,8 @@ class StreamJobStatus(BaseModel):
         elapsed_seconds: Wall-clock-free elapsed time since job start (injected monotonic clock).
         eta_seconds: Rough estimate of seconds remaining (``None`` when indeterminate — unknown
             total, no progress yet, or a terminal state). A best-effort linear extrapolation.
+        truncated: ``True`` iff the worker reported the requested function set exceeded the
+            decompile total cap and was honestly bounded (ADR-040 D8). ``False`` until completion.
         error: The terminal error envelope when ``state`` is ``error`` (else ``None``).
     """
 
@@ -221,6 +256,7 @@ class StreamJobStatus(BaseModel):
     cursor: int = Field(ge=0)
     elapsed_seconds: float = Field(ge=0.0)
     eta_seconds: float | None = Field(default=None, ge=0.0)
+    truncated: bool = False
     error: ErrorEnvelope | None = None
 
 
@@ -259,6 +295,7 @@ class _StreamingJob:
         "_producer",
         "_started_mono",
         "_state",
+        "_terminal",
         "_total",
         "buffered_bytes",
         "cursor",
@@ -277,6 +314,7 @@ class _StreamingJob:
         total: int | None,
         limits: Limits,
         clock: Callable[[], float],
+        terminal: StreamTerminal | None = None,
     ) -> None:
         """Initialize a fresh streaming job in the ``running`` state.
 
@@ -290,12 +328,17 @@ class _StreamingJob:
             total: Total expected chunk count when known up front, else ``None``.
             limits: Active resource limits (buffer caps).
             clock: Injected monotonic clock for elapsed/ETA (deterministic in tests).
+            terminal: Optional holder the producer fills with the worker's terminal
+                ``{total, truncated}`` on clean completion; the job reads ``truncated`` from it for
+                honest reporting (ADR-040 D8). ``None`` for the synthetic/in-memory producer (no
+                worker terminal summary — ``truncated`` stays ``False``).
         """
         self.job_id = job_id
         self.session_id = session_id
         self.owner = owner
         self._producer = producer
         self._total = total
+        self._terminal = terminal if terminal is not None else StreamTerminal()
         self._max_buffer_chunks = limits.max_stream_buffer_chunks
         self._max_buffer_bytes = limits.max_stream_buffer_bytes
         self._clock = clock
@@ -321,6 +364,15 @@ class _StreamingJob:
     def error(self) -> ErrorEnvelope | None:
         """The terminal error envelope when the job is in ``error`` state, else ``None``."""
         return self._error
+
+    @property
+    def truncated(self) -> bool:
+        """Whether the worker honestly bounded an over-cap requested set (ADR-040 D8).
+
+        Read from the shared terminal holder the producer fills on clean completion; ``False`` until
+        the worker's terminal summary lands (and for the synthetic in-memory producer).
+        """
+        return self._terminal.truncated
 
     def _buffer_full(self) -> bool:
         """Whether the buffer has hit either backpressure bound (count OR bytes)."""
@@ -461,6 +513,7 @@ class _StreamingJob:
             cursor=self.cursor,
             elapsed_seconds=elapsed,
             eta_seconds=eta,
+            truncated=self._terminal.truncated,
             error=self._error,
         )
 
@@ -518,6 +571,7 @@ class StreamingJobManager:
         producer: Iterator[s.DecompiledFunction],
         total: int | None = None,
         caller: str = "local",
+        terminal: StreamTerminal | None = None,
     ) -> str:
         """Start a streaming job for a caller-owned session; return its opaque handle (ADR-040).
 
@@ -533,6 +587,8 @@ class StreamingJobManager:
                 this increment). Exhaustion → ``done``; an exception → terminal ``error``.
             total: Total expected chunks when known up front (drives ETA/total reporting).
             caller: The authenticated, server-derived calling-principal id (ADR-017).
+            terminal: Optional shared holder the producer fills with the worker's terminal
+                ``{total, truncated}`` (ADR-040 D8); read by the job for honest ``truncated``.
 
         Returns:
             The opaque CSPRNG job id.
@@ -563,6 +619,7 @@ class StreamingJobManager:
                 total=total,
                 limits=self._limits,
                 clock=self._clock,
+                terminal=terminal,
             )
             self._jobs[job_id] = job
             self._active_by_session[session_id] = job_id
@@ -643,6 +700,7 @@ class StreamingJobManager:
                 cursor=job.cursor,
                 state=job.state,
                 done=job.is_terminal,
+                truncated=job.truncated,
                 error=job.error,
             )
 

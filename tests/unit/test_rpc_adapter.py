@@ -1344,6 +1344,23 @@ class _FakeBackend:
         self.calls.append(("analyze", {**params, "_emit_progress": emit_progress is not None}))
         return {"method": "analyze"}
 
+    def start_decompile_stream(
+        self,
+        params: dict[str, Any],
+        *,
+        emit_chunk: Callable[[int, str, dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """Explicit ``start_decompile_stream`` matching the protocol's keyword-only ``emit_chunk``.
+
+        Like ``analyze``, the catch-all ``__getattr__`` cannot express the keyword-only emitter, so
+        this is declared explicitly. Records the call (with whether a chunk emitter was supplied)
+        and returns a canned terminal summary.
+        """
+        self.calls.append(
+            ("start_decompile_stream", {**params, "_emit_chunk": emit_chunk is not None})
+        )
+        return {"total": 0, "truncated": False, "done": True}
+
 
 def test_dispatch_ping_and_shutdown_bypass_backend() -> None:
     be = _FakeBackend()

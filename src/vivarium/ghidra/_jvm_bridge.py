@@ -194,6 +194,11 @@ class PyGhidraBackend:
         self._sha256: str | None = None
         #: Whether Ghidra auto-analysis has completed for the open program.
         self._analyzed: bool = False
+        #: Per-stream cancel flag (ADR-040 D6). ``cancel_stream`` sets it; the streaming backend
+        #: checks it BETWEEN functions so a client that has seen enough frees worker capacity early.
+        #: A plain bool is sufficient: the worker serves ONE connection single-threaded, so there is
+        #: no concurrent producer to race (topic-concurrency: confinement, not a shared mutable).
+        self._stream_cancelled: bool = False
 
     # --- lifecycle ---------------------------------------------------------------------------
     def import_binary(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -238,6 +243,68 @@ class PyGhidraBackend:
     def decompile_function(self, params: dict[str, Any]) -> dict[str, Any]:
         """Decompile one function (by address or name)."""
         return self._gh_decompile(str(_require(params, "function")))
+
+    # --- streaming bulk decompile (v1.x — ADR-040 Phase 2; emits $/chunk per function) ---
+    def start_decompile_stream(
+        self,
+        params: dict[str, Any],
+        *,
+        emit_chunk: Callable[[int, str, dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """Stream a bounded bulk decompile, emitting one ``$/chunk`` per function (ADR-040 Phase 2).
+
+        Decompiles the requested function set (an explicit ``functions`` list of addresses/names, or
+        a bounded ``offset``/``limit`` window of the program's functions when none is named),
+        emitting one ``$/chunk`` (``kind:"function"``) per function via ``emit_chunk`` as it is
+        produced, then returns the terminal summary. The per-function decompiler is disposed each
+        iteration (the ADR-002 memory discipline). Read-only/output-only (ADR-001).
+
+        The cancel flag (set by :meth:`cancel_stream`) is reset at the start and checked BETWEEN
+        functions so a cancel stops production promptly (ADR-040 D6); a cancelled stream ends with
+        ``done: True`` having emitted the chunks produced so far (honest partial — the server marks
+        the job cancelled).
+
+        Args:
+            params: ``{"functions"?: list[str], "offset"?: int, "limit"?: int}`` — server-validated.
+            emit_chunk: The dispatch-supplied socket-bound emitter (``None`` for a fake/no-emit
+                path, which then produces only the terminal summary).
+
+        Returns:
+            A plain ``{"total": int, "truncated": bool, "done": True}`` terminal summary.
+        """
+        self._stream_cancelled = False
+        functions = params.get("functions")
+        names: list[str] | None = None
+        if isinstance(functions, list):
+            # Each identifier is an untrusted address/name; coerce to str defensively (the server
+            # already length/charset-validated them). An explicit set bounds the produced count to
+            # its length (already client-capped); the window bounds apply only when none is named.
+            names = [str(fn) for fn in functions]
+        offset = max(0, int(params.get("offset", 0)))
+        limit = _clamp_count(int(params.get("limit", 100)))
+        return self._gh_decompile_stream(
+            names, offset, limit, emit_chunk=emit_chunk, is_cancelled=lambda: self._stream_cancelled
+        )
+
+    def cancel_stream(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Request the in-flight streaming call stop early — idempotent (ADR-040 D6).
+
+        Sets the per-stream cancel flag the streaming backend checks BETWEEN functions. Idempotent:
+        calling it when no stream is active simply leaves the flag set for the next stream's reset
+        (a fresh ``start_decompile_stream`` clears it). The ``params.id`` correlation is enforced by
+        the dispatch/contract; this method needs no argument beyond confirming a cancel was
+        requested. (In the synchronous single-connection worker the operative early-free of a
+        blocked stream is the server SIGKILL on ``cancel_job``; this flag is the contract-complete
+        hook + the future async-loop path.)
+
+        Args:
+            params: Ignored (the streaming call is identified by the socket/contract).
+
+        Returns:
+            ``{"cancelled": True}``.
+        """
+        self._stream_cancelled = True
+        return {"cancelled": True}
 
     def disassemble(self, params: dict[str, Any]) -> dict[str, Any]:
         """Disassemble a bounded range or function."""
@@ -881,6 +948,155 @@ class PyGhidraBackend:
                 raise WorkerError(CODE_ANALYSIS_FAILED, "decompilation did not complete")
             decompiled = results.getDecompiledFunction()
             c_code = decompiled.getC() if decompiled is not None else ""
+        finally:
+            decompiler.dispose()
+        return {
+            "address": str(func.getEntryPoint()),
+            "name": str(func.getName()),
+            "c_code": _to_text(c_code),
+            "signature": _to_text(func.getPrototypeString(False, False)),
+        }
+
+    def _gh_decompile_stream(  # pragma: no cover - JVM edge
+        self,
+        names: list[str] | None,
+        offset: int,
+        limit: int,
+        *,
+        emit_chunk: Callable[[int, str, dict[str, Any]], None] | None,
+        is_cancelled: Callable[[], bool],
+    ) -> dict[str, Any]:
+        """Decompile a bounded function set, emitting one ``$/chunk`` per function (ADR-040 P2).
+
+        Iterates the target functions in a stable order, decompiles each with a freshly-opened
+        ``DecompInterface`` that is **disposed in a ``finally`` per function** (the ADR-002 memory
+        discipline — no decompiler context outlives its function), and calls ``emit_chunk(seq,
+        "function", payload)`` for each as it is produced. ``seq`` is a 0-based, gap-free, monotonic
+        counter the server uses as the cursor unit.
+
+        Function set:
+        - ``names`` given → exactly those functions (each resolved by address/name); ``offset``/
+          ``limit`` are ignored (the explicit list IS the bound, already client-capped). A name that
+          does not resolve is skipped (best-effort; it still counts toward neither produced nor
+          truncated — a missing name is not a worker fault).
+        - ``names`` is ``None`` → the program's functions in entry order, the
+          ``[offset, offset+limit)`` window; ``truncated`` is ``True`` iff more functions existed
+          beyond the window.
+
+        Cancellation (ADR-040 D6): ``is_cancelled()`` is checked BEFORE each function so a cancel
+        stops production promptly; the call then returns ``done: True`` with the chunks produced so
+        far (an honest partial — the server marks the job cancelled).
+
+        Args:
+            names: Explicit function identifiers (addresses/names), or ``None`` to window the
+                program's function set.
+            offset: Window start index (only used when ``names`` is ``None``).
+            limit: Window size cap (only used when ``names`` is ``None``).
+            emit_chunk: The socket-bound chunk emitter, or ``None`` (no frames emitted then).
+            is_cancelled: A predicate the loop polls between functions for early stop.
+
+        Returns:
+            A plain ``{"total": int, "truncated": bool, "done": True}`` terminal summary, where
+            ``total`` is the number of functions actually streamed.
+        """
+        # NOTE: both ghidra.app.decompiler.DecompInterface and ghidra.util.task.ConsoleTaskMonitor
+        # are recorded missing-ignored at their first import (in _gh_decompile /
+        # _run_monitored_analysis); a second per-line ignore here would be flagged "unused".
+        from ghidra.app.decompiler import DecompInterface
+        from ghidra.util.task import ConsoleTaskMonitor
+
+        program = self._require_program()
+        funcs, truncated = self._stream_target_functions(names, offset, limit)
+
+        seq = 0
+        for func in funcs:
+            if is_cancelled():
+                # Honest early stop: the chunks already emitted stand; the server marks the job
+                # cancelled. Do NOT report truncated for a cancel (a client choice, not a cap).
+                return {"total": seq, "truncated": False, "done": True}
+            payload = self._decompile_one(program, func, DecompInterface, ConsoleTaskMonitor)
+            if emit_chunk is not None:
+                emit_chunk(seq, "function", payload)
+            seq += 1
+        return {"total": seq, "truncated": truncated, "done": True}
+
+    def _stream_target_functions(  # pragma: no cover - JVM edge
+        self, names: list[str] | None, offset: int, limit: int
+    ) -> tuple[list[Any], bool]:
+        """Resolve the ordered function set to stream + whether the window truncated (ADR-040).
+
+        Args:
+            names: Explicit identifiers, or ``None`` to window the program's functions.
+            offset: Window start (only when ``names`` is ``None``).
+            limit: Window cap (only when ``names`` is ``None``).
+
+        Returns:
+            ``(functions, truncated)`` — the ordered functions to decompile and the honesty flag
+            (``True`` only when an unnamed window left functions beyond it; an explicit list is
+            never "truncated" — it is exactly the requested set).
+        """
+        program = self._require_program()
+        if names is not None:
+            resolved: list[Any] = []
+            for name in names:
+                func = self._try_resolve_function(name)
+                if func is not None:
+                    resolved.append(func)
+            return resolved, False
+        all_funcs = list(program.getFunctionManager().getFunctions(True))
+        window = all_funcs[offset : offset + limit]
+        truncated = (offset + limit) < len(all_funcs)
+        return window, truncated
+
+    def _try_resolve_function(self, function: str) -> Any | None:  # pragma: no cover - JVM edge
+        """Resolve a function by address/name, returning ``None`` instead of raising (stream path).
+
+        The streaming path skips a non-resolving name rather than aborting the whole stream for one
+        bad identifier (best-effort over a bounded set). Mirrors :meth:`_resolve_function` but
+        non-raising.
+
+        Args:
+            function: An address (hex) or a function name.
+
+        Returns:
+            The matching Ghidra ``Function``, or ``None`` if none matches.
+        """
+        from worker.dispatch import WorkerError
+
+        try:
+            return self._resolve_function(function)
+        except WorkerError:
+            return None
+
+    @staticmethod
+    def _decompile_one(  # pragma: no cover - JVM edge
+        program: Any, func: Any, decomp_interface_cls: Any, monitor_cls: Any
+    ) -> dict[str, Any]:
+        """Decompile one resolved function with a per-function decompiler (dispose in ``finally``).
+
+        Mirrors :meth:`_gh_decompile`'s decompiler lifecycle but takes an already-resolved function
+        and the (lazily-imported) JVM classes so the streaming loop imports them once. The
+        ``DecompInterface`` is opened and **disposed per function** (ADR-002 memory discipline). A
+        function whose decompilation does not complete yields an empty ``c_code`` rather than
+        aborting the stream (best-effort partial — the server still envelopes it honestly).
+
+        Args:
+            program: The open Ghidra program.
+            func: The resolved Ghidra ``Function`` to decompile.
+            decomp_interface_cls: The ``DecompInterface`` class (lazily imported by the caller).
+            monitor_cls: The ``ConsoleTaskMonitor`` class (lazily imported by the caller).
+
+        Returns:
+            ``{"address", "name", "c_code", "signature"}`` (all plain strings).
+        """
+        decompiler = decomp_interface_cls()
+        try:
+            decompiler.openProgram(program)
+            results = decompiler.decompileFunction(func, 0, monitor_cls())
+            c_code = ""
+            if results is not None and results.decompileCompleted():
+                decompiled = results.getDecompiledFunction()
+                c_code = decompiled.getC() if decompiled is not None else ""
         finally:
             decompiler.dispose()
         return {

@@ -61,6 +61,17 @@ PROGRESS_METHOD = "$/progress"
 #: ``analyzing`` is the safe catch-all when a cleaner phase mapping is unavailable.
 PROGRESS_PHASES: frozenset[str] = frozenset({"importing", "analyzing", "finalizing"})
 
+#: JSON-RPC method name for the additive worker→server partial-result NOTIFICATION (ADR-040
+#: Phase 2, rpc-protocol.md §4). Framed exactly like ``$/progress``: a notification carries NO
+#: top-level ``id``, so it can never be mistaken for the streaming call's correlated response.
+CHUNK_METHOD = "$/chunk"
+
+#: CLOSED ``kind`` vocabulary for a ``$/chunk`` frame, per stream (ADR-040 D4). For
+#: ``start_decompile_stream`` the only unit is a decompiled ``"function"``; an out-of-vocabulary
+#: kind is a protocol violation handled fail-closed (kill + evict). A future bulk tool that streams
+#: a different unit adds its own kind here behind the same contract.
+CHUNK_KINDS: frozenset[str] = frozenset({"function"})
+
 
 @dataclass(frozen=True, slots=True)
 class RpcError:
@@ -101,6 +112,32 @@ class RpcProgress:
     request_id: str
     percent: int | None
     phase: str
+
+
+@dataclass(frozen=True, slots=True)
+class RpcChunk:
+    """A decoded ``$/chunk`` partial-result notification (ADR-040 Phase 2; rpc-protocol.md §4).
+
+    A notification, NOT a response: it carries no top-level ``id`` and is one of N frames the worker
+    emits (in ``seq`` order) BEFORE the terminal response of a streaming extraction call. Its
+    ``payload`` is plain structured data (the streamed unit's schema minus the envelope) — the
+    SERVER wraps every binary-derived field in the untrusted envelope before it reaches the client
+    (the worker never envelopes — rpc-protocol.md §4). The codec only validates the frame's SHAPE
+    (seq/kind/payload are well-formed); it never inspects payload values (no content read).
+
+    Attributes:
+        request_id: The id of the streaming call this chunk pertains to (a ``params`` field, not the
+            JSON-RPC top-level ``id`` — notifications have none). Confirms the frame correlates to
+            the in-flight call.
+        seq: Server-/worker-assigned 0-based, monotonic, gap-free sequence number (the cursor unit).
+        kind: A value from :data:`CHUNK_KINDS` (closed vocabulary) identifying the unit shape.
+        payload: The plain (un-enveloped) structured unit — a JSON object the server envelopes.
+    """
+
+    request_id: str
+    seq: int
+    kind: str
+    payload: dict[str, Any]
 
 
 class RpcCallError(Exception):
@@ -339,6 +376,121 @@ def build_progress(request_id: str, percent: int | None, phase: str) -> dict[str
         "jsonrpc": "2.0",
         "method": PROGRESS_METHOD,
         "params": {"id": request_id, "percent": percent, "phase": phase},
+    }
+
+
+def is_chunk_notification(obj: dict[str, Any]) -> bool:
+    """Classify a decoded frame as a ``$/chunk`` partial-result notification (ADR-040 Phase 2).
+
+    A frame is a chunk notification iff it declares ``method == "$/chunk"`` AND carries NO top-level
+    ``id`` (per JSON-RPC 2.0 a notification has no id). The id check is the structural invariant
+    so a chunk can never be mistaken for the streaming call's correlated response (and vice-versa) —
+    identical to :func:`is_progress_notification`. A frame carrying BOTH a ``$/chunk`` method AND a
+    top-level id is NOT treated as a chunk (fail closed → it falls through to response parsing,
+    which rejects it).
+
+    Args:
+        obj: The decoded frame object.
+
+    Returns:
+        ``True`` only for a well-formed chunk notification (method matches, no top-level id).
+    """
+    return obj.get("method") == CHUNK_METHOD and "id" not in obj
+
+
+def parse_chunk(obj: dict[str, Any], *, expected_id: str) -> RpcChunk:
+    """Validate a ``$/chunk`` notification and return its decoded shape (ADR-040 Phase 2).
+
+    Strict, fail-closed validation (the worker is potentially hostile — TB2/TB3): the method must be
+    ``$/chunk`` with no top-level id; ``params`` must be an object whose ``id`` correlates to the
+    in-flight streaming call, whose ``seq`` is a non-negative int (not a bool), whose ``kind`` is in
+    the CLOSED :data:`CHUNK_KINDS` vocabulary, and whose ``payload`` is a JSON object. Anything else
+    raises. The parser validates SHAPE only — it does NOT read any payload value (the payload is
+    binary-derived, untrusted, and is enveloped by the server downstream, not inspected here).
+
+    Args:
+        obj: The decoded notification object (already classified by :func:`is_chunk_notification` in
+            the loop, but re-checked here so the parser is safe to call standalone).
+        expected_id: The id of the streaming request the chunk must correlate to.
+
+    Returns:
+        The validated :class:`RpcChunk` (request_id, seq, kind, payload).
+
+    Raises:
+        RpcProtocolError: If the notification is malformed, mis-correlated, or carries a bad
+            ``seq`` / out-of-vocabulary ``kind`` / non-object ``payload``.
+    """
+    if obj.get("jsonrpc") != "2.0":
+        raise RpcProtocolError("chunk: missing or wrong jsonrpc version")
+    if obj.get("method") != CHUNK_METHOD or "id" in obj:
+        raise RpcProtocolError("chunk: not a $/chunk notification")
+    params = obj.get("params")
+    if not isinstance(params, dict):
+        raise RpcProtocolError("chunk: params is not a JSON object")
+    if params.get("id") != expected_id:
+        raise RpcProtocolError("chunk: id does not correlate to request")
+    seq = _parse_seq(params.get("seq"))
+    kind = params.get("kind")
+    if not isinstance(kind, str) or kind not in CHUNK_KINDS:
+        raise RpcProtocolError("chunk: kind not in the closed vocabulary")
+    payload = params.get("payload")
+    if not isinstance(payload, dict):
+        raise RpcProtocolError("chunk: payload is not a JSON object")
+    return RpcChunk(request_id=expected_id, seq=seq, kind=kind, payload=payload)
+
+
+def _parse_seq(raw: Any) -> int:
+    """Validate a chunk ``seq``: a non-negative int (fail closed otherwise).
+
+    A ``bool`` is rejected even though it is an ``int`` subclass in Python — a hostile worker MUST
+    send a real integer, not ``true``/``false`` (defensive type-narrowing, mirrors
+    :func:`_parse_percent`). The monotonic/gap-free invariant ACROSS frames is enforced by the
+    reader (it tracks the expected next ``seq``); this only validates a single value's type+sign.
+
+    Args:
+        raw: The raw ``params.seq`` value.
+
+    Returns:
+        The validated non-negative sequence number.
+
+    Raises:
+        RpcProtocolError: If ``raw`` is not an int, is a bool, or is negative.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise RpcProtocolError("chunk: seq is not an integer")
+    if raw < 0:
+        raise RpcProtocolError("chunk: seq is negative")
+    return raw
+
+
+def build_chunk(request_id: str, seq: int, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Construct a ``$/chunk`` JSON-RPC notification (worker → server; ADR-040 Phase 2).
+
+    Used by the worker side. The result carries NO top-level ``id`` (notification). ``kind`` is
+    asserted in-vocabulary and ``seq`` asserted non-negative so a coding mistake fails loudly here
+    rather than emitting a frame the server would reject. ``payload`` is the plain, un-enveloped
+    unit — the worker NEVER envelopes (rpc-protocol.md §4); the server wraps it on receipt.
+
+    Args:
+        request_id: The streaming request id this chunk pertains to (placed in ``params.id``).
+        seq: The 0-based, monotonic, gap-free sequence number for this unit.
+        kind: A value from :data:`CHUNK_KINDS`.
+        payload: The plain structured unit (a JSON object) the server will envelope.
+
+    Returns:
+        A JSON-RPC 2.0 notification dict ready to encode + frame.
+
+    Raises:
+        ValueError: If ``kind`` is not in :data:`CHUNK_KINDS` or ``seq`` is negative.
+    """
+    if kind not in CHUNK_KINDS:
+        raise ValueError("chunk kind not in the closed vocabulary")
+    if seq < 0:
+        raise ValueError("chunk seq is negative")
+    return {
+        "jsonrpc": "2.0",
+        "method": CHUNK_METHOD,
+        "params": {"id": request_id, "seq": seq, "kind": kind, "payload": payload},
     }
 
 
