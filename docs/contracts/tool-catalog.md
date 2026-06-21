@@ -6,10 +6,11 @@
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **55** tools (asserted in tests by
-  `len(TIER1_TOOL_NAMES) == 55`). The breakdown:
+- **Allow-list only:** the catalog is fixed; there are exactly **56** tools (asserted in tests by
+  `len(TIER1_TOOL_NAMES) == 56`). The breakdown:
   22 Tier-1 read-only (v1) + 5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
-  reporting/metrics tools (ADR-008; all read-only) + **6 v1.1 mutation/write tools (ADR-012) + 8
+  reporting/metrics tools (ADR-008; all read-only) + **1 Function ID library-match tool (ADR-042
+  Phase 1: `identify_functions`; read-only)** + **6 v1.1 mutation/write tools (ADR-012) + 8
   structural-write tools (ADR-013 Phase A + ADR-014 Phase B + ADR-015 Phase C + ADR-021 batch
   `define_types` + ADR-031 `delete_type`)** + **4 v1.x streaming-extraction tools (ADR-040:
   `start_decompile_stream` + the generic `fetch_job_results`/`job_status`/`cancel_job`;
@@ -133,6 +134,19 @@ node `name`s and decompiled C stay `Untrusted` (ADR-005). Bounded (`max_nodes �
 > CFG / *defined* bytes, not ground truth (ADR-008). Derivation is pure-core (ADR-001); only raw
 > extraction (`function_cfg`/`imports`/`exports`/`coverage`) touches the worker. See
 > `docs/design/tier2-metrics.md`.
+
+### Function ID (FID) library-match identification (ADR-042 Phase 1; READ-ONLY)
+
+| Tool | Input | Output |
+|------|-------|--------|
+| `identify_functions` | `IdentifyFunctionsIn{limit, min_score?}` | `IdentifyFunctionsOut{matches[{address, matched_name*, library*, score}], total, truncated}` |
+
+> A FID match is a **best-effort, possibly-multiple HINT, not an authoritative identity** — one row
+> per surviving candidate (a function may match several library candidates above the threshold).
+> `min_score` absent ⇒ the worker uses Ghidra's FID default score threshold (fail-safe). The matched
+> library function `matched_name` + `library` descriptor are binary-derived → `Untrusted`-wrapped
+> (ADR-005); `address`/`score` are safe. Bounded by `limit` (`truncated` honest when more matched);
+> read-only (runs the FID service, no DB mutation — ADR-001/ADR-042 Phase 1).
 
 ### Mutation / write tools (v1.1 — ADR-012; GATED by per-session write-consent — threat-model TB7)
 

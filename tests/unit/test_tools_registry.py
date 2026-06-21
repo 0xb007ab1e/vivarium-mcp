@@ -344,6 +344,11 @@ class FakePort:
             string_count=0,
         )
 
+    # --- Function ID library-match identification (ADR-042 Phase 1) ---
+    def identify_functions(self, sid: str, a: s.IdentifyFunctionsIn) -> s.IdentifyFunctionsOut:
+        self._rec("identify_functions", sid)
+        return s.IdentifyFunctionsOut(matches=[], total=0)
+
 
 class RecordingRegistrar:
     """Captures ``add_tool`` calls so tests can assert exhaustive registration."""
@@ -389,8 +394,9 @@ def ctx() -> reg.ToolContext:
     )
 
 
-def test_catalog_is_exactly_55_unique_tools() -> None:
+def test_catalog_is_exactly_56_unique_tools() -> None:
     # 22 Tier-1 + 5 v1.1 semantic-naming (ADR-007) + 8 v1.1 Tier-2 metrics (ADR-008; READ-ONLY)
+    # + 1 Function ID library-match (ADR-042 Phase 1: identify_functions; READ-ONLY)
     # + 6 v1.1 mutation/write (ADR-012) + 2 v1.1 structural mutation (ADR-013 Phase A) + 2 v1.1
     # structural type-aware mutation (ADR-014 Phase B) + 2 v1.1 composite-type creation (ADR-015
     # Phase C) + 2 v1.2 annotation persistence (ADR-018: export read-only + import GATED) + 1 v1.2
@@ -400,8 +406,8 @@ def test_catalog_is_exactly_55_unique_tools() -> None:
     # job_status / cancel_job; READ-ONLY, output-only) — the 14 mutation tools GATED by per-session
     # write-consent (the structural 8 additionally by allow_structural); import is GATED identically
     # (+ allow_structural for structural entries).
-    assert len(reg.TIER1_TOOL_NAMES) == 55
-    assert len(set(reg.TIER1_TOOL_NAMES)) == 55
+    assert len(reg.TIER1_TOOL_NAMES) == 56
+    assert len(set(reg.TIER1_TOOL_NAMES)) == 56
 
 
 def test_handler_table_matches_frozen_allow_list() -> None:

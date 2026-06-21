@@ -95,16 +95,16 @@ def test_expected_sha256_pattern_enforced() -> None:
 
 @pytest.mark.critical
 def test_catalog_count_matches_registry() -> None:
-    # 55 tools per the frozen catalog: 22 Tier-1 read-only + 5 v1.1 semantic-naming (ADR-007)
+    # 56 tools per the frozen catalog: 22 Tier-1 read-only + 5 v1.1 semantic-naming (ADR-007)
     # + 8 v1.1 Tier-2 reporting/metrics (ADR-008) + 6 v1.1 mutation/write (ADR-012) + 2 v1.1
     # structural mutation (ADR-013 Phase A) + 2 v1.1 structural type-aware mutation (ADR-014
     # Phase B) + 2 v1.1 composite-type creation (ADR-015 Phase C) + 2 v1.2 annotation persistence
     # (ADR-018: export + import) + 1 v1.2 multi-type composite batch (ADR-021: define_types)
     # + 1 v1.4 composite deletion (ADR-031: delete_type) + 4 v1.x streaming-extraction tools
-    # (ADR-040: start_decompile_stream + fetch_job_results/job_status/cancel_job). The registry
-    # list is the source.
+    # (ADR-040: start_decompile_stream + fetch_job_results/job_status/cancel_job) + 1 Function ID
+    # library-match tool (ADR-042 Phase 1: identify_functions). The registry list is the source.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 55
+    assert len(TIER1_TOOL_NAMES) == 56
 
 
 @pytest.mark.critical

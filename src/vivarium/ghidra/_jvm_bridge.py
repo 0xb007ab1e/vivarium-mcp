@@ -29,6 +29,11 @@ from typing import Any
 # Bounds the bridge enforces itself (defense-in-depth; the server also caps before calling).
 _MAX_RESULT_COUNT = 10_000
 _MAX_READ_BYTES = 1_048_576  # 1 MiB
+# Max FID match candidates the worker ever returns from identify_functions (v1.x — ADR-042 Phase 1;
+# mirrors rpc_client._IDENTIFY_MATCH_BUDGET). Defense-in-depth: the FID service can emit many
+# candidates per function on a large binary; the worker clamps + sets truncated, the server caps
+# again to the caller's bounded `limit` (CWE-400).
+_MAX_IDENTIFY_MATCHES = 10_000
 # Call-graph extraction caps (v1.1 — ADR-007): mirror the schema/threat-model §8 ceilings, NOT the
 # generic 10k result cap — otherwise the worker would silently clamp even its own 40k edge default
 # down to 10k, contradicting the documented contract (the server schema remains authoritative).
@@ -417,6 +422,27 @@ class PyGhidraBackend:
     def coverage(self, params: dict[str, Any]) -> dict[str, Any]:
         """Defined-code/data byte counts for program coverage — v1.1 (ADR-008)."""
         return self._gh_coverage()
+
+    def identify_functions(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Match functions against library FID databases — v1.x (ADR-042 Phase 1; READ-ONLY).
+
+        Runs the Ghidra Function ID service over the analyzed program and returns one row per
+        surviving candidate (multiplicity is honest — a function may match several library
+        candidates above the score threshold). Bounded by :data:`_MAX_IDENTIFY_MATCHES` (the server
+        further caps to the caller's ``limit``); ``min_score`` (when supplied) raises the floor
+        above Ghidra's FID default threshold.
+
+        Args:
+            params: ``{"limit": int, "min_score"?: float}`` (``limit`` already bounded by the
+                server; ``min_score`` absent ⇒ the worker uses the FID default score threshold).
+
+        Returns:
+            ``{"matches": [{"address","matched_name","library","score"}], "truncated": bool}``
+            (plain; the server wraps ``matched_name``/``library`` as untrusted — binary-derived).
+        """
+        limit = _clamp_identify(int(params.get("limit", _MAX_IDENTIFY_MATCHES)))
+        min_score = params.get("min_score")
+        return self._gh_identify_functions(limit, None if min_score is None else float(min_score))
 
     # --- mutation operations (v1.1 — ADR-012; transaction-wrapped, fail-closed) --------------
     # Each write resolves the target with an existing read-only resolver, then performs a single
@@ -1948,6 +1974,71 @@ class PyGhidraBackend:
             "defined_data_bytes": defined_data_bytes,
             "function_count": int(program.getFunctionManager().getFunctionCount()),
         }
+
+    def _gh_identify_functions(
+        self, limit: int, min_score: float | None
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Run the Ghidra Function ID service and shape the library matches (ADR-042 Phase 1).
+
+        One row per surviving candidate (a function may match several library candidates above the
+        threshold — multiplicity is honest). Candidates scoring below the effective threshold
+        (``min_score`` when supplied, else the FID default) are dropped; the result is clamped to
+        ``limit`` with a ``truncated`` flag (no silent loss — ADR-005).
+
+        Args:
+            limit: Maximum match rows to return (already bounded by the caller/server).
+            min_score: Minimum FID overall score to include, or ``None`` to use the FID default
+                score threshold.
+
+        Returns:
+            ``{"matches": [{"address","matched_name","library","score"}], "truncated": bool}``.
+        """
+        # integration-validate (real-worker, ADR-042 follow-up): FidService().processProgram(
+        #   program, monitor) -> List<FidSearchResult>; FidSearchResult has PUBLIC FIELDS
+        #   .function (a Function; .getEntryPoint().toString() = address) and .matches
+        #   (List<FidMatch>). FidMatch getters: getFunctionRecord().getName() = library function
+        #   name; getLibraryRecord() -> getLibraryFamilyName()/getLibraryVersion()/
+        #   getLibraryVariant(); getOverallScore() -> float. Threshold:
+        #   FidService().getDefaultScoreThreshold().
+        from ghidra.feature.fid.service import FidService  # type: ignore[import-not-found]
+
+        # NOTE: ghidra.util.task is already missing-import-ignored at its first import site
+        # (_run_monitored_analysis / _gh_decompile), so a second per-line ignore here would be
+        # flagged "unused" — import ConsoleTaskMonitor without one (mirrors _gh_decompile_stream).
+        from ghidra.util.task import ConsoleTaskMonitor
+
+        program = self._require_program()
+        service = FidService()
+        threshold = float(service.getDefaultScoreThreshold()) if min_score is None else min_score
+        results = service.processProgram(program, ConsoleTaskMonitor())
+        rows: list[dict[str, Any]] = []
+        truncated = False
+        for search_result in results:
+            address = str(search_result.function.getEntryPoint().toString())
+            for match in search_result.matches:
+                score = float(match.getOverallScore())
+                if score < threshold:
+                    continue
+                if len(rows) >= limit:
+                    truncated = True
+                    break
+                library = match.getLibraryRecord()
+                rows.append(
+                    {
+                        "address": address,
+                        "matched_name": _to_text(match.getFunctionRecord().getName()),
+                        "library": _to_text(
+                            f"{library.getLibraryFamilyName()} "
+                            f"{library.getLibraryVersion()} "
+                            f"{library.getLibraryVariant()}"
+                        ),
+                        "score": score,
+                    }
+                )
+            if len(rows) >= limit:
+                truncated = True
+                break
+        return {"matches": rows, "truncated": truncated}
 
     # --- private JVM helpers (lazy imports only; never at module scope) -----------------------
     # --- mutation JVM edges (ADR-012; one transaction per write, roll back on failure) -------
@@ -3524,6 +3615,18 @@ def _clamp_read(value: int) -> int:
         The clamped length.
     """
     return max(1, min(int(value), _MAX_READ_BYTES))
+
+
+def _clamp_identify(value: int) -> int:
+    """Clamp a FID match-count request to ``[1, _MAX_IDENTIFY_MATCHES]`` (ADR-042; CWE-400).
+
+    Args:
+        value: The requested match count.
+
+    Returns:
+        The clamped count.
+    """
+    return max(1, min(int(value), _MAX_IDENTIFY_MATCHES))
 
 
 def worker_main() -> int:

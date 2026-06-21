@@ -104,6 +104,9 @@ RPC_METHODS = frozenset(
         "imports",
         "exports",
         "coverage",
+        # Function ID library-match identification (v1.x — ADR-042 Phase 1; worker-only, ADR-001;
+        # READ-ONLY — runs the FID service, no DB mutation).
+        "identify_functions",
         # mutation (write) methods (v1.1 — ADR-012; worker-only, ADR-001; one txn per call, §4).
         # The server validates the name/address/comment-type as hostile input and checks write
         # consent BEFORE routing here (ADR-012 §3/§7); a rolled-back write maps to analysis-failed.
@@ -282,6 +285,10 @@ class GhidraBackend(Protocol):
 
     def coverage(self, params: dict[str, Any]) -> dict[str, Any]:
         """Defined-code/data byte counts for program coverage — v1.1."""
+        ...
+
+    def identify_functions(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Match functions against library FID databases (READ-ONLY) — v1.x (ADR-042)."""
         ...
 
     # --- mutation (write) operations (v1.1 — ADR-012; one transaction per call, §4) ---
