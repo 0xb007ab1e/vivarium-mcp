@@ -69,6 +69,42 @@ def _failing_producer(ok: int) -> Iterator[s.DecompiledFunction]:
 
 
 @pytest.mark.critical
+def test_cancel_takes_effect_on_producer_done_but_buffered_job() -> None:
+    """A producer-finished job with chunks still buffered (effective RUNNING) is cancellable.
+
+    Regression for the bug the live cancel-latency test caught (ADR-041 follow-up): ``cancel()``
+    guarded on the INTERNAL terminal state, so a job whose producer had exhausted while chunks were
+    still buffered (internal ``done`` but ``effective_state == running`` to the client) silently
+    no-op'd the cancel — the client saw ``running`` yet ``cancel_job`` reported not-cancelled.
+    ``cancel()`` now guards on the EFFECTIVE terminal view, so such a cancel takes effect.
+    """
+    # Buffer cap >= produced; we do NOT drain. The producer exhausts (internal DONE) with all chunks
+    # still buffered → the client-visible state is RUNNING (ADR-040 D7).
+    mgr = _manager(limits=Limits(max_stream_buffer_chunks=10))
+    job_id = mgr.start_job(_SID, producer=_producer(5), total=5, caller=_OWNER)
+    pre = mgr.status(_SID, job_id, caller=_OWNER)
+    assert pre.state is JobState.RUNNING  # effective: producer done, but 5 chunks buffered
+    assert pre.buffered == 5
+
+    cancelled = mgr.cancel(_SID, job_id, caller=_OWNER)
+    assert cancelled.state is JobState.CANCELLED  # the cancel TOOK EFFECT (not a silent no-op)
+    assert cancelled.buffered == 0  # the buffered chunks were discarded
+
+
+@pytest.mark.critical
+def test_cancel_is_noop_on_a_truly_complete_job() -> None:
+    """A fully-delivered (drained → done) job stays ``done`` on cancel — idempotent (ADR-040 D6)."""
+    mgr = _manager(limits=Limits(max_stream_buffer_chunks=10))
+    job_id = mgr.start_job(_SID, producer=_producer(3), total=3, caller=_OWNER)
+    drained = mgr.fetch(_SID, job_id, limit=10, caller=_OWNER)
+    assert drained.done and [c.seq for c in drained.chunks] == [0, 1, 2]
+    cancelled = mgr.cancel(_SID, job_id, caller=_OWNER)
+    assert (
+        cancelled.state is JobState.DONE
+    )  # truly complete → cancel does not override to cancelled
+
+
+@pytest.mark.critical
 def test_done_reported_only_after_buffer_fully_drained() -> None:
     """``done`` must not be reported while buffered chunks remain (ADR-040 D7 regression).
 
