@@ -389,17 +389,19 @@ def ctx() -> reg.ToolContext:
     )
 
 
-def test_catalog_is_exactly_51_unique_tools() -> None:
+def test_catalog_is_exactly_55_unique_tools() -> None:
     # 22 Tier-1 + 5 v1.1 semantic-naming (ADR-007) + 8 v1.1 Tier-2 metrics (ADR-008; READ-ONLY)
     # + 6 v1.1 mutation/write (ADR-012) + 2 v1.1 structural mutation (ADR-013 Phase A) + 2 v1.1
     # structural type-aware mutation (ADR-014 Phase B) + 2 v1.1 composite-type creation (ADR-015
     # Phase C) + 2 v1.2 annotation persistence (ADR-018: export read-only + import GATED) + 1 v1.2
     # multi-type composite batch (ADR-021: define_types, GATED by allow_structural) + 1 v1.4
-    # composite deletion (ADR-031: delete_type, session-authored only, GATED by allow_structural) —
-    # the 14 mutation tools GATED by per-session write-consent (the structural 8 additionally by
-    # allow_structural); import is GATED identically (+ allow_structural for structural entries).
-    assert len(reg.TIER1_TOOL_NAMES) == 51
-    assert len(set(reg.TIER1_TOOL_NAMES)) == 51
+    # composite deletion (ADR-031: delete_type, session-authored only, GATED by allow_structural)
+    # + 4 v1.x streaming-extraction tools (ADR-040: start_decompile_stream + fetch_job_results /
+    # job_status / cancel_job; READ-ONLY, output-only) — the 14 mutation tools GATED by per-session
+    # write-consent (the structural 8 additionally by allow_structural); import is GATED identically
+    # (+ allow_structural for structural entries).
+    assert len(reg.TIER1_TOOL_NAMES) == 55
+    assert len(set(reg.TIER1_TOOL_NAMES)) == 55
 
 
 def test_handler_table_matches_frozen_allow_list() -> None:

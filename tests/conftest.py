@@ -224,6 +224,15 @@ class FakeGhidraPort:
         )
 
     # --- streaming-decompile capability (ADR-040; deterministic synthetic source) ---
+    def attach_stream_jobs(self, manager: st.StreamingJobManager) -> None:
+        """Inject a streaming-job manager (ADR-040; composition-root wiring seam).
+
+        Replaces the fake's permissive default manager with one carrying a real session authorizer
+        (so ``build_app``-wired e2e tests get true BOLA). The deterministic synthetic source
+        (:meth:`decompile_stream`) is independent of the manager, so ``stream_count`` still drives.
+        """
+        self._stream_jobs = manager
+
     def decompile_stream(self, sid: str, a: st.DecompileStreamIn) -> Iterator[s.DecompiledFunction]:
         """Yield deterministic per-function decompiler output, honoring the configured stream size.
 

@@ -95,14 +95,16 @@ def test_expected_sha256_pattern_enforced() -> None:
 
 @pytest.mark.critical
 def test_catalog_count_matches_registry() -> None:
-    # 51 tools per the frozen catalog: 22 Tier-1 read-only + 5 v1.1 semantic-naming (ADR-007)
+    # 55 tools per the frozen catalog: 22 Tier-1 read-only + 5 v1.1 semantic-naming (ADR-007)
     # + 8 v1.1 Tier-2 reporting/metrics (ADR-008) + 6 v1.1 mutation/write (ADR-012) + 2 v1.1
     # structural mutation (ADR-013 Phase A) + 2 v1.1 structural type-aware mutation (ADR-014
     # Phase B) + 2 v1.1 composite-type creation (ADR-015 Phase C) + 2 v1.2 annotation persistence
     # (ADR-018: export + import) + 1 v1.2 multi-type composite batch (ADR-021: define_types)
-    # + 1 v1.4 composite deletion (ADR-031: delete_type). The registry list is the source.
+    # + 1 v1.4 composite deletion (ADR-031: delete_type) + 4 v1.x streaming-extraction tools
+    # (ADR-040: start_decompile_stream + fetch_job_results/job_status/cancel_job). The registry
+    # list is the source.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 51
+    assert len(TIER1_TOOL_NAMES) == 55
 
 
 @pytest.mark.critical
@@ -118,3 +120,47 @@ def test_output_models_carry_untrusted_fields() -> None:
     )
     assert isinstance(out.c_code, Untrusted)
     assert out.address == "0x1000"  # server-computed scalar stays bare
+
+
+def test_streaming_job_state_literal_matches_enum() -> None:
+    # The frozen client schema mirrors the server-side JobState enum vocabulary without importing it
+    # (no cycle). Keep them in lockstep: any new state must be added to BOTH.
+    import typing
+
+    from vivarium.jobs.streaming import JobState
+
+    literal_states = set(typing.get_args(s._JOB_STATE))
+    enum_states = {st.value for st in JobState}
+    assert literal_states == enum_states
+
+
+def test_decompiled_chunk_carries_per_chunk_untrusted_envelope() -> None:
+    from vivarium.core.envelope import DataOrigin, Untrusted
+
+    chunk = s.DecompiledChunk(
+        seq=0,
+        address="0x401000",
+        name=Untrusted(value="FUN_00401000", origin=DataOrigin.BINARY),
+        code=Untrusted(value="int FUN_00401000(void){}", origin=DataOrigin.GHIDRA),
+        signature=Untrusted(value="int FUN_00401000(void)", origin=DataOrigin.GHIDRA),
+    )
+    assert isinstance(chunk.code, Untrusted)  # per-chunk envelope (ADR-040 D9)
+    assert chunk.address == "0x401000"  # server-normalized scalar stays bare
+    assert chunk.seq == 0
+
+
+def test_job_status_out_has_no_untrusted_fields() -> None:
+    # job_status carries server counters only — NO binary content (master §5 / ADR-040 D9).
+    from vivarium.core.envelope import Untrusted
+
+    out = s.JobStatusOut(
+        state="running", phase="running", done=False, total=10, buffered=2, started_at=1.5
+    )
+    for value in out.model_dump().values():
+        assert not isinstance(value, Untrusted)
+
+
+def test_fetch_job_results_in_bounds() -> None:
+    assert s.FetchJobResultsIn(session_id="x", job="j").limit == 32  # default 32
+    with pytest.raises(ValidationError):
+        s.FetchJobResultsIn(session_id="x", job="j", limit=257)  # > max 256

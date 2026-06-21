@@ -67,13 +67,25 @@ def _http(**over: Any) -> HttpConfig:
     return HttpConfig(**base)
 
 
+class _StubPort:
+    """A do-nothing Ghidra port stub (edge-abuse tests never reach a tool — no method is called).
+
+    Implements only the composition-root wiring seam (:meth:`attach_stream_jobs`); any other
+    attribute access would be a test bug, so it is intentionally absent.
+    """
+
+    def attach_stream_jobs(self, manager: object) -> None:
+        """No-op streaming-job injection (ADR-040 composition-root wiring seam)."""
+        return None
+
+
 def _composed(http: HttpConfig, *, authenticator: Any, clock: Any = None) -> Any:
     """Build the real FastMCP MCP app wrapped in the full TB6 middleware stack.
 
-    The Ghidra port is a bare object (never invoked — abuse cases are rejected at the edge); a real
+    The Ghidra port is a bare stub (never invoked — abuse cases are rejected at the edge); a real
     :class:`SessionManager` holds it so construction matches production wiring.
     """
-    port = cast(GhidraPort, object())
+    port = cast(GhidraPort, _StubPort())
     sessions = SessionManager(port=port, ttl_s=3600, idle_s=900, max_sessions=4)
     inner = build_app(_config(), session_manager=sessions, port=port).streamable_http_app()
     kw: dict[str, Any] = {"authenticator": authenticator}

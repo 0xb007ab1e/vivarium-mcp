@@ -96,6 +96,19 @@ class GhidraPort(Protocol):
     # These authorize through the session-ownership chokepoint (BOLA), bind the job to its session,
     # and bound the buffer with backpressure (jobs.streaming). They are SERVER-SIDE orchestration on
     # top of decompile_stream — not a worker RPC each (the worker only streams units).
+    def attach_stream_jobs(self, manager: st.StreamingJobManager) -> None:
+        """Inject the streaming-job manager at the composition root (ADR-040; build_app wiring).
+
+        The job manager carries the session-ownership authorizer (BOLA) + buffer limits + injected
+        clock; binding it after construction resolves the composition cycle (the manager needs the
+        session manager, which needs the port). Until injected, the four stream methods fail closed
+        ``worker-unavailable``.
+
+        Args:
+            manager: The constructed :class:`vivarium.jobs.streaming.StreamingJobManager`.
+        """
+        ...
+
     def start_decompile_stream(self, sid: str, a: st.DecompileStreamIn, *, caller: str) -> str:
         """Start a bounded bulk-decompile streaming job; return its opaque handle (ADR-040)."""
         ...

@@ -142,11 +142,27 @@ class _FakePort:
             length=4,
         )
 
+    def attach_stream_jobs(self, manager: object) -> None:
+        """No-op streaming-job injection (ADR-040 composition-root wiring seam)."""
+        return None
+
     def __getattr__(self, name: str) -> Any:
         def _unused(sid: str, a: object | None = None) -> object:
             raise AssertionError(f"unexpected port call {name}")
 
         return _unused
+
+
+class _StubPort:
+    """Minimal port stub for wiring-only tests (no tool is dispatched).
+
+    Implements only the composition-root seam (:meth:`attach_stream_jobs`) that ``build_app`` calls
+    while wiring streaming (ADR-040); any other attribute access would be a test bug.
+    """
+
+    def attach_stream_jobs(self, manager: object) -> None:
+        """No-op streaming-job injection (ADR-040 composition-root wiring seam)."""
+        return None
 
 
 def _build_with_fakes() -> Any:
@@ -359,7 +375,7 @@ def test_build_app_wires_resolver_for_http_transport(monkeypatch: pytest.MonkeyP
     srv.build_app(
         http_cfg,
         session_manager=cast(SessionManager, _FakeSessions()),
-        port=cast(GhidraPort, object()),
+        port=cast(GhidraPort, _StubPort()),
     )
     assert captured["ctx"].resolve_principal is not None  # HTTP → resolver wired
 
@@ -367,6 +383,6 @@ def test_build_app_wires_resolver_for_http_transport(monkeypatch: pytest.MonkeyP
     srv.build_app(
         _config(),  # stdio (default)
         session_manager=cast(SessionManager, _FakeSessions()),
-        port=cast(GhidraPort, object()),
+        port=cast(GhidraPort, _StubPort()),
     )
     assert captured["ctx"].resolve_principal is None  # stdio → static local principal

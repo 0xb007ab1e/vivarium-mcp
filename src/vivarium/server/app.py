@@ -28,6 +28,7 @@ from starlette.types import ASGIApp
 from vivarium.config import Config, HttpConfig
 from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from vivarium.ghidra.port import GhidraPort
+from vivarium.jobs.streaming import StreamingJobManager
 from vivarium.logging import get_logger
 from vivarium.server.auth import Authenticator, Principal, build_authenticator
 from vivarium.server.http_middleware import (
@@ -203,6 +204,19 @@ def build_app(config: Config, *, session_manager: SessionManager, port: GhidraPo
         A FastMCP application instance ready to serve.
     """
     app = FastMCP(name=_SERVER_NAME, instructions=_SERVER_INSTRUCTIONS)
+    # Streaming-job machinery (ADR-040): construct the manager here (it needs BOTH the session
+    # manager — for the BOLA-safe ownership authorize — and the resolved limits/clock), inject it
+    # into the adapter, and bind the lifetime hook so a session eviction discards its streaming jobs
+    # (no binary-derived chunk outlives the session — ADR-040 D10 / ADR-002). The authorize callable
+    # is `(sid, caller) -> SessionInfo` raising SESSION_INVALID for unknown/expired/foreign ids.
+    stream_jobs = StreamingJobManager(
+        authorize=lambda sid, caller: session_manager.authorize(sid, caller=caller),
+        limits=config.limits,
+    )
+    port.attach_stream_jobs(stream_jobs)
+    # Lifetime binding (ADR-040 D10): session eviction (TTL/idle/close/poison/timeout) discards the
+    # session's jobs. The session manager stores this as its injected `on_evict` hook.
+    session_manager._on_evict = stream_jobs.discard_session
     # HTTP is multi-principal: resolve the owner/caller per request from the authenticated scope
     # principal (ADR-017). stdio is single-principal (the implicit local operator) — no resolver.
     resolve_principal = _http_principal_resolver(app) if config.transport == "http" else None
