@@ -1349,15 +1349,23 @@ class _FakeBackend:
         params: dict[str, Any],
         *,
         emit_chunk: Callable[[int, str, dict[str, Any]], None] | None = None,
+        poll_cancel: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        """Explicit ``start_decompile_stream`` matching the protocol's keyword-only ``emit_chunk``.
+        """Explicit ``start_decompile_stream`` matching the protocol's keyword-only collaborators.
 
-        Like ``analyze``, the catch-all ``__getattr__`` cannot express the keyword-only emitter, so
-        this is declared explicitly. Records the call (with whether a chunk emitter was supplied)
-        and returns a canned terminal summary.
+        Like ``analyze``, the catch-all ``__getattr__`` cannot express the keyword-only emitter /
+        cancel poll, so this is declared explicitly. Records the call (with whether a chunk emitter
+        and a cancel poll were supplied) and returns a canned terminal summary.
         """
         self.calls.append(
-            ("start_decompile_stream", {**params, "_emit_chunk": emit_chunk is not None})
+            (
+                "start_decompile_stream",
+                {
+                    **params,
+                    "_emit_chunk": emit_chunk is not None,
+                    "_poll_cancel": poll_cancel is not None,
+                },
+            )
         )
         return {"total": 0, "truncated": False, "done": True}
 

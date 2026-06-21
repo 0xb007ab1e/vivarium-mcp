@@ -549,9 +549,9 @@ def test_adapter_fetch_propagates_bola_denial() -> None:
 
 
 def test_cancel_job_best_effort_worker_signal_never_fails_the_cancel() -> None:
-    # cancel_job's server-side state change is authoritative; a best-effort cancel_stream send must
+    # cancel_job's server-side state change is authoritative; a best-effort $/cancel send must
     # never make the cancel raise. With a wired manager + a registered (socketpair) worker, the
-    # cancel returns the terminal status even though no one reads the cancel_stream frame.
+    # cancel returns the terminal status even though no one reads the $/cancel frame.
     srv, wrk = socket.socketpair(socket.AF_UNIX)
     worker = _FakeWorker()
     # A tiny buffer so the (larger) producer pauses non-terminal: the job is still cancelable.
@@ -568,8 +568,10 @@ def test_cancel_job_best_effort_worker_signal_never_fails_the_cancel() -> None:
         stream_jobs=mgr,
     )
     adapter.start_worker(_SID)
-    # Force a connected socket so cancel_job's best-effort cancel_stream has somewhere to write.
+    # Force a connected socket so cancel_job's best-effort $/cancel has somewhere to write, and an
+    # in-flight stream id to target (set as the streaming generator would).
     adapter._ensure_connected(adapter._sessions[_SID])
+    adapter._sessions[_SID].active_stream_id = "stream-1"
     job_id = mgr.start_job(_SID, producer=_producer(50), total=50, caller=_CALLER)
     cancelled = adapter.cancel_job(
         _SID, JobHandleIn(session_id=_SID, job_id=job_id), caller=_CALLER
@@ -577,3 +579,96 @@ def test_cancel_job_best_effort_worker_signal_never_fails_the_cancel() -> None:
     assert cancelled.state is JobState.CANCELLED
     wrk.close()
     srv.close()
+
+
+def test_cancel_job_sends_a_well_formed_cancel_for_the_active_stream_id() -> None:
+    """cancel_job emits a $/cancel notification targeting the in-flight stream id (ADR-041)."""
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    mgr = StreamingJobManager(
+        authorize=lambda _s, _c: None, limits=Limits(max_stream_buffer_chunks=2)
+    )
+    adapter = _ConnectedAdapter(
+        server_sock=srv,
+        launcher=lambda sid, path: worker,
+        socket_dir="/tmp/vivarium-test",  # noqa: S108  # test-only path
+        tool_timeout_s=2.0,
+        analysis_timeout_s=2.0,
+        max_response_bytes=_CAP,
+        stream_jobs=mgr,
+    )
+    adapter.start_worker(_SID)
+    adapter._ensure_connected(adapter._sessions[_SID])
+    adapter._sessions[_SID].active_stream_id = "rid-42"
+    job_id = mgr.start_job(_SID, producer=_producer(50), total=50, caller=_CALLER)
+
+    adapter.cancel_job(_SID, JobHandleIn(session_id=_SID, job_id=job_id), caller=_CALLER)
+
+    # The worker end should now have exactly one framed $/cancel targeting the active stream id.
+    wrk.settimeout(2.0)
+    frame = _read_request(wrk)
+    assert f.is_cancel_notification(frame)
+    cancel = f.parse_cancel(frame, expected_id="rid-42")
+    assert cancel.request_id == "rid-42"
+    wrk.close()
+    srv.close()
+
+
+def test_cancel_job_sends_nothing_when_no_active_stream() -> None:
+    """With no in-flight stream id, cancel_job sends NO $/cancel (nothing to target — a no-op)."""
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    mgr = StreamingJobManager(
+        authorize=lambda _s, _c: None, limits=Limits(max_stream_buffer_chunks=2)
+    )
+    adapter = _ConnectedAdapter(
+        server_sock=srv,
+        launcher=lambda sid, path: worker,
+        socket_dir="/tmp/vivarium-test",  # noqa: S108  # test-only path
+        tool_timeout_s=2.0,
+        analysis_timeout_s=2.0,
+        max_response_bytes=_CAP,
+        stream_jobs=mgr,
+    )
+    adapter.start_worker(_SID)
+    adapter._ensure_connected(adapter._sessions[_SID])
+    # active_stream_id stays None (its default) — the stream already finished / never produced.
+    job_id = mgr.start_job(_SID, producer=_producer(50), total=50, caller=_CALLER)
+
+    cancelled = adapter.cancel_job(
+        _SID, JobHandleIn(session_id=_SID, job_id=job_id), caller=_CALLER
+    )
+    assert cancelled.state is JobState.CANCELLED
+    # Nothing was written server→worker: a non-blocking recv on the worker end sees no data.
+    wrk.setblocking(False)
+    with pytest.raises(BlockingIOError):
+        wrk.recv(64)
+    wrk.close()
+    srv.close()
+
+
+def test_decompile_stream_sets_and_clears_active_stream_id() -> None:
+    """The streaming generator tracks the in-flight id so cancel_job can target it (ADR-041)."""
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+    seen: dict[str, Any] = {}
+
+    def _serve() -> None:
+        req = _read_request(wrk)
+        seen["id"] = req["id"]
+        _send_frame(wrk, f.build_chunk(req["id"], 0, "function", _chunk_payload(0)))
+        _send_frame(wrk, {"jsonrpc": "2.0", "id": req["id"], "result": {"total": 1, "done": True}})
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    it = adapter.decompile_stream(_SID, DecompileStreamIn(session_id=_SID, limit=1))
+    # First next() sends the RPC + records the active id, then yields the first chunk.
+    first = next(it)
+    assert first.address == f"0x{0x00401000:08x}"
+    assert adapter._sessions[_SID].active_stream_id == seen["id"]
+    # Drain to completion → the finally clears the active id.
+    list(it)
+    t.join(timeout=3)
+    assert adapter._sessions[_SID].active_stream_id is None
+    wrk.close()

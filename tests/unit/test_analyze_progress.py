@@ -774,6 +774,9 @@ class _RecordingConn:
     def recv(self, _n: int) -> bytes:  # part of the _Conn protocol; unused by the emitter
         return b""
 
+    def fileno(self) -> int:  # part of the _Conn protocol; unused by the progress emitter
+        return -1
+
 
 class _RaisingConn:
     """A ``_Conn`` fake whose ``sendall`` always raises ``OSError`` (transient socket error)."""
@@ -783,6 +786,9 @@ class _RaisingConn:
 
     def recv(self, _n: int) -> bytes:  # part of the _Conn protocol; unused by the emitter
         return b""
+
+    def fileno(self) -> int:  # part of the _Conn protocol; unused by the progress emitter
+        return -1
 
 
 @pytest.mark.parametrize(

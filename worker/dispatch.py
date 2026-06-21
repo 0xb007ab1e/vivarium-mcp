@@ -22,6 +22,7 @@ Security:
 
 from __future__ import annotations
 
+import select
 import time
 from collections.abc import Callable
 from typing import Any, Protocol
@@ -40,6 +41,13 @@ ProgressEmitter = Callable[[int | None, str], None]
 #: terminal response. ``payload`` is the plain (un-enveloped) unit — the server envelopes on
 #: receipt; the worker never envelopes (rpc-protocol.md §4).
 ChunkEmitter = Callable[[int, str, dict[str, Any]], None]
+
+#: A worker-side cancel predicate: ``poll_cancel()`` returns ``True`` once a ``$/cancel``
+#: notification for the in-flight streaming call has been observed (ADR-041). The dispatch builds
+#: it bound to the session ``conn`` (a non-blocking poll); the JVM backend consults it BETWEEN
+#: functions and stops production at the next boundary. The backend never touches the socket — it
+#: only calls this plain callable (ADR-001 boundary: dispatch owns ``conn``).
+CancelPoll = Callable[[], bool]
 
 #: Worker-side minimum spacing between EMITTED progress frames (ADR-030 Phase 1). The worker
 #: coalesces (drops) progress callbacks arriving sooner than this so a Ghidra ``TaskMonitor`` that
@@ -122,10 +130,11 @@ RPC_METHODS = frozenset(
         "export_annotations",
         # streaming bulk decompile (v1.x — ADR-040 Phase 2; worker-only, read-only/output-only per
         # ADR-001). ``start_decompile_stream`` is the long call that emits one ``$/chunk`` per
-        # decompiled function then a terminal ``{total, truncated, done}`` response;
-        # ``cancel_stream`` is its idempotent control hook to request the in-flight stream stop.
+        # decompiled function then a terminal ``{total, truncated, done}`` response. It is aborted
+        # mid-stream by the server→worker ``$/cancel`` control NOTIFICATION (ADR-041) the worker
+        # polls for between functions — NOT a ``cancel_stream`` request method (ADR-041 superseded
+        # it: a request would interleave a second request/response pair onto the streaming socket).
         "start_decompile_stream",
-        "cancel_stream",
         "ping",
         "shutdown",
     }
@@ -345,7 +354,11 @@ class GhidraBackend(Protocol):
 
     # --- streaming bulk decompile (v1.x — ADR-040 Phase 2; emits $/chunk per function) ---
     def start_decompile_stream(
-        self, params: dict[str, Any], *, emit_chunk: ChunkEmitter | None = None
+        self,
+        params: dict[str, Any],
+        *,
+        emit_chunk: ChunkEmitter | None = None,
+        poll_cancel: CancelPoll | None = None,
     ) -> dict[str, Any]:
         """Stream a bounded bulk decompile, emitting one ``$/chunk`` per function — v1.x / ADR-040.
 
@@ -355,17 +368,13 @@ class GhidraBackend(Protocol):
         emitter). Returns a plain terminal ``{"total": int, "truncated": bool, "done": True}``
         AFTER the last chunk. Read-only/output-only (ADR-001). When ``emit_chunk`` is ``None`` (a
         fake/no-emitter path) the backend still produces no chunks — only the terminal summary.
-        """
-        ...
 
-    def cancel_stream(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Request the in-flight streaming call for ``params.id`` stop early — v1.x / ADR-040.
-
-        Idempotent control hook (rpc-protocol.md §4): sets a per-stream cancel flag the streaming
-        backend checks BETWEEN functions so a client that has seen enough frees worker capacity
-        without waiting for the per-call deadline. Returns ``{"cancelled": bool}``. (In the
-        synchronous single-connection worker the operative early-free is the server SIGKILL on
-        ``cancel_job``; this flag is the contract-complete hook + future async-loop path.)
+        ``poll_cancel`` (ADR-041) is a dispatch-supplied predicate the backend consults BETWEEN
+        functions: a non-blocking check for a ``$/cancel`` notification on the session socket. When
+        it returns ``True`` the stream ends early at the next function boundary (the terminal
+        summary reports the produced count). The backend calls a plain callable only — it NEVER
+        touches the socket (ADR-001: dispatch owns ``conn``, the JVM backend owns Ghidra). When
+        ``None`` (a fake/no-poll path) the stream runs to completion as before.
         """
         ...
 
@@ -377,6 +386,7 @@ def dispatch(
     *,
     emit_progress: ProgressEmitter | None = None,
     emit_chunk: ChunkEmitter | None = None,
+    poll_cancel: CancelPoll | None = None,
 ) -> dict[str, Any]:
     """Route one validated request to the backend; control methods are handled here.
 
@@ -385,10 +395,11 @@ def dispatch(
 
     The ``emit_progress`` callable (built by the loop, bound to the session socket) is forwarded to
     ``analyze`` ONLY when the request opted in (ADR-030 Phase 1: ``params["progress"]`` truthy). The
-    ``emit_chunk`` callable (also socket-bound) is forwarded to ``start_decompile_stream`` so it can
-    stream one ``$/chunk`` per function BEFORE its terminal response (ADR-040 Phase 2). For every
-    other method — and for an ``analyze`` that did NOT opt in — the backend is called exactly as
-    before (no emitter), so the default path is byte-for-byte unchanged.
+    ``emit_chunk`` callable (also socket-bound) and the ``poll_cancel`` predicate (ADR-041) are
+    forwarded to ``start_decompile_stream`` so it can stream one ``$/chunk`` per function BEFORE its
+    terminal response and stop early when a ``$/cancel`` notification arrives. For every other
+    method — and for an ``analyze`` that did NOT opt in — the backend is called exactly as before
+    (no emitter), so the default path is byte-for-byte unchanged.
 
     Args:
         backend: The JVM-touching backend.
@@ -396,6 +407,7 @@ def dispatch(
         params: The request parameters.
         emit_progress: The socket-bound progress emitter from the loop, or ``None``.
         emit_chunk: The socket-bound partial-result emitter from the loop, or ``None``.
+        poll_cancel: The socket-bound cancel predicate from the loop (ADR-041), or ``None``.
 
     Returns:
         The backend's plain result dict (or ``{"ok": true}`` for ``ping``).
@@ -419,8 +431,12 @@ def dispatch(
     if method == "start_decompile_stream":
         # Streaming bulk decompile: thread the socket-bound chunk emitter so the backend streams one
         # $/chunk per function BEFORE the terminal {total, truncated, done} response (ADR-040
-        # Phase 2). Keyword-only so a fake backend that ignores it still satisfies the contract.
-        streamed: dict[str, Any] = backend.start_decompile_stream(params, emit_chunk=emit_chunk)
+        # Phase 2), and the poll_cancel predicate so it stops at the next function boundary on a
+        # $/cancel notification (ADR-041). Keyword-only so a fake backend that ignores either still
+        # satisfies the contract.
+        streamed: dict[str, Any] = backend.start_decompile_stream(
+            params, emit_chunk=emit_chunk, poll_cancel=poll_cancel
+        )
         return streamed
     result: dict[str, Any] = handler(params)  # narrow the dynamic getattr result to the contract
     return result
@@ -511,21 +527,24 @@ def handle_request(
     *,
     emit_progress: ProgressEmitter | None = None,
     emit_chunk: ChunkEmitter | None = None,
+    poll_cancel: CancelPoll | None = None,
 ) -> dict[str, Any]:
     """Validate one decoded request and produce its response (success or error).
 
     Pure of socket I/O for the request/response itself (it returns the response object the loop
-    frames); the optional ``emit_progress`` / ``emit_chunk`` (built by the loop, bound to the
-    session socket) are the only side-effecting collaborators — forwarded to :func:`dispatch` so an
-    opted-in ``analyze`` can stream bounded ``$/progress`` frames (ADR-030 Phase 1) and
-    ``start_decompile_stream`` can stream ``$/chunk`` frames (ADR-040 Phase 2) BEFORE this response.
-    ``None`` (the default, and every other call) leaves the path byte-for-byte unchanged.
+    frames); the optional ``emit_progress`` / ``emit_chunk`` / ``poll_cancel`` (built by the loop,
+    bound to the session socket) are the only side-effecting collaborators — forwarded to
+    :func:`dispatch` so an opted-in ``analyze`` can stream bounded ``$/progress`` frames (ADR-030
+    Phase 1) and ``start_decompile_stream`` can stream ``$/chunk`` frames (ADR-040 Phase 2) BEFORE
+    this response and stop early on a ``$/cancel`` (ADR-041). ``None`` (the default, and every other
+    call) leaves the path byte-for-byte unchanged.
 
     Args:
         backend: The JVM-touching backend.
         obj: The decoded JSON-RPC request object.
         emit_progress: The socket-bound progress emitter from the loop, or ``None``.
         emit_chunk: The socket-bound partial-result emitter from the loop, or ``None``.
+        poll_cancel: The socket-bound cancel predicate from the loop (ADR-041), or ``None``.
 
     Returns:
         The JSON-RPC response object to frame and send.
@@ -541,12 +560,26 @@ def handle_request(
         return build_error(request_id, CODE_INVALID_PARAMS, "params must be an object")
     try:
         result = dispatch(
-            backend, method, params, emit_progress=emit_progress, emit_chunk=emit_chunk
+            backend,
+            method,
+            params,
+            emit_progress=emit_progress,
+            emit_chunk=emit_chunk,
+            poll_cancel=poll_cancel,
         )
     except WorkerError as exc:
         # exc.detail (when set) is the redacted, log-only ADR-024 ``data.detail`` — the server logs
         # it under a correlation id; it never reaches the client envelope. Default None ⇒ no detail.
         return build_error(request_id, exc.code, exc.safe_message, detail=exc.detail)
+    except (FramingError, RpcProtocolError, EOFError):
+        # A wire-protocol/transport violation surfaced by the ADR-041 cancel poll (a non-$/cancel/
+        # malformed/oversized frame, or a closed socket mid-frame, on the streaming socket — §6).
+        # This is NOT a recoverable method error: it must propagate so ``serve_connection`` closes
+        # the connection → kill + evict, exactly like a bad frame on the request read. Re-raise
+        # BEFORE the generic Exception catch so it is not masked as a benign ``internal-error``
+        # response (fail closed). (A select-level OSError is already converted to FramingError in
+        # the poll, so it is covered here too.)
+        raise
     except Exception as exc:
         # The client-facing message stays generic (no host/JVM detail crosses to the client).
         # The optional, redacted ``data.detail`` (class name + fixed template, NOT str(exc)) lets
@@ -571,7 +604,12 @@ def is_shutdown(obj: dict[str, Any]) -> bool:
 
 
 class _Conn(Protocol):
-    """The minimal stream-socket surface the serve loop needs (recv/sendall)."""
+    """The minimal stream-socket surface the serve loop needs.
+
+    ``recv``/``sendall`` carry the request/response + notification frames; ``fileno`` exposes the
+    underlying descriptor for the non-blocking ``select`` the ADR-041 cancel poll uses to check
+    whether a ``$/cancel`` frame is readable WITHOUT blocking the streaming producer.
+    """
 
     def recv(self, bufsize: int) -> bytes:
         """Receive up to ``bufsize`` bytes."""
@@ -579,6 +617,10 @@ class _Conn(Protocol):
 
     def sendall(self, data: bytes) -> None:
         """Send all of ``data``."""
+        ...
+
+    def fileno(self) -> int:
+        """Return the underlying file descriptor (for a non-blocking ``select`` readiness check)."""
         ...
 
 
@@ -706,6 +748,70 @@ def _make_chunk_emitter(conn: _Conn, request_id: str, *, max_frame_bytes: int) -
     return emit_chunk
 
 
+def _make_cancel_poll(conn: _Conn, request_id: str, *, max_frame_bytes: int) -> CancelPoll:
+    """Build a non-blocking ``$/cancel`` poll for one streaming request (ADR-041).
+
+    The returned ``poll_cancel()`` is consulted by the streaming backend BETWEEN functions. It does
+    a **non-blocking** ``select`` on ``conn``; if nothing is readable it returns ``False`` at once
+    (the common case — negligible per-boundary cost, ADR-041 D2). If the socket IS readable it reads
+    **exactly one** framed control notification (subject to the shared §3 size cap) and:
+
+    - a ``$/cancel`` for THIS ``request_id`` → ``True`` (and it stays ``True`` thereafter — the
+      cancel latches so a later boundary need not re-read);
+    - a ``$/cancel`` for an unknown/other id → ``False`` (a safe no-op — ADR-041 D6);
+    - **anything else** on the stream socket server→worker (a non-``$/cancel`` frame, a malformed/
+      oversized frame, or a closed socket) → a §6 protocol violation: the exception propagates, the
+      streaming call aborts, and ``serve_connection`` returns so the worker exits and is evicted
+      (kill + evict — the universal failure handler, ADR-041 D4).
+
+    Non-blocking guarantee (ADR-041 D4): the producer is only ever made to read once ``select``
+    reports the socket readable, and then for at most one small control frame. A ``$/cancel`` is a
+    tiny (~60-byte) frame, so once any of it is readable the whole frame is realistically already in
+    the kernel buffer; the bounded ``read_frame`` completes it without meaningfully blocking. A
+    truly partial frame (only the prefix readable, no body yet) is the pathological case — it would
+    block for the few remaining bytes of one tiny frame; the §3 cap bounds the read, and a peer that
+    declares a body it never sends trips the kill-on-deadline backstop (§6).
+
+    Args:
+        conn: The session connection to poll (dispatch owns it; the backend never sees it).
+        request_id: The id of the in-flight streaming request a ``$/cancel`` must correlate to.
+        max_frame_bytes: Hard frame cap (shared §3 cap; bounds the one control-frame read).
+
+    Returns:
+        A ``poll_cancel() -> bool`` predicate (latches ``True`` once this stream is cancelled).
+    """
+    state = {"cancelled": False}  # type: dict[str, bool]
+
+    def poll_cancel() -> bool:
+        if state["cancelled"]:
+            return True  # latched: a prior boundary already saw the cancel
+        # Non-blocking readiness check: 0 timeout → return immediately. If the socket is not
+        # readable there is no pending control frame, so there is nothing to cancel right now.
+        try:
+            readable, _, _ = select.select([conn.fileno()], [], [], 0)
+        except (OSError, ValueError):
+            # A closed/invalid descriptor surfaced as a select error: treat as a transport failure
+            # → let the streaming path end (the loop returns; the server evicts).
+            raise FramingError("cancel poll: socket select failed") from None
+        if not readable:
+            return False
+        # Readable: read exactly one framed control notification. read_frame enforces the §3 cap and
+        # raises FramingError/RpcProtocolError/EOFError on a bad/oversized/closed frame — those are
+        # §6 protocol violations that propagate to serve_connection (kill + evict).
+        frame = read_frame(conn, max_frame_bytes=max_frame_bytes)
+        if not rpc_framing.is_cancel_notification(frame):
+            # Any non-$/cancel frame on the stream socket server→worker is a protocol violation
+            # (only $/cancel is valid here mid-stream) → fail closed (ADR-041 D4).
+            raise RpcProtocolError("unexpected non-$/cancel frame on the streaming socket")
+        cancel = rpc_framing.parse_cancel(frame, expected_id=request_id)
+        if cancel.request_id == request_id:
+            state["cancelled"] = True
+            return True
+        return False  # a cancel for an unknown/other id is a safe no-op (ADR-041 D6)
+
+    return poll_cancel
+
+
 def serve_connection(conn: _Conn, backend: GhidraBackend, *, max_frame_bytes: int) -> None:
     """Serve requests on one accepted connection until shutdown/EOF/protocol error.
 
@@ -715,9 +821,10 @@ def serve_connection(conn: _Conn, backend: GhidraBackend, *, max_frame_bytes: in
 
     For an opted-in ``analyze`` (ADR-030 Phase 1) a per-request, socket-bound progress emitter is
     built and threaded through :func:`handle_request`; for ``start_decompile_stream`` (ADR-040
-    Phase 2) a socket-bound chunk emitter is built instead. The backend calls the relevant emitter
-    to stream bounded ``$/progress`` / ``$/chunk`` frames BEFORE the response. Every other request
-    path is unchanged.
+    Phase 2) a socket-bound chunk emitter AND a non-blocking ``$/cancel`` poll (ADR-041) are built
+    instead. The backend calls the relevant emitter to stream bounded ``$/progress`` / ``$/chunk``
+    frames BEFORE the response, and consults the poll between functions to stop early on a cancel.
+    Every other request path is unchanged.
 
     Args:
         conn: The accepted stream connection.
@@ -731,6 +838,7 @@ def serve_connection(conn: _Conn, backend: GhidraBackend, *, max_frame_bytes: in
             return  # close the connection; worker will exit and be evicted by the server
         emitter: ProgressEmitter | None = None
         chunk_emitter: ChunkEmitter | None = None
+        cancel_poll: CancelPoll | None = None
         method = obj.get("method")
         request_id = obj.get("id")
         if method == "analyze" and isinstance(request_id, str):
@@ -740,7 +848,22 @@ def serve_connection(conn: _Conn, backend: GhidraBackend, *, max_frame_bytes: in
             emitter = _make_progress_emitter(conn, request_id, max_frame_bytes=max_frame_bytes)
         elif method == "start_decompile_stream" and isinstance(request_id, str):
             chunk_emitter = _make_chunk_emitter(conn, request_id, max_frame_bytes=max_frame_bytes)
-        response = handle_request(backend, obj, emit_progress=emitter, emit_chunk=chunk_emitter)
+            # ADR-041: the poll reads from the SAME conn between functions; only this streaming call
+            # is in flight, so the socket carries nothing but a possible $/cancel until it returns.
+            cancel_poll = _make_cancel_poll(conn, request_id, max_frame_bytes=max_frame_bytes)
+        try:
+            response = handle_request(
+                backend,
+                obj,
+                emit_progress=emitter,
+                emit_chunk=chunk_emitter,
+                poll_cancel=cancel_poll,
+            )
+        except (FramingError, RpcProtocolError, EOFError, OSError):
+            # A protocol/transport violation surfaced by the cancel poll mid-stream (ADR-041 D4):
+            # close the connection so the worker exits and is evicted (kill + evict). This mirrors
+            # the read_frame guard above for a bad frame on the streaming socket.
+            return
         try:
             frame = rpc_framing.encode_frame(response, max_frame_bytes=max_frame_bytes)
             conn.sendall(frame)
