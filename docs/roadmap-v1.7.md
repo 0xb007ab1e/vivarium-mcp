@@ -8,17 +8,26 @@
 
 ## Status
 
-**Candidate backlog, not committed scope.** v1.6 shipped (released as **v0.8.0**, 2026-06-19): the
-ADR-037 JVM heap-OOM → `resource-exhausted` reclassification + memory-sizing hint, the fully-offline
-vendored-Semgrep SAST gate, and the tool-catalog prose fix.
+**Committed headline: ADR-042 Function ID (Phase 1).** Since v1.6 (v0.8.0) two increments shipped
+out-of-band: **v0.9.0** (the `ghidra-mcp → Vivarium` rename, ADR-038) and **v0.10.0** (streaming
+partial results + mid-stream cancellation, ADR-040/041, catalog 51 → 55, acceptance-green). With the
+streaming work done, the v0.10.0 functional-gap review picked the next headline: **library-function
+identification via Ghidra FunctionID** (ADR-042) — the highest-leverage *new* capability for the core
+naming workflow: auto-label known library code so the LLM focuses on the actual program.
 
-**The substantive backlog is genuinely thin, and that is the headline.** A blind-binary acceptance run
-against the released **v0.8.0** (below) was **clean end-to-end** — the read chain, the gated write
-path, annotation export, and the store-wipe all work on the real worker with no regressions. The big
-findings from earlier runs were already driven into v1.3–v1.6. What remains is **deferred-pending-a-real-need**
-(incremental analysis, import progress), **infra-gated** (self-hosted gVisor runner), or **minor
-polish** (the two items the v0.8.0 run surfaced). This roadmap records that honestly rather than
-manufacturing scope.
+**Scope is phased on an SME finding (see ADR-042).** Ghidra ships FID databases for **MSVC/Windows
+only**; ELF coverage (libc/OpenSSL/zlib) means **generating our own `.fidb`** at build time, which
+carries two unverified blockers (headless custom-DB activation API; licensing of a copyleft-derived
+DB). So v1.7 commits **Phase 1 only** — a read-only `identify_functions` tool surfacing the matches
+Ghidra's already-running analyzer produces from the bundled MSVC DBs (zero custom DBs, zero licensing
+exposure, additive contract 55 → 56). **Phase 2** (ELF DBs) stays **deferred behind SPIKE-1 + SPIKE-2**
+with its own ADR/ratification.
+
+**The rest of the backlog remains genuinely thin.** A blind-binary acceptance run against **v0.8.0**
+(below) was clean end-to-end; the big findings from earlier runs were already driven into v1.3–v1.6.
+What remains beyond the FID headline is **deferred-pending-a-real-need** (incremental analysis, import
+progress), **infra-gated** (self-hosted gVisor runner), or **minor polish** (folded into v1.7). This
+roadmap records that honestly rather than manufacturing scope.
 
 > Promotion path unchanged: **design ADR → human ratification → implement (isolated worktree) →
 > `sdlc-reviewer` security pass → CI green → gated merge.** Pre-1.0: items are additive/opt-in unless
@@ -40,14 +49,37 @@ functions) via the real hardened worker (crun):
 
 | # | Item | Area | Contract / TB impact | Expected bump | Source |
 |---|------|------|----------------------|---------------|--------|
-| 1 | **Self-hosted gVisor runner** for per-PR isolation acceptance (ADR-004 / `verify-isolation.sh`) | Infra / CI | none | minor | carry-forward (ADR-028 §D3); the one real CI gap |
+| 1 | **FID Phase 1 — `identify_functions`** (read-only; bundled MSVC DBs) | Capability (headline) | additive (catalog 55 → 56; new untrusted output path) | minor | **ADR-042** |
 | 2 | **Export `binary.name` / `binary.size` population** in the annotation document | Persistence / polish | additive (doc fields) | patch | v0.8.0 acceptance run |
-| 3 | **Minor polish / maintenance** (origin-tagging doc note; pyelftools `eval` extra; ADR-022 deeper eval) | Docs / maint | none | patch | v0.8.0 run + v1.6 carry-forward |
-| 4 | Carry-forward **deferred** (gates restated): incremental analysis · `session_import` progress | — | — | — | v1.5/v1.6 deferrals |
+| 3 | **Echo effective analysis profile** (`light`/`deep`) in `SessionInfo` | Observability / polish | additive (doc field) | patch | v0.10.0 gap review (ADR-029 §Negative) |
+| 4 | **Minor polish / maintenance** (origin-tagging doc note; pyelftools `eval` extra; ADR-022 deeper eval) | Docs / maint | none | patch | v0.8.0 run + v1.6 carry-forward |
+| 5 | **Self-hosted gVisor runner** for per-PR isolation acceptance (ADR-004 / `verify-isolation.sh`) | Infra / CI | none | minor | carry-forward (ADR-028 §D3); the one real CI gap — still deferred |
+| 6 | Carry-forward **deferred** (gates restated): incremental analysis · `session_import` progress · **FID Phase 2 (ELF DBs)** behind SPIKE-1/2 | — | — | — | v1.5/v1.6 deferrals + ADR-042 |
 
 ---
 
-## 1. Self-hosted gVisor runner for isolation acceptance (the one real CI gap)
+## 1. FID Phase 1 — `identify_functions` (the v1.7 headline)
+
+**What.** A new **read-only** Tier-1 tool, `identify_functions(session)`, that surfaces the
+library-function matches Ghidra's **Function ID** analyzer already produces — initially from the
+**MSVC runtime DBs Ghidra bundles** (Windows/PE targets). Each match returns the function address, the
+matched **library name/version** and **function name** (both in the **ADR-005 untrusted envelope**),
+and **match-quality metadata** (full- vs. specific-hash, relation-corroborated, multiplicity), bounded
+with a `truncated` flag. It is a **hint surface** — no rename, no auto-action (LLM09 overreliance).
+
+**Why.** Auto-identifying known library code collapses the bulk of unknown-symbol noise so the client
+LLM spends inference on the functions that are the actual program — the single highest-leverage gap
+from the v0.10.0 review. Catalog **55 → 56**; additive contract (minor bump + threat-model note for
+the new untrusted-output path and the FID-DB-as-trusted-input supply-chain edge).
+
+**Scope boundary (see [ADR-042](adr/ADR-042-function-id-signature-identification.md)).** Phase 1 ships
+**only** the MSVC-DB read path (zero custom DBs, zero licensing exposure). **Run SPIKE-0** first
+(confirm the analyzer + bundled DBs are active/readable headlessly on the 12.1.2 worker — likely a
+no-op, verify via the ADR-028 harness). The **`apply_signatures` write tool is deferred** (D2). **ELF
+DB generation (Phase 2) is deferred** behind **SPIKE-1** (headless custom-`.fidb` activation API) +
+**SPIKE-2** (licensing of a glibc/OpenSSL-derived DB — needs counsel), with its own ADR.
+
+## 5. Self-hosted gVisor runner for isolation acceptance (the one real CI gap — still deferred)
 
 **What.** ADR-004's runtime isolation acceptance (`deploy/verify-isolation.sh`: `--runtime runsc`,
 no-net, caps-dropped, read-only rootfs) currently **cannot run in CI** — GitHub-hosted runners have no
@@ -76,7 +108,16 @@ the server already holds — no binary parse) makes the document more self-descr
 fields; confirm against the frozen annotation-document contract (likely a no-op additive change, but
 check). Pairs with a quick test that export carries them.
 
-## 3. Minor polish / maintenance
+## 3. Echo the effective analysis profile in `SessionInfo`
+
+**What.** The analysis profile (`light`/`deep`, ADR-029) is applied but **not echoed** in results, so
+the operator can't see which one ran. Surface the effective profile in `SessionInfo` (additive doc
+field) for honesty/observability.
+
+**Why.** Cheap, additive, and removes a small "which profile did I get?" ambiguity flagged in the
+v0.10.0 gap review (ADR-029 §Negative). Pairs with a test asserting the field round-trips.
+
+## 4. Minor polish / maintenance
 
 - **Untrusted-origin doc note (Info).** The exported user-supplied `new_name` is tagged
   `origin: "binary-derived"`. This is *defensible* — on export the name is read back from the hostile
@@ -90,11 +131,16 @@ check). Pairs with a quick test that export carries them.
   coverage-guided equivalence remain out of scope; revisit if the advisory naming/equivalence eval
   becomes a gating signal.
 
-## 4. Carry-forward deferrals (gates restated)
+## 6. Carry-forward deferrals (gates restated)
 
+- **FID Phase 2 — ELF FID DBs (ADR-042, deferred).** Build-time generation + bundling of libc/OpenSSL/
+  zlib `.fidb` for Linux targets. Gated on **SPIKE-1** (headless custom-`.fidb` activation API,
+  `FidFileManager`/`FidService` — Ghidra normally requires GUI attach+activate) and **SPIKE-2**
+  (licensing of a copyleft/OpenSSL-derived DB — counsel sign-off). Generate from **permissively-licensed
+  pinned sources only** until cleared; provenance per DB + SBOM; own ADR/ratification before build.
 - **Incremental / lazy analysis (ADR-029 §D5).** Still deferred. The v1.5 #5 measurement spike
   confirmed the large-binary blocker is **peak memory**, which is **configurable** (ADR-023
-  `GHIDRA_MCP_WORKER_MEM_MIB`) — raising the cap converted a fast OOM into a stable analysis. Incremental
+  `VIVARIUM_WORKER_MEM_MIB`) — raising the cap converted a fast OOM into a stable analysis. Incremental
   analysis lowers *peak* memory, so it is justified **only** for **memory-capped hosts that cannot add
   RAM** *and* must analyze very large binaries. First levers stay: raise the cap, use `profile=light`.
 - **`session_import` progress (ADR-030 deferred).** Still deferred: `pyghidra.open_program` exposes no
