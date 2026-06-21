@@ -225,6 +225,7 @@ jobs:
     permissions:
       contents: write          # push the bump branch.
       pull-requests: write     # open the PR.
+      actions: write           # workflow_dispatch ci.yml to run required checks on the bot PR.
     steps:
       - name: Checkout (default branch)
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # actions/checkout@v6.0.3
@@ -272,6 +273,12 @@ jobs:
           cosign-signed worker image from this release's worker-image run. Merging advances what
           live-regression's default verify-and-pull path trusts.
 
-          Note: PRs opened by \`GITHUB_TOKEN\` do not auto-trigger \`pull_request\` workflows, so
-          you may need to re-run/trigger required checks (e.g. an empty commit or close+reopen)
-          before merging."
+          Required checks are auto-triggered on this branch via \`workflow_dispatch\` (a
+          \`GITHUB_TOKEN\`-opened PR does not auto-run \`pull_request\` CI), so no maintainer reopen
+          is needed — just review the digest and merge once green."
+          # A PR opened with GITHUB_TOKEN does NOT auto-run pull_request CI (GitHub loop-prevention),
+          # so trigger the required checks on the branch via workflow_dispatch — which DOES fire even
+          # under GITHUB_TOKEN (the documented exception). The dispatched ci.yml run posts the same
+          # named check-runs onto the branch head SHA, satisfying branch-protection required checks
+          # without a manual close+reopen. Needs the job's actions:write permission (above).
+          gh workflow run ci.yml --ref "${BRANCH}"

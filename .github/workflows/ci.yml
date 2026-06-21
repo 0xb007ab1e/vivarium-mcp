@@ -8,6 +8,12 @@
 name: ci
 
 on:
+  # Manually/programmatically dispatchable so the worker-image `propose-pin-bump` job can trigger
+  # these required checks on its own PR branch: a PR opened with the default GITHUB_TOKEN does NOT
+  # auto-run `pull_request` workflows (GitHub loop-prevention), but `workflow_dispatch` DOES fire
+  # even when invoked with GITHUB_TOKEN (the documented exception). The dispatched run posts the
+  # same named check-runs onto the branch head SHA, satisfying branch-protection required checks.
+  workflow_dispatch:
   pull_request:
   push:
     branches: [main]
