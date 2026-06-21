@@ -13,9 +13,11 @@ and marked as untrusted before it reaches the model.
 The name fits the design: a vivarium is a sealed enclosure where you can safely keep and observe a live
 specimen. Here the specimen is an untrusted binary.
 
-> Current release: **v0.9.0** (2026-06-19). This release renames the project from `ghidra-mcp` to
-> Vivarium; what the tools do is unchanged. See the [CHANGELOG](./CHANGELOG.md) for details. Vivarium is
-> pre-1.0, so the tool set and internal contracts may still change before 1.0.
+> Current release: **v0.10.0** (2026-06-21). This release adds **streaming partial results** — the worker
+> emits decompiled functions as it produces them, and a client can pull early results (and cancel a run
+> mid-stream) instead of waiting for the whole job; four new tools, catalog 51 → 55. See the
+> [CHANGELOG](./CHANGELOG.md) for details. Vivarium is pre-1.0, so the tool set and internal contracts may
+> still change before 1.0.
 
 ## What it can do
 
@@ -24,13 +26,16 @@ specimen. Here the specimen is an untrusted binary.
   bytes or strings. Every read tool takes size and count limits so a response cannot grow without bound.
 - **Summarize and measure.** Report cyclomatic complexity, code and data coverage, a call-graph summary,
   scan for indicators of compromise and common crypto constants, and produce a whole-program summary.
+- **Stream results as they're produced.** Start a bulk decompile as a job and pull partial results by
+  cursor while extraction continues — so an LLM can begin reasoning over early functions — and cancel the
+  run mid-stream when you have enough.
 - **Suggest names.** Helper tools support a client-driven workflow for proposing human-readable function
   names from the decompiled code.
 - **Make changes, only with consent.** Renaming functions and symbols, setting comments, applying or
   defining data types, and similar edits are off by default. A session must explicitly enable writes
   before any change is allowed, and edits can be exported and re-imported as a portable annotation file.
 
-There are 51 tools in total. The full list, with the inputs and outputs for each, is in
+There are 55 tools in total. The full list, with the inputs and outputs for each, is in
 [`docs/contracts/tool-catalog.md`](./docs/contracts/tool-catalog.md).
 
 ## How it works
@@ -86,7 +91,7 @@ The full design rationale is in the decision records under [`docs/adr/`](./docs/
   SQLite binary](./docs/examples/blind-analysis-sqlite.md) compared against the original source.
 - [`docs/runbooks/`](./docs/runbooks/): operational procedures (deploy, rollback, incident response, and
   more), including [HTTP exposure](./docs/runbooks/http-exposure.md).
-- [`docs/adr/`](./docs/adr/): the numbered design decisions (ADR-001 through ADR-038).
+- [`docs/adr/`](./docs/adr/): the numbered design decisions (ADR-001 through ADR-041).
 - [`SECURITY.md`](./SECURITY.md): how to report a vulnerability.
 - [`CHANGELOG.md`](./CHANGELOG.md): release history.
 - [`PLAN.md`](./PLAN.md): the delivery plan and locked decisions.

@@ -6,6 +6,35 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-06-21
+
+Streaming reverse-engineering: the worker now emits decompiled functions **as it produces them**, so an
+LLM client can begin reasoning over early results while extraction continues, and can stop a long run
+mid-stream. Additive — every existing tool and contract is unchanged; the catalog grows **51 → 55**.
+
+### Added
+- **Streaming partial results (ADR-040) + mid-stream cancellation (ADR-041).** A bulk decompile is run
+  as a pull-based job: the worker streams one `$/chunk` partial result per decompiled function, the
+  server buffers them with pause-backpressure (never silent drop), and the client pulls batches by a
+  monotonic cursor (seq-ordered, resumable, each chunk wrapped in the ADR-005 untrusted-data envelope).
+  First-chunk latency is far below full-run time, so inference overlaps extraction. Four new Tier-1 tools
+  (**catalog 51 → 55**): `start_decompile_stream`, `fetch_job_results`, `job_status`, and `cancel_job`
+  (stops the worker promptly mid-stream via a `$/cancel` control notification). Each job is bound to its
+  session/principal (BOLA) and lives within the ADR-002 worker lifetime; one active streaming job per
+  session. Live-validated against the real Ghidra worker (extraction overlap + prompt cancel).
+- **CI run-status reporting (ADR-039).** `live-regression` now reports start/finish status via GitHub
+  annotations, a job summary, and an optional ntfy push.
+- **Worker-image trust-pin automation.** A release tag now opens a reviewed PR bumping the committed
+  `.github/worker-image.pin`; the `live-regression` and `e2e-groundtruth` workflows resolve the pinned,
+  cosign-verified digest from that file instead of a stale repo variable.
+
+### Changed
+- Tool catalog **51 → 55** (the four streaming tools above).
+- New clamp-only limit **`VIVARIUM_MAX_STREAM_BUFFER_CHUNKS`** caps the server-side per-job chunk buffer.
+
+### Security
+- Bump `pydantic-settings` 2.14.1 → 2.14.2 (GHSA-4xgf-cpjx-pc3j).
+
 ## [0.9.0] — 2026-06-19
 
 **Project renamed `ghidra-mcp` → `Vivarium`** (ADR-038). Vivarium = a sealed enclosure to safely keep and
