@@ -123,7 +123,9 @@ jobs:
         id: image
         env:
           FORCE_BUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.build_image }}
-          WORKER_IMAGE_DIGEST: ${{ vars.WORKER_IMAGE_DIGEST }}
+          # Legacy fallback only: the trusted pin now lives in the committed file
+          # .github/worker-image.pin (auto-bumped via a reviewed PR by worker-image.yml on release).
+          WORKER_IMAGE_DIGEST_VAR: ${{ vars.WORKER_IMAGE_DIGEST }}
           REPO: ${{ github.repository }}
           OWNER: ${{ github.repository_owner }}
           GHIDRA_VERSION: ${{ vars.GHIDRA_VERSION }}
@@ -149,13 +151,23 @@ jobs:
             exit 0
           fi
 
-          if [ -z "${WORKER_IMAGE_DIGEST}" ]; then
-            echo "::warning::vars.WORKER_IMAGE_DIGEST is unset — falling back to a local build"
+          # Resolve the trusted worker-image digest. Source of truth: the committed pin file
+          # .github/worker-image.pin (auto-bumped by a reviewed PR from worker-image.yml on each
+          # release). Fall back to the legacy repo variable, then to a local build.
+          PIN_FILE=".github/worker-image.pin"
+          DIGEST=""
+          if [ -f "${PIN_FILE}" ]; then
+            DIGEST="$(grep -oiE 'sha256:[0-9a-f]{64}' "${PIN_FILE}" | head -n1 || true)"
+          fi
+          [ -z "${DIGEST}" ] && DIGEST="${WORKER_IMAGE_DIGEST_VAR:-}"
+
+          if [ -z "${DIGEST}" ]; then
+            echo "::warning::no worker-image pin (.github/worker-image.pin / vars.WORKER_IMAGE_DIGEST) — local build"
             build_local
             exit 0
           fi
 
-          WORKER_IMAGE="ghcr.io/${OWNER}/vivarium-worker@${WORKER_IMAGE_DIGEST}"
+          WORKER_IMAGE="ghcr.io/${OWNER}/vivarium-worker@${DIGEST}"
           # Keyless cosign verify scoped to THIS repo's worker-image.yml OIDC identity before trust.
           # A pinned digest is present, so the released artifact MUST verify: a verify FAILURE means a
           # tampered/unsigned image (supply-chain integrity failure) and is FAILED LOUD — never masked

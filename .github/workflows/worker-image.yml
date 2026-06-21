@@ -174,6 +174,25 @@ jobs:
             --type cyclonedx \
             "${{ matrix.image }}@${{ steps.build.outputs.digest }}"
 
+      # Publish the freshly SIGNED worker digest so the pin-bump job can propose advancing the
+      # live-regression trust pin (.github/worker-image.pin) via a reviewed PR. Worker leg only —
+      # the server image is not the regression subject. Artifact (not a matrix job output) to avoid
+      # last-writer ambiguity across the worker/server matrix legs.
+      - name: Record signed worker digest (worker only)
+        if: ${{ matrix.name == 'worker' }}
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${DIGEST}" > worker-image.digest
+          echo "recorded worker digest: ${DIGEST}"
+      - name: Upload signed worker digest (worker only)
+        if: ${{ matrix.name == 'worker' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # actions/upload-artifact@v7.0.1
+        with:
+          name: worker-image-digest
+          path: worker-image.digest
+
   # ---------------------------------------------------------------------------
   # Isolation verification is a RUNTIME check (needs to run a container with --runtime runsc, no-net,
   # caps dropped). GitHub-hosted runners cannot run gVisor; this asserts the harness exists and
@@ -191,3 +210,68 @@ jobs:
           echo "deploy/verify-isolation.sh on a gVisor-capable host/self-hosted runner — NOT on"
           echo "the default GitHub runner (no runsc). See deploy/README.md step 3."
           test -x deploy/verify-isolation.sh || { echo "harness missing"; exit 1; }
+
+  # ---------------------------------------------------------------------------
+  # Propose advancing the live-regression trust pin to the freshly signed worker digest.
+  # Runs only on release-tag pushes (not workflow_dispatch). Opens a REVIEWED PR that bumps
+  # .github/worker-image.pin — the human merge is the gate (changing what CI trusts is a
+  # supply-chain decision, never auto-applied; workflow-gated-actions). Uses GITHUB_TOKEN only
+  # (contents:write + pull-requests:write) — no long-lived PAT. No-op if the pin is unchanged.
+  # ---------------------------------------------------------------------------
+  propose-pin-bump:
+    needs: build-scan-sign
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # push the bump branch.
+      pull-requests: write     # open the PR.
+    steps:
+      - name: Checkout (default branch)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # actions/checkout@v6.0.3
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - name: Download signed worker digest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # actions/download-artifact@v8.0.1
+        with:
+          name: worker-image-digest
+      - name: Open PR to bump the trust pin (if changed)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          PIN_FILE=".github/worker-image.pin"
+          DIGEST="$(grep -oiE 'sha256:[0-9a-f]{64}' worker-image.digest | head -n1 || true)"
+          if [ -z "${DIGEST}" ]; then
+            echo "::error::no sha256 digest found in the worker-image-digest artifact"; exit 1
+          fi
+          CURRENT="$(grep -oiE 'sha256:[0-9a-f]{64}' "${PIN_FILE}" | head -n1 || true)"
+          if [ "${DIGEST}" = "${CURRENT}" ]; then
+            echo "::notice::worker-image pin already at ${DIGEST} — no bump needed"; exit 0
+          fi
+          BRANCH="ci/bump-worker-pin-${TAG}"
+          # Rewrite the digest line, preserving the documentation header.
+          grep -vE '^sha256:' "${PIN_FILE}" > "${PIN_FILE}.tmp"
+          printf '%s\n' "${DIGEST}" >> "${PIN_FILE}.tmp"
+          mv "${PIN_FILE}.tmp" "${PIN_FILE}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${BRANCH}"
+          git add "${PIN_FILE}"
+          git commit -m "ci(supply-chain): bump worker-image trust pin to ${TAG} (${DIGEST})"
+          git push -u origin "${BRANCH}" --force-with-lease
+          gh pr create --base "${{ github.event.repository.default_branch }}" --head "${BRANCH}" \
+            --title "ci: bump worker-image trust pin to ${TAG}" \
+            --body "Automated by worker-image.yml on release \`${TAG}\`.
+
+          Advances the live-regression trust pin (\`.github/worker-image.pin\`) to the freshly
+          built+signed worker image digest \`${DIGEST}\`.
+
+          **Review before merge** (supply-chain trust change): confirm this digest matches the
+          cosign-signed worker image from this release's worker-image run. Merging advances what
+          live-regression's default verify-and-pull path trusts.
+
+          Note: PRs opened by \`GITHUB_TOKEN\` do not auto-trigger \`pull_request\` workflows, so
+          you may need to re-run/trigger required checks (e.g. an empty commit or close+reopen)
+          before merging."
