@@ -14,6 +14,10 @@
 #     and populates a function surface (tests/integration/test_analyze_profiles.py, 3 params). Only
 #     light/deep drive the option-overlay JVM edge (getOptions(ANALYSIS_PROPERTIES)+setBoolean),
 #     which `default` (empty overlay) skips — so this is the sole recurring guard for that binding.
+#   * FID — `identify_functions` runs the Function ID service on a real worker and returns a
+#     well-formed, bounded result (tests/integration/test_identify_functions_fid.py, ADR-042 Phase 1).
+#     Guards the `processProgram(Program, FidQueryService, float, TaskMonitor)` JVM-edge binding (the
+#     live test already caught a wrong-arity call). ELF micro-binary → 0 MSVC-DB matches (empty OK).
 # Naming-accuracy / behavioral-equivalence is ADVISORY (NOT a hard gate, NOT run with an LLM in CI)
 # and is deliberately NOT part of this job — see e2e-groundtruth.yml for the gated naming-eval e2e.
 # Per-profile recovered-function counts are recorded into the JUnit XML as an advisory trend.
@@ -218,7 +222,8 @@ jobs:
             --junit-xml=live-regression-junit.xml \
             tests/integration/test_export_annotations_after_rename.py \
             tests/integration/test_export_known_count.py \
-            tests/integration/test_analyze_profiles.py
+            tests/integration/test_analyze_profiles.py \
+            tests/integration/test_identify_functions_fid.py
 
       # --- FAIL-LOUD ON SKIP: a skipped hard gate is a FAILURE, not a silent pass ------------------
       - name: Assert all hard gates actually RAN (fail-loud on skip)
