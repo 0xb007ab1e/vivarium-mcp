@@ -68,6 +68,37 @@ def _failing_producer(ok: int) -> Iterator[s.DecompiledFunction]:
     raise _errors.make_error(ErrorType.ANALYSIS_FAILED, "synthetic mid-stream failure")
 
 
+@pytest.mark.critical
+def test_done_reported_only_after_buffer_fully_drained() -> None:
+    """``done`` must not be reported while buffered chunks remain (ADR-040 D7 regression).
+
+    Regression for the bug the live worker surfaced (#134 follow-up): a producer that fills the
+    buffer then exhausts leaves a tail buffered, so a ``limit``-capped final batch reported
+    ``done`` while chunks were still buffered — a client trusting ``done`` (and breaking) orphaned
+    the tail, and a cursor re-fetch then delivered un-seen chunks. The producer here (10) is larger
+    than BOTH the buffer cap (3) and the fetch limit (2), the exact shape the real worker hit.
+    """
+    mgr = _manager(limits=Limits(max_stream_buffer_chunks=3))
+    job_id = mgr.start_job(_SID, producer=_producer(10), total=10, caller=_OWNER)
+
+    seen: list[int] = []
+    reported_done = False
+    for _pull in range(100):
+        res = mgr.fetch(_SID, job_id, limit=2, caller=_OWNER)
+        seen.extend(c.seq for c in res.chunks)
+        if res.done:
+            reported_done = True
+            break
+
+    assert reported_done, "stream never reported done"
+    # If `done` had fired early (with a tail still buffered), the break would have left chunks
+    # unseen — so an exactly-once gap-free 0..9 proves `done` waited for the buffer to drain.
+    assert seen == list(range(10)), f"chunks not delivered exactly once gap-free: {seen}"
+    # A re-fetch after `done` yields nothing — the buffer was truly empty at the done point.
+    replay = mgr.fetch(_SID, job_id, limit=2, caller=_OWNER)
+    assert [c.seq for c in replay.chunks] == [], "a fetch after done delivered orphaned chunks"
+
+
 def _accept_all(_sid: str, _caller: str) -> None:
     """A permissive authorizer (no session table) for non-BOLA tests."""
 

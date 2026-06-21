@@ -357,8 +357,32 @@ class _StreamingJob:
 
     @property
     def is_terminal(self) -> bool:
-        """Whether the job has reached a terminal state (no more chunks will be produced)."""
+        """Whether the job has reached a terminal state (no more chunks will be produced).
+
+        This is the INTERNAL terminal flag (producer exhausted/errored/cancelled). It does NOT
+        imply the client has seen everything — buffered chunks may still be undelivered. For what
+        the client should observe, use :attr:`effective_state` / :attr:`effective_done`.
+        """
         return self._state in _TERMINAL_STATES
+
+    @property
+    def effective_state(self) -> JobState:
+        """The state as the CLIENT should observe it (ADR-040 D7: ``done`` is authoritative).
+
+        A producer that has finished (``done``) or raised (``error``) is still reported as
+        ``running`` while buffered chunks remain undelivered, so the client's ``done`` does not flip
+        until the stream is genuinely complete (the buffer is drained). Otherwise a ``limit``-capped
+        final batch would report ``done`` with a tail still buffered, and the client — trusting
+        ``done`` — would orphan those chunks. ``cancelled`` drops the buffer, so it reports at once.
+        """
+        if self._buffer and self._state in (JobState.DONE, JobState.ERROR):
+            return JobState.RUNNING
+        return self._state
+
+    @property
+    def effective_done(self) -> bool:
+        """Whether the client should consider the stream complete: terminal AND buffer drained."""
+        return self.effective_state in _TERMINAL_STATES
 
     @property
     def error(self) -> ErrorEnvelope | None:
@@ -503,10 +527,11 @@ class _StreamingJob:
             rate = self._next_seq / elapsed  # chunks per second so far
             remaining = self._total - self._next_seq
             eta = remaining / rate
+        effective = self.effective_state
         return StreamJobStatus(
             job_id=self.job_id,
             session_id=self.session_id,
-            state=self._state,
+            state=effective,
             produced=self._next_seq,
             total=self._total,
             buffered=len(self._buffer),
@@ -514,7 +539,9 @@ class _StreamingJob:
             elapsed_seconds=elapsed,
             eta_seconds=eta,
             truncated=self._terminal.truncated,
-            error=self._error,
+            # Surface the terminal error only once the pre-error buffered chunks have drained
+            # (design §6: the terminal error comes AFTER the already-buffered chunks).
+            error=self._error if effective is JobState.ERROR else None,
         )
 
 
@@ -694,14 +721,19 @@ class StreamingJobManager:
                 )
             chunks = job.drain(limit)
             job.pump()
+            effective = job.effective_state
             return StreamFetchResult(
                 job_id=job.job_id,
                 chunks=chunks,
                 cursor=job.cursor,
-                state=job.state,
-                done=job.is_terminal,
+                # Report terminal (state/done) only when the buffer is drained — a producer that
+                # finished/errored with chunks still buffered stays `running`, so the client does
+                # not trust an early `done` and orphan the buffered tail (ADR-040 D7).
+                state=effective,
+                done=job.effective_done,
                 truncated=job.truncated,
-                error=job.error,
+                # Surface the terminal error only once the pre-error buffered chunks have drained.
+                error=job.error if effective is JobState.ERROR else None,
             )
 
     def status(self, session_id: str, job_id: str, *, caller: str = "local") -> StreamJobStatus:

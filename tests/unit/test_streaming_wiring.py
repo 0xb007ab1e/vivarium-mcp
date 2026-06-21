@@ -141,10 +141,19 @@ def test_fake_port_status_and_cancel() -> None:
     job_id = port.start_decompile_stream(
         sid, DecompileStreamIn(session_id=sid, limit=100), caller=_OWNER
     )
+    # All 4 are produced but still buffered (undrained): the client-visible state is RUNNING, not
+    # DONE — `done` is not reported until the buffer drains (ADR-040 D7).
     st_ = port.job_status(sid, JobHandleIn(session_id=sid, job_id=job_id), caller=_OWNER)
-    assert st_.produced == 4  # all 4 fit the default buffer → DONE after the initial pump
-    cancelled = port.cancel_job(sid, JobHandleIn(session_id=sid, job_id=job_id), caller=_OWNER)
+    assert st_.produced == 4
+    assert st_.state is JobState.RUNNING
+    # Drain the buffer → the stream is now genuinely complete (DONE).
+    drained = port.fetch_job_results(
+        sid, FetchJobResultsIn(session_id=sid, job_id=job_id, limit=10), caller=_OWNER
+    )
+    assert [c.seq for c in drained.chunks] == [0, 1, 2, 3]
+    assert drained.done
     # Cancelling a DONE job leaves it DONE (cancel does not override a terminal state).
+    cancelled = port.cancel_job(sid, JobHandleIn(session_id=sid, job_id=job_id), caller=_OWNER)
     assert cancelled.state is JobState.DONE
 
 
