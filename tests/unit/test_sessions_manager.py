@@ -635,6 +635,66 @@ def test_record_binary_hash_evicted_session_is_session_invalid() -> None:
     assert ei.value.envelope.type is ErrorType.SESSION_INVALID
 
 
+@pytest.mark.critical
+def test_record_binary_hash_stamps_advisory_size_and_name() -> None:
+    # The widened recorder stamps size/name alongside the load-bearing hash in one chokepoint pass.
+    mgr, _ = _mgr(max_sessions=8)
+    info = mgr.create(owner=_A)
+    assert mgr.authorize(info.session_id, caller=_A).binary_size is None
+    assert mgr.binary_name(info.session_id, caller=_A) is None
+    mgr.record_binary_hash(info.session_id, _HASH_A, size=4096, name="sample.bin", caller=_A)
+    refreshed = mgr.authorize(info.session_id, caller=_A)
+    assert refreshed.binary_sha256 == _HASH_A
+    assert refreshed.binary_size == 4096
+    assert mgr.binary_name(info.session_id, caller=_A) == "sample.bin"
+
+
+def test_record_binary_hash_none_size_name_leaves_existing_unchanged() -> None:
+    # ``None`` size/name (the legacy single-arg call) never clobbers a previously-recorded value.
+    mgr, _ = _mgr(max_sessions=8)
+    info = mgr.create(owner=_A)
+    mgr.record_binary_hash(info.session_id, _HASH_A, size=10, name="a.bin", caller=_A)
+    mgr.record_binary_hash(info.session_id, _HASH_A, caller=_A)  # no size/name supplied
+    assert mgr.authorize(info.session_id, caller=_A).binary_size == 10
+    assert mgr.binary_name(info.session_id, caller=_A) == "a.bin"
+
+
+@pytest.mark.critical
+def test_binary_name_foreign_caller_is_session_invalid() -> None:
+    # BOLA: the advisory-name accessor is owner-scoped like every other session read.
+    mgr, _ = _mgr(max_sessions=8)
+    info = mgr.create(owner=_A)
+    mgr.record_binary_hash(info.session_id, _HASH_A, name="a.bin", caller=_A)
+    fields = _invalid_envelope_fields(mgr, mgr.binary_name, info.session_id, caller=_B)
+    assert fields["type"] is ErrorType.SESSION_INVALID
+
+
+# ==============================================================================================
+# record_analysis_profile (ADR-029 B) — echoes the effective analyzer preset on SessionInfo.
+# Owner-scoped via the same BOLA chokepoint. Exercises the REAL SessionManager.
+# ==============================================================================================
+@pytest.mark.critical
+def test_record_analysis_profile_is_echoed_on_session_info() -> None:
+    # Before any analyze the profile is None; after recording it is surfaced on SessionInfo.
+    mgr, _ = _mgr(max_sessions=8)
+    info = mgr.create(owner=_A)
+    assert mgr.authorize(info.session_id, caller=_A).analysis_profile is None
+    mgr.record_analysis_profile(info.session_id, "deep", caller=_A)
+    assert mgr.authorize(info.session_id, caller=_A).analysis_profile == "deep"
+
+
+@pytest.mark.critical
+def test_record_analysis_profile_foreign_caller_is_session_invalid_and_no_stamp() -> None:
+    # BOLA: a foreign caller cannot stamp another principal's profile (denied SESSION_INVALID).
+    mgr, _ = _mgr(max_sessions=8)
+    info = mgr.create(owner=_A)
+    fields = _invalid_envelope_fields(
+        mgr, mgr.record_analysis_profile, info.session_id, "light", caller=_B
+    )
+    assert fields["type"] is ErrorType.SESSION_INVALID
+    assert mgr.authorize(info.session_id, caller=_A).analysis_profile is None  # never stamped
+
+
 # =====================================================================================
 # Session-scoped change-log (ADR-027 D2/D4) — comment + composite export-target tracking.
 # Critical-path: the change-log is the load-bearing provenance signal for the F7 fix, lives on the

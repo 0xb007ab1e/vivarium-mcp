@@ -30,6 +30,10 @@ Server-controlled scalars we computed ourselves (addresses we normalized, counts
 only **content originating from the binary** is wrapped. The schemas in `tools/schemas.py` encode
 this distinction in their field types and are part of the frozen contract.
 
+On **export** (ADR-018), a value field read back out of the program (e.g. a function's current
+name) is tagged `Untrusted` / binary-derived **regardless of who originally wrote it** — at
+read-time its provenance is the hostile Ghidra program, not the client that may have set it.
+
 ## Consequences
 
 - **Positive:** makes the trust boundary explicit and enforced by the type system; one place to

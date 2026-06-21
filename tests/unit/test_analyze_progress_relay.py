@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import functools
 import inspect
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import anyio
 from mcp.server.fastmcp.tools.base import Tool
@@ -44,12 +44,25 @@ class _FakeSessions:
 
     def __init__(self) -> None:
         self.events: list[str] = []
+        # ADR-029 B: the recorded effective analysis profile (echoed back via authorize).
+        self.profile: Literal["default", "light", "deep"] | None = None
 
     def begin_call(self, session_id: str) -> None:
         self.events.append(f"begin:{session_id}")
 
     def end_call(self, session_id: str) -> None:
         self.events.append(f"end:{session_id}")
+
+    def record_analysis_profile(
+        self,
+        session_id: str,
+        profile: Literal["default", "light", "deep"],
+        *,
+        caller: str = "local",
+    ) -> None:
+        """Echo the effective analysis profile on the session (ADR-029 B)."""
+        self.events.append(f"record_profile:{session_id}:{profile}")
+        self.profile = profile
 
     def authorize(self, session_id: str, *, caller: str = "local") -> s.SessionInfo:
         self.events.append(f"authorize:{session_id}")
@@ -59,6 +72,7 @@ class _FakeSessions:
             created_at=0,
             expires_at=10,
             binary_sha256=None,
+            analysis_profile=self.profile,
         )
 
 
@@ -205,7 +219,15 @@ def test_no_token_runs_inline_without_relay() -> None:
     assert info.session_id == _SID
     assert info.state == "ready"
     assert info.binary_sha256 == "b" * 64
-    assert sessions.events == [f"begin:{_SID}", f"authorize:{_SID}", f"end:{_SID}"]
+    # ADR-029 B: the effective profile (default here) is echoed on the returned info.
+    assert info.analysis_profile == "default"
+    # Order: in-flight begin → authorize → record-profile (post-analyze) → in-flight end.
+    assert sessions.events == [
+        f"begin:{_SID}",
+        f"authorize:{_SID}",
+        f"record_profile:{_SID}:default",
+        f"end:{_SID}",
+    ]
 
 
 def test_context_without_token_takes_the_inline_path() -> None:

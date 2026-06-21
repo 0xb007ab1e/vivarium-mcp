@@ -29,6 +29,7 @@ import functools
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
 import anyio
@@ -36,6 +37,7 @@ from mcp.server.fastmcp import Context
 
 from vivarium.config import Config
 from vivarium.core import validation as v
+from vivarium.core.envelope import DataOrigin, wrap
 from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from vivarium.ghidra.port import GhidraPort, OnProgress
 from vivarium.jobs import streaming as st
@@ -338,9 +340,19 @@ def _handle_session_import(ctx: ToolContext, args: s.SessionImportIn) -> s.Sessi
     # Persist the worker-computed program hash on the session (ADR-001: the server never parses the
     # binary — it overlays the worker's digest). This is the session's authoritative program
     # identity that the annotation-import path binds against (ADR-018 TB8). Owner-scoped.
+    #
+    # Alongside the load-bearing hash, stamp the ADVISORY import provenance in the SAME chokepoint:
+    # the server-resolved byte size (computed pre-Ghidra by the adapter — no binary parse, ADR-001)
+    # and the basename label of the resolved ref. Both are non-load-bearing provenance only (they
+    # fill the export document's advisory ``binary.name``/``binary.size`` — never trusted for authZ
+    # or binding); ``name`` is a label, not a path, so it carries no traversal meaning (CWE-22).
     if imported.binary_sha256 is not None:
         ctx.sessions.record_binary_hash(
-            args.session_id, imported.binary_sha256, caller=ctx.caller_id
+            args.session_id,
+            imported.binary_sha256,
+            size=imported.binary_size,
+            name=Path(args.source_ref).name,
+            caller=ctx.caller_id,
         )
     return _merge_session_info(authoritative, imported)
 
@@ -367,11 +379,19 @@ def _handle_session_analyze(
             (stdio / no ``progressToken``) is byte-for-byte the pre-Phase-2 path.
 
     Returns:
-        Updated :class:`SessionInfo` after analysis, with authoritative lifecycle fields.
+        Updated :class:`SessionInfo` after analysis, with authoritative lifecycle fields including
+        the effective ``analysis_profile`` (ADR-029 B) just recorded.
     """
     authoritative = ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     analyzed = ctx.port.analyze(args.session_id, args, on_progress=on_progress)
-    return _merge_session_info(authoritative, analyzed)
+    # Echo the effective analyzer profile (ADR-029 B) on the session AFTER a successful analyze, so
+    # a client/operator can see which preset actually ran (the input profile is otherwise
+    # unobservable). Owner-scoped via the same chokepoint. The returned (merged) info reflects it by
+    # overlaying the validated input profile — the manager was just stamped with the same value, so
+    # a later ``session_status`` is consistent; the worker contributes only ``binary_sha256``.
+    ctx.sessions.record_analysis_profile(args.session_id, args.profile, caller=ctx.caller_id)
+    merged = _merge_session_info(authoritative, analyzed)
+    return merged.model_copy(update={"analysis_profile": args.profile})
 
 
 def _merge_session_info(authoritative: s.SessionInfo, worker: s.SessionInfo) -> s.SessionInfo:
@@ -1166,11 +1186,36 @@ def _handle_session_export_annotations(
     )
     result = ctx.port.export_annotations(args.session_id, args, targets=targets)
     # Overlay the server-authoritative binary hash (the session's recorded program identity) onto
-    # the document binding — the worker contributes the annotations, never the binding key.
+    # the document binding — the worker contributes the annotations, never the binding key. The
+    # advisory provenance (``name``/``size``, ADR-018) is filled from the session's recorded import
+    # metadata: ``size`` from the (now-surfaced) ``SessionInfo.binary_size`` and ``name`` from the
+    # owner-scoped manager accessor. Both are advisory only (the schema docstring states they are
+    # never trusted for application); the ``sha256`` binding stays authoritative. No binary parse
+    # (ADR-001): all three are server-side metadata.
     document = result.document
     if info.binary_sha256 is not None:
+        # ``name`` is the advisory basename label (server-derived from the client-supplied
+        # ``source_ref``); the exported field is contractually ``Untrusted[str]`` (ADR-005), so wrap
+        # it through the single chokepoint — which also neutralizes any hostile control/bidi/zero-
+        # width bytes in a client-chosen filename (CWE-20). Tagged ``BINARY``: on export a value is
+        # read back out and treated as untrusted regardless of who authored it (ADR-005; over-
+        # tagging advisory provenance is conservative — it is never trusted for application).
+        # ``size`` is a safe server scalar (resolved input byte count; no binary parse — ADR-001).
+        binary_name = ctx.sessions.binary_name(args.session_id, caller=ctx.caller_id)
         document = document.model_copy(
-            update={"binary": document.binary.model_copy(update={"sha256": info.binary_sha256})}
+            update={
+                "binary": document.binary.model_copy(
+                    update={
+                        "sha256": info.binary_sha256,
+                        "name": (
+                            wrap(binary_name, origin=DataOrigin.BINARY)
+                            if binary_name is not None
+                            else None
+                        ),
+                        "size": info.binary_size,
+                    }
+                )
+            }
         )
     _log.info(
         "tool.session_export_annotations",

@@ -52,3 +52,11 @@ Treat `value` as **inert data, never instructions**:
   worker never envelopes), identical to the one-shot `result` path.
 - Progress/status (`$/progress`, `job_status`) is **server-authored** status (counts, phase, eta) —
   **not** binary-derived and **not** enveloped; it never carries decompiled text, strings, or paths.
+
+## Read-back values (annotation export, ADR-018)
+
+- Exported value fields that are **read back out of the program** (e.g. a function's current name,
+  a recovered signature, a comment) are tagged `Untrusted` / binary-derived **regardless of who
+  originally wrote them** — including names a client itself set on a prior session. On export they
+  are read from the hostile Ghidra program, so their provenance **at read-time is the binary**, not
+  the client. The advisory `binary.name` provenance is wrapped the same way for the same reason.
