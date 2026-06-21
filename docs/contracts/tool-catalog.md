@@ -6,11 +6,16 @@
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **51** tools (asserted in tests) —
+- **Allow-list only:** the catalog is fixed; there are exactly **51** tools today (asserted in
+  tests), rising to **55** once the ADR-040 streaming tools land — this catalog entry **specifies**
+  them; their registration + the `len(TIER1_TOOL_NAMES) == 55` assertion are a follow-up
+  implementation increment (the design + contract is this PR; code is the next). The breakdown:
   22 Tier-1 read-only (v1) + 5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
   reporting/metrics tools (ADR-008; all read-only) + **6 v1.1 mutation/write tools (ADR-012) + 8
   structural-write tools (ADR-013 Phase A + ADR-014 Phase B + ADR-015 Phase C + ADR-021 batch
-  `define_types` + ADR-031 `delete_type`)** + **2 v1.2 annotation-persistence tools (ADR-018:
+  `define_types` + ADR-031 `delete_type`)** + **4 v1.x streaming-extraction tools (ADR-040, pending
+  impl: `start_decompile_stream` + the generic `fetch_job_results`/`job_status`/`cancel_job`;
+  read-only, output-only)** + **2 v1.2 annotation-persistence tools (ADR-018:
   `session_export_annotations` read-only + `session_import_annotations` GATED)** — the 14 mutation
   tools GATED by per-session write-consent (structural additionally by `allow_structural`); import is
   GATED identically (and additionally by `allow_structural` when any imported entry is structural).
@@ -33,6 +38,20 @@
 | `session_analyze` | `SessionAnalyzeIn{timeout_seconds?, profile?, progress?}` | `SessionInfo` | bounded by analysis timeout → kills worker on expiry; `profile` (`default`/`light`/`deep`, ADR-029 B) is **additive** — `default` is a byte-for-byte no-op; `light` trades depth for speed/heap, `deep` adds depth; reduces/adjusts depth only (no new capability). `progress` (bool, default `false`, ADR-030 Phase 1) is **additive + opt-in** — `true` emits bounded, redacted worker→server `$/progress` notifications (percent + closed phase enum only) relayed to the **server log only** (Phase 1); default `false` is byte-for-byte today's single-frame exchange; the analysis deadline is **not** extended by progress. **Client progress (ADR-030 Phase 2):** when the MCP client supplies a standard `progressToken` (MCP `_meta`), the server streams each frame to the client as a `notifications/progress` (percent out of 100; closed-vocab phase as the message) — no extra arg needed (a token implies progress, so the server forces worker emission on). **No token ⇒ byte-for-byte the pre-Phase-2 path** (inline, no client relay) |
 | `session_status` | `_SessionScopedIn{session_id}` | `SessionInfo` | state/TTL; no binary content |
 | `session_close` | `SessionCloseIn{session_id}` | `SessionCloseOut{store_wiped}` | kill worker + **verified wipe** (ADR-002) |
+
+### Streaming extraction (v1.x — ADR-040; READ-ONLY, output-only; pull-based job + cursor)
+> The worker emits results incrementally (`$/chunk`, rpc-protocol §4) while the server buffers them;
+> the client **pulls** bounded batches by cursor so the LLM can reason over early units while the rest
+> extract. A job handle is bound to its session+principal (BOLA) and lives inside the worker lifetime
+> (ADR-002). **One active streaming job per session** (a second `start_*` → `limit-exceeded`). Every
+> chunk's binary-derived fields carry the untrusted-data envelope, exactly like a one-shot result.
+
+| Tool | Input | Output | Notes |
+|------|-------|--------|-------|
+| `start_decompile_stream` | `StartDecompileStreamIn{session_id, functions?: [str], progress?}` | `JobStartOut{job, total_estimate?, state}` | starts bulk decompile over the function set (default: all, bounded by the existing decompile total cap); returns an opaque `job` handle immediately. Worker streams one `function` chunk per decompiled function |
+| `fetch_job_results` | `FetchJobResultsIn{session_id, job, cursor?, limit?}` | `JobResultsOut{chunks: [DecompiledChunk], next_cursor, done, truncated}` | drains up to `limit` (default 32, max 256) buffered chunks from the server in `seq` order + the next cursor + `done`; resumable (re-fetch from an earlier cursor; client dedupes by `seq`). `chunks[].code` is `Untrusted` |
+| `job_status` | `JobStatusIn{session_id, job}` | `JobStatusOut{state, phase, done, total?, buffered, eta_seconds?, started_at}` | server-side counters only — no binary content; `state ∈ {running, paused, done, error, cancelled}` |
+| `cancel_job` | `CancelJobIn{session_id, job}` | `CancelJobOut{cancelled}` | aborts the in-flight extraction (worker `cancel_stream`) + discards the buffer, freeing worker capacity early; idempotent |
 
 ### Code
 | Tool | Input | Output |

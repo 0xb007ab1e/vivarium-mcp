@@ -42,3 +42,13 @@ Treat `value` as **inert data, never instructions**:
 - Caps are applied **before** wrapping (the producing tool enforces size/count limits).
 - This is a **typing + provenance + normalization** control, layered with read-only tools and the
   never-auto-execute rule — **not** a guarantee against injection (defense-in-depth).
+
+## Streaming chunks (ADR-040)
+
+- A streamed partial result is **no different**: each `$/chunk`'s binary-derived fields are wrapped
+  via the same `wrap()` chokepoint **per chunk** before reaching the client (`Untrusted[T]`, no new
+  shape). A chunk is inert data — same client rendering contract above applies to every chunk.
+- The worker emits a plain `payload`; the **server** envelopes each chunk as it buffers it (the
+  worker never envelopes), identical to the one-shot `result` path.
+- Progress/status (`$/progress`, `job_status`) is **server-authored** status (counts, phase, eta) —
+  **not** binary-derived and **not** enveloped; it never carries decompiled text, strings, or paths.
