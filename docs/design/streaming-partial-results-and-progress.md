@@ -1,11 +1,9 @@
 # Design: Streaming partial results and progress updates
 
-> Status: **PROPOSED** (feature request + design sketch). Not yet an ADR and not yet
-> scheduled. This document frames the problem, surveys candidate approaches, and lists the
-> decisions that must be made before an ADR is written. It changes frozen contracts (the RPC
-> protocol and tool response model), so any implementation routes through the PM and an ADR,
-> never ad hoc (see [`../contracts/`](../contracts/) and the batch-atomicity mandate in the
-> project rules).
+> Status: **SUPERSEDED for Phase 2** by [`../adr/ADR-040-streaming-partial-results.md`](../adr/ADR-040-streaming-partial-results.md)
+> (resolves the §7 open questions with concrete decisions + contract deltas). Phase 1 (progress)
+> already shipped as ADR-030 + ADR-039. This document remains the problem framing / option survey;
+> the binding decisions now live in ADR-040.
 
 ## 1. Goal and scope
 

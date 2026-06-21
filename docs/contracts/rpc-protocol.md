@@ -110,6 +110,37 @@ OPT-IN):** during an opted-in `analyze` the worker MAY send zero or more `$/prog
   (percent out of 100; closed-vocab phase as the message). A `progressToken` makes the server set
   `params.progress:true` automatically; with no token the server behaves byte-for-byte as Phase 1.
 
+**`$/chunk` — additive partial-result NOTIFICATION (v1.x — ADR-040 Phase 2; worker → server):**
+during a streaming extraction call (e.g. `start_decompile_stream`) the worker emits zero or more
+`$/chunk` notifications on the same socket BEFORE the single terminal response, one per extracted
+unit (e.g. one decompiled function):
+```json
+{ "jsonrpc": "2.0", "method": "$/chunk",
+  "params": { "id": "<call-uuid>", "seq": <int ≥ 0>, "kind": "<closed-enum>", "payload": { … } } }
+```
+- **A notification, not a response — NO top-level `id`** (identical structural invariant to
+  `$/progress`: classified as a chunk iff `method == "$/chunk"` AND no top-level `id`; a frame with
+  both is not a chunk). `params.id` correlates to the in-flight streaming call.
+- **`seq`** is a monotonic, 0-based, gap-free counter per call (ordering + resume key). The worker
+  emits in `seq` order; the server never reorders.
+- **`kind`** is from a closed vocabulary per stream (`start_decompile_stream`: `"function"`);
+  out-of-vocabulary `kind` or a non-monotonic `seq` is a protocol violation → kill + evict (§6).
+- **`payload`** is plain structured data (mirrors the streamed unit's schema minus envelope); the
+  **server** wraps every binary-derived field in the untrusted-data envelope before it reaches the
+  client — exactly as it does for a one-shot `result`. The worker never envelopes.
+- **Server buffering + backpressure (ADR-040 D5).** The server buffers chunks into a bounded
+  per-job buffer (caps: max buffered chunks, max buffered bytes — `security/limits.py`). When the
+  buffer is full the server **stops reading the socket**; UDS flow control pauses the worker's
+  writes until the client drains the buffer via `fetch_job_results`. Chunks are **never** shed or
+  reordered (ADR-005 honesty). The per-frame §3 size cap applies to each chunk.
+- **Ordering & termination.** Zero or more `$/progress` and `$/chunk` notifications, interleaved in
+  emission order, then **exactly one** response: a `result` carrying `{total, truncated, done:true}`
+  on success, or an `error` (§5) on failure. The server surfaces a worker mid-stream failure to the
+  client as a **terminal error chunk** after the already-buffered chunks — a stream never ends in a
+  way indistinguishable from success (ADR-005). The streaming call's deadline (§6) is computed once
+  and **not** extended by chunks or progress; on timeout/eviction the buffer is drained to the
+  client where already-pulled, then the stream terminates with a terminal error.
+
 ### RPC methods (worker-facing; one per Ghidra-touching operation)
 `import_binary`, `analyze`, `decompile_function`, `disassemble`, `list_functions`, `get_function`,
 `xrefs_to`, `xrefs_from`, `list_strings`, `list_symbols`, `get_symbol`, `list_data`,
@@ -157,7 +188,18 @@ slots, composite names), never a binary-derived value; the **client-facing
 repurposed). An empty/missing `targets` emits no comments/composites. **ADR-032:** the worker emits
 all reconstructable session-authored composites as ONE `define_types` batch entry (schema_version
 **2**) so mutually-recursive pointer composites round-trip; >`_MAX_TYPES_PER_BATCH` (64) →
-`limit-exceeded`), plus a `ping`/`shutdown` control pair.
+`limit-exceeded`), the v1.x **streaming-extraction primitive** `start_decompile_stream` (ADR-040
+Phase 2 — a long call that decompiles a bounded function set, emitting one `$/chunk`
+(`kind:"function"`) per function as it is produced, then a terminal response `{total, truncated,
+done}`; read-only/output-only per ADR-001; the worker streams incrementally while the server
+buffers + applies backpressure; bounded by the existing bulk-decompile total cap) and its control
+method `cancel_stream` (aborts the in-flight streaming call for a given `params.id` so the server
+can free the worker early on client `cancel_job`; idempotent), plus a `ping`/`shutdown` control
+pair.
+(`fetch_job_results`, `job_status`, and `cancel_job` are **server-side** job operations against the
+server's per-job buffer — they read/drain buffered chunks and job state the server already holds;
+they are **not** worker RPC methods. Only `start_decompile_stream` (produce) and `cancel_stream`
+(abort production) touch the worker.)
 (Session create/status/close **and the write-consent grant/revoke** `session_enable_writes`/
 `session_disable_writes` are **server-side** lifecycle, not worker RPC methods. The derived
 tools compute server-side with **no dedicated worker method**: `callees`/`callers`/`analysis_order`/
