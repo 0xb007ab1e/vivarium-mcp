@@ -55,8 +55,9 @@ pytestmark = pytest.mark.integration
 _SAMPLE_DIR = Path(__file__).resolve().parents[2] / "samples" / "openssl-blind-analysis"
 _BINARY = _SAMPLE_DIR / "openssl.blind"
 
-#: Keep the run bounded: stream only a small function window so the test is seconds, not minutes.
-_STREAM_LIMIT = 8
+#: Keep the run bounded: stream only a small function window so the test is seconds, not minutes,
+#: yet large enough that production clearly outlasts the first fetch (a robust overlap margin).
+_STREAM_LIMIT = 32
 #: One pull returns at most this many chunks (the contract default is 32; small here keeps the
 #: cursor loop exercising MULTIPLE fetches over the small set).
 _FETCH_LIMIT = 3
@@ -159,12 +160,25 @@ async def _drive_stream(binary: Path, import_root: Path) -> dict[str, Any]:
                 )
             )
 
+            # Bound the stream to a small function set so the producer exhausts quickly and the job
+            # reaches a terminal `done` within the test window (the binary is stripped, so identify
+            # the targets by address — the worker's `functions` filter resolves addresses or names).
+            listed = _structured(
+                await session.call_tool(
+                    "list_functions",
+                    {"session_id": sid, "limit": _STREAM_LIMIT},
+                    read_timeout_seconds=timeout,
+                )
+            )
+            targets = [f["address"] for f in listed.get("functions", [])]
+            assert targets, "list_functions returned no functions to stream"
+
             # Start the bounded streaming job; the handle returns immediately (no chunks yet).
             start = time.monotonic()
             started = _structured(
                 await session.call_tool(
                     "start_decompile_stream",
-                    {"session_id": sid},
+                    {"session_id": sid, "functions": targets},
                     read_timeout_seconds=timeout,
                 )
             )
@@ -176,8 +190,12 @@ async def _drive_stream(binary: Path, import_root: Path) -> dict[str, Any]:
             first_chunk_latency: float | None = None
             completion_latency: float | None = None
             cursor = 0
-            # Bound the pull loop independently of `done` so a contract bug cannot hang the test.
-            for _pull in range(_STREAM_LIMIT * 4):
+            # Pull until the stream is `done`, bounded by a generous wall-clock deadline (NOT a
+            # small iteration cap): a real worker decompiles slowly, so many early fetches return
+            # an empty batch while the buffer warms — an iteration cap would falsely give up before
+            # the bounded set finishes. The deadline still guarantees the test cannot hang.
+            pull_deadline = time.monotonic() + 600.0
+            while time.monotonic() < pull_deadline:
                 res = _structured(
                     await session.call_tool(
                         "fetch_job_results",
