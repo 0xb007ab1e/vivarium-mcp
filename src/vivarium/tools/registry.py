@@ -97,6 +97,8 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "crypto_constant_scan",
     "call_graph_metrics",
     "program_summary",
+    # Function ID library-match identification (ADR-042 Phase 1; READ-ONLY)
+    "identify_functions",
     # mutation / write tools (v1.1 — ADR-012; GATED by per-session write-consent)
     "session_enable_writes",
     "session_disable_writes",
@@ -685,6 +687,20 @@ def _handle_program_summary(ctx: ToolContext, args: s.ProgramSummaryIn) -> s.Pro
     """One-shot aggregate triage report (server-side aggregation)."""
     ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     return ctx.port.program_summary(args.session_id, args)
+
+
+# =====================================================================================
+# Function ID library-match identification handler (ADR-042 Phase 1). READ-ONLY: authorize →
+# delegate. The matched name/library are binary-derived → Untrusted-wrapped by the adapter; the
+# `limit`/`truncated` bound is enforced server-side in the adapter (and mirrored worker-side). No
+# semantic input validation is needed beyond the schema bounds (no address/name argument).
+# =====================================================================================
+def _handle_identify_functions(
+    ctx: ToolContext, args: s.IdentifyFunctionsIn
+) -> s.IdentifyFunctionsOut:
+    """Match functions against library FID databases (best-effort, untrusted hints — ADR-042)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    return ctx.port.identify_functions(args.session_id, args)
 
 
 # =====================================================================================
@@ -1569,6 +1585,8 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "crypto_constant_scan": (_handle_crypto_constant_scan, s.CryptoConstantScanIn),
     "call_graph_metrics": (_handle_call_graph_metrics, s.CallGraphMetricsIn),
     "program_summary": (_handle_program_summary, s.ProgramSummaryIn),
+    # Function ID library-match identification (ADR-042 Phase 1; READ-ONLY)
+    "identify_functions": (_handle_identify_functions, s.IdentifyFunctionsIn),
     # mutation / write tools (v1.1 — ADR-012; gated by per-session write-consent)
     "session_enable_writes": (_handle_session_enable_writes, s.SessionEnableWritesIn),
     "session_disable_writes": (_handle_session_disable_writes, s.SessionDisableWritesIn),

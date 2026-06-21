@@ -169,7 +169,13 @@ an in-flight `start_decompile_stream` promptly (on client `cancel_job`), the ser
 `get_data_type`, `get_comments`, `memory_map`, `read_bytes`, `search_bytes`, `search_strings`,
 `program_metadata`, the v1.1 semantic-naming extraction primitives `call_graph` and
 `referenced_strings` (ADR-007), the v1.1 Tier-2 extraction primitives `function_cfg`, `imports`,
-`exports`, and `coverage` (ADR-008) — all worker-only extraction per ADR-001 — the v1.1 **mutation
+`exports`, and `coverage` (ADR-008), the **Function ID library-match primitive**
+`identify_functions` (ADR-042 Phase 1 — READ-ONLY; runs the Ghidra FID service over the analyzed
+program and returns one row per surviving candidate `{address, matched_name, library, score}`,
+filtering below the effective score threshold — `min_score` when supplied, else the FID default —
+and bounding to the requested `limit` with a `truncated` flag; the server caps `limit` and wraps the
+binary-derived `matched_name`/`library` as untrusted) — all worker-only extraction per ADR-001 —
+the v1.1 **mutation
 (write) primitives** `rename_function`, `rename_symbol`, `set_comment`, and `undo` (ADR-012 — each
 performs a single Ghidra write inside **one transaction**, commit on success / `endTransaction(…,
 False)` roll-back + `analysis-failed` on failure; the server gates these behind per-session

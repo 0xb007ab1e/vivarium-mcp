@@ -1222,6 +1222,63 @@ class ProgramSummary(_Out):
 
 
 # =====================================================================================
+# Function ID (FID) library-match identification (ADR-042 Phase 1). READ-ONLY, output-only,
+# bounded. A FID match is a best-effort, possibly-multiple HINT (a function may match several
+# library candidates above the score threshold) — never an authoritative identity. The matched
+# library function NAME and the library descriptor are BINARY-derived → Untrusted-wrapped (a
+# hostile binary can carry symbols/data that influence the FID DB lookup). The address and score
+# are server/worker-controlled scalars — bare.
+# =====================================================================================
+class IdentifyFunctionsIn(_SessionScopedIn):
+    """Arguments for ``identify_functions`` — match functions against library FID databases.
+
+    Attributes:
+        limit: Maximum matches to return (bounded; ``truncated`` flags a clipped result).
+        min_score: Minimum FID overall score a candidate must meet to be included. ``None``
+            (the default) lets the worker apply Ghidra's FID default score threshold — the
+            conservative, fail-safe choice.
+    """
+
+    limit: int = Field(default=_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT)
+    min_score: float | None = Field(default=None, ge=0.0)
+
+
+class IdentifiedFunction(_Out):
+    """One FunctionID match — a best-effort, possibly-multiple, untrusted HINT (not authoritative).
+
+    Attributes:
+        address: The matched function's entry address (hex) — server-safe (worker-normalized).
+        matched_name: The matched library function name — UNTRUSTED (binary-derived; the FID
+            lookup is influenced by attacker-controlled bytes/symbols).
+        library: ``"<family> <version> <variant>"`` of the matching library — UNTRUSTED
+            (binary-derived descriptor).
+        score: The FID overall score for this candidate — safe (server/worker-controlled float).
+    """
+
+    address: str
+    matched_name: Untrusted[str]
+    library: Untrusted[str]
+    score: float
+
+
+class IdentifyFunctionsOut(_Out):
+    """Result of ``identify_functions``.
+
+    A function with multiple surviving candidates yields one :class:`IdentifiedFunction` per
+    candidate (multiplicity is honest — the tool never collapses ambiguous matches to one).
+
+    Attributes:
+        matches: Bounded list of FID matches (one per surviving candidate).
+        total: Count returned (``== len(matches)``) — safe.
+        truncated: Whether more matches existed than ``limit`` (honest clip — ADR-005).
+    """
+
+    matches: list[IdentifiedFunction]
+    total: int
+    truncated: bool = False
+
+
+# =====================================================================================
 # Mutation (write) tools — first gated increment (ADR-012; TB7). ANNOTATION-ONLY.
 #
 # Asymmetry vs. read tools (ADR-012 §6): the ``new_name``/``text`` the client supplies is

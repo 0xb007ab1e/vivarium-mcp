@@ -251,6 +251,18 @@ class GhidraPort(Protocol):
         """One-shot aggregate triage report (server-side aggregation of Tier-1 + Tier-2)."""
         ...
 
+    # --- Function ID library-match identification (ADR-042 Phase 1; READ-ONLY) ---
+    def identify_functions(self, sid: str, a: s.IdentifyFunctionsIn) -> s.IdentifyFunctionsOut:
+        """Match functions against library FID databases (best-effort, untrusted hints — ADR-042).
+
+        Delegates to the worker's ``identify_functions`` RPC (the only Ghidra hop), filtering
+        candidates below ``a.min_score`` (``None`` ⇒ the worker's FID default threshold) and
+        bounding the result to ``a.limit`` matches (``truncated`` flags a clip — honest, ADR-005).
+        The matched library function name + library descriptor are binary-derived → the adapter
+        wraps them ``Untrusted`` (BINARY origin); the address + score are server/worker-safe.
+        """
+        ...
+
     # --- mutation / write operations (v1.1 — ADR-012; gated by session write-consent) ---
     # The server checks write consent + validates the (attacker-influenced) inputs BEFORE calling
     # these; the worker performs each write inside one Ghidra transaction (rollback on failure). The

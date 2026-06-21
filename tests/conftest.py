@@ -585,6 +585,10 @@ class FakeGhidraPort:
         """Reserved Tier-2 stub."""
         raise NotImplementedError("RESERVED (v1.1 ADR-008): program_summary")
 
+    def identify_functions(self, sid: str, a: s.IdentifyFunctionsIn) -> s.IdentifyFunctionsOut:
+        """Reserved Function ID stub (ADR-042; FID tests use a dedicated fake adapter)."""
+        raise NotImplementedError("RESERVED (ADR-042): identify_functions")
+
     def rename_function(self, sid: str, a: s.RenameFunctionIn) -> s.RenameResult:
         """Reserved mutation stub (ADR-012; mutation tests use a dedicated fake port)."""
         raise NotImplementedError("RESERVED (v1.1 ADR-012): rename_function")

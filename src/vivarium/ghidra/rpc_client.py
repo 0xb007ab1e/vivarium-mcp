@@ -109,6 +109,10 @@ _IOC_STRING_BUDGET = 10_000
 #: Max ``search_bytes`` matches requested per crypto signature (each search is already bounded; this
 #: caps the per-signature contribution to the aggregate and feeds ``truncated``).
 _CRYPTO_MATCH_BUDGET = 1_000
+#: Hard cap on FID match candidates the adapter ever returns from ``identify_functions`` (ADR-042;
+#: bounds the result BEFORE shaping — std-cwe CWE-400). Mirrors the worker-side cap; the per-call
+#: ``limit`` (schema-bounded) further narrows it, and ``truncated`` is honest when more matched.
+_IDENTIFY_MATCH_BUDGET = 10_000
 #: Poll interval between worker-socket connect attempts while the worker is still binding/warming
 #: up (bounded overall by ``connect_timeout_s``). Small enough for a snappy first call, large
 #: enough not to busy-spin.
@@ -1319,6 +1323,34 @@ class RpcGhidraAdapter:
         measured.sort(key=lambda c: c.complexity, reverse=True)
         return _TopComplex(functions=measured[:max_functions], truncated=listing.truncated)
 
+    # --- Function ID library-match identification (ADR-042 Phase 1; READ-ONLY) ---
+    def identify_functions(self, sid: str, a: s.IdentifyFunctionsIn) -> s.IdentifyFunctionsOut:
+        """Match functions against library FID databases (best-effort, untrusted hints — ADR-042).
+
+        Issues the worker ``identify_functions`` RPC (the only Ghidra hop — the worker runs the FID
+        service, filters candidates below the effective score threshold, and bounds its own result),
+        then enforces the caller's ``limit`` server-side: if more matches survive than ``limit``,
+        the list is clipped and ``truncated`` is set (honest — ADR-005), OR-ing in any worker clip.
+        Each candidate's ``matched_name`` + ``library`` are binary-derived → wrapped ``Untrusted``
+        (BINARY origin) by :func:`_build_identified_functions`; the address + score are safe.
+
+        Args:
+            sid: The session id.
+            a: The validated tool arguments (``limit`` / ``min_score``).
+
+        Returns:
+            The bounded :class:`vivarium.tools.schemas.IdentifyFunctionsOut`.
+        """
+        params: dict[str, Any] = {"limit": _IDENTIFY_MATCH_BUDGET}
+        if a.min_score is not None:
+            params["min_score"] = a.min_score
+        result = _build_identified_functions(self._tool_call(sid, "identify_functions", params))
+        worker_truncated = result.truncated
+        matches = result.matches
+        truncated = worker_truncated or len(matches) > a.limit
+        bounded = matches[: a.limit]
+        return s.IdentifyFunctionsOut(matches=bounded, total=len(bounded), truncated=truncated)
+
     # --- mutation / write operations (v1.1 — ADR-012; transaction-wrapped in the worker) ---
     # The server has already checked write consent (sessions.require_write_consent) and validated
     # the attacker-influenced inputs (validate_write_name / validate_comment_text). Here the adapter
@@ -2436,6 +2468,33 @@ def _build_export_list(r: dict[str, Any]) -> s.ExportListOut:
     return s.ExportListOut(
         exports=[_build_exported_symbol(x) for x in r.get("exports", [])],
         total=int(r["total"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
+def _build_identified_function(r: dict[str, Any]) -> s.IdentifiedFunction:
+    """Build one :class:`IdentifiedFunction`: matched_name/library=BINARY; address/score safe."""
+    return s.IdentifiedFunction(
+        address=str(r["address"]),
+        matched_name=_w(r["matched_name"], DataOrigin.BINARY),
+        library=_w(r["library"], DataOrigin.BINARY),
+        score=float(r["score"]),
+    )
+
+
+@_fail_closed
+def _build_identified_functions(r: dict[str, Any]) -> s.IdentifyFunctionsOut:
+    """Build :class:`IdentifyFunctionsOut` from a plain worker result (ADR-042).
+
+    ``total`` is recomputed from the wrapped matches (== ``len(matches)``) so the contract holds
+    regardless of any worker-reported count; ``truncated`` carries the worker's own clip flag (the
+    adapter OR-s the caller's ``limit`` clip on top in :meth:`RpcGhidraAdapter.identify_functions`).
+    """
+    matches = [_build_identified_function(m) for m in r.get("matches", [])]
+    return s.IdentifyFunctionsOut(
+        matches=matches,
+        total=len(matches),
         truncated=bool(r.get("truncated", False)),
     )
 

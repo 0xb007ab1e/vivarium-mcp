@@ -35,7 +35,7 @@ specimen. Here the specimen is an untrusted binary.
   defining data types, and similar edits are off by default. A session must explicitly enable writes
   before any change is allowed, and edits can be exported and re-imported as a portable annotation file.
 
-There are 55 tools in total. The full list, with the inputs and outputs for each, is in
+There are 56 tools in total. The full list, with the inputs and outputs for each, is in
 [`docs/contracts/tool-catalog.md`](./docs/contracts/tool-catalog.md).
 
 ## How it works
