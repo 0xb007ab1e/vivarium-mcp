@@ -138,6 +138,13 @@ _MAX_PROGRESS_FRAMES = 10_000
 #: it for mere chattiness; only exceeding the hard frame count is fatal.
 _MIN_PROGRESS_INTERVAL_S = 0.5
 
+#: Hard cap on ``$/chunk`` frames accepted per streaming call (ADR-040; worker is potentially
+#: hostile — TB2/TB3). A bulk decompile is bounded by the decompile total cap (10 000), so a worker
+#: emitting MORE chunks than that is a protocol violation → kill + evict (fail closed). Independent
+#: of the per-frame size cap (§3) and the server-side per-job buffer cap (which applies backpressure
+#: rather than killing); this bounds the TOTAL frame count across one call.
+_MAX_STREAM_CHUNKS = 10_000
+
 #: Module logger. RPC-layer failures are logged SERVER-SIDE with the underlying exception
 #: (socket/framing errors — no binary content or secrets) before being mapped to the
 #: boundary-safe public envelope, so operability does not depend on the client-facing message
@@ -500,28 +507,182 @@ class RpcGhidraAdapter:
         )
 
     # --- streaming-decompile (ADR-040) -----------------------------------------------------------
-    def decompile_stream(self, sid: str, a: st.DecompileStreamIn) -> Iterator[s.DecompiledFunction]:
+    def decompile_stream(
+        self, sid: str, a: st.DecompileStreamIn, *, terminal: st.StreamTerminal | None = None
+    ) -> Iterator[s.DecompiledFunction]:
         """Stream decompiled functions incrementally from the worker (ADR-040 — increment 2b).
 
-        The worker-side incremental emit (``start_decompile_stream`` RPC + ``$/chunk`` frames) is a
-        LATER increment; until then this fails closed with a safe ``worker-unavailable`` rather than
-        silently producing nothing. The server-side job machinery (buffer/backpressure/cursor/BOLA)
-        is complete and exercised hermetically via the fake streaming port.
+        Returns a **lazy iterator** (generator): nothing is sent until the first ``next()``. On that
+        first pull it issues the ``start_decompile_stream`` RPC, then reads the interleaved
+        ``$/progress`` + ``$/chunk`` + terminal-response frames within the call deadline,
+        classifying each (rpc-protocol.md §4):
+
+        - ``$/progress`` → relayed to the server log (redacted — percent + closed phase only) and
+          skipped (the job buffers results, not heartbeats);
+        - ``$/chunk`` → parsed + the **gap-free, monotonic ``seq`` asserted** against the next
+          expected value; the per-chunk binary-derived fields are wrapped at the ADR-005 chokepoint
+          and yielded as a :class:`DecompiledFunction`;
+        - the terminal response → ends the stream (``done``); its ``{total, truncated}`` is recorded
+          on ``terminal`` (when supplied) so the server can surface ``truncated`` honestly;
+        - a worker ``error`` response or any protocol/framing violation → kills the worker + evicts
+          (the universal fault handler) and **raises** so the job ends in a terminal ``error``
+          (never an ambiguous early ``done`` — ADR-005).
+
+        A non-monotonic / gapped ``seq`` or an out-of-vocabulary ``kind`` is a protocol violation
+        (``parse_chunk`` enforces the per-frame shape; the gap-free invariant ACROSS frames is
+        asserted here) → kill + evict.
 
         Args:
             sid: The session id.
-            a: The stream-start arguments (bounded function range).
+            a: The stream-start arguments (explicit function set or a bounded window).
+            terminal: Optional out-parameter the generator fills with the worker's terminal
+                ``{total, truncated}`` when the stream completes cleanly (lets the job report
+                ``truncated`` — the iterator interface itself cannot return it).
 
         Returns:
-            An iterator of decompiled functions (this increment: raises before producing any).
+            A lazy iterator of decompiled functions, one per worker ``$/chunk``.
 
         Raises:
-            GhidraMcpError: ``WORKER_UNAVAILABLE`` — worker streaming is not wired this increment.
+            GhidraMcpError: ``WORKER_UNAVAILABLE`` / ``TIMEOUT`` / a mapped worker error on any
+                failure (raised lazily from within the generator on the relevant ``next()``).
         """
-        raise _errors.make_error(
-            ErrorType.WORKER_UNAVAILABLE,
-            "worker streaming is not available in this build",
+        return self._decompile_stream_gen(sid, a, terminal)
+
+    def _decompile_stream_gen(
+        self, sid: str, a: st.DecompileStreamIn, terminal: st.StreamTerminal | None
+    ) -> Iterator[s.DecompiledFunction]:
+        """Generator backing :meth:`decompile_stream` (lazy: sends the RPC on first ``next()``).
+
+        Kept as a separate generator function so :meth:`decompile_stream` returns immediately while
+        production stays lazy. See :meth:`decompile_stream` for the full protocol.
+
+        Args:
+            sid: The session id.
+            a: The stream-start arguments.
+            terminal: Optional terminal out-parameter (filled on clean completion).
+
+        Yields:
+            One :class:`DecompiledFunction` per worker ``$/chunk``.
+        """
+        sess = self._sessions.get(sid)
+        if sess is None:
+            raise _errors.make_error(ErrorType.WORKER_UNAVAILABLE, "no worker for session")
+        request_id = uuid.uuid4().hex
+        params = _stream_start_params(a)
+        frame = rpc_framing.encode_frame(
+            rpc_framing.build_request(request_id, "start_decompile_stream", params),
+            max_frame_bytes=self._max_response_bytes,
         )
+        # A bulk decompile is a long operation; bound it by the analysis deadline (kill-on-expiry,
+        # NOT extended by chunks — ADR-002). The job lives inside the worker's bounded lifetime.
+        deadline = time.monotonic() + self._analysis_timeout_s
+        try:
+            sock = self._ensure_connected(sess)
+            self._send_all_with_timeout(sock, frame, self._analysis_timeout_s)
+            yield from self._read_stream_chunks(
+                sock, sid, expected_id=request_id, deadline=deadline, terminal=terminal
+            )
+        except RpcCallError as exc:
+            # A method-level worker failure mid-stream: the worker is healthy, do NOT kill. Map the
+            # slug; the job manager turns the raised GhidraMcpError into a terminal error chunk.
+            _log.warning(
+                "stream.worker_error",
+                extra={"slug": exc.error.type_slug, "detail": exc.error.detail},
+            )
+            etype = _errors.map_worker_slug(exc.error.type_slug)
+            raise _errors.make_error(etype, exc.error.message) from exc
+        except TimeoutError as exc:
+            _log.warning("stream.rpc_failed", extra={"cause": "timeout", "detail": str(exc)[:300]})
+            self.kill_worker(sid)
+            raise _errors.make_error(ErrorType.TIMEOUT, "stream exceeded its time limit") from exc
+        except (FramingError, RpcProtocolError) as exc:
+            # Hostile/buggy worker: protocol/framing/seq violation → kill + evict.
+            _log.warning(
+                "stream.rpc_failed",
+                extra={"cause": "protocol", "exc": type(exc).__name__, "detail": str(exc)[:300]},
+            )
+            self.kill_worker(sid)
+            raise _errors.make_error(
+                ErrorType.WORKER_UNAVAILABLE, "worker protocol violation"
+            ) from exc
+        except (ConnectionError, EOFError, OSError) as exc:
+            diagnosis = self._diagnose_worker_exit(sess)
+            _log.warning(
+                "stream.rpc_failed",
+                extra={
+                    "cause": "resource-exhausted" if diagnosis == "oom" else "transport",
+                    "exc": type(exc).__name__,
+                    "detail": str(exc)[:300],
+                },
+            )
+            self.kill_worker(sid)
+            if diagnosis == "oom":
+                raise _errors.resource_exhausted(self._worker_mem_mib) from exc
+            raise _errors.make_error(ErrorType.WORKER_UNAVAILABLE, "worker unavailable") from exc
+
+    def _read_stream_chunks(
+        self,
+        sock: socket.socket,
+        sid: str,
+        *,
+        expected_id: str,
+        deadline: float,
+        terminal: st.StreamTerminal | None,
+    ) -> Iterator[s.DecompiledFunction]:
+        """Read interleaved ``$/progress``/``$/chunk`` then the terminal response (ADR-040 loop).
+
+        Each iteration reads one frame within the SHRINKING remaining time of the one-shot stream
+        deadline (chunks NEVER extend it — ADR-002), classifies it, and either relays progress,
+        yields a chunk, or returns on the terminal response. Enforces the gap-free monotonic ``seq``
+        invariant across frames and a per-call chunk-count flood cap (TB2/TB3).
+
+        Args:
+            sock: The connected worker socket.
+            sid: The session id (for safe log context — length only, never the opaque id value).
+            expected_id: The streaming request id every frame must correlate to.
+            deadline: The monotonic wall-clock deadline for the whole stream.
+            terminal: Optional out-parameter filled with ``{total, truncated}`` on clean completion.
+
+        Yields:
+            One :class:`DecompiledFunction` per ``$/chunk`` frame, in ``seq`` order.
+
+        Raises:
+            RpcProtocolError: On a gapped/non-monotonic ``seq`` or a chunk flood over the cap.
+            RpcCallError: When the terminal frame is a worker ``error`` response.
+            TimeoutError: If the deadline elapses before the terminal response arrives.
+        """
+        next_seq = 0
+        chunk_count = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("stream deadline elapsed during chunk read-loop")
+            sock.settimeout(remaining)
+            frame = self._read_frame(sock)
+            if rpc_framing.is_progress_notification(frame):
+                progress = rpc_framing.parse_progress(frame, expected_id=expected_id)
+                _log.info("stream.progress", extra=_progress_log_payload(progress))
+                continue
+            if rpc_framing.is_chunk_notification(frame):
+                chunk_count += 1
+                if chunk_count > _MAX_STREAM_CHUNKS:
+                    raise RpcProtocolError("stream chunk flood exceeded the per-call cap")
+                chunk = rpc_framing.parse_chunk(frame, expected_id=expected_id)
+                if chunk.seq != next_seq:
+                    # Gap-free, monotonic seq is the resume/ordering invariant (ADR-040 D7); a
+                    # mismatch is a hostile/buggy worker → kill + evict (the caller maps it).
+                    raise RpcProtocolError("stream chunk seq is not gap-free monotonic")
+                next_seq += 1
+                yield _build_decompiled(chunk.payload)
+                continue
+            # Not a notification → the terminal response. parse_response validates id/result/error;
+            # a worker error raises RpcCallError (→ terminal error chunk). On success, record the
+            # honest {total, truncated} for the server and end the stream (StopIteration → done).
+            result = rpc_framing.parse_response(frame, expected_id=expected_id)
+            if terminal is not None:
+                terminal.total = int(result.get("total", next_seq))
+                terminal.truncated = bool(result.get("truncated", False))
+            return
 
     def attach_stream_jobs(self, manager: StreamingJobManager) -> None:
         """Inject the streaming-job manager after construction (ADR-040; composition-root wiring).
@@ -569,11 +730,17 @@ class RpcGhidraAdapter:
 
         Raises:
             GhidraMcpError: ``SESSION_INVALID`` (BOLA-safe), ``LIMIT_EXCEEDED`` (already active), or
-                ``WORKER_UNAVAILABLE`` (streaming off / worker emit not wired this increment).
+                ``WORKER_UNAVAILABLE`` (streaming off).
         """
         jobs = self._require_stream_jobs()
+        # A shared terminal holder: the producer fills {total, truncated} from the worker's
+        # terminal response; the job reads it to report ``truncated`` honestly (ADR-040 D8). Passing
+        # the SAME object to both the producer and the job is the decoupling seam (the iterator
+        # interface cannot itself return the job-level summary).
+        terminal = st.StreamTerminal()
+        producer = self.decompile_stream(sid, a, terminal=terminal)
         return jobs.start_job(
-            sid, producer=self.decompile_stream(sid, a), total=a.limit, caller=caller
+            sid, producer=producer, total=a.limit, caller=caller, terminal=terminal
         )
 
     def fetch_job_results(
@@ -614,7 +781,19 @@ class RpcGhidraAdapter:
         return jobs.status(sid, a.job_id, caller=caller)
 
     def cancel_job(self, sid: str, a: st.JobHandleIn, *, caller: str) -> st.StreamJobStatus:
-        """Cancel a job (free the worker early), returning its terminal status (ADR-040).
+        """Cancel a job (free the worker early), returning its terminal status (ADR-040 D6).
+
+        The manager authorizes (BOLA) + marks the job cancelled + drops its buffer FIRST (so an
+        unauthorized caller never causes a worker side effect). On a successful cancel of a job
+        that was still producing, a best-effort ``cancel_stream`` RPC is sent to the worker to set
+        its per-stream cancel flag, freeing worker capacity early without waiting for the deadline.
+
+        NOTE (synchronous worker): while the worker is mid-stream the single-connection loop is
+        blocked in the streaming call, so it cannot read a ``cancel_stream`` frame until that call
+        returns; in practice a blocked stream is freed by the bounded deadline + eviction (and the
+        ``cancel_stream`` flag is honored promptly only by the future async worker loop). The
+        best-effort send is therefore wrapped to never let a worker hiccup fail the (already
+        applied) server-side cancel — the authoritative cancel is the manager state change.
 
         Args:
             sid: The session id.
@@ -628,7 +807,33 @@ class RpcGhidraAdapter:
             GhidraMcpError: ``SESSION_INVALID`` (BOLA-safe) or ``WORKER_UNAVAILABLE`` (no stream).
         """
         jobs = self._require_stream_jobs()
-        return jobs.cancel(sid, a.job_id, caller=caller)
+        status = jobs.cancel(sid, a.job_id, caller=caller)
+        # Best-effort worker-side early stop: only attempt it for a session we still have a worker
+        # for, and never let it raise (the server-side cancel above is authoritative + done).
+        if sid in self._sessions:
+            with contextlib.suppress(Exception):
+                self._send_cancel_stream(sid)
+        return status
+
+    def _send_cancel_stream(self, sid: str) -> None:
+        """Send the idempotent ``cancel_stream`` control RPC to a session's worker (ADR-040 D6).
+
+        A short, bounded request: it sets the worker's per-stream cancel flag (checked between
+        functions). Best-effort — the caller suppresses failures. NOTE: in the synchronous worker a
+        mid-stream loop cannot service this until the call returns; see :meth:`cancel_job`.
+
+        Args:
+            sid: The session id whose worker to signal.
+        """
+        sess = self._sessions.get(sid)
+        if sess is None or sess.sock is None:
+            return  # no live connection to signal on
+        request_id = uuid.uuid4().hex
+        frame = rpc_framing.encode_frame(
+            rpc_framing.build_request(request_id, "cancel_stream", {}),
+            max_frame_bytes=self._max_response_bytes,
+        )
+        sess.sock.sendall(frame)
 
     def disassemble(self, sid: str, a: s.DisassembleIn) -> s.DisassembleOut:
         """Disassemble a bounded range or function."""
@@ -1681,6 +1886,26 @@ def _xrefs_params(a: s.XrefsIn) -> dict[str, Any]:
         The RPC params dict.
     """
     return {"target": a.target, "offset": a.offset, "limit": a.limit}
+
+
+def _stream_start_params(a: st.DecompileStreamIn) -> dict[str, Any]:
+    """Build the ``start_decompile_stream`` RPC params from the server-side start shape (ADR-040).
+
+    When an explicit ``functions`` set was named (the real name-filtering wired this increment) it
+    is forwarded so the worker decompiles exactly those; the worker treats the list as the bound and
+    ignores the window. When no set is named the worker windows the program's functions by
+    ``offset``/``limit`` (the existing decompile total cap). Pure (no I/O).
+
+    Args:
+        a: The server-side stream-start arguments.
+
+    Returns:
+        The JSON-serializable params dict for the streaming RPC.
+    """
+    params: dict[str, Any] = {"offset": a.offset, "limit": a.limit}
+    if a.functions is not None:
+        params["functions"] = list(a.functions)
+    return params
 
 
 # =====================================================================================

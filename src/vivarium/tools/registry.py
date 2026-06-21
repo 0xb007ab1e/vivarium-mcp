@@ -1376,10 +1376,11 @@ def _handle_session_import_annotations(
 def _to_server_stream_start(args: s.StartDecompileStreamIn) -> st.DecompileStreamIn:
     """Translate the client ``start_decompile_stream`` args to the server-side start shape.
 
-    The client names a function set (or omits it for "all"); the server-side producer is bounded by
-    ``offset``/``limit``. When an explicit set is supplied, the produced-chunk bound equals its
-    length (already length-capped at the client schema). When omitted, the default decompile total
-    cap applies. (Worker-side name filtering is increment 2b; this increment bounds the count.)
+    The client names a function set (or omits it for "all"). When an explicit set is supplied, the
+    names are forwarded so the worker decompiles EXACTLY those (real name-filtering — increment 2b)
+    and the produced-chunk bound equals the (already length-capped) list length. When omitted, the
+    server-side producer windows the program's functions by ``offset``/``limit`` (the decompile
+    total cap applies).
 
     Args:
         args: The validated client-facing start arguments.
@@ -1388,7 +1389,12 @@ def _to_server_stream_start(args: s.StartDecompileStreamIn) -> st.DecompileStrea
         The server-side :class:`vivarium.jobs.streaming.DecompileStreamIn` for the adapter.
     """
     if args.functions is not None:
-        return st.DecompileStreamIn(session_id=args.session_id, offset=0, limit=len(args.functions))
+        return st.DecompileStreamIn(
+            session_id=args.session_id,
+            offset=0,
+            limit=len(args.functions),
+            functions=list(args.functions),
+        )
     return st.DecompileStreamIn(session_id=args.session_id)
 
 
@@ -1461,14 +1467,15 @@ def _handle_fetch_job_results(ctx: ToolContext, args: s.FetchJobResultsIn) -> s.
         )
         for c in result.chunks
     ]
-    # `truncated` (requested set exceeded the decompile total cap) is a worker-reported job-level
-    # honesty flag wired in increment 2b; the server-side result carries no such signal yet, so it
-    # is reported `False` here (the count cap is enforced at input validation, never silently cut).
+    # `truncated` (the requested set exceeded the decompile total cap and was honestly bounded —
+    # ADR-040 D8) is now wired through from the worker's terminal summary via the job's shared
+    # terminal holder (increment 2b); the count cap is also enforced at input validation, never
+    # silently cut.
     return s.JobResultsOut(
         chunks=chunks,
         next_cursor=result.cursor,
         done=result.done,
-        truncated=False,
+        truncated=result.truncated,
     )
 
 
