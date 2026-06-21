@@ -141,6 +141,28 @@ unit (e.g. one decompiled function):
   and **not** extended by chunks or progress; on timeout/eviction the buffer is drained to the
   client where already-pulled, then the stream terminates with a terminal error.
 
+**`$/cancel` — additive mid-stream cancel NOTIFICATION (v1.x — ADR-041; server → worker):** to stop
+an in-flight `start_decompile_stream` promptly (on client `cancel_job`), the server sends a
+`$/cancel` notification on the same socket:
+```json
+{ "jsonrpc": "2.0", "method": "$/cancel", "params": { "id": "<streaming-call-uuid>" } }
+```
+- **A notification, not a request — NO top-level `id`** (same structural invariant as `$/progress`/
+  `$/chunk`; `params.id` correlates to the in-flight streaming call). It supersedes the former
+  `cancel_stream` request method (ADR-041): a notification avoids interleaving a second
+  request/response pair onto the streaming socket.
+- **The worker observes it BETWEEN functions** via a non-blocking poll of the socket during the
+  decompile loop (single-threaded; no reader thread / second socket). It sets the per-stream cancel
+  flag the loop already checks, so production stops at the next function boundary (granularity: one
+  function — a single `decompileFunction` is not interruptible and is separately bounded).
+- **The stream's terminal response is the acknowledgement** — on cancel the worker ends the stream
+  early and returns its terminal summary `{total, truncated, done}` with the produced count, exactly
+  as on normal completion; there is no separate cancel-ack frame.
+- **Idempotent + safe.** A `$/cancel` for an unknown/already-finished stream id is a no-op. Sending
+  is best-effort (the §6 deadline + eviction remain the backstop). A malformed/oversized control
+  frame, or any non-`$/cancel` frame arriving on the stream socket server→worker, is a protocol
+  violation → kill + evict (§6).
+
 ### RPC methods (worker-facing; one per Ghidra-touching operation)
 `import_binary`, `analyze`, `decompile_function`, `disassemble`, `list_functions`, `get_function`,
 `xrefs_to`, `xrefs_from`, `list_strings`, `list_symbols`, `get_symbol`, `list_data`,
@@ -192,14 +214,13 @@ all reconstructable session-authored composites as ONE `define_types` batch entr
 Phase 2 — a long call that decompiles a bounded function set, emitting one `$/chunk`
 (`kind:"function"`) per function as it is produced, then a terminal response `{total, truncated,
 done}`; read-only/output-only per ADR-001; the worker streams incrementally while the server
-buffers + applies backpressure; bounded by the existing bulk-decompile total cap) and its control
-method `cancel_stream` (aborts the in-flight streaming call for a given `params.id` so the server
-can free the worker early on client `cancel_job`; idempotent), plus a `ping`/`shutdown` control
+buffers + applies backpressure; bounded by the existing bulk-decompile total cap; aborted
+mid-stream by the `$/cancel` control notification below — ADR-041), plus a `ping`/`shutdown` control
 pair.
 (`fetch_job_results`, `job_status`, and `cancel_job` are **server-side** job operations against the
 server's per-job buffer — they read/drain buffered chunks and job state the server already holds;
-they are **not** worker RPC methods. Only `start_decompile_stream` (produce) and `cancel_stream`
-(abort production) touch the worker.)
+they are **not** worker RPC methods. Only `start_decompile_stream` touches the worker to produce;
+`$/cancel` (below) is the server→worker control notification that aborts production.)
 (Session create/status/close **and the write-consent grant/revoke** `session_enable_writes`/
 `session_disable_writes` are **server-side** lifecycle, not worker RPC methods. The derived
 tools compute server-side with **no dedicated worker method**: `callees`/`callers`/`analysis_order`/

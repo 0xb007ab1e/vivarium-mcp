@@ -49,7 +49,7 @@
 | `start_decompile_stream` | `StartDecompileStreamIn{session_id, functions?: [str], progress?}` | `JobStartOut{job, total_estimate?, state}` | starts bulk decompile over the function set (default: all, bounded by the existing decompile total cap); returns an opaque `job` handle immediately. Worker streams one `function` chunk per decompiled function |
 | `fetch_job_results` | `FetchJobResultsIn{session_id, job, cursor?, limit?}` | `JobResultsOut{chunks: [DecompiledChunk], next_cursor, done, truncated}` | drains up to `limit` (default 32, max 256) buffered chunks from the server in `seq` order + the next cursor + `done`; resumable (re-fetch from an earlier cursor; client dedupes by `seq`). `chunks[].code` is `Untrusted` |
 | `job_status` | `JobStatusIn{session_id, job}` | `JobStatusOut{state, phase, done, total?, buffered, eta_seconds?, started_at}` | server-side counters only — no binary content; `state ∈ {running, paused, done, error, cancelled}` |
-| `cancel_job` | `CancelJobIn{session_id, job}` | `CancelJobOut{cancelled}` | aborts the in-flight extraction (worker `cancel_stream`) + discards the buffer, freeing worker capacity early; idempotent |
+| `cancel_job` | `CancelJobIn{session_id, job}` | `CancelJobOut{cancelled}` | aborts the in-flight extraction (server→worker `$/cancel` notification — ADR-041) + discards the buffer, freeing worker capacity early; idempotent |
 
 ### Code
 | Tool | Input | Output |
