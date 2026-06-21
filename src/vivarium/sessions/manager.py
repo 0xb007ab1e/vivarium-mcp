@@ -38,7 +38,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from vivarium.core.errors import ErrorType
 from vivarium.ghidra import _errors
@@ -129,6 +129,9 @@ class _Session:
         ttl_s: Absolute lifetime in seconds.
         idle_s: Idle timeout in seconds.
         binary_sha256: Server-computed digest once a binary is imported, else ``None``.
+        analysis_profile: The analyzer-depth preset last run (ADR-029 B:
+            ``"default"``/``"light"``/``"deep"``), else ``None`` before any analyze. Echoes the
+            effective input profile; server-authoritative.
         store_path: Per-session project-store path to verified-wipe on eviction, or ``None`` if no
             store was provisioned.
         worker_started: Whether a worker was spawned (so eviction only kills a real worker).
@@ -148,6 +151,7 @@ class _Session:
     idle_s: int
     in_flight: int = 0
     binary_sha256: str | None = None
+    analysis_profile: Literal["default", "light", "deep"] | None = None
     store_path: str | None = None
     worker_started: bool = False
     writes_enabled: bool = False
@@ -614,6 +618,36 @@ class SessionManager:
         finally:
             self._flush_evicted()
 
+    def record_analysis_profile(
+        self,
+        session_id: str,
+        profile: Literal["default", "light", "deep"],
+        *,
+        caller: str = _LOCAL_PRINCIPAL_ID,
+    ) -> None:
+        """Echo the analyzer-depth profile that ran on a caller-owned session (ADR-029 B).
+
+        Called from the analyze handler AFTER a successful auto-analysis so the session's
+        ``SessionInfo`` reflects which profile (``"default"``/``"light"``/``"deep"``) actually ran —
+        the input ``SessionAnalyzeIn.profile`` is otherwise not observable. Server-authoritative and
+        non-binary-derived (it is the validated, closed-set input echoed back). Owner-scoped via the
+        shared chokepoint (a foreign caller cannot stamp another principal's session — ADR-017).
+
+        Args:
+            session_id: The opaque id of a live, caller-owned session.
+            profile: The validated profile string that ran (closed set; from ``SessionAnalyzeIn``).
+            caller: The authenticated, server-derived calling-principal id (ADR-017).
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` if unknown/expired/evicted/foreign (BOLA-safe).
+        """
+        try:
+            with self._lock:
+                sess = self._get_live_locked(session_id, caller=caller)
+                sess.analysis_profile = profile
+        finally:
+            self._flush_evicted()
+
     # --- session-scoped change-log (ADR-027 D2/D4; comments + composites export selection) -------
     def record_comment_target(
         self,
@@ -1034,6 +1068,7 @@ class SessionManager:
             created_at=sess.created_at,
             expires_at=sess.created_at + sess.ttl_s,
             binary_sha256=sess.binary_sha256,
+            analysis_profile=sess.analysis_profile,
             writes_enabled=sess.writes_enabled,
             allow_structural=sess.allow_structural,
         )

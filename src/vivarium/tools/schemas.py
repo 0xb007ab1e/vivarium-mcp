@@ -102,6 +102,11 @@ class SessionInfo(_Out):
         expires_at: Unix epoch seconds at which TTL eviction occurs.
         binary_sha256: Hex SHA-256 of the imported binary, or ``None`` before import. This is a
             server-computed digest of input — safe (not binary-derived content).
+        analysis_profile: The analyzer-depth preset that was last run on this session
+            (``"default"``/``"light"``/``"deep"``), or ``None`` before any ``session_analyze``
+            (ADR-029 B). Echoes the effective input ``SessionAnalyzeIn.profile`` so a
+            client/operator can see which profile actually ran — server-authoritative, safe
+            (not binary-derived).
         writes_enabled: Whether this session holds write consent (annotation mutation permitted —
             ADR-012 §3). Default-deny: ``False`` until ``session_enable_writes`` is called. Server-
             authoritative, safe.
@@ -114,6 +119,7 @@ class SessionInfo(_Out):
     created_at: int
     expires_at: int
     binary_sha256: str | None = None
+    analysis_profile: Literal["default", "light", "deep"] | None = None
     writes_enabled: bool = False
     allow_structural: bool = False
 

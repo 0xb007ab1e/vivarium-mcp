@@ -73,6 +73,7 @@ class FakeSessionManager:
         self.evicted: list[tuple[str, str]] = []
         self.ensured: list[str] = []
         self.recorded_hashes: list[tuple[str, str]] = []  # ADR-018: program-hash binding records
+        self.recorded_profiles: list[tuple[str, str]] = []  # ADR-029 B: effective analysis profile
         self.created = 0
         # ADR-025 / F4: in-flight markers the dispatch chokepoint wraps session-scoped calls with.
         # ``events`` records the interleaving so tests can assert begin → handler → end ordering.
@@ -117,6 +118,12 @@ class FakeSessionManager:
     def record_binary_hash(self, session_id: str, sha256: str, *, caller: str = "local") -> None:
         """Record the worker-computed program hash (the import handler calls this — ADR-018)."""
         self.recorded_hashes.append((session_id, sha256))
+
+    def record_analysis_profile(
+        self, session_id: str, profile: str, *, caller: str = "local"
+    ) -> None:
+        """Echo the effective analyzer profile on the session (the analyze handler — ADR-029 B)."""
+        self.recorded_profiles.append((session_id, profile))
 
 
 def _u(text: str, origin: DataOrigin = DataOrigin.BINARY) -> Untrusted[str]:
@@ -647,6 +654,30 @@ def test_session_analyze_uses_manager_lifecycle_keeps_worker_sha256(ctx: reg.Too
     assert info.created_at == 0
     assert info.expires_at == 10
     assert info.binary_sha256 == "b" * 64
+
+
+@pytest.mark.critical
+@pytest.mark.parametrize("profile", ["default", "light", "deep"])
+def test_session_analyze_echoes_effective_profile(ctx: reg.ToolContext, profile: str) -> None:
+    """Item 1 (ADR-029 B): the returned SessionInfo carries the effective analysis profile.
+
+    The sync handler records the validated input profile on the session AFTER a successful analyze
+    and the returned (merged) info reflects it — so a client/operator can see which preset ran.
+    """
+    handlers = reg.build_handlers(ctx)
+    info = _invoke(handlers["session_analyze"], session_id=_VALID_SID, profile=profile)
+    assert info.analysis_profile == profile
+    # The same value was recorded on the session (the source of truth for a later session_status).
+    sessions = cast(FakeSessionManager, ctx.sessions)
+    assert sessions.recorded_profiles == [(_VALID_SID, profile)]
+
+
+def test_session_analyze_default_profile_when_unspecified(ctx: reg.ToolContext) -> None:
+    """Omitting ``profile`` defaults to ``"default"`` and that is echoed/recorded (ADR-029 B)."""
+    handlers = reg.build_handlers(ctx)
+    info = _invoke(handlers["session_analyze"], session_id=_VALID_SID)
+    assert info.analysis_profile == "default"
+    assert cast(FakeSessionManager, ctx.sessions).recorded_profiles == [(_VALID_SID, "default")]
 
 
 @pytest.mark.parametrize(

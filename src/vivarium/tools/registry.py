@@ -367,11 +367,19 @@ def _handle_session_analyze(
             (stdio / no ``progressToken``) is byte-for-byte the pre-Phase-2 path.
 
     Returns:
-        Updated :class:`SessionInfo` after analysis, with authoritative lifecycle fields.
+        Updated :class:`SessionInfo` after analysis, with authoritative lifecycle fields including
+        the effective ``analysis_profile`` (ADR-029 B) just recorded.
     """
     authoritative = ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     analyzed = ctx.port.analyze(args.session_id, args, on_progress=on_progress)
-    return _merge_session_info(authoritative, analyzed)
+    # Echo the effective analyzer profile (ADR-029 B) on the session AFTER a successful analyze, so
+    # a client/operator can see which preset actually ran (the input profile is otherwise
+    # unobservable). Owner-scoped via the same chokepoint. The returned (merged) info reflects it by
+    # overlaying the validated input profile — the manager was just stamped with the same value, so
+    # a later ``session_status`` is consistent; the worker contributes only ``binary_sha256``.
+    ctx.sessions.record_analysis_profile(args.session_id, args.profile, caller=ctx.caller_id)
+    merged = _merge_session_info(authoritative, analyzed)
+    return merged.model_copy(update={"analysis_profile": args.profile})
 
 
 def _merge_session_info(authoritative: s.SessionInfo, worker: s.SessionInfo) -> s.SessionInfo:
