@@ -6,15 +6,13 @@
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **51** tools today (asserted in
-  tests), rising to **55** once the ADR-040 streaming tools land — this catalog entry **specifies**
-  them; their registration + the `len(TIER1_TOOL_NAMES) == 55` assertion are a follow-up
-  implementation increment (the design + contract is this PR; code is the next). The breakdown:
+- **Allow-list only:** the catalog is fixed; there are exactly **55** tools (asserted in tests by
+  `len(TIER1_TOOL_NAMES) == 55`). The breakdown:
   22 Tier-1 read-only (v1) + 5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
   reporting/metrics tools (ADR-008; all read-only) + **6 v1.1 mutation/write tools (ADR-012) + 8
   structural-write tools (ADR-013 Phase A + ADR-014 Phase B + ADR-015 Phase C + ADR-021 batch
-  `define_types` + ADR-031 `delete_type`)** + **4 v1.x streaming-extraction tools (ADR-040, pending
-  impl: `start_decompile_stream` + the generic `fetch_job_results`/`job_status`/`cancel_job`;
+  `define_types` + ADR-031 `delete_type`)** + **4 v1.x streaming-extraction tools (ADR-040:
+  `start_decompile_stream` + the generic `fetch_job_results`/`job_status`/`cancel_job`;
   read-only, output-only)** + **2 v1.2 annotation-persistence tools (ADR-018:
   `session_export_annotations` read-only + `session_import_annotations` GATED)** — the 14 mutation
   tools GATED by per-session write-consent (structural additionally by `allow_structural`); import is

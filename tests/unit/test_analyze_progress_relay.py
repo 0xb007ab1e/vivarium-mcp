@@ -69,6 +69,10 @@ class _FakePort:
         self.frames = frames or []
         self.on_progress_seen: OnProgress | None | object = "unset"
 
+    def attach_stream_jobs(self, manager: object) -> None:
+        """No-op streaming-job injection (ADR-040 composition-root wiring seam)."""
+        return None
+
     def analyze(
         self,
         session_id: str,

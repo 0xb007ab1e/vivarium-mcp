@@ -38,6 +38,7 @@ from vivarium.config import Config
 from vivarium.core import validation as v
 from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from vivarium.ghidra.port import GhidraPort, OnProgress
+from vivarium.jobs import streaming as st
 from vivarium.logging import get_logger
 from vivarium.server.auth import CAP_READ, CAP_WRITE, Principal
 from vivarium.sessions.manager import SessionManager
@@ -120,6 +121,11 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     # write-consent + allow_structural for structural entries)
     "session_export_annotations",
     "session_import_annotations",
+    # streaming extraction (v1.x — ADR-040; READ-ONLY, output-only; pull-based job + cursor)
+    "start_decompile_stream",
+    "fetch_job_results",
+    "job_status",
+    "cancel_job",
 )
 
 
@@ -1352,6 +1358,172 @@ def _handle_session_import_annotations(
     )
 
 
+# =====================================================================================
+# Streaming extraction (ADR-040 — pull-based job + cursor; READ-ONLY, output-only)
+# =====================================================================================
+# Each handler follows the catalog pattern: validate (pydantic, done by dispatch) → BOLA authorize
+# (the session-ownership chokepoint) → enforce caps BEFORE delegation → delegate to the port (which
+# delegates to the injected StreamingJobManager — itself re-authorizing) → map the SERVER-SIDE
+# result shape to the FROZEN client-facing ``*Out``. The double authorize (handler + manager) is
+# defense in depth / complete mediation; the per-chunk untrusted envelope is preserved by passing
+# the already-``Untrusted``-wrapped fields straight through (never unwrapped here).
+#
+# Worker incremental emit is increment 2b: against a real worker the port's ``decompile_stream``
+# fails closed ``worker-unavailable`` (no chunks produced); these handlers + the job machinery are
+# exercised hermetically via ``FakeGhidraPort``'s deterministic synthetic stream.
+
+
+def _to_server_stream_start(args: s.StartDecompileStreamIn) -> st.DecompileStreamIn:
+    """Translate the client ``start_decompile_stream`` args to the server-side start shape.
+
+    The client names a function set (or omits it for "all"); the server-side producer is bounded by
+    ``offset``/``limit``. When an explicit set is supplied, the produced-chunk bound equals its
+    length (already length-capped at the client schema). When omitted, the default decompile total
+    cap applies. (Worker-side name filtering is increment 2b; this increment bounds the count.)
+
+    Args:
+        args: The validated client-facing start arguments.
+
+    Returns:
+        The server-side :class:`vivarium.jobs.streaming.DecompileStreamIn` for the adapter.
+    """
+    if args.functions is not None:
+        return st.DecompileStreamIn(session_id=args.session_id, offset=0, limit=len(args.functions))
+    return st.DecompileStreamIn(session_id=args.session_id)
+
+
+def _handle_start_decompile_stream(
+    ctx: ToolContext, args: s.StartDecompileStreamIn
+) -> s.JobStartOut:
+    """Start a bulk-decompile streaming job; return its opaque handle + initial state (ADR-040).
+
+    Authorizes the session (BOLA), bounds the requested function set BEFORE delegating, starts the
+    job (the manager enforces one-active-job-per-session under the bounded buffer), then snapshots
+    status to report the initial state + total estimate — never any binary content.
+
+    Args:
+        ctx: Injected collaborators.
+        args: The validated client-facing start arguments.
+
+    Returns:
+        A :class:`vivarium.tools.schemas.JobStartOut` with the handle, total estimate, and state.
+
+    Raises:
+        GhidraMcpError: ``SESSION_INVALID`` (BOLA-safe), ``LIMIT_EXCEEDED`` (already active), or
+            ``WORKER_UNAVAILABLE`` (streaming off / worker emit not wired this increment).
+    """
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    server_args = _to_server_stream_start(args)
+    job_id = ctx.port.start_decompile_stream(args.session_id, server_args, caller=ctx.caller_id)
+    handle = st.JobHandleIn(session_id=args.session_id, job_id=job_id)
+    status = ctx.port.job_status(args.session_id, handle, caller=ctx.caller_id)
+    return s.JobStartOut(
+        job=job_id,
+        total_estimate=status.total,
+        state=status.state.value,
+    )
+
+
+def _handle_fetch_job_results(ctx: ToolContext, args: s.FetchJobResultsIn) -> s.JobResultsOut:
+    """Pull the next bounded, ordered batch of chunks by cursor (ADR-040 fetch).
+
+    Authorizes the session (BOLA), then delegates to the job manager (which re-authorizes + verifies
+    the job belongs to the session). The fetch ``limit`` is already pydantic-bounded (default 32,
+    max 256). Each chunk's binary-derived fields stay :class:`Untrusted` — passed straight through
+    into the client ``DecompiledChunk`` (the per-chunk envelope rule, never unwrapped).
+
+    Args:
+        ctx: Injected collaborators.
+        args: The validated client-facing fetch arguments.
+
+    Returns:
+        A :class:`vivarium.tools.schemas.JobResultsOut` batch + resume cursor + terminality.
+
+    Raises:
+        GhidraMcpError: ``SESSION_INVALID`` (BOLA-safe), ``VALIDATION`` (cursor ahead of stream), or
+            ``WORKER_UNAVAILABLE`` (streaming off).
+    """
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    result = ctx.port.fetch_job_results(
+        args.session_id,
+        st.FetchJobResultsIn(
+            session_id=args.session_id, job_id=args.job, cursor=args.cursor, limit=args.limit
+        ),
+        caller=ctx.caller_id,
+    )
+    chunks = [
+        s.DecompiledChunk(
+            seq=c.seq,
+            address=c.function.address,
+            name=c.function.name,
+            code=c.function.c_code,
+            signature=c.function.signature,
+        )
+        for c in result.chunks
+    ]
+    # `truncated` (requested set exceeded the decompile total cap) is a worker-reported job-level
+    # honesty flag wired in increment 2b; the server-side result carries no such signal yet, so it
+    # is reported `False` here (the count cap is enforced at input validation, never silently cut).
+    return s.JobResultsOut(
+        chunks=chunks,
+        next_cursor=result.cursor,
+        done=result.done,
+        truncated=False,
+    )
+
+
+def _handle_job_status(ctx: ToolContext, args: s.JobStatusIn) -> s.JobStatusOut:
+    """Return a job's server-authored status — counters/state only, NO binary content (ADR-040).
+
+    Authorizes the session (BOLA), delegates to the manager (re-authorizes + verifies ownership),
+    and maps the server-side status to the client shape. No binary-derived field is ever present.
+
+    Args:
+        ctx: Injected collaborators.
+        args: The validated client-facing status arguments.
+
+    Returns:
+        A :class:`vivarium.tools.schemas.JobStatusOut` snapshot.
+
+    Raises:
+        GhidraMcpError: ``SESSION_INVALID`` (BOLA-safe) or ``WORKER_UNAVAILABLE`` (no stream).
+    """
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    handle = st.JobHandleIn(session_id=args.session_id, job_id=args.job)
+    status = ctx.port.job_status(args.session_id, handle, caller=ctx.caller_id)
+    return s.JobStatusOut(
+        state=status.state.value,
+        phase=status.state.value,
+        done=status.state in st._TERMINAL_STATES,
+        total=status.total,
+        buffered=status.buffered,
+        eta_seconds=status.eta_seconds,
+        started_at=status.elapsed_seconds,
+    )
+
+
+def _handle_cancel_job(ctx: ToolContext, args: s.CancelJobIn) -> s.CancelJobOut:
+    """Cancel a job (free the worker early); return an idempotent terminal ack (ADR-040).
+
+    Authorizes the session (BOLA), delegates to the manager (re-authorizes + verifies ownership),
+    which marks the job cancelled, discards its buffer, and clears the active-job slot. Idempotent.
+
+    Args:
+        ctx: Injected collaborators.
+        args: The validated client-facing cancel arguments.
+
+    Returns:
+        A :class:`vivarium.tools.schemas.CancelJobOut` with ``cancelled=True`` (job now terminal).
+
+    Raises:
+        GhidraMcpError: ``SESSION_INVALID`` (BOLA-safe) or ``WORKER_UNAVAILABLE`` (no stream).
+    """
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    handle = st.JobHandleIn(session_id=args.session_id, job_id=args.job)
+    status = ctx.port.cancel_job(args.session_id, handle, caller=ctx.caller_id)
+    return s.CancelJobOut(cancelled=status.state in st._TERMINAL_STATES)
+
+
 # Map of tool name → (handler, input-schema). The input schema is the handler's single argument
 # type, from which FastMCP derives the tool's JSON schema. The output schema is the return type.
 _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
@@ -1417,6 +1589,11 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
         _handle_session_import_annotations,
         s.SessionImportAnnotationsIn,
     ),
+    # streaming extraction (v1.x — ADR-040; READ-ONLY, output-only; pull-based job + cursor)
+    "start_decompile_stream": (_handle_start_decompile_stream, s.StartDecompileStreamIn),
+    "fetch_job_results": (_handle_fetch_job_results, s.FetchJobResultsIn),
+    "job_status": (_handle_job_status, s.JobStatusIn),
+    "cancel_job": (_handle_cancel_job, s.CancelJobIn),
 }
 
 

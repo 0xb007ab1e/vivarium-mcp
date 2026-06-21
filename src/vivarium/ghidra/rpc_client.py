@@ -523,6 +523,18 @@ class RpcGhidraAdapter:
             "worker streaming is not available in this build",
         )
 
+    def attach_stream_jobs(self, manager: StreamingJobManager) -> None:
+        """Inject the streaming-job manager after construction (ADR-040; composition-root wiring).
+
+        Resolves the composition cycle: the manager needs the session manager's authorizer, the
+        session manager needs this port, so the manager is built last and bound here. Idempotent
+        replace.
+
+        Args:
+            manager: The constructed :class:`~vivarium.jobs.streaming.StreamingJobManager`.
+        """
+        self._stream_jobs = manager
+
     def _require_stream_jobs(self) -> StreamingJobManager:
         """Return the wired streaming-job manager or fail closed if streaming is not configured.
 

@@ -2614,3 +2614,205 @@ class SessionImportAnnotationsOut(_Out):
     applied: int
     rejected: int
     outcomes: list[ImportedEntryOutcome]
+
+
+# =====================================================================================
+# Streaming extraction (v1.x — ADR-040; READ-ONLY, output-only; pull-based job + cursor)
+# =====================================================================================
+# These are the FROZEN, client-facing tool schemas for the four streaming tools (the catalog I/O
+# spec, `docs/contracts/tool-catalog.md` "Streaming extraction"). They are deliberately decoupled
+# from the SERVER-SIDE shapes in :mod:`vivarium.jobs.streaming` (``DecompileStreamIn`` /
+# ``FetchJobResultsIn`` / ``JobHandleIn`` / ``StreamFetchResult`` / ``StreamJobStatus``): the
+# registry handlers translate between this client surface and the adapter/job-manager surface so
+# this module stays standalone (the job manager imports THIS module — never the reverse, no cycle).
+
+#: Default chunks returned by one ``fetch_job_results`` pull (catalog: default 32).
+_DEFAULT_FETCH_LIMIT = 32
+#: Hard cap on one ``fetch_job_results`` pull (catalog: max 256 — bounds one response, DoS/CWE-400).
+_MAX_FETCH_LIMIT = 256
+#: Max function names a ``start_decompile_stream`` request may name explicitly (bounds the produced
+#: chunk count + request size before the worker — DoS/CWE-400; mirrors the decompile total cap).
+_MAX_STREAM_FUNCTIONS = _MAX_LIMIT
+#: Closed status vocabulary mirrored from :class:`vivarium.jobs.streaming.JobState` so the frozen
+#: client schema does not import the server-side enum (no cycle). Kept in lockstep by a test.
+_JOB_STATE = Literal["running", "paused", "done", "error", "cancelled"]
+
+
+class StartDecompileStreamIn(_SessionScopedIn):
+    """Arguments for ``start_decompile_stream`` — begin a bulk-decompile streaming job (ADR-040).
+
+    Starts an extraction *job* over a function set and returns an opaque handle immediately; the
+    client then pulls bounded batches with ``fetch_job_results``. Bounded by default: an explicit
+    ``functions`` list is capped (DoS — the count caps the produced chunks); omitting it streams the
+    program's functions bounded by the existing decompile total cap (the worker filters/enumerates —
+    increment 2b).
+
+    Attributes:
+        session_id: The owning, server-authorized session id (BOLA).
+        functions: Optional explicit set of function entry addresses (hex) OR names to decompile.
+            When omitted, the job covers the program's functions up to the decompile total cap. Each
+            entry is a bounded, untrusted identifier; the list length is capped.
+        progress: Opt-in to bounded, redacted worker→server progress notifications for this job
+            (additive; default ``False`` — byte-for-byte the no-progress path). No binary content.
+    """
+
+    functions: list[str] | None = Field(default=None, max_length=_MAX_STREAM_FUNCTIONS)
+    progress: bool = False
+
+    @model_validator(mode="after")
+    def _check_function_names(self) -> StartDecompileStreamIn:
+        """Validate an explicit function set: non-empty list, each identifier length-bounded.
+
+        Fails closed on an explicit-but-empty list (``[]`` is ambiguous — "stream nothing" — and
+        would map to an out-of-range server-side bound); omit the field to stream all.
+
+        Returns:
+            The validated model.
+
+        Raises:
+            ValueError: If ``functions`` is an empty list, or any named function is empty or exceeds
+                the name length cap (semantic hex/charset validation is applied by
+                ``core.validation`` in the handler/worker).
+        """
+        if self.functions is not None:
+            if not self.functions:
+                raise ValueError("functions, when given, must be non-empty (omit it to stream all)")
+            for fn in self.functions:
+                if not 1 <= len(fn) <= _MAX_NAME:
+                    raise ValueError(f"each function identifier must be 1..{_MAX_NAME} chars")
+        return self
+
+
+class JobStartOut(_Out):
+    """Result of ``start_decompile_stream`` — the opaque job handle + initial state (ADR-040).
+
+    Server-authored, no binary content. The client uses ``job`` for every subsequent
+    ``fetch_job_results`` / ``job_status`` / ``cancel_job`` call.
+
+    Attributes:
+        job: The opaque CSPRNG job handle (bound to its session+principal — BOLA).
+        total_estimate: Total expected chunks when known up front (else ``None`` — indeterminate).
+        state: The job's initial :data:`_JOB_STATE` (typically ``running`` or ``paused``).
+    """
+
+    job: str
+    total_estimate: int | None = None
+    state: _JOB_STATE
+
+
+class DecompiledChunk(_Out):
+    """One streamed partial result — a decompiled function (ADR-040; binary-derived per-chunk).
+
+    Carries the same untrusted-data envelope per chunk as a one-shot ``DecompiledFunction`` result
+    (ADR-005 / ADR-040 D9): ``name``/``code``/``signature`` are :class:`Untrusted` — inert data,
+    never instructions. ``seq`` is the server-assigned, gap-free cursor unit; ``address`` is a
+    server-normalized scalar (safe).
+
+    Attributes:
+        seq: Server-assigned 0-based, monotonic, gap-free sequence number (the cursor unit).
+        address: Server-normalized entry address (hex string) — safe.
+        name: Function name as Ghidra knows it — untrusted (attacker-influenced symbol).
+        code: The decompiled pseudo-C — untrusted (prime injection vector).
+        signature: Recovered signature — untrusted.
+    """
+
+    seq: int = Field(ge=0)
+    address: str
+    name: Untrusted[str]
+    code: Untrusted[str]
+    signature: Untrusted[str]
+
+
+class FetchJobResultsIn(_SessionScopedIn):
+    """Arguments for ``fetch_job_results`` — pull the next bounded batch by cursor (ADR-040).
+
+    Attributes:
+        session_id: The owning session id (BOLA).
+        job: The opaque job handle returned by ``start_decompile_stream``.
+        cursor: Optional client resume cursor (next ``seq`` the client expects); the server is the
+            authority on what remains buffered (a cursor ahead of the server is rejected).
+        limit: Max chunks to return this pull (default 32, max 256 — bounds one response).
+    """
+
+    job: str = Field(min_length=1, max_length=64)
+    cursor: int | None = Field(default=None, ge=0)
+    limit: int = Field(default=_DEFAULT_FETCH_LIMIT, ge=1, le=_MAX_FETCH_LIMIT)
+
+
+class JobResultsOut(_Out):
+    """Result of ``fetch_job_results`` — the next ordered batch + resume cursor (ADR-040).
+
+    Server-authored; the ``chunks`` payloads are per-chunk untrusted (above). On a terminal error
+    ``done`` is ``True`` and ``chunks`` may be empty — the honest end is reported via ``job_status``
+    (no ambiguous early ``done``).
+
+    Attributes:
+        chunks: The next bounded, ordered batch (possibly empty when nothing new is buffered yet).
+        next_cursor: The next-expected ``seq`` — the resume point for the following fetch.
+        done: ``True`` iff the job has reached a terminal state (no more chunks will arrive).
+        truncated: ``True`` iff the requested function set exceeded the decompile total cap and was
+            honestly bounded (never silently cut — ADR-040 D8).
+    """
+
+    chunks: list[DecompiledChunk]
+    next_cursor: int = Field(ge=0)
+    done: bool
+    truncated: bool = False
+
+
+class JobStatusIn(_SessionScopedIn):
+    """Arguments for ``job_status`` — snapshot a job's server-authored counters (ADR-040).
+
+    Attributes:
+        session_id: The owning session id (BOLA).
+        job: The opaque job handle.
+    """
+
+    job: str = Field(min_length=1, max_length=64)
+
+
+class JobStatusOut(_Out):
+    """Result of ``job_status`` — server-side counters only, NO binary content (ADR-040 D9).
+
+    Every field is a server-computed scalar/label; nothing here is binary-derived (master §5).
+
+    Attributes:
+        state: Current :data:`_JOB_STATE`.
+        phase: Coarse, closed-vocabulary lifecycle phase label (mirrors ``state`` for this
+            increment — a content-free progress hint).
+        done: ``True`` iff ``state`` is terminal.
+        total: Total expected chunks when known up front (else ``None``).
+        buffered: Count of produced-but-not-yet-fetched chunks currently held server-side.
+        eta_seconds: Best-effort seconds remaining (``None`` when indeterminate/terminal).
+        started_at: Elapsed seconds since the job started (injected monotonic clock; deterministic).
+    """
+
+    state: _JOB_STATE
+    phase: _JOB_STATE
+    done: bool
+    total: int | None = Field(default=None, ge=0)
+    buffered: int = Field(ge=0)
+    eta_seconds: float | None = Field(default=None, ge=0.0)
+    started_at: float = Field(ge=0.0)
+
+
+class CancelJobIn(_SessionScopedIn):
+    """Arguments for ``cancel_job`` — abort an in-flight job and free the worker early (ADR-040).
+
+    Attributes:
+        session_id: The owning session id (BOLA).
+        job: The opaque job handle.
+    """
+
+    job: str = Field(min_length=1, max_length=64)
+
+
+class CancelJobOut(_Out):
+    """Result of ``cancel_job`` — idempotent terminal acknowledgement (ADR-040).
+
+    Attributes:
+        cancelled: ``True`` once the job is in a terminal state after this call (idempotent — a job
+            already terminal returns ``True``).
+    """
+
+    cancelled: bool
