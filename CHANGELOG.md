@@ -6,6 +6,31 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-06-21
+
+Library-function identification: the new read-only `identify_functions` tool surfaces Ghidra
+**FunctionID (FID)** matches as untrusted, bounded **hints** — auto-labeling known library code so an
+LLM client can focus on the program's own logic. Plus session/export provenance polish. Additive —
+every existing tool and contract is unchanged; the catalog grows **55 → 56**.
+
+### Added
+- **`identify_functions` — library-function identification (ADR-042 Phase 1).** A read-only tool that
+  runs Ghidra's FunctionID service over the analyzed program and returns, per matched function, the
+  library function name + `"<family> <version> <variant>"` + FID score. Each binary-derived field is
+  wrapped in the ADR-005 untrusted-data envelope (a match is a best-effort, possibly-multiple **hint**,
+  never an authoritative identity), and the result is bounded with a `truncated` flag. **Phase 1 covers
+  the bundled MSVC FID databases** (Windows/PE targets); ELF database coverage is deferred (ADR-042
+  Phase 2, behind a headless-activation + licensing spike). Catalog **55 → 56**. Validated end-to-end
+  against the real worker (a `live-regression` hard gate).
+- **`SessionInfo.analysis_profile` (ADR-029).** `session_status` now echoes the effective analyzer
+  profile that ran (`default` / `light` / `deep`, or `null` before analysis).
+- **`SessionInfo.binary_size`, and export-document `binary.name` / `binary.size` provenance.**
+  Populated server-side from import metadata — no binary parse (ADR-001); `name`/`size` remain advisory
+  (the `sha256` binding stays authoritative).
+
+### Changed
+- Tool catalog **55 → 56** (the `identify_functions` tool).
+
 ## [0.10.0] — 2026-06-21
 
 Streaming reverse-engineering: the worker now emits decompiled functions **as it produces them**, so an
