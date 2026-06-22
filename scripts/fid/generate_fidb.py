@@ -211,6 +211,7 @@ def _generate_fidbf(
     from ghidra.framework.store.db import PackedDatabase  # type: ignore[import-not-found]
     from ghidra.util.task import ConsoleTaskMonitor  # type: ignore[import-not-found]
     from java.io import File  # type: ignore[import-not-found]
+    from java.lang import Object as JObject  # type: ignore[import-not-found]
     from java.util import ArrayList  # type: ignore[import-not-found]
 
     unpacked = fidbf_path.with_suffix(".fidb")  # raw createNewFidDatabase output (intermediate)
@@ -218,50 +219,81 @@ def _generate_fidbf(
     manager = FidFileManager.getInstance()
     service = FidService()
 
-    with pyghidra.open_program(
-        str(input_path),
-        project_location=str(fidbf_path.parent / "_genproject"),
-        project_name="fidgen",
-        analyze=True,
-    ) as flat:
-        program = flat.getCurrentProgram()
-        language_id = str(program.getLanguageID())
-
-        manager.createNewFidDatabase(File(str(unpacked)))
-        fid_file = manager.addUserFidFile(File(str(unpacked)))
-        fid_db = fid_file.getFidDB(True)
-        if include_symbols is None:
-            function_filter = jpype.JProxy(
-                "java.util.function.Predicate", dict={"test": lambda _t: True}
-            )
-        else:
-            # The predicate receives generic.stl.Pair<Function, FidHashQuad>; ``.first`` is the
-            # Function. Fail CLOSED (exclude) on any accessor error so a wrong accessor yields a
-            # loud empty DB rather than silently re-admitting every CRT function.
-            def _accept(pair: object) -> bool:
-                try:
-                    return str(pair.first.getName()) in include_symbols  # type: ignore[attr-defined]
-                except Exception:  # JVM-edge accessor; exclude on any failure (fail closed)
-                    return False
-
-            function_filter = jpype.JProxy("java.util.function.Predicate", dict={"test": _accept})
-        domain_files = ArrayList()
-        domain_files.add(program.getDomainFile())
-        result = service.createNewLibraryFromPrograms(
-            fid_db,
-            meta.family,
-            meta.version,
-            meta.variant,
-            domain_files,
-            function_filter,
-            program.getLanguageID(),
-            ArrayList(),
-            ArrayList(),
-            monitor,
+    # New pyghidra API (``open_program`` is deprecated). It fused import→analyze→``project.save``
+    # into one call whose internal save threw ``IllegalStateException: Cannot call flush() with
+    # locks!`` on large C++ objects (ADR-043 Inc E, Boost) because a post-analysis lock was still
+    # held at save time. The replacement SPLITS the steps: load (no auto-analyze), analyze under an
+    # explicit transaction that closes before returning (``pyghidra.analyze``), then ``save`` with
+    # no lock held. This both fixes the C++ blocker and modernizes off the deprecated call.
+    consumer = JObject()
+    # ``open_project`` (unlike the old ``open_program``) requires the project's PARENT directory to
+    # already exist — ``createProject`` does not mkdir it. Create it ourselves (idempotent).
+    genproject_dir = fidbf_path.parent / "_genproject"
+    genproject_dir.mkdir(parents=True, exist_ok=True)
+    with pyghidra.open_project(str(genproject_dir), "fidgen", create=True) as project:
+        results = (
+            pyghidra.program_loader()
+            .source(File(str(input_path)))
+            .project(project)
+            .projectFolderPath("/")
+            .monitor(monitor)
+            .load()
         )
-        function_count = int(result.getTotalAdded())
-        fid_db.saveDatabase(f"{meta.family} {meta.version} {meta.variant}", monitor)
-        fid_db.close()
+        try:
+            program = results.getPrimaryDomainObject(consumer)
+            try:
+                # ``pyghidra.analyze`` is the supported analysis API (it manages the txn).
+                # Regression-free on the C-lib DBs (zlib/musl/openssl). NOTE (ADR-043 Inc E):
+                # it does NOT work for Boost — that large C++ program flushes its DB
+                # mid-analysis while the analysis txn holds a lock ("Cannot call flush() with
+                # locks!"); startAnalysis needs a held txn but a flush needs none, so neither
+                # held-txn nor no-txn works. Boost needs a Ghidra DB-cache / analysis-depth fix.
+                pyghidra.analyze(program)
+                # Persist so the program's DomainFile reflects the analysis.
+                results.save(monitor)
+                language_id = str(program.getLanguageID())
+
+                manager.createNewFidDatabase(File(str(unpacked)))
+                fid_file = manager.addUserFidFile(File(str(unpacked)))
+                fid_db = fid_file.getFidDB(True)
+                if include_symbols is None:
+                    function_filter = jpype.JProxy(
+                        "java.util.function.Predicate", dict={"test": lambda _t: True}
+                    )
+                else:
+                    # The predicate receives generic.stl.Pair<Function, FidHashQuad>; ``.first`` is
+                    # the Function. Fail CLOSED (exclude) on any accessor error so a wrong accessor
+                    # yields a loud empty DB rather than silently re-admitting every CRT function.
+                    def _accept(pair: object) -> bool:
+                        try:
+                            return str(pair.first.getName()) in include_symbols  # type: ignore[attr-defined]
+                        except Exception:  # JVM-edge accessor; exclude on any failure (fail closed)
+                            return False
+
+                    function_filter = jpype.JProxy(
+                        "java.util.function.Predicate", dict={"test": _accept}
+                    )
+                domain_files = ArrayList()
+                domain_files.add(program.getDomainFile())
+                result = service.createNewLibraryFromPrograms(
+                    fid_db,
+                    meta.family,
+                    meta.version,
+                    meta.variant,
+                    domain_files,
+                    function_filter,
+                    program.getLanguageID(),
+                    ArrayList(),
+                    ArrayList(),
+                    monitor,
+                )
+                function_count = int(result.getTotalAdded())
+                fid_db.saveDatabase(f"{meta.family} {meta.version} {meta.variant}", monitor)
+                fid_db.close()
+            finally:
+                program.release(consumer)
+        finally:
+            results.close()
 
     # Reopen READ-ONLY (no open transaction) and pack to the distribution `.fidbf`.
     fid_file_ro = manager.addUserFidFile(File(str(unpacked)))

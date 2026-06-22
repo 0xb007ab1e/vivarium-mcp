@@ -185,6 +185,28 @@ gates ADR-042 deferred Phase 2 behind are now cleared:
 - **Build-resource note (ops).** OpenSSL FID generation is the heaviest bundled-DB step; regenerating
   it must use a long-timeout build lane. Recorded so a future Inc/regen doesn't re-hit the 300s wall.
 
+### Generator modernized to the supported pyghidra API (2026-06-22)
+
+`scripts/fid/generate_fidb.py` was moved off the **deprecated** `pyghidra.open_program` to the
+supported API (pyghidra 3.1.0): `open_project` → `program_loader().…​.load()` (`LoadResults`) →
+`pyghidra.analyze(program)` → `LoadResults.save`. Behavior is unchanged and the change is
+**regression-free** — re-validated by regenerating the three bundled DBs (zlib/musl/OpenSSL)
+identically (OpenSSL still 12 749 functions). Note: `open_project` requires the project's parent
+directory to pre-exist (the generator now `mkdir`s it; `open_program` did not).
+
+### Increment E — Boost: attempted & deferred (2026-06-22)
+
+Boost (BSL-1.0) was built (`boost-build` compiles a curated compiled-lib set + `ld -r` merge) but its
+**FID generation is blocked by a Ghidra DB-cache vs. transaction conflict**, not the API: Boost's
+large C++ program (demangling/vtables/RTTI/templates) **flushes its program DB mid-analysis**, and a
+DB flush requires `lockCount==0` — but `AutoAnalysisManager.startAnalysis` requires a **held**
+transaction. Confirmed deterministic across three approaches (`pyghidra.analyze` held-txn →
+`Cannot call flush() with locks!`; `FlatProgramAPI.analyzeAll` and bare `startAnalysis` →
+`NoTransactionException`). OpenSSL (more functions, but C) fit in cache and never flushed — so it's
+C++ DB churn, not function count. **Fix direction (deferred):** enlarge Ghidra's DB buffer cache so
+Boost fits without a mid-analysis spill, or reduce analysis depth / the bundled lib-set. The Boost
+build stages live unmerged on a branch; `sources.toml` keeps `boost bundled = false`.
+
 ## Testing
 
 - **Deterministic hard gate (unchanged):** the in-worker **self-match**
