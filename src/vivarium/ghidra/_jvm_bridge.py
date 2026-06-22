@@ -3641,10 +3641,94 @@ def _clamp_identify(value: int) -> int:
     return max(1, min(int(value), _MAX_IDENTIFY_MATCHES))
 
 
+#: Writable tmpfs scratch dir the bundled FID DBs are copied into before attach (ADR-043 D3 — the
+#: bundled dir is on the read-only rootfs; ``addUserFidFile`` needs a writable, valid packed path).
+#: Mirrors the worker image's HOME / java.io.tmpdir tmpfs (Containerfile.worker).
+_FID_WRITABLE_SCRATCH = "/tmp/ghidra"  # noqa: S108 — the worker's writable tmpfs (read-only rootfs)
+
+
+def _fid_log(event: str, **fields: object) -> None:  # pragma: no cover - worker stderr sink
+    """Emit a redaction-safe structured FID-attach log line to the worker's stderr sink.
+
+    The worker runs offline; stderr is its only diagnostic sink (``worker/__main__.py``). Fields are
+    redaction-safe scalars only (DB file names, counts, outcomes — never binary content or secrets,
+    topic-logging-observability). One JSON-ish line per event.
+
+    Args:
+        event: The event name (e.g. ``fid_dbs_attached`` / ``fid_db_skipped``).
+        **fields: Redaction-safe scalar fields to attach.
+    """
+    import json
+    import sys
+
+    payload = {"event": event, **fields}
+    print(json.dumps(payload, default=str), file=sys.stderr, flush=True)
+
+
+def _fid_attach_one(writable_copy: Any) -> bool:  # pragma: no cover - JVM edge
+    """Attach + activate one writable packed ``.fidbf`` via the Ghidra FID manager (ADR-043 D3).
+
+    The PROVEN activation recipe (O1 spike): ``FidFileManager.getInstance().addUserFidFile(File)``
+    on a WRITABLE, valid packed path (returns ``None`` on a read-only/invalid/corrupt path) →
+    ``FidFile.setActive(True)``. A pre-built populated DB activates on a single attach (no re-add).
+
+    Args:
+        writable_copy: The :class:`pathlib.Path` of the writable packed-DB copy.
+
+    Returns:
+        ``True`` when attached + activated; ``False`` when the manager rejected the file
+        (``addUserFidFile`` returned ``None``) — the orchestration then skips it (fail-soft).
+    """
+    from ghidra.feature.fid.db import FidFileManager  # type: ignore[import-not-found]
+    from java.io import File  # type: ignore[import-not-found]
+
+    manager = FidFileManager.getInstance()
+    fid_file = manager.addUserFidFile(File(str(writable_copy)))
+    if fid_file is None:
+        return False
+    fid_file.setActive(True)
+    return True
+
+
+def _attach_bundled_fid_dbs() -> None:  # pragma: no cover - JVM edge wiring
+    """Boot PyGhidra (program-independent), then attach the bundled ELF FID DBs (ADR-043).
+
+    Runs once at worker startup, BEFORE serving RPC. The pure dir-scan/iteration/fail-soft logic
+    lives in :mod:`vivarium.ghidra._fid_attach` (hermetically unit-tested); this wrapper supplies
+    the JVM edges (``pyghidra.start`` + :func:`_fid_attach_one`) and the config
+    (``VIVARIUM_FID_DB_DIR``).
+    Fail-soft end to end: no bundled dir / no DBs ⇒ a clean no-op; a bad DB is logged + skipped; a
+    JVM/attach failure never crashes the worker (the worker still serves, just with fewer matches —
+    identical to the pre-Phase-2 baseline).
+    """
+    from vivarium.ghidra._fid_attach import DEFAULT_FID_DB_DIR, attach_bundled_fid_dbs
+
+    db_dir = os.environ.get("VIVARIUM_FID_DB_DIR", DEFAULT_FID_DB_DIR)
+    # Pre-flight discovery so we only pay the JVM-start cost when DBs are actually bundled.
+    from vivarium.ghidra._fid_attach import discover_fid_dbs
+
+    if not discover_fid_dbs(db_dir):
+        return
+    try:
+        import pyghidra
+
+        pyghidra.start(verbose=False)
+    except Exception as exc:
+        _fid_log("fid_attach_skipped", reason=type(exc).__name__)
+        return
+    attach_bundled_fid_dbs(
+        db_dir,
+        _FID_WRITABLE_SCRATCH,
+        attach_one=_fid_attach_one,
+        log=_fid_log,
+    )
+
+
 def worker_main() -> int:
     """Entry point for the in-container worker RPC server (WS2).
 
     Reads its socket path and frame cap from the environment (set by the WS3 worker launcher),
+    attaches the bundled ELF FID databases (ADR-043 Phase 2 — fail-soft, no-op if none bundled),
     constructs the PyGhidra backend, and serves the single server connection until shutdown/EOF.
     Runs ONLY in the worker container; never invoked from the server (ADR-001).
 
@@ -3657,5 +3741,8 @@ def worker_main() -> int:
     max_frame_bytes = int(
         os.environ.get("VIVARIUM_MAX_RESPONSE_BYTES", str(_DEFAULT_MAX_FRAME_BYTES))
     )
+    # ADR-043 Phase 2: activate the bundled ELF FID DBs before serving (one-time startup attach;
+    # no per-request cost). Fail-soft — a missing/bad DB never blocks the worker from serving.
+    _attach_bundled_fid_dbs()
     backend = PyGhidraBackend()
     return run_server(socket_path, backend, max_frame_bytes=max_frame_bytes)

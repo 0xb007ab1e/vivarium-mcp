@@ -64,6 +64,12 @@ _ENV_WORKER_TMPFS_PROJECT_MIB = "VIVARIUM_WORKER_TMPFS_PROJECT_MIB"
 _ENV_WORKER_PREFLIGHT = "VIVARIUM_WORKER_PREFLIGHT"
 _ENV_RPC_SOCKET_DIR = "VIVARIUM_RPC_SOCKET_DIR"
 _ENV_IMPORT_ROOT = "VIVARIUM_IMPORT_ROOT"
+# Bundled ELF FID-DB dir (v1.x — ADR-043 Phase 2). WORKER-ONLY: it is read inside the worker by
+# ``vivarium.ghidra._jvm_bridge`` (the JVM/PyGhidra edge), NOT by the server ``Config`` — the server
+# never touches Ghidra (ADR-001). Listed here so the worker's env read-set stays a single auditable
+# allow-list alongside the other ``VIVARIUM_*`` names; there is no server-side knob for it. Default
+# is ``vivarium.ghidra._fid_attach.DEFAULT_FID_DB_DIR`` (``/opt/vivarium/fid``).
+_ENV_FID_DB_DIR = "VIVARIUM_FID_DB_DIR"  # worker-only (ADR-043); not parsed into Config
 
 # HTTP transport (v1.1 — ADR-011 / threat-model TB6). Default transport stays stdio; these are read
 # only when transport=http. (These are env-var NAMES, not secrets.)
