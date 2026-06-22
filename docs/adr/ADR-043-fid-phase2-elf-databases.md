@@ -153,6 +153,38 @@ gates ADR-042 deferred Phase 2 behind are now cleared:
   toolchain and weak across, reinforcing the per-toolchain/per-flag DB-variant roadmap (O5) and the
   advisory framing of the host-compiled ELF-match test.
 
+### Increment D — OpenSSL libcrypto/libssl (x86-64, 2026-06-22) ✅
+
+- **Built (same `ld -r` recipe as musl).** `Containerfile.worker` adds `openssl-build` (wolfi-base +
+  `gcc make perl linux-headers`) compiling **OpenSSL 3.5.7** (sha256 `a8c0d28a…`, Apache-2.0;
+  github + openssl.org digests cross-checked) via `./Configure no-shared no-tests no-docs no-apps
+  linux-x86_64` + `make build_libs` (libcrypto.a + libssl.a only — skips the app/tests/docs); both
+  archives are merged with `ld -r --whole-archive` into one relocatable object. `openssl-fidgen` runs
+  `generate_fidb.py --include-symbols`; `worker-final` bakes `openssl.fidbf` alongside zlib + musl.
+  `sources.toml` flips openssl `bundled = true`, version → 3.5.7 (Apache-2.0 → license gate permits).
+- **Built PIC on purpose (differs from zlib/musl).** OpenSSL's static libs default to PIC, and the
+  **dominant** OpenSSL static-consumer case is a PIE/PIC binary (most OpenSSL is dynamically linked);
+  so a PIC DB matches the dominant consumer — we don't fight OpenSSL's asm-heavy build to force
+  non-PIC. Recorded here as a deliberate per-library codegen choice.
+- **Why OpenSSL.** Highest RE value of any single library — auto-identifying crypto primitives (AES,
+  SHA, RSA/EC, the EVP layer) is the most-wanted labeling; complements `crypto_constant_scan`.
+- **3.5.7, not the 3.5.0 placeholder.** Pinned to the latest 3.5.x LTS patch for CVE hygiene
+  (`workflow-cve-management`); the gated build re-verifies the digest.
+- **Built + validated.** `openssl.fidbf` holds **12 749** functions (`x86:LE:64:default`), **1.69 MB**
+  — by far the largest DB, yet image growth is **negligible** (1.18 GB, unchanged to 3 sig figs vs
+  Inc C — the DB is <2 MB against the ~1.17 GB Ghidra/JDK base; O4 budget is a non-issue even for the
+  biggest library). License gate PASS (Apache-2.0).
+- **End-to-end validated** on the `:incd` image via the real crun worker + an independently-built,
+  **same-toolchain** OpenSSL-static ELF (a benign EVP digest/cipher/RAND consumer linked against the
+  very `libcrypto.a` the DB came from) through the full MCP stdio chain: `identify_functions →
+  total=100, truncated=true` (the result hit the tool's 100-row cap — there are MORE matches), all
+  genuine OpenSSL (`EVP_CIPHER_CTX_*`, `EVP_CipherInit_ex`, `EVP_DecryptFinal_ex`, …), 97/100 crypto-
+  named, `store_wiped=True` (ADR-002). Analysis of the 22 MB binary took ~7 min (within worker limits;
+  `VIVARIUM_WORKER_MEM_MIB` raised for the e2e). The build itself needed the 90-min `longrun` lane —
+  the default 300s exec cap is too short for OpenSSL's compile + 12 749-function FID generation.
+- **Build-resource note (ops).** OpenSSL FID generation is the heaviest bundled-DB step; regenerating
+  it must use a long-timeout build lane. Recorded so a future Inc/regen doesn't re-hit the 300s wall.
+
 ## Testing
 
 - **Deterministic hard gate (unchanged):** the in-worker **self-match**

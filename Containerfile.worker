@@ -72,6 +72,15 @@ ARG MUSL_VERSION=1.2.5
 ARG MUSL_TARBALL_SHA256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
 ARG MUSL_TARBALL_URL=https://musl.libc.org/releases/musl-1.2.5.tar.gz
 
+# GATED ITEM W-OPENSSL: OpenSSL source tarball (downloaded + SHA-256-verified before extract). The
+# version MUST match the `openssl` entry in deploy/fid/sources.toml. OpenSSL 3.x is Apache-2.0
+# (permissive — passes vivarium.fid_licenses; pre-3.0 `OpenSSL`-id is BLOCKED). The highest-RE-value
+# DB (crypto primitives). 3.5.x is the LTS line; the sha256 below for openssl-3.5.7.tar.gz is the
+# upstream digest published on BOTH github releases and openssl.org; the gated build re-verifies it.
+ARG OPENSSL_VERSION=3.5.7
+ARG OPENSSL_TARBALL_SHA256=a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8
+ARG OPENSSL_TARBALL_URL=https://github.com/openssl/openssl/releases/download/openssl-3.5.7/openssl-3.5.7.tar.gz
+
 # =============================================================================
 # Stage 1: ghidra-fetch — fetch + verify + unpack Ghidra. Build tooling stays HERE, not in runtime.
 # =============================================================================
@@ -483,11 +492,93 @@ RUN set -eux; \
 USER 65532:65532
 
 # =============================================================================
+# Stage 4e: openssl-build — compile OpenSSL libcrypto/libssl UNSTRIPPED from pinned source.
+# =============================================================================
+# GATED ITEM W-OPENSSL (ADR-043 Inc D). Same `ld -r --whole-archive` merge as musl. Built PIC
+# (OpenSSL's default for static libs) ON PURPOSE: unlike zlib/musl, real OpenSSL static consumers are
+# overwhelmingly PIE/PIC (the dominant statically-linked-openssl case is a PIE binary, and most
+# OpenSSL is dynamically linked) — so a PIC DB matches the dominant consumer. `make build_libs` builds
+# only libcrypto.a + libssl.a (skips the openssl app + tests/docs — a big time saver). Throwaway:
+# only the merged .o + allow-list cross the stage boundary; the C toolchain + perl never ship.
+FROM cgr.dev/chainguard/wolfi-base@sha256:0b5fd36c9f36ecc95bf6dbe049fe0a211410e1ba8a9801db0fbe25c7561d81c1 AS openssl-build
+
+ARG OPENSSL_VERSION
+ARG OPENSSL_TARBALL_SHA256
+ARG OPENSSL_TARBALL_URL
+
+RUN set -eux; \
+    echo "https://packages.wolfi.dev/os" >> /etc/apk/repositories; \
+    apk add --no-cache ca-certificates curl gcc make perl linux-headers
+
+# --- Fetch + VERIFY OpenSSL source (fail-closed on checksum mismatch — std-supplychain) ----------
+WORKDIR /opt/openssl-src
+RUN set -eux; \
+    echo "${OPENSSL_TARBALL_SHA256}  openssl.tar.gz" > openssl.tar.gz.sha256; \
+    curl -fsSL --proto '=https' --tlsv1.2 -o openssl.tar.gz "${OPENSSL_TARBALL_URL}"; \
+    sha256sum -c openssl.tar.gz.sha256; \
+    tar -xzf openssl.tar.gz; \
+    rm -f openssl.tar.gz openssl.tar.gz.sha256
+
+# --- Build static libcrypto.a + libssl.a UNSTRIPPED (-g, symbols kept), x86-64 -------------------
+# `no-shared` → static archives only; `no-tests no-docs no-apps` trims the build; `make build_libs`
+# builds just the two libraries. Merge both into one relocatable object with `ld -r --whole-archive`
+# (no executable link / crt; keeps -g/symbols). `nm` is written to a file (no pipe) and checked,
+# failing closed if the crypto functions are missing/stripped.
+WORKDIR /opt/openssl-src/openssl-${OPENSSL_VERSION}
+RUN set -eux; \
+    ./Configure no-shared no-tests no-docs no-apps linux-x86_64 -O2 -g -fno-omit-frame-pointer; \
+    make -j"$(nproc)" build_libs; \
+    ld -r --whole-archive libcrypto.a libssl.a -o /opt/openssl-fidgen.o; \
+    nm /opt/openssl-fidgen.o > /opt/openssl-fidgen.syms; \
+    grep -qE ' [TtWw] (SHA256_Init|EVP_EncryptInit_ex)$' /opt/openssl-fidgen.syms; \
+    # OpenSSL-ONLY function-name allow-list from the static archives (defined text/weak symbols).
+    nm --defined-only libcrypto.a libssl.a | awk '$2 ~ /^[TtWw]$/ {print $3}' | sort -u > /opt/openssl.allow; \
+    test "$(wc -l < /opt/openssl.allow)" -gt 1000; \
+    grep -qx EVP_EncryptInit_ex /opt/openssl.allow; \
+    grep -qx SHA256_Init /opt/openssl.allow
+
+# =============================================================================
+# Stage 4f: openssl-fidgen — run the PROVEN FID generate+pack recipe on the built OpenSSL object.
+# =============================================================================
+FROM runtime AS openssl-fidgen
+
+ARG OPENSSL_VERSION
+ARG OPENSSL_TARBALL_SHA256
+
+# Build as root (runtime ends as USER 65532); Ghidra HOME/project live in this throwaway stage only.
+USER root
+COPY --from=openssl-build /opt/openssl-fidgen.o /opt/openssl-fidgen.o
+COPY --from=openssl-build /opt/openssl.allow /opt/openssl.allow
+
+COPY --chown=root:root scripts/ /opt/vivarium-build/scripts/
+WORKDIR /opt/vivarium-build
+RUN set -eux; \
+    mkdir -p /out /tmp/ghidra; \
+    chmod 0777 /tmp/ghidra; \
+    HOME=/tmp/ghidra PYTHONPATH=/opt/vivarium-worker python scripts/fid/generate_fidb.py \
+        --input /opt/openssl-fidgen.o \
+        --output /out/openssl.fidbf \
+        --family openssl \
+        --version "${OPENSSL_VERSION}" \
+        --variant x86-64 \
+        --license-spdx Apache-2.0 \
+        --source-digest "sha256:${OPENSSL_TARBALL_SHA256}" \
+        --compiler "gcc (wolfi)" \
+        --compiler-flags="-O2 -g (PIC, OpenSSL default); ld -r --whole-archive libcrypto.a libssl.a" \
+        --include-symbols /opt/openssl.allow; \
+    # Fail closed: the packed DB + its provenance manifest MUST exist for the final-stage COPY.
+    test -s /out/openssl.fidbf; \
+    test -s /out/openssl.fidbf.provenance.json
+
+# Drop back to the runtime's non-root UID so no stage ends as root (Trivy DS-0002). Throwaway stage.
+USER 65532:65532
+
+# =============================================================================
 # Stage 5: worker-final — the shipped worker image = `runtime` + the build-generated FID DBs.
 # =============================================================================
 # Default build target (last stage). Overlays ONLY the packed .fidbf files + provenance onto the
 # already-baked deploy/fid scaffold (README + sources.toml) from `runtime`, so the worker
-# startup-attaches the REAL zlib + musl DBs and identify_functions matches them in ELF (ADR-043 D3).
+# startup-attaches the REAL zlib + musl + openssl DBs and identify_functions matches them (ADR-043 D3).
 FROM runtime AS worker-final
 COPY --from=zlib-fidgen --chown=root:root /out/zlib.fidbf /opt/vivarium/fid/zlib.fidbf
 COPY --from=zlib-fidgen --chown=root:root \
@@ -495,6 +586,9 @@ COPY --from=zlib-fidgen --chown=root:root \
 COPY --from=musl-fidgen --chown=root:root /out/musl.fidbf /opt/vivarium/fid/musl.fidbf
 COPY --from=musl-fidgen --chown=root:root \
     /out/musl.fidbf.provenance.json /opt/vivarium/fid/musl.fidbf.provenance.json
+COPY --from=openssl-fidgen --chown=root:root /out/openssl.fidbf /opt/vivarium/fid/openssl.fidbf
+COPY --from=openssl-fidgen --chown=root:root \
+    /out/openssl.fidbf.provenance.json /opt/vivarium/fid/openssl.fidbf.provenance.json
 
 # The shipped worker runs as the runtime's non-root UID (inherited from `runtime`); state it
 # explicitly so the final image's USER is unambiguously non-root (topic-container-k8s; Trivy DS-0002).

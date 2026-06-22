@@ -33,8 +33,10 @@ bundled = true
 name = "openssl"
 spdx = "Apache-2.0"
 # OpenSSL 3.0+ ONLY (Apache-2.0 — same license as our outbound). Pre-3.0 (`OpenSSL` id) is BLOCKED.
-version = "3.5.0"
-bundled = false
+# Built + bundled in ADR-043 Inc D (x86-64; libcrypto+libssl, PIC — the dominant OpenSSL consumer
+# case). Pinned to the 3.5.x LTS line's latest patch for CVE hygiene.
+version = "3.5.7"
+bundled = true
 
 [[source]]
 name = "boost"
