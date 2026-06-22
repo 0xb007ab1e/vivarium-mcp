@@ -18,6 +18,8 @@ docs/
 tests/
 .github/
 deploy/
+!deploy/fid/
+!deploy/fid/**
 infra/
 # Other Containerfiles (avoid recursive context confusion):
 Containerfile.server

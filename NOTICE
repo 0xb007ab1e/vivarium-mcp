@@ -9,3 +9,28 @@ which is itself distributed under the Apache License, Version 2.0. Ghidra is not
 distributed as part of this repository; it is obtained and run separately (see
 PLAN.md / docs). Third-party dependency attributions are generated with the SBOM
 on release (see docs / std-supplychain).
+
+-------------------------------------------------------------------------------
+Bundled ELF FunctionID databases (ADR-043 Phase 2)
+-------------------------------------------------------------------------------
+
+The worker container image bundles ELF FunctionID databases (.fidbf) generated
+from the permissively-licensed libraries listed below (the authoritative, CI-gated
+source set is deploy/fid/sources.toml). These databases contain ONLY non-reversible
+function-body hashes, lifted symbol names, and library metadata — they contain NO
+library code and NO source (the FLIRT "hashes + names, no code" rationale; see
+docs/security/fid-database-licensing.md). They are shipped only from
+permissively-licensed sources (Zlib / MIT / Apache-2.0 / BSL-1.0 / BSD-2-Clause /
+BSD-3-Clause); copyleft sources (LGPL/GPL/AGPL, OpenSSL pre-3.0) are excluded and
+gated out of the build.
+
+  - zlib       (SPDX: Zlib)        https://zlib.net/
+  - musl libc  (SPDX: MIT)         https://musl.libc.org/
+  - OpenSSL    (SPDX: Apache-2.0)  https://www.openssl.org/   (3.0+ only)
+  - Boost      (SPDX: BSL-1.0)     https://www.boost.org/
+
+Per-database provenance manifests (source version + digest, compiler/flags, Ghidra
++ generator version, .fidbf digest, SPDX license) accompany each shipped database,
+and per-source SPDX license ids are recorded in the per-release SBOM
+(std-supplychain). Each source library's own copyright/attribution notice is
+preserved as required by its license.

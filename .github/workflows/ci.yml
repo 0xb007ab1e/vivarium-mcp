@@ -146,6 +146,25 @@ jobs:
         # ambient runner env — otherwise it flags the runner's own pip/setuptools, which is noise.
         run: pip-audit --strict --desc --requirement requirements.lock
 
+  # 6b. FID-DB source license gate (ADR-043 Phase 2 / D5; topic-license-compliance). Merge-blocking:
+  # every bundled-FID-DB source (deploy/fid/sources.toml) must carry a PERMISSIVE SPDX id (allow-list
+  # in vivarium.fid_licenses); a copyleft id (LGPL-*/GPL-*/AGPL-*/OpenSSL pre-3.0) FAILS the gate so
+  # a copyleft source cannot enter the worker-image build without an explicit, reviewed waiver +
+  # counsel sign-off (SPIKE-2 §5). Pure stdlib (tomllib) — no extra deps, no network.
+  fid-license-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # actions/checkout@v6.0.3
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # actions/setup-python@v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: FID-DB source license allow-list gate
+        env:
+          PYTHONPATH: src
+        # Runs from src/ (no editable install — nothing unpinned fetched). Fails closed on any
+        # disallowed/copyleft/missing SPDX id in deploy/fid/sources.toml.
+        run: python -m vivarium.fid_licenses
+
   # 7. Secret scan — block on any detected secret.
   secret-scan:
     runs-on: ubuntu-latest

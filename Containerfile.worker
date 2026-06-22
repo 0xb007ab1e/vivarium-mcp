@@ -171,6 +171,19 @@ COPY --chown=root:root requirements.lock /opt/vivarium/requirements.lock
 COPY --from=pybuilder --chown=root:root /build/dist /opt/vivarium/dist
 COPY --chown=root:root worker/ /opt/vivarium-worker/worker/
 
+# --- Bundled ELF FunctionID databases (ADR-043 Phase 2) ------------------------------------------
+# The worker startup-attaches every *.fidbf under VIVARIUM_FID_DB_DIR (default /opt/vivarium/fid):
+# it copies each to the writable tmpfs scratch and calls FidFileManager.addUserFidFile + setActive
+# (the PROVEN activation mechanism — a data-dir drop-in is silently ignored; ADR-043 D3). The dir is
+# root-owned (the read-only rootfs + non-root worker cannot tamper with the shipped DBs).
+#
+# COPY the deploy/fid scaffold (README + the CI-gated sources.toml manifest) so the dir always EXISTS
+# (an empty dir ⇒ a clean no-op, identical to the pre-Phase-2 baseline — fail-soft).
+# >>> PM-GATED: the actual permissive `.fidbf` artifacts are GENERATED during validation (the gated
+# >>> zlib-static build stage + scripts/fid/generate_fidb.py) and dropped into deploy/fid/ (or a
+# >>> dedicated build stage) so this COPY bakes them in. No real `.fidbf` is committed to the repo.
+COPY --chown=root:root deploy/fid/ /opt/vivarium/fid/
+
 ENV PYTHONPATH=/opt/vivarium-worker \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
