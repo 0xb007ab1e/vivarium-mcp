@@ -122,6 +122,37 @@ gates ADR-042 deferred Phase 2 behind are now cleared:
   needs **per-toolchain / per-flag DB variants** (recall scales with the number of bundled builds,
   not just libraries). Tracked; informs the DB-set roadmap and the ELF-match advisory framing above.
 
+### Increment C — musl static libc (x86-64, 2026-06-22) ✅
+
+- **Built (same proven recipe as Inc B).** `Containerfile.worker` adds `musl-build` (wolfi-base +
+  wolfi OS apk repo → `gcc make`) compiling **musl 1.2.5** (sha256 `a9a118bb…`, MIT) **non-PIC**
+  (`-O2 -g`); `musl-fidgen` runs `generate_fidb.py --include-symbols` over an UNSTRIPPED binary;
+  `worker-final` bakes the packed `musl.fidbf` (+ provenance) alongside `zlib.fidbf`. The worker's
+  attach (`_fid_attach`) **auto-discovers** every `*.fidbf` — no worker code change. `sources.toml`
+  flips musl `bundled = true` (MIT → license gate already permits it).
+- **Libc-specific build wrinkle.** musl's `libc.a` defines the same symbols as the build host's
+  glibc. Linking an executable failed: under wolfi's gcc, a `musl-gcc -static` link injects a
+  `-latomic_asneeded` self-spec with no static variant (`ld: cannot find -latomic_asneeded`). Fixed
+  by **not linking an executable** — merge the whole archive into one relocatable object with `ld -r
+  --whole-archive` (no gcc specs, no crt/_start, no glibc clash; keeps -g/symbols). FID is
+  relocation-tolerant (it masks call/reloc operands), so a DB built from the merged `.o` still
+  matches musl in fully-linked consumers. The allow-list (`nm --defined-only libc.a`) scopes the DB
+  to musl's own functions.
+- **Why musl.** Static libc is ubiquitous in stripped Linux binaries (Alpine, Rust/Go static); it is
+  the highest coverage-per-effort next DB and the permissive substitute for the LGPL-gated glibc (D1).
+- **Built + validated.** Allow-list = **2043** musl symbols; the generated `musl.fidbf` holds **1586**
+  functions (`x86:LE:64:default`), **168 KB**. Image growth ≈ **10 MB** (1.18 GB vs Inc B's 1.17 GB)
+  — negligible against the ~1.17 GB Ghidra/JDK base, well within the O4 budget. License gate PASS (MIT).
+- **End-to-end validated** on the `:incc` image via the real crun worker + an independently-built,
+  **same-toolchain** musl-static ELF (a benign consumer compiled with the image's own wolfi+musl)
+  through the full MCP stdio chain: `identify_functions → total=72`, **all genuine musl internals**
+  (`__libc_start_main`, `__libc_malloc_impl`, `__intscan`, `__qsort_r`, `__fwritex`, `__mmap`, …),
+  **zero non-musl false positives**, `store_wiped=True` (ADR-002 containment).
+- **O5 confirmed empirically.** The **same-toolchain** consumer matched **72** functions vs Inc B's
+  **1** for the cross-toolchain zlib probe — direct evidence that FID recall is high within a
+  toolchain and weak across, reinforcing the per-toolchain/per-flag DB-variant roadmap (O5) and the
+  advisory framing of the host-compiled ELF-match test.
+
 ## Testing
 
 - **Deterministic hard gate (unchanged):** the in-worker **self-match**

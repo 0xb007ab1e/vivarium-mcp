@@ -25,8 +25,9 @@ bundled = true
 name = "musl"
 spdx = "MIT"
 # Static-libc identification workhorse + the glibc-role substitute (avoids the LGPL question).
+# Built + bundled in ADR-043 Inc C (x86-64, non-PIE static; scoped to musl's own functions).
 version = "1.2.5"
-bundled = false
+bundled = true
 
 [[source]]
 name = "openssl"
