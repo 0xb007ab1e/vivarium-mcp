@@ -157,8 +157,35 @@ def manifest_path_for(fidbf_path: Path) -> Path:
     return fidbf_path.with_suffix(fidbf_path.suffix + ".provenance.json")
 
 
+def _load_include_symbols(path: Path | None) -> frozenset[str] | None:
+    """Load the optional function-name allow-list (one symbol per line); ``None`` → include all.
+
+    A reference binary built by static-linking a library pulls in C-runtime/libc/libgcc functions
+    too; ingesting those would mislabel generic CRT code as the library (a false-positive provenance
+    claim). The allow-list (e.g. ``nm --defined-only libz.a``) scopes the FID library to exactly the
+    library's own functions (ADR-043 D2 — correctness over recall).
+
+    Args:
+        path: Path to a newline-delimited symbol allow-list, or ``None`` to include every function.
+
+    Returns:
+        A frozenset of accepted function names, or ``None`` when no allow-list is given.
+    """
+    if path is None:
+        return None
+    names = frozenset(
+        line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    )
+    if not names:
+        raise ValueError(f"include-symbols file is empty: {path}")
+    return names
+
+
 def _generate_fidbf(
-    input_path: Path, fidbf_path: Path, meta: LibraryMeta
+    input_path: Path,
+    fidbf_path: Path,
+    meta: LibraryMeta,
+    include_symbols: frozenset[str] | None = None,
 ) -> tuple[str, int]:  # pragma: no cover - JVM edge
     """Run the PROVEN generate+pack recipe and write the packed ``.fidbf`` (ADR-043 D2).
 
@@ -166,6 +193,9 @@ def _generate_fidbf(
         input_path: The reference library binary (unstripped, with symbols) to analyze.
         fidbf_path: Output path for the packed ``.fidbf``.
         meta: Library metadata (family/version/variant for the FID library record).
+        include_symbols: Optional allow-list of function names to ingest; ``None`` includes every
+            function. Scopes the DB to the library's own functions, excluding statically-linked
+            CRT/libc/libgcc code (avoids false-positive library identification).
 
     Returns:
         ``(language_id, function_count)`` — the target language id and the count of ingested
@@ -200,7 +230,21 @@ def _generate_fidbf(
         manager.createNewFidDatabase(File(str(unpacked)))
         fid_file = manager.addUserFidFile(File(str(unpacked)))
         fid_db = fid_file.getFidDB(True)
-        include_all = jpype.JProxy("java.util.function.Predicate", dict={"test": lambda _t: True})
+        if include_symbols is None:
+            function_filter = jpype.JProxy(
+                "java.util.function.Predicate", dict={"test": lambda _t: True}
+            )
+        else:
+            # The predicate receives generic.stl.Pair<Function, FidHashQuad>; ``.first`` is the
+            # Function. Fail CLOSED (exclude) on any accessor error so a wrong accessor yields a
+            # loud empty DB rather than silently re-admitting every CRT function.
+            def _accept(pair: object) -> bool:
+                try:
+                    return str(pair.first.getName()) in include_symbols  # type: ignore[attr-defined]
+                except Exception:  # JVM-edge accessor; exclude on any failure (fail closed)
+                    return False
+
+            function_filter = jpype.JProxy("java.util.function.Predicate", dict={"test": _accept})
         domain_files = ArrayList()
         domain_files.add(program.getDomainFile())
         result = service.createNewLibraryFromPrograms(
@@ -209,7 +253,7 @@ def _generate_fidbf(
             meta.version,
             meta.variant,
             domain_files,
-            include_all,
+            function_filter,
             program.getLanguageID(),
             ArrayList(),
             ArrayList(),
@@ -264,6 +308,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--version", required=True, help="upstream library version (e.g. 1.3.1)")
     parser.add_argument("--variant", required=True, help="build variant (e.g. x86-64-static)")
     parser.add_argument("--license-spdx", required=True, help="source SPDX license id (e.g. Zlib)")
+    parser.add_argument(
+        "--include-symbols",
+        default=None,
+        help="path to a newline-delimited function-name allow-list (scopes the DB to the "
+        "library's own functions, e.g. `nm --defined-only libz.a`); omit to include all",
+    )
     parser.add_argument("--source-name", default=None, help="human source name (default: family)")
     parser.add_argument("--source-digest", default=None, help="sha256:... of the source tarball")
     parser.add_argument("--compiler", default=None, help="compiler id+version (e.g. 'gcc 13.2.0')")
@@ -309,7 +359,15 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - JVM-edge o
         return 2
     fidbf_path.parent.mkdir(parents=True, exist_ok=True)
 
-    language_id, function_count = _generate_fidbf(input_path, fidbf_path, meta)
+    include_path = Path(args.include_symbols) if args.include_symbols else None
+    if include_path is not None and not include_path.is_file():
+        print(f"generate_fidb: include-symbols not found: {include_path}", file=sys.stderr)
+        return 2
+    include_symbols = _load_include_symbols(include_path)
+
+    language_id, function_count = _generate_fidbf(
+        input_path, fidbf_path, meta, include_symbols=include_symbols
+    )
     manifest = build_manifest(
         meta,
         fidbf_path=fidbf_path,

@@ -151,6 +151,48 @@ def test_parse_args_requires_core_fields() -> None:
         _MOD._parse_args(["--input", "/x"])  # missing output/family/version/variant/license
 
 
+def test_parse_args_include_symbols_optional() -> None:
+    """``--include-symbols`` is optional (defaults None) and parses when given."""
+    base = [
+        "--input",
+        "/b",
+        "--output",
+        "/o.fidbf",
+        "--family",
+        "zlib",
+        "--version",
+        "1.3.1",
+        "--variant",
+        "x86-64",
+        "--license-spdx",
+        "Zlib",
+    ]
+    assert _MOD._parse_args(base).include_symbols is None
+    parsed = _MOD._parse_args([*base, "--include-symbols", "/opt/zlib.allow"])
+    assert parsed.include_symbols == "/opt/zlib.allow"
+
+
+def test_load_include_symbols_parses_strips_and_dedupes(tmp_path: Path) -> None:
+    """The allow-list loader trims whitespace, drops blanks, and dedupes into a frozenset."""
+    f = tmp_path / "zlib.allow"
+    f.write_text("deflate\ninflate\n\n  crc32  \ndeflate\n", encoding="utf-8")
+    got = _MOD._load_include_symbols(f)
+    assert got == frozenset({"deflate", "inflate", "crc32"})
+
+
+def test_load_include_symbols_none_returns_none() -> None:
+    """No allow-list path → ``None`` (include every function, back-compat)."""
+    assert _MOD._load_include_symbols(None) is None
+
+
+def test_load_include_symbols_empty_file_raises(tmp_path: Path) -> None:
+    """An empty/whitespace-only allow-list fails closed (a silent empty DB would be a footgun)."""
+    f = tmp_path / "empty.allow"
+    f.write_text("\n   \n", encoding="utf-8")
+    with pytest.raises(ValueError, match="empty"):
+        _MOD._load_include_symbols(f)
+
+
 def test_sha256_file(tmp_path: Path) -> None:
     """The streaming digest matches hashlib over the file bytes."""
     import hashlib

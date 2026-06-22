@@ -53,6 +53,16 @@ ARG GHIDRA_RELEASE_TAG=Ghidra_12.1.2_build
 ARG GHIDRA_ZIP_SHA256=b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d
 ARG GHIDRA_ZIP_URL=https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip
 
+# --- ADR-043 Phase 2 (Increment B): bundled zlib ELF FID database source pin -------------------
+# zlib upstream source tarball, version-pinned + SHA-256-verified BEFORE extract in the zlib-fidgen
+# stage (mirrors the GHIDRA_ZIP_* pattern: fail-closed on checksum mismatch — std-supplychain D4).
+# The version MUST match the `zlib` entry in deploy/fid/sources.toml (the CI license/source gate).
+# The published sha256 for zlib 1.3.1 (zlib-1.3.1.tar.gz) is the well-known upstream digest below;
+# the gated build host re-verifies it (and may repin URL/digest if upstream relocates the artifact).
+ARG ZLIB_VERSION=1.3.1
+ARG ZLIB_TARBALL_SHA256=9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
+ARG ZLIB_TARBALL_URL=https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
+
 # =============================================================================
 # Stage 1: ghidra-fetch — fetch + verify + unpack Ghidra. Build tooling stays HERE, not in runtime.
 # =============================================================================
@@ -253,3 +263,118 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
 # non-zero on a missing session id or fatal error → the server maps the closed/absent socket to
 # worker-unavailable and evicts (rpc-protocol.md §6).
 ENTRYPOINT ["python", "-m", "worker"]
+
+# =============================================================================
+# Stage 4: zlib-fidgen — BUILD-TIME ONLY. Compile zlib UNSTRIPPED from pinned source, then run the
+# PROVEN in-worker FID generate+pack recipe (scripts/fid/generate_fidb.py) to emit /out/zlib.fidbf.
+# =============================================================================
+# Bases on `runtime` to REUSE the already-assembled Ghidra + PyGhidra + JDK 21 + python layers (the
+# generator needs the JVM/PyGhidra to run the createNewLibraryFromPrograms → PackedDatabase.pack
+# recipe — ADR-043 D2). NOTHING from this stage ships to the worker image EXCEPT the packed
+# .fidbf + its provenance manifest (COPY'd in the final stage); the C toolchain stays build-time.
+#
+# GATED ITEM W-ZLIB: zlib source tarball (downloaded + SHA-256-verified before extract, ARG-pinned).
+# --- Stage 4a: zlib-build — compile zlib UNSTRIPPED from pinned source (wolfi OS toolchain) -------
+# `runtime`/wolfi-base's default apk repo (apk.cgr.dev/chainguard) lacks the C toolchain, and this
+# is a glibc base — so add the upstream wolfi OS repo (its signing key already ships in wolfi-base)
+# and install gcc/make/GLIBC-dev (NOT musl-dev; tar is busybox-provided). Throwaway: only the built
+# binary is COPY'd into the fidgen stage.
+FROM cgr.dev/chainguard/wolfi-base@sha256:0b5fd36c9f36ecc95bf6dbe049fe0a211410e1ba8a9801db0fbe25c7561d81c1 AS zlib-build
+
+ARG ZLIB_VERSION
+ARG ZLIB_TARBALL_SHA256
+ARG ZLIB_TARBALL_URL
+
+RUN set -eux; \
+    echo "https://packages.wolfi.dev/os" >> /etc/apk/repositories; \
+    apk add --no-cache ca-certificates curl gcc make glibc-dev
+
+# --- Fetch + VERIFY zlib source (fail-closed on checksum mismatch — std-supplychain) -------------
+WORKDIR /opt/zlib-src
+RUN set -eux; \
+    echo "${ZLIB_TARBALL_SHA256}  zlib.tar.gz" > zlib.tar.gz.sha256; \
+    curl -fsSL --proto '=https' --tlsv1.2 -o zlib.tar.gz "${ZLIB_TARBALL_URL}"; \
+    sha256sum -c zlib.tar.gz.sha256; \
+    tar -xzf zlib.tar.gz; \
+    rm -f zlib.tar.gz zlib.tar.gz.sha256
+
+# --- Build zlib UNSTRIPPED (-g, symbols kept), x86-64 --------------------------------------------
+# Build static libz.a, then a statically-linked, UNSTRIPPED executable that pulls EVERY zlib object
+# in via --whole-archive so all zlib functions are DEFINED + NAMED in the analyzed binary (FID needs
+# non-default-named functions large enough to clear the min-hash length — ADR-043 D2). No strip
+# anywhere; -O2 -g keeps real, identifiable function bodies. A tiny driver gives the link an entry
+# point. `nm`'s symbol table is written to a file (no pipe) and grepped, failing closed if zlib
+# functions are missing/stripped (a stripped binary yields ~0 FID matches).
+WORKDIR /opt/zlib-src/zlib-${ZLIB_VERSION}
+# Build NON-PIC (no -fPIC) + link the executable -no-pie so the recovered zlib code matches
+# the dominant real-world case of zlib statically linked into a non-PIE binary (PIC codegen routes
+# global access through the GOT and changes instruction bytes, which would break FID full-hashes
+# against non-PIE consumers — ADR-043 D2: match-rate over a PIC build).
+RUN set -eux; \
+    export CFLAGS="-O2 -g -fno-omit-frame-pointer"; \
+    ./configure --static; \
+    make -j"$(nproc)" libz.a; \
+    printf '%s\n' \
+        '#include <zlib.h>' \
+        'int main(void){return (int)(zlibVersion()!=0);}' \
+        > driver.c; \
+    gcc -O2 -g -static -no-pie -fno-pie -I. -o /opt/zlib-fidgen.bin driver.c \
+        -Wl,--whole-archive libz.a -Wl,--no-whole-archive; \
+    nm /opt/zlib-fidgen.bin > /opt/zlib-fidgen.syms; \
+    grep -q ' T inflate' /opt/zlib-fidgen.syms; \
+    # zlib-ONLY function-name allow-list from the static archive (defined text/weak symbols). Scopes
+    # the FID DB to zlib's own functions, EXCLUDING the statically-linked CRT/libc/libgcc functions
+    # that would otherwise be mislabeled as zlib (false-positive library identification).
+    nm --defined-only libz.a | awk '$2 ~ /^[TtWw]$/ {print $3}' | sort -u > /opt/zlib.allow; \
+    test "$(wc -l < /opt/zlib.allow)" -gt 50; \
+    grep -qx inflate /opt/zlib.allow; \
+    grep -qx deflate /opt/zlib.allow
+
+# --- Stage 4b: zlib-fidgen — run the PROVEN FID generate+pack recipe on the built binary ---------
+# Bases on `runtime` to REUSE Ghidra + PyGhidra + JDK 21 + python (the generator needs the JVM —
+# ADR-043 D2). Only the packed .fidbf + provenance ship (COPY'd in the final stage); ADR-001
+# server-isolation is irrelevant in a build stage (no server here).
+FROM runtime AS zlib-fidgen
+
+ARG ZLIB_VERSION
+ARG ZLIB_TARBALL_SHA256
+
+# Build as root (runtime ends as USER 65532); Ghidra HOME/project live in this throwaway stage only.
+USER root
+COPY --from=zlib-build /opt/zlib-fidgen.bin /opt/zlib-fidgen.bin
+COPY --from=zlib-build /opt/zlib.allow /opt/zlib.allow
+
+# --- Run the PROVEN generator (scripts/fid/generate_fidb.py) → /out/zlib.fidbf (+ provenance) ----
+# scripts/ is NOT in the runtime image, so COPY it into this build-only stage. The generator runs
+# PyGhidra in-process (ADR-001 isolation is irrelevant in a build stage — there is no server here),
+# analyzes the unstripped binary, and emits the packed .fidbf + its provenance manifest.
+COPY --chown=root:root scripts/ /opt/vivarium-build/scripts/
+WORKDIR /opt/vivarium-build
+RUN set -eux; \
+    mkdir -p /out /tmp/ghidra; \
+    chmod 0777 /tmp/ghidra; \
+    HOME=/tmp/ghidra PYTHONPATH=/opt/vivarium-worker python scripts/fid/generate_fidb.py \
+        --input /opt/zlib-fidgen.bin \
+        --output /out/zlib.fidbf \
+        --family zlib \
+        --version "${ZLIB_VERSION}" \
+        --variant x86-64 \
+        --license-spdx Zlib \
+        --source-digest "sha256:${ZLIB_TARBALL_SHA256}" \
+        --compiler "gcc (wolfi)" \
+        --compiler-flags="-O2 -g -static -no-pie --whole-archive" \
+        --include-symbols /opt/zlib.allow; \
+    # Fail closed: the packed DB + its provenance manifest MUST exist for the final-stage COPY.
+    test -s /out/zlib.fidbf; \
+    test -s /out/zlib.fidbf.provenance.json
+
+# =============================================================================
+# Stage 5: worker-final — the shipped worker image = `runtime` + the build-generated zlib FID DB.
+# =============================================================================
+# Default build target (last stage). Overlays ONLY the packed .fidbf + provenance onto the
+# already-baked deploy/fid scaffold (README + sources.toml) from `runtime`, so the worker
+# startup-attaches a REAL zlib DB and identify_functions matches zlib in ELF (ADR-043 D3).
+FROM runtime AS worker-final
+COPY --from=zlib-fidgen --chown=root:root /out/zlib.fidbf /opt/vivarium/fid/zlib.fidbf
+COPY --from=zlib-fidgen --chown=root:root \
+    /out/zlib.fidbf.provenance.json /opt/vivarium/fid/zlib.fidbf.provenance.json
