@@ -368,6 +368,11 @@ RUN set -eux; \
     test -s /out/zlib.fidbf; \
     test -s /out/zlib.fidbf.provenance.json
 
+# Drop back to the runtime's non-root UID so no stage ends as root (Trivy DS-0002). This is a
+# throwaway build stage — the generation RUN above already ran as root; this only resets the
+# stage's trailing USER metadata.
+USER 65532:65532
+
 # =============================================================================
 # Stage 5: worker-final — the shipped worker image = `runtime` + the build-generated zlib FID DB.
 # =============================================================================
@@ -378,3 +383,7 @@ FROM runtime AS worker-final
 COPY --from=zlib-fidgen --chown=root:root /out/zlib.fidbf /opt/vivarium/fid/zlib.fidbf
 COPY --from=zlib-fidgen --chown=root:root \
     /out/zlib.fidbf.provenance.json /opt/vivarium/fid/zlib.fidbf.provenance.json
+
+# The shipped worker runs as the runtime's non-root UID (inherited from `runtime`); state it
+# explicitly so the final image's USER is unambiguously non-root (topic-container-k8s; Trivy DS-0002).
+USER 65532:65532
