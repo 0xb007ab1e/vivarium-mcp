@@ -36,27 +36,34 @@ gates ADR-042 deferred Phase 2 behind are now cleared:
   **Excluded** from v1: glibc + Qt (LGPL — CAUTION), readline/GPL, AGPL, OpenSSL pre-3.0 (AVOID) —
   each requires counsel sign-off before it may enter the build (SPIKE-2 §5).
 
-- **D2 — Build-time generation via Ghidra's FID build tooling, never at runtime.** A dedicated, gated
-  build stage compiles each library from **pinned-by-digest source** (unstripped, with symbols) and
-  produces a **packed `.fidbf`** using **Ghidra's FunctionID database build tooling** (the
-  `analyzeHeadless` FunctionID prescript / packed-DB creator that the shipped MSVC DBs are made
-  with), one per *(library, version, processor)*. **O1 finding:** the simple `createNewFidDatabase`
-  service API (the SPIKE-1 chain) yields an **unpacked** DB that Ghidra's data-dir scan does **not**
-  discover — so generation must use the real packed-DB tooling, not the raw service API. The worker
-  **never** ingests or mutates a DB at runtime (ADR-001 isolation + read-only-rootfs). Reproducible;
-  each `.fidbf` is pinned by digest.
+- **D2 — Build-time generation, never at runtime — PROVEN recipe (O1 spike).** A dedicated, gated
+  build stage compiles each library from **pinned-by-digest source** (unstripped, with symbols), then
+  runs Ghidra headless to **generate + pack** a `.fidbf`, one per *(library, version, processor)*.
+  The proven recipe (PyGhidra, in-worker; `tests/integration/fid_selfmatch_inworker.py` is the
+  reference):
+  1. **Generate (unpacked):** `FidFileManager.createNewFidDatabase(file)` → `addUserFidFile(file)` →
+     `getFidDB(true)` → `FidService.createNewLibraryFromPrograms(fidDb, family, version, variant,
+     [program.getDomainFile()], <JProxy java.util.function.Predicate→true>, program.getLanguageID(),
+     [], [], monitor)` → `saveDatabase(comment, monitor)` → `close()`. (Functions must be
+     non-default-named and large enough to clear FID's minimum-hash length.)
+  2. **Pack:** reopen **read-only** (`getFidDB(false)` → no open transaction) and
+     `ghidra.framework.store.db.PackedDatabase.packDatabase(fidDb.getDBHandle(), name,
+     "FunctionID Database", packedFile, monitor)` → the packed `.fidbf`. (The raw `createNewFidDatabase`
+     output alone is **not** the distribution format.)
+  The worker **never** generates/ingests at runtime (ADR-001 isolation + read-only rootfs).
+  Reproducible; each `.fidbf` is pinned by digest.
 
-- **D3 — Activation by "installed" placement (primary); startup-attach (proven fallback).** Bake the
-  packed `.fidbf` into Ghidra's FunctionID **data directory** (`Ghidra/Features/FunctionID/data/`)
-  **next to the shipped MSVC DBs**, so they are *installed* and **active by default** — SPIKE-0
-  confirmed shipped DBs there report `active=True` headless, so `identify_functions` (which queries
-  active DBs) matches ELF with **zero tool code change**. This requires the **packed** format (D2);
-  **O1 confirmed an *unpacked* DB dropped in `data/` is silently ignored.** **Fallback (proven,
-  SPIKE-1):** a one-time worker-startup `addUserFidFile` + `setActive` of the bundled DBs — but O1
-  found `addUserFidFile` returns `None` on a read-only/wrong-format path, so the fallback needs the
-  DB presented in a writable, accepted form (copy into the tmpfs at startup). Either way: no
-  per-request work. **Decision: pursue data-dir-packed (D2 tooling) as primary; keep startup-attach
-  as the validated fallback.**
+- **D3 — Activation by worker-startup attach (PROVEN; data-dir drop-in does NOT work).** **O1 spike
+  result:** dropping a `.fidbf` (even a properly *packed* one) into `Ghidra/Features/FunctionID/data/`
+  is **silently ignored** — Ghidra registers the shipped MSVC DBs via an install/registration step,
+  not a directory glob, so a bind-mounted/baked file there is never discovered. **Therefore the
+  activation mechanism is startup-attach:** the worker, at init (before serving), copies each bundled
+  packed `.fidbf` to a writable path (the tmpfs scratch) and calls `FidFileManager.addUserFidFile`
+  (needs a **writable, valid packed** path — returns `None` otherwise) → `FidFile.setActive(true)`.
+  A pre-built populated DB activates on a **single** attach (no re-add). Then `identify_functions`
+  (which queries active DBs) matches ELF. **Proven end-to-end: matches=7** on a self-built DB
+  (`o1_attach2`). One-time at startup; no per-request cost; the only `identify_functions`-side change
+  is the new worker-init attach step (the tool itself is unchanged).
 
 - **D4 — Supply chain (each DB is a pinned, attested artifact).** Generation source tarballs are
   verified by digest; each `.fidb` is digest-pinned and baked into the **worker image** → the image
@@ -81,13 +88,14 @@ gates ADR-042 deferred Phase 2 behind are now cleared:
 
 ## Open items (resolve during implementation)
 
-- **O1 — auto-activation of generated DBs in the data dir — ✅ RESOLVED (spike, 2026-06-21).**
-  Finding: Ghidra's data-dir scan only discovers **genuinely packed `.fidbf`** (a raw
-  `createNewFidDatabase`/`saveDatabase` DB, even renamed `.fidbf`, is silently ignored); the shipped
-  MSVC DBs are packed + `active=True` by default. So **D2 must use Ghidra's packed-DB build tooling**,
-  and D3 data-dir placement works only with that packed output. Startup-attach is the proven fallback
-  but `addUserFidFile` needs a writable/accepted path (returns `None` otherwise). Remaining sub-task
-  (implementation): wire the packed-DB build step (the `analyzeHeadless` FunctionID flow).
+- **O1 — DB generation + activation mechanism — ✅ FULLY RESOLVED (spike, 2026-06-21).**
+  Generation + packing proven (D2): `createNewLibraryFromPrograms` ingests, then
+  `PackedDatabase.packDatabase(getDBHandle(),…,"FunctionID Database",…)` on a **read-only-reopened**
+  handle emits the packed `.fidbf`. Activation proven (D3): **data-dir placement does not work even
+  for a packed file** (Ghidra registers DBs via an install step, not a glob — verified: a
+  bind-mounted packed `.fidbf` in `Features/FunctionID/data/` never appears in `getFidFiles()`), so
+  the worker **startup-attaches** the bundled packed DBs (copy to writable tmpfs → `addUserFidFile`
+  + `setActive`) — **end-to-end matches=7**. No remaining unknowns; the rest is implementation.
 - **O2 — generation mechanism + arch matrix** — `FunctionIDHeadlessPrescript` vs a PyGhidra generator;
   confirm per-arch coverage; settle the exact build flags for stable, reproducible hashes.
 - **O3 — exact source versions** — musl (static), OpenSSL 3.x, zlib, Boost subset; pin each.
