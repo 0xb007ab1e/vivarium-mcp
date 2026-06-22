@@ -194,18 +194,46 @@ supported API (pyghidra 3.1.0): `open_project` → `program_loader().…​.load
 identically (OpenSSL still 12 749 functions). Note: `open_project` requires the project's parent
 directory to pre-exist (the generator now `mkdir`s it; `open_program` did not).
 
-### Increment E — Boost: attempted & deferred (2026-06-22)
+### Increment E — Boost compiled libraries (x86-64) ✅ shipped — minimal-analysis FID-gen fix, match-validated (2026-06-24)
 
-Boost (BSL-1.0) was built (`boost-build` compiles a curated compiled-lib set + `ld -r` merge) but its
-**FID generation is blocked by a Ghidra DB-cache vs. transaction conflict**, not the API: Boost's
-large C++ program (demangling/vtables/RTTI/templates) **flushes its program DB mid-analysis**, and a
-DB flush requires `lockCount==0` — but `AutoAnalysisManager.startAnalysis` requires a **held**
-transaction. Confirmed deterministic across three approaches (`pyghidra.analyze` held-txn →
-`Cannot call flush() with locks!`; `FlatProgramAPI.analyzeAll` and bare `startAnalysis` →
-`NoTransactionException`). OpenSSL (more functions, but C) fit in cache and never flushed — so it's
-C++ DB churn, not function count. **Fix direction (deferred):** enlarge Ghidra's DB buffer cache so
-Boost fits without a mid-analysis spill, or reduce analysis depth / the bundled lib-set. The Boost
-build stages live unmerged on a branch; `sources.toml` keeps `boost bundled = false`.
+- **Built (b2 + `ld -r` recipe).** `Containerfile.worker` adds `boost-build` (wolfi-base + `gcc g++
+  make bash`) compiling **Boost 1.89.0** (sha256 `aa25e7b9…`, BSL-1.0) via `./bootstrap.sh` + `./b2
+  … link=static stage` for a curated, dependency-light set of COMPILED libs (system, filesystem,
+  program_options, thread, chrono, atomic, date_time, container, random, regex, exception, charconv,
+  json — no python/ICU/zlib deps); the staged `libboost_*.a` are merged with `ld -r --whole-archive`.
+  `boost-fidgen` runs `generate_fidb.py`; `worker-final` bakes `boost.fidbf` alongside the other three.
+  `sources.toml` flips boost `bundled = true`, version 1.88.0 → 1.89.0 (BSL-1.0 → license gate permits).
+- **C++ specifics (why this DB differs).** (1) Most of Boost is **header-only** → no compiled code to
+  fingerprint; only the compiled libs are covered. (2) The fidgen step **omits `--include-symbols`**:
+  the merged `.o` is pure Boost (nothing foreign to mislabel) AND Ghidra **demangles** C++ names, so a
+  mangled `nm` allow-list would match nothing and wrongly empty the DB — include-all is correct here.
+  (3) Expect **lower precision than the C libs**: template instantiations produce many near-identical
+  functions, and C++ ABI/mangling makes matches **more** toolchain-sensitive than C (O5 applies harder).
+- **Why Boost.** Last of the pre-approved permissive set (D1); meaningful coverage for C++ targets.
+- **Blocker (RESOLVED) — FID *generation* flushed mid-analysis; the build was always fine.** Boost's
+  large C++ object overflowed Ghidra's program-DB buffer cache DURING `pyghidra.analyze`, which then
+  tried to `flush()` while the analysis transaction held a lock → `IllegalStateException: Cannot call
+  flush() with locks!`. Confirmed **not** an API issue (the modernized `pyghidra.analyze` hits the
+  same wall) and **not** function count (OpenSSL has more functions, in C, and never flushed) — it is
+  **C++ DB churn**, dominated by **DWARF import** of the `-g` object's per-template debug types (plus
+  the reference/data analyzers), NOT the decompiler (disabling only the decompiler still flushed).
+- **Fix (ADOPTED) — `--minimal-analysis` analyzer overlay (ADR-035-guarded).** New opt-in flag on
+  `scripts/fid/generate_fidb.py`: it first creates the `AutoAnalysisManager` (required — analyzer
+  option names are EMPTY on a freshly `program_loader().load()`'d program until the manager registers
+  them), then under a txn disables the heavy churners — **DWARF**, the decompiler analyzers, and the
+  reference/data/string passes — KEEPING Function Start / Disassemble / Demangler GNU / Function ID.
+  FID full-hashes derive from instruction bytes within a function boundary (NOT decompiler/DWARF
+  output), so match validity is preserved. The Boost `boost-fidgen` stage passes `--minimal-analysis`;
+  the C-lib DBs (zlib/musl/openssl) do **not** → they analyze byte-identically (the #158
+  regression-free guarantee holds). Result: `boost.fidbf` = **2068 functions** (x86:LE:64:default).
+- **Match-VALIDATED (2026-06-24).** A throwaway `boost-match-check` Containerfile stage (`--target
+  boost-match-check`, NOT shipped) attaches the bundled minimal-analysis `boost.fidbf` and queries a
+  same-toolchain Boost consumer opened with **FULL** analysis (`scripts/fid/boost_match_check_inworker.py`):
+  **215 matches, ALL in the `boost` library, ZERO false positives** — genuine Boost.Filesystem
+  internals (`current_path`, `read_symlink`, `temp_directory_path`, `remove_all_impl`, `canonical_*`).
+  Proves a minimal-analysis-built DB matches a fully-analyzed consumer (FID full-hash is
+  analysis-depth-independent — boundaries come from the symbol table), so `boost bundled = true` is
+  shippable.
 
 ## Testing
 

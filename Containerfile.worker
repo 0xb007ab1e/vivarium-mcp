@@ -81,6 +81,15 @@ ARG OPENSSL_VERSION=3.5.7
 ARG OPENSSL_TARBALL_SHA256=a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8
 ARG OPENSSL_TARBALL_URL=https://github.com/openssl/openssl/releases/download/openssl-3.5.7/openssl-3.5.7.tar.gz
 
+# GATED ITEM W-BOOST: Boost source (b2-nodocs tarball; downloaded + SHA-256-verified before extract).
+# Version MUST match the `boost` entry in deploy/fid/sources.toml. Boost is BSL-1.0 (permissive —
+# passes vivarium.fid_licenses). Most of Boost is header-only (no compiled code → no FID value); this
+# DB covers Boost's COMPILED libraries only. The sha256 below for boost-1.89.0-b2-nodocs.tar.gz is the
+# upstream digest published alongside the release asset; the gated build re-verifies it.
+ARG BOOST_VERSION=1.89.0
+ARG BOOST_TARBALL_SHA256=aa25e7b9c227c21abb8a681efd4fe6e54823815ffc12394c9339de998eb503fb
+ARG BOOST_TARBALL_URL=https://github.com/boostorg/boost/releases/download/boost-1.89.0/boost-1.89.0-b2-nodocs.tar.gz
+
 # =============================================================================
 # Stage 1: ghidra-fetch — fetch + verify + unpack Ghidra. Build tooling stays HERE, not in runtime.
 # =============================================================================
@@ -625,11 +634,145 @@ RUN set -eux; \
     nm /opt/fid-probes/musl_probe | grep -qE ' [TtWw] memcpy$'
 
 # =============================================================================
+# Stage 4g: boost-build — compile Boost's COMPILED libraries UNSTRIPPED from pinned source.
+# =============================================================================
+# GATED ITEM W-BOOST (ADR-043 Inc E). Boost is C++ and mostly header-only; only its COMPILED libs
+# carry function bodies to fingerprint. Build a dependency-light, high-value subset with Boost.Build
+# (`./bootstrap.sh` → `./b2 ... stage`), link=static, then merge every staged libboost_*.a into one
+# relocatable object via `ld -r --whole-archive` (same as musl/openssl). C++ NOTE: the DB is NOT
+# symbol-scoped (`--include-symbols` is omitted in the fidgen step) because the merged .o is pure
+# Boost (no CRT/libc to mislabel) AND Ghidra DEMANGLES C++ names, which a mangled `nm` allow-list
+# would not match — so scoping would wrongly empty the DB. Throwaway: only the merged .o ships out.
+FROM cgr.dev/chainguard/wolfi-base@sha256:0b5fd36c9f36ecc95bf6dbe049fe0a211410e1ba8a9801db0fbe25c7561d81c1 AS boost-build
+
+ARG BOOST_VERSION
+ARG BOOST_TARBALL_SHA256
+ARG BOOST_TARBALL_URL
+
+RUN set -eux; \
+    echo "https://packages.wolfi.dev/os" >> /etc/apk/repositories; \
+    # wolfi's `gcc` package ships the C++ driver (g++/c++) too — there is no separate `g++` package.
+    apk add --no-cache ca-certificates curl gcc make bash
+
+# --- Fetch + VERIFY Boost source (fail-closed on checksum mismatch — std-supplychain) ------------
+WORKDIR /opt/boost-src
+RUN set -eux; \
+    echo "${BOOST_TARBALL_SHA256}  boost.tar.gz" > boost.tar.gz.sha256; \
+    curl -fsSL --proto '=https' --tlsv1.2 -o boost.tar.gz "${BOOST_TARBALL_URL}"; \
+    sha256sum -c boost.tar.gz.sha256; \
+    tar -xzf boost.tar.gz; \
+    rm -f boost.tar.gz boost.tar.gz.sha256
+
+# --- Build a curated set of COMPILED Boost libs (static, UNSTRIPPED, -g) -------------------------
+# The `--with-*` set is deliberately dependency-light (no python/ICU/zlib/bzip2) so the build is
+# reliable + bounded while still covering the most common compiled Boost libraries. `ld -r` merges
+# all staged archives into one object with every Boost function DEFINED + NAMED.
+WORKDIR /opt/boost-src/boost-${BOOST_VERSION}
+RUN set -eux; \
+    ./bootstrap.sh --with-toolset=gcc; \
+    ./b2 -j"$(nproc)" toolset=gcc link=static runtime-link=static variant=release \
+        cxxflags="-O2 -g -fno-omit-frame-pointer" --layout=system \
+        --with-system --with-filesystem --with-program_options --with-thread \
+        --with-chrono --with-atomic --with-date_time --with-container \
+        --with-random --with-regex --with-exception --with-charconv --with-json \
+        stage; \
+    ls -la stage/lib/*.a; \
+    ld -r --whole-archive stage/lib/libboost_*.a -o /opt/boost-fidgen.o; \
+    nm /opt/boost-fidgen.o > /opt/boost-fidgen.syms; \
+    grep -qE ' [TtWw] .*5boost' /opt/boost-fidgen.syms; \
+    test "$(grep -cE ' [TtWw] ' /opt/boost-fidgen.syms)" -gt 300
+
+# --- Same-toolchain Boost CONSUMER for the FID match-validation (ADR-043 Inc E; NOT shipped) -----
+# Its Boost function bodies come from the SAME staged libboost_*.a that produced boost-fidgen.o, so
+# they are byte-identical to the DB's source → a deterministic same-toolchain match. Boost libs are
+# static (.a), so they link in regardless of -static; keep libc/libstdc++ dynamic (only the Boost
+# bodies need to be present for FID). Consumed only by the throwaway `boost-match-check` stage below.
+RUN set -eux; \
+    ls -la stage/lib/*.a; \
+    printf '%s\n' \
+        '#include <boost/filesystem.hpp>' \
+        '#include <boost/regex.hpp>' \
+        '#include <string>' \
+        'int main(int argc, char** argv){' \
+        '  boost::filesystem::path p(argc>0?argv[0]:".");' \
+        '  bool e=boost::filesystem::exists(p);' \
+        '  boost::regex re("[a-z]+[0-9]*");' \
+        '  std::string s(argc>1?argv[1]:"vivarium123");' \
+        '  bool m=boost::regex_search(s,re);' \
+        '  return (e?1:0)+(m?2:0);}' \
+        > /tmp/boost_consumer.cpp; \
+    # Boost.System is header-only (>=1.69) — no libboost_system.a. Link every staged archive inside
+    # a --start-group so inter-library circular refs resolve; only needed symbols are pulled in.
+    g++ -O2 -g -no-pie -fno-pie /tmp/boost_consumer.cpp -I . \
+        -Wl,--start-group stage/lib/libboost_*.a -Wl,--end-group \
+        -o /opt/boost_consumer; \
+    nm /opt/boost_consumer > /opt/boost_consumer.syms; \
+    grep -qiE ' [Tt] .*boost' /opt/boost_consumer.syms
+
+# =============================================================================
+# Stage 4h: boost-fidgen — run the PROVEN FID generate+pack recipe on the merged Boost object.
+# =============================================================================
+FROM runtime AS boost-fidgen
+
+ARG BOOST_VERSION
+ARG BOOST_TARBALL_SHA256
+
+# Build as root (runtime ends as USER 65532); Ghidra HOME/project live in this throwaway stage only.
+USER root
+COPY --from=boost-build /opt/boost-fidgen.o /opt/boost-fidgen.o
+
+COPY --chown=root:root scripts/ /opt/vivarium-build/scripts/
+WORKDIR /opt/vivarium-build
+# No --include-symbols: the .o is pure Boost (nothing to mislabel) and Ghidra demangles C++ names,
+# which a mangled allow-list would not match — so include ALL functions (ADR-043 Inc E).
+RUN set -eux; \
+    mkdir -p /out /tmp/ghidra; \
+    chmod 0777 /tmp/ghidra; \
+    HOME=/tmp/ghidra PYTHONPATH=/opt/vivarium-worker python scripts/fid/generate_fidb.py \
+        --input /opt/boost-fidgen.o \
+        --output /out/boost.fidbf \
+        --family boost \
+        --version "${BOOST_VERSION}" \
+        --variant x86-64 \
+        --license-spdx BSL-1.0 \
+        --minimal-analysis \
+        --source-digest "sha256:${BOOST_TARBALL_SHA256}" \
+        --compiler "g++ (wolfi)" \
+        --compiler-flags="-O2 -g (C++, link=static); ld -r --whole-archive libboost_*.a"; \
+    # Fail closed: the packed DB + its provenance manifest MUST exist for the final-stage COPY.
+    test -s /out/boost.fidbf; \
+    test -s /out/boost.fidbf.provenance.json
+
+# Drop back to the runtime's non-root UID so no stage ends as root (Trivy DS-0002). Throwaway stage.
+USER 65532:65532
+
+# =============================================================================
+# Stage 4i: boost-match-check — VALIDATE the minimal-analysis Boost DB actually MATCHES (ADR-043 Inc E).
+# =============================================================================
+# NOT shipped (worker-final does NOT COPY from here). Answers the question the --minimal-analysis DB
+# raises: does a DB built with REDUCED analysis match a Boost consumer analyzed NORMALLY? Attaches the
+# bundled boost.fidbf, opens+FULL-analyzes the same-toolchain consumer, and queries FID. A build
+# failure here = the minimal-analysis DB does not match (fall back to per-library split, plan C).
+# Build with `--target boost-match-check` to run the gate; `--target worker-final` never builds it.
+FROM boost-fidgen AS boost-match-check
+USER root
+# The harness lives under scripts/fid/ (baked into this image by the boost-fidgen `COPY scripts/`
+# above; tests/ is .containerignore'd because tests are MOUNTED at runtime, not baked).
+COPY --from=boost-build /opt/boost_consumer /work/input.bin
+RUN set -eux; \
+    mkdir -p /work/project /tmp/ghidra; \
+    chmod 0777 /work/project /tmp/ghidra; \
+    BOOST_FIDBF=/out/boost.fidbf BOOST_CONSUMER=/work/input.bin \
+        HOME=/tmp/ghidra PYTHONPATH=/opt/vivarium-worker \
+        python /opt/vivarium-build/scripts/fid/boost_match_check_inworker.py
+USER 65532:65532
+
+# =============================================================================
 # Stage 5: worker-final — the shipped worker image = `runtime` + the build-generated FID DBs.
 # =============================================================================
 # Default build target (last stage). Overlays ONLY the packed .fidbf files + provenance onto the
-# already-baked deploy/fid scaffold (README + sources.toml) from `runtime`, so the worker
-# startup-attaches the REAL zlib + musl + openssl DBs and identify_functions matches them (ADR-043 D3).
+# already-baked deploy/fid scaffold (README + sources.toml) from `runtime`, so the worker startup-
+# attaches the REAL zlib + musl + openssl + boost DBs and identify_functions matches them (ADR-043 D3).
 FROM runtime AS worker-final
 COPY --from=zlib-fidgen --chown=root:root /out/zlib.fidbf /opt/vivarium/fid/zlib.fidbf
 COPY --from=zlib-fidgen --chown=root:root \
@@ -640,6 +783,9 @@ COPY --from=musl-fidgen --chown=root:root \
 COPY --from=openssl-fidgen --chown=root:root /out/openssl.fidbf /opt/vivarium/fid/openssl.fidbf
 COPY --from=openssl-fidgen --chown=root:root \
     /out/openssl.fidbf.provenance.json /opt/vivarium/fid/openssl.fidbf.provenance.json
+COPY --from=boost-fidgen --chown=root:root /out/boost.fidbf /opt/vivarium/fid/boost.fidbf
+COPY --from=boost-fidgen --chown=root:root \
+    /out/boost.fidbf.provenance.json /opt/vivarium/fid/boost.fidbf.provenance.json
 
 # The shipped worker runs as the runtime's non-root UID (inherited from `runtime`); state it
 # explicitly so the final image's USER is unambiguously non-root (topic-container-k8s; Trivy DS-0002).

@@ -42,5 +42,6 @@ bundled = true
 name = "boost"
 spdx = "BSL-1.0"
 # High value for C++ targets; permissive, no notice required for compiled redistribution.
-version = "1.88.0"
-bundled = false
+# Built + bundled in ADR-043 Inc E (x86-64; the COMPILED libs only — most of Boost is header-only).
+version = "1.89.0"
+bundled = true

@@ -186,6 +186,7 @@ def _generate_fidbf(
     fidbf_path: Path,
     meta: LibraryMeta,
     include_symbols: frozenset[str] | None = None,
+    minimal_analysis: bool = False,
 ) -> tuple[str, int]:  # pragma: no cover - JVM edge
     """Run the PROVEN generate+pack recipe and write the packed ``.fidbf`` (ADR-043 D2).
 
@@ -196,6 +197,11 @@ def _generate_fidbf(
         include_symbols: Optional allow-list of function names to ingest; ``None`` includes every
             function. Scopes the DB to the library's own functions, excluding statically-linked
             CRT/libc/libgcc code (avoids false-positive library identification).
+        minimal_analysis: When ``True``, disable the decompiler-driven analyzers before analysis
+            (ADR-043 Inc E) — for large C++ objects (Boost) that overflow Ghidra's program-DB
+            buffer cache mid-analysis ("Cannot call flush() with locks!"). FID hashes derive from
+            disassembly + function boundaries, not decompiler output, so this preserves FID
+            validity. Opt-in; the C-lib DBs leave it off and analyze byte-identically.
 
     Returns:
         ``(language_id, function_count)`` — the target language id and the count of ingested
@@ -242,12 +248,82 @@ def _generate_fidbf(
         try:
             program = results.getPrimaryDomainObject(consumer)
             try:
+                # ADR-043 Inc E (Boost): a large C++ object overflows Ghidra's program-DB
+                # buffer cache DURING analysis; the cache then flushes to disk while the
+                # analysis transaction holds a lock → "Cannot call flush() with locks!". The
+                # decompiler analyzers churn the DB, but the dominant driver is DWARF import of
+                # the -g object's per-template debug types. ``--minimal-analysis`` disables them
+                # before analysis so the DB never spills. FID hashes derive from disassembly +
+                # function boundaries (NOT decompiler/DWARF output), so FID validity is kept.
+                # Opt-in: the C-lib DBs do NOT set it → byte-identical analysis (the #158
+                # regression-free guarantee holds).
+                if minimal_analysis:
+                    from ghidra.app.plugin.core.analysis import (  # type: ignore[import-not-found]
+                        AutoAnalysisManager,
+                    )
+                    from ghidra.program.model.listing import (  # type: ignore[import-not-found]
+                        Program,
+                    )
+
+                    # Creating the analysis manager REGISTERS every analyzer's options into
+                    # ANALYSIS_PROPERTIES. On a freshly-loaded program getOptionNames() is
+                    # otherwise EMPTY (names appear only once the manager initializes them) —
+                    # so the first attempt silently disabled nothing. pyghidra.analyze reuses
+                    # this same per-program manager singleton, so options set here apply to its
+                    # run. All under one txn (option registration + setBoolean are DB-backed
+                    # writes), closed before ``pyghidra.analyze`` opens its own.
+                    to_disable: list[str] = []
+                    txid = program.startTransaction("fidgen: minimal-analysis options")
+                    try:
+                        AutoAnalysisManager.getAnalysisManager(program)
+                        analysis_opts = program.getOptions(Program.ANALYSIS_PROPERTIES)
+                        existing = sorted(str(n) for n in analysis_opts.getOptionNames())
+                        # Diagnostic: surface the REAL analyzer-option names (ADR-035 — a name miss
+                        # must be visible, never silent). Safe to log: Ghidra's own option names.
+                        print(
+                            f"generate_fidb: {len(existing)} analysis options: {existing}",
+                            file=sys.stderr,
+                        )
+                        # Strip to the FID-essential analyzers: KEEP Function Start* /
+                        # Disassemble (boundaries), Demangler GNU (C++ names), Function ID,
+                        # Non-Returning, Call-Fixup. DISABLE the churners — decompiler passes AND
+                        # (the real Boost culprit) DWARF import of every template's debug types
+                        # (.o is -g), plus data/reference/string. None feed the FID full-hash
+                        # (instruction bytes within a function boundary), so the DB stays valid
+                        # but small enough to never spill mid-analysis.
+                        to_disable = [
+                            n
+                            for n in (
+                                "Decompiler Parameter ID",
+                                "Decompiler Switch Analysis",
+                                "Call Convention ID",
+                                "Stack",
+                                "Variadic Function Signature Override",
+                                "Aggressive Instruction Finder",
+                                "Shared Return Calls",
+                                "DWARF",
+                                "Data Reference",
+                                "Reference",
+                                "x86 Constant Reference Analyzer",
+                                "ASCII Strings",
+                                "Create Address Tables",
+                                "Embedded Media",
+                                "Apply Data Archives",
+                                "Subroutine References",
+                                "GCC Exception Handlers",
+                                "ELF Scalar Operand References",
+                            )
+                            if n in existing
+                        ]
+                        for name in to_disable:
+                            analysis_opts.setBoolean(name, False)
+                    finally:
+                        program.endTransaction(txid, True)
+                    print(
+                        f"generate_fidb: minimal-analysis disabled {to_disable}",
+                        file=sys.stderr,
+                    )
                 # ``pyghidra.analyze`` is the supported analysis API (it manages the txn).
-                # Regression-free on the C-lib DBs (zlib/musl/openssl). NOTE (ADR-043 Inc E):
-                # it does NOT work for Boost — that large C++ program flushes its DB
-                # mid-analysis while the analysis txn holds a lock ("Cannot call flush() with
-                # locks!"); startAnalysis needs a held txn but a flush needs none, so neither
-                # held-txn nor no-txn works. Boost needs a Ghidra DB-cache / analysis-depth fix.
                 pyghidra.analyze(program)
                 # Persist so the program's DomainFile reflects the analysis.
                 results.save(monitor)
@@ -356,6 +432,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         help="compiler flags used (use =form: --compiler-flags=...)",
     )
+    parser.add_argument(
+        "--minimal-analysis",
+        action="store_true",
+        help="disable decompiler-driven analyzers before analysis (ADR-043 Inc E) — for large "
+        "C++ objects (Boost) that overflow Ghidra's DB buffer cache mid-analysis; FID hashes do "
+        "not need decompiler output. C-lib DBs omit this and analyze identically.",
+    )
     return parser.parse_args(argv)
 
 
@@ -398,7 +481,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - JVM-edge o
     include_symbols = _load_include_symbols(include_path)
 
     language_id, function_count = _generate_fidbf(
-        input_path, fidbf_path, meta, include_symbols=include_symbols
+        input_path,
+        fidbf_path,
+        meta,
+        include_symbols=include_symbols,
+        minimal_analysis=args.minimal_analysis,
     )
     manifest = build_manifest(
         meta,
