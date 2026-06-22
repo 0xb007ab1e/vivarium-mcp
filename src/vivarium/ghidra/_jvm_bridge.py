@@ -3644,7 +3644,7 @@ def _clamp_identify(value: int) -> int:
 #: Writable tmpfs scratch dir the bundled FID DBs are copied into before attach (ADR-043 D3 — the
 #: bundled dir is on the read-only rootfs; ``addUserFidFile`` needs a writable, valid packed path).
 #: Mirrors the worker image's HOME / java.io.tmpdir tmpfs (Containerfile.worker).
-_FID_WRITABLE_SCRATCH = "/tmp/ghidra"  # noqa: S108 — the worker's writable tmpfs (read-only rootfs)
+_FID_WRITABLE_SCRATCH = "/tmp/ghidra"  # noqa: S108  # nosec B108 — worker tmpfs (ro rootfs)
 
 
 def _fid_log(event: str, **fields: object) -> None:  # pragma: no cover - worker stderr sink
