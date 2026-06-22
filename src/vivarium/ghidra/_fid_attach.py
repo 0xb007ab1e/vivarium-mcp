@@ -89,7 +89,11 @@ def discover_fid_dbs(db_dir: str | Path) -> list[Path]:
     root = Path(db_dir)
     if not root.is_dir():
         return []
-    candidates = sorted(p for p in root.iterdir() if p.is_file() and p.suffix == FIDB_SUFFIX)
+    # Regular files only — skip symlinks (defense-in-depth: the bundle dir holds our own build
+    # artifacts on a read-only rootfs; never follow a symlink masquerading as a packed DB).
+    candidates = sorted(
+        p for p in root.iterdir() if p.is_file() and not p.is_symlink() and p.suffix == FIDB_SUFFIX
+    )
     return candidates[:_MAX_FID_DBS]
 
 
