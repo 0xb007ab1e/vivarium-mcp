@@ -31,6 +31,13 @@ htmlcov/
 ghidra_projects/
 samples/        # binary samples are not committed; tests use synthetic fixtures
 
+# Bundled FID databases (ADR-043) — packed binary artifacts + their intermediates are GENERATED
+# (PM-gated build), never committed; deploy/fid/sources.toml + README.md ARE committed (above rules
+# keep tracked files, these patterns only block the binary DB files).
+*.fidbf
+*.fidb
+*.fidbf.provenance.json
+
 # Containers / build
 *.tar
 *.sif

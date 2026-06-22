@@ -23,6 +23,14 @@
 #     ingest+attach+activate chain, i.e. Phase-2 SPIKE-1 (tests/integration/
 #     test_identify_functions_selfmatch.py). Hermetic — DB from the binary's own functions, no MSVC/
 #     licensing.
+#
+# ADVISORY (not a hard gate YET): FID ELF bundled-DB match (ADR-043 Phase 2) — a zlib-static ELF
+# matches the BUNDLED zlib FID DB via the worker-startup attach
+# (tests/integration/test_identify_functions_elf_match.py). It SKIPs until the PM generates +
+# bundles the zlib `.fidbf` into the worker image (scripts/fid/generate_fidb.py + Containerfile.worker
+# COPY deploy/fid/), so it runs in the ADVISORY step below (its skip must NOT fail the hard-gate
+# guard). PROMOTE to a hard gate (move into the hard-gate run + bump the >=5 expectation, and flip the
+# test's "DB not bundled" skip to a hard assert) ONCE the zlib DB ships in the image.
 # Naming-accuracy / behavioral-equivalence is ADVISORY (NOT a hard gate, NOT run with an LLM in CI)
 # and is deliberately NOT part of this job — see e2e-groundtruth.yml for the gated naming-eval e2e.
 # Per-profile recovered-function counts are recorded into the JUnit XML as an advisory trend.
@@ -320,6 +328,45 @@ jobs:
         with:
           name: golden-fixture-junit
           path: golden-fixture-junit.xml
+          if-no-files-found: ignore
+
+      # --- ADVISORY: FID ELF bundled-DB match (ADR-043 Phase 2; PROMOTE to hard gate once bundled) -
+      # A zlib-static ELF must match the BUNDLED zlib FID DB via the worker-startup attach. SKIPs
+      # (advisory, continue-on-error — NOT read by the fail-loud hard-gate guard) until the PM
+      # generates + bundles the zlib `.fidbf` into the worker image. zlib-dev provides libz.a so the
+      # test can static-link a benign zlib program. PROMOTE to the hard-gate run + bump the >=5
+      # expectation once the DB ships (see this workflow's header + the test's "DB not bundled" note).
+      - name: FID ELF bundled-DB match (ADR-043) — advisory
+        if: always()
+        continue-on-error: true
+        env:
+          PYTHONPATH: src
+          VIVARIUM_INTEGRATION: "1"
+          VIVARIUM_WORKER_IMAGE: ${{ steps.image.outputs.image }}
+          VIVARIUM_CONTAINER_ENGINE: podman
+          VIVARIUM_WORKER_RUNTIME: crun
+          VIVARIUM_E2E_TIMEOUT: "900"
+          VIVARIUM_SESSION_TTL_SECONDS: "1800"
+          VIVARIUM_SESSION_IDLE_SECONDS: "1800"
+        run: |
+          set -uo pipefail
+          # zlib-dev (libz.a) so the test can static-link a benign zlib program for the DB to match.
+          sudo apt-get update -qq && sudo apt-get install -y -qq zlib1g-dev || true
+          export VIVARIUM_RPC_SOCKET_DIR="/tmp/gmcp-run"
+          export VIVARIUM_IMPORT_ROOT="/tmp/gmcp-imports"
+          export VIVARIUM_WORKER_UID="$(id -u)"
+          export VIVARIUM_WORKER_GID="$(id -g)"
+          mkdir -p "$VIVARIUM_RPC_SOCKET_DIR" "$VIVARIUM_IMPORT_ROOT"
+          pytest -m integration --no-cov -v \
+            --junit-xml=fid-elf-match-junit.xml \
+            tests/integration/test_identify_functions_elf_match.py || true
+
+      - name: Upload FID ELF match JUnit
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact@v7.0.1
+        with:
+          name: fid-elf-match-junit
+          path: fid-elf-match-junit.xml
           if-no-files-found: ignore
 
       # End-user status reporting (ADR-039): on completion, summarize every gate + the advisory
