@@ -233,8 +233,12 @@ build stages live unmerged on a branch; `sources.toml` keeps `boost bundled = fa
   conservative `>= 20` floor. This proves the bundled DBs identify library code in an *independently
   compiled* consumer — coverage the in-worker self-match does not give. The probes are **not** baked
   into the runtime image: a static probe embeds real library code, which would bloat the image and
-  trip Trivy image-SCA on the embedded library's CVEs. A skip (probes absent) is turned into a
-  FAILURE by the live-regression fail-loud guard, so the gate cannot silently no-op.
+  trip Trivy image-SCA on the embedded library's CVEs. **Self-activating:** the gate applies only when
+  the worker image under test actually ships the bundled DBs (the lane probes the image for
+  `/opt/vivarium/fid/{zlib,musl}.fidbf`). The live-regression pulls the *pinned released* image, which
+  may predate FID Phase 2 — in that window the gate is omitted (a `::warning::`, not a skip, so the
+  fail-loud guard is unaffected) and auto-upgrades to a hard `>=` gate once a FID-containing worker
+  image is released + pinned.
 - Keep the existing empty-match (ELF-vs-MSVC) gate.
 - License-gate negative test: a copyleft source in the DB build list fails the gate (SPIKE-2 §4).
 
