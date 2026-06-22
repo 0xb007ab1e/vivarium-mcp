@@ -114,15 +114,22 @@ must not over-rely on it (`std-owasp-llm` LLM09). FID results are hints, never a
   assumption holds. **Bonus:** `FidFileManager` exposes `addUserFidFile`, `getUserAddedFiles`,
   `createNewFidDatabase`, and **`openFidQueryService`** — informing both the Phase-1 mechanism (D7)
   and SPIKE-1.
-- **SPIKE-1 (blocks Phase 2) — partially de-risked.** SPIKE-0 found `FidFileManager.addUserFidFile`
-  + `getUserAddedFiles`, which is plausibly the headless **attach** path for a custom `.fidb` (Ghidra
-  normally requires GUI attach+activate, #1847). Still to confirm: that an added user DB becomes
-  **active** for the analyzer/query headlessly, and the ingest API (`FidServiceLibraryIngest`) runs
-  build-time. Resolve fully before Phase 2.
-- **SPIKE-2 (blocks Phase 2):** **legal determination** on distributing a `.fidb` derived from
-  glibc (GPL/LGPL) and OpenSSL/BSD libraries — is the derived hash+symbol DB a licensed derivative?
-  Conservative default until counsel: generate **only from permissively-licensed sources**, record
-  provenance, no copyleft-derived DB shipped without sign-off.
+- **SPIKE-1 (blocks Phase 2) — ✅ DONE, PROVEN end-to-end (#150).** The headless custom-`.fidb`
+  chain works: `createNewFidDatabase` → `addUserFidFile` → `getFidDB(true)` →
+  `createNewLibraryFromPrograms([DomainFile], …)` → `saveDatabase` → `close` → **remove+re-add the
+  FidFile** (a file attached while empty caches `canProcessLanguage()==False` → the query skips it) →
+  `setActive(true)` → `openFidQueryService` → `processProgram` → matches. Locked as a live-regression
+  hard gate (`tests/integration/test_identify_functions_selfmatch.py`, self-match n=7). Phase 2 is
+  technically unblocked.
+- **SPIKE-2 (blocks copyleft-derived DBs) — ✅ analysis DONE; see
+  [`docs/security/fid-database-licensing.md`](../security/fid-database-licensing.md).** A `.fidb`
+  (non-reversible hashes + uncopyrightable symbol names + metadata, no code) is **almost certainly
+  not a derivative work** (US: *Feist*/Circular-33/*Google v. Oracle*; 25-yr IDA-FLIRT precedent of
+  the same "hashes+names, no code" design) — but it is **legally untested for a `.fidb`**.
+  **Resolution:** ship a **permissive-only** v1 set (**musl/MIT, OpenSSL 3.0+/Apache-2.0, zlib,
+  Boost/BSL-1.0**) — which needs **no hard legal ruling** — with per-DB provenance + SBOM + NOTICE;
+  **defer glibc/Qt (LGPL) and GPL/AGPL to counsel** (the escalation questions are in the doc). This
+  makes Phase 2 shippable without blocking on a legal determination.
 
 ## Consequences
 
