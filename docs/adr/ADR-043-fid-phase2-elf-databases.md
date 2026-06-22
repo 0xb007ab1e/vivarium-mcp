@@ -221,8 +221,20 @@ build stages live unmerged on a branch; `sources.toml` keeps `boost bundled = fa
   **toolchain-sensitive**: the bundled DB is built with the worker image's compiler while the probe
   is built with the host/CI compiler, so the match count is compiler-dependent (empirically only
   small internal leaves like `_tr_flush_bits` match cross-compiler). A strict `≥1` assertion would
-  be flaky (violates the hermetic-tests mandate). **Follow-up (stronger gate):** build the probe
-  with the worker image's own toolchain → deterministic, many matches → can become a hard gate.
+  be flaky (violates the hermetic-tests mandate). The deterministic counterpart below supersedes the
+  original "build the probe with the worker's own toolchain" follow-up.
+- **Deterministic same-toolchain ELF-match HARD GATE (delivered).**
+  `test_identify_functions_deterministic.py` matches **same-toolchain** probes against the bundled
+  DBs and asserts a hard **`>= floor`** count per library. The probes are compiled with the worker
+  image's OWN toolchain — the non-shipped `fid-probes` Containerfile stage (the same pinned wolfi gcc
+  + pinned library source that produced the `.fidbf`) — and the live-regression CI job builds that
+  stage, extracts the probes, and points `VIVARIUM_FID_PROBE_DIR` at them. Same toolchain ⇒ stable
+  match counts: observed **zlib 52, musl 50** (vs the cross-toolchain advisory's ~1), gated at a
+  conservative `>= 20` floor. This proves the bundled DBs identify library code in an *independently
+  compiled* consumer — coverage the in-worker self-match does not give. The probes are **not** baked
+  into the runtime image: a static probe embeds real library code, which would bloat the image and
+  trip Trivy image-SCA on the embedded library's CVEs. A skip (probes absent) is turned into a
+  FAILURE by the live-regression fail-loud guard, so the gate cannot silently no-op.
 - Keep the existing empty-match (ELF-vs-MSVC) gate.
 - License-gate negative test: a copyleft source in the DB build list fails the gate (SPIKE-2 §4).
 
