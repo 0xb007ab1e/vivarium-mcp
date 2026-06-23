@@ -239,6 +239,19 @@ build stages live unmerged on a branch; `sources.toml` keeps `boost bundled = fa
   may predate FID Phase 2 — in that window the gate is omitted (a `::warning::`, not a skip, so the
   fail-loud guard is unaffected) and auto-upgrades to a hard `>=` gate once a FID-containing worker
   image is released + pinned.
+- **Per-PR trigger scope (#160, 2026-06-23).** The deterministic gate above is run **per-PR on
+  FID-path changes**, not just nightly. A cheap `changes` pre-flight job in `live-regression.yml`
+  diffs the PR and, when a FID-relevant path is touched (`Containerfile.worker`, `scripts/fid/**`,
+  `deploy/fid/**`, `src/vivarium/*fid*`, `tests/integration/test_identify_functions*`, the workflow
+  itself), the expensive real-worker job auto-runs — so a FID-match regression is caught at merge
+  time, not only on the next nightly. The manual `live-regression` label is retained as a
+  force-escape for any PR. **Mechanism note:** auto-*labeling* (the originally-proposed option) was
+  rejected because a label applied with the default `GITHUB_TOKEN` does not re-trigger a workflow
+  (GitHub anti-recursion), which would need a PAT/App secret; the path-filtered trigger needs no new
+  credential. **Required-check decision: NOT (yet) a branch-protection `required_status_check`** —
+  run-now / decide-required-later. It runs and reports per-PR; promotion to a *blocking* required
+  check is deferred until real per-PR runtime/cost is observed (the real-worker run is several
+  minutes). Revisit once that data exists.
 - Keep the existing empty-match (ELF-vs-MSVC) gate.
 - License-gate negative test: a copyleft source in the DB build list fails the gate (SPIKE-2 §4).
 
