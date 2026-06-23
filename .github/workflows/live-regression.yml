@@ -48,9 +48,16 @@
 # read-only rootfs, dropped caps, `--network none`, seccomp) and the input is a BENIGN, locally-built
 # micro-binary (master §5 — no real malware). Production keeps runsc/gVisor (deploy/README.md).
 #
-# Cadence: nightly cron + manual dispatch + ONLY PRs carrying the `live-regression` label — NOT
-# every PR (the real-worker run is expensive). A failed scheduled run is the alert (GitHub notifies
-# the repo owner of default-branch scheduled-workflow failures), mirroring scheduled-rescan.yml.
+# Cadence: nightly cron + manual dispatch + PRs that TOUCH a FID path (auto, via the `changes`
+# detector — #160) + ANY PR manually carrying the `live-regression` label (force-escape). It does
+# NOT run on every PR (the real-worker run is expensive) — only FID-path PRs auto-trigger it, so a
+# FID-match regression is caught at merge time and not just on the nightly run. A failed scheduled
+# run is still the catch-all alert (GitHub notifies the repo owner of default-branch
+# scheduled-workflow failures), mirroring scheduled-rescan.yml.
+#
+# NOTE (#160): this job is wired to RUN per-PR on FID paths but is deliberately NOT (yet) in
+# branch-protection `required_status_checks` — the run-now/decide-required-later call. Revisit
+# promoting it to a required check once real per-PR runtime/cost is observed (see ADR-043).
 
 name: live-regression
 
@@ -65,7 +72,11 @@ on:
         default: false
         required: false
   pull_request:
-    types: [labeled] # runs only when the `live-regression` label is applied (guarded below)
+    # Auto-run on PRs that TOUCH a FID path (opened/synchronize/reopened) via the `changes`
+    # detector + the job `if:` guard below (#160) — so a FID-match regression is caught at merge
+    # time, not just on the nightly run. `labeled` is retained as a manual force-escape: applying
+    # the `live-regression` label runs the FULL real-worker suite on ANY PR regardless of paths.
+    types: [labeled, opened, synchronize, reopened]
 
 permissions:
   contents: read # least privilege; nothing is pushed
@@ -78,13 +89,75 @@ env:
   PYTHON_VERSION: "3.12"
 
 jobs:
+  # Cheap pre-flight (#160): on a PR, decide whether any FID-relevant path changed. The expensive
+  # real-worker job below auto-runs only when this says `fid == 'true'`, so non-FID PRs never spin
+  # up the worker. Self-contained `git diff` (no third-party action to vet/pin); base..head two-dot
+  # is FAIL-SAFE — it can only OVER-trigger (run the gate when not strictly needed), never miss a
+  # FID change. Runs on PRs only; for schedule/dispatch it is skipped and the guard below ignores it.
+  changes:
+    name: detect FID-path changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      fid: ${{ steps.filter.outputs.fid }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # actions/checkout@v6.0.3
+        with:
+          fetch-depth: 0 # need both base and head commits to diff
+      - name: Detect FID-path changes
+        id: filter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Ensure both endpoints are present locally (base lives on the target branch).
+          git fetch --no-tags --quiet origin "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || true
+          # FAIL-SAFE: if the diff cannot be computed (missing object on a fork PR, etc.), assume a
+          # FID change so the gate RUNS rather than silently being skipped (fail-safe, not fail-open).
+          if ! files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null)"; then
+            echo "::warning::could not diff $BASE_SHA..$HEAD_SHA — assuming a FID change (fail-safe)"
+            echo "fid=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Changed files:"; echo "$files"
+          fid=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              Containerfile.worker | \
+              scripts/fid/* | \
+              deploy/fid/* | \
+              src/vivarium/*fid* | \
+              tests/integration/test_identify_functions* | \
+              .github/workflows/live-regression.yml)
+                fid=true ;;
+            esac
+          done <<< "$files"
+          echo "fid=$fid" >> "$GITHUB_OUTPUT"
+          echo "::notice::FID-path change detected: $fid"
+
   live-regression:
-    # Run ONLY when: scheduled, manually dispatched, OR a PR that carries the `live-regression`
-    # label (the `labeled` event also fires for OTHER labels — gate on the specific label name).
+    # Run when: scheduled, manually dispatched, a PR that TOUCHES a FID path (auto — #160), OR ANY
+    # PR manually carrying the `live-regression` label (force-escape; the `labeled` event also fires
+    # for OTHER labels, so gate on the specific name). `!cancelled()` keeps this job evaluating its
+    # `if:` even though the `changes` dependency is SKIPPED on schedule/dispatch (a skipped need
+    # would otherwise skip this job too). FAIL-SAFE: the last clause runs the gate when the `changes`
+    # detector itself FAILED at the job level (checkout/OOM/etc.) — so a broken detector errs toward
+    # RUNNING the gate, never silently skipping it (complements the in-step diff-failure fail-safe).
+    needs: [changes]
     if: >-
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && github.event.label.name == 'live-regression')
+      !cancelled() && (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'pull_request' && github.event.label.name == 'live-regression') ||
+        (github.event_name == 'pull_request' && needs.changes.outputs.fid == 'true') ||
+        (github.event_name == 'pull_request' && needs.changes.result == 'failure')
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
