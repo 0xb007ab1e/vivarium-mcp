@@ -215,6 +215,35 @@ enforced — closing the BOLA gap that ADR-011 §6 deferred (TB6-I).
 | Tag-mutated / poisoned Ghidra/JDK image | M×H=**High** | pin **by digest** (ADR-003); SBOM; gated image pulls; CVE tracking + digest-bump runbook |
 | Compromised CI action | L×H=**Med** | pin CI actions **by digest**; least-privilege OIDC; ephemeral runners (`workflow-cicd`) |
 
+> **§4 delta — live-regression CI auto-trigger (#160/#161; CI trigger-surface, no new TB).** The
+> deterministic FID real-worker gate (`live-regression.yml`) now **auto-runs per-PR on FID-path
+> changes** (the `changes` detector + the job `if:`), where it previously required a maintainer to
+> apply the `live-regression` label / nightly cron / dispatch. This widens *who can trigger an
+> expensive, content-compiling, real-worker job*, not the running product (TB1–TB8 unchanged). It is
+> `pull_request` (**NOT** `pull_request_target`), so the **workflow definition runs from `main`**, not
+> the PR — a fork cannot alter the job, its `permissions`, or the `if:` guards. **(I) Disclosure:**
+> platform-covered — fork-PR `GITHUB_TOKEN` is **read-only**, repo **secrets are withheld**
+> (`STATUS_NTFY_URL`, writable token), and the fork-scoped OIDC token is used only for cosign
+> *verify* against a repo-pinned identity (`worker-image.yml@`), never to sign/push; **L×L=Low**.
+> **(E) Runner pivot:** no `*: write` beyond the downgraded token, ephemeral hosted runner, no prod
+> creds in the lane → no standing privilege to escalate to; **L×H=Med** (generic hosted-runner risk).
+> **(T) Runner code-exec:** a fork PR *can* supply the `Containerfile.worker` + FID probe/test sources
+> that the base workflow `podman build`s + `pytest`-runs — attacker code-exec in a credential-less
+> throwaway runner (the *worker* stays `--network none`/ro-rootfs/caps-dropped per ADR-004, but the
+> *runner* is not sandboxed); **M×M=Med**. **(D) Cost/CI-DoS — the dominant residual:** unbounded fork
+> PRs each auto-spinning a ~60-min-capped real-worker, dual-`podman build` run; `concurrency:
+> cancel-in-progress` caps concurrent runs *per ref* but not the count of distinct PRs; **M×M=Med**.
+> **(T) Detector evasion:** forcing the `changes` output false only skips an **advisory, non-required**
+> check (no security control bypassed); SHAs flow via `env:` not inline `${{ }}` (no expression
+> injection), filenames feed a `case` (no `eval`), fail-**safe** to `fid=true`; **L×L=Low**.
+> **Mitigation (IMPLEMENTED):** the **auto** branches of the job `if:` are gated to same-repo PRs
+> (`github.event.pull_request.head.repo.full_name == github.repository`), leaving fork PRs to the
+> explicit maintainer-`label` path (the label apply *is* the human gate) — restoring the human step
+> for fork code while keeping the auto-convenience for trusted branches (defense in depth, master §2).
+> **Complementary platform control (operator action):** set Actions → "Require approval for all
+> outside collaborators" as a backstop. Same-repo PRs gain **no new exposure** (same trust as a
+> maintainer-labeled run).
+
 ## 5. Residual risk & assumptions
 
 - **Prompt injection is not fully preventable** — the envelope + never-auto-execute **limit blast

@@ -142,21 +142,37 @@ jobs:
           echo "::notice::FID-path change detected: $fid"
 
   live-regression:
-    # Run when: scheduled, manually dispatched, a PR that TOUCHES a FID path (auto — #160), OR ANY
-    # PR manually carrying the `live-regression` label (force-escape; the `labeled` event also fires
-    # for OTHER labels, so gate on the specific name). `!cancelled()` keeps this job evaluating its
-    # `if:` even though the `changes` dependency is SKIPPED on schedule/dispatch (a skipped need
-    # would otherwise skip this job too). FAIL-SAFE: the last clause runs the gate when the `changes`
-    # detector itself FAILED at the job level (checkout/OOM/etc.) — so a broken detector errs toward
-    # RUNNING the gate, never silently skipping it (complements the in-step diff-failure fail-safe).
+    # Run when: scheduled, manually dispatched, a SAME-REPO PR that TOUCHES a FID path (auto — #160),
+    # OR ANY PR manually carrying the `live-regression` label (force-escape; the `labeled` event also
+    # fires for OTHER labels, so gate on the specific name). `!cancelled()` keeps this job evaluating
+    # its `if:` even though the `changes` dependency is SKIPPED on schedule/dispatch (a skipped need
+    # would otherwise skip this job too). FAIL-SAFE: the `needs.changes.result == 'failure'` clause
+    # runs the gate when the `changes` detector itself FAILED at the job level (checkout/OOM/etc.) — so
+    # a broken detector errs toward RUNNING the gate, never silently skipping it (complements the
+    # in-step diff-failure fail-safe).
+    #
+    # FORK-PR HARDENING (threat-model §4 delta, post-#161 re-analysis): the two AUTO branches
+    # (`fid == 'true'` and detector-`failure`) are gated to **same-repo** PRs via
+    # `head.repo.full_name == github.repository`. This job pulls images and `podman build`s +
+    # `pytest`-runs PR-supplied content (Containerfile.worker / FID probe + test sources); a fork PR
+    # auto-triggering it would run fork-influenced content in the runner without a human in the loop
+    # (Medium: runner code-exec in a credential-less ephemeral runner + Actions-minute cost-DoS — it
+    # is `pull_request` not `pull_request_target`, so no secret/token/prod exposure). Fork PRs are
+    # therefore left to the maintainer-`label` path (applying `live-regression` IS the human gate).
+    # Same-repo PRs auto-run at the existing contributor trust level (no new exposure). Pairs with the
+    # repo Actions setting "Require approval for all outside collaborators" as a platform backstop.
     needs: [changes]
     if: >-
       !cancelled() && (
         github.event_name == 'schedule' ||
         github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'pull_request' && github.event.label.name == 'live-regression') ||
-        (github.event_name == 'pull_request' && needs.changes.outputs.fid == 'true') ||
-        (github.event_name == 'pull_request' && needs.changes.result == 'failure')
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name == github.repository &&
+         needs.changes.outputs.fid == 'true') ||
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name == github.repository &&
+         needs.changes.result == 'failure')
       )
     runs-on: ubuntu-latest
     timeout-minutes: 60
