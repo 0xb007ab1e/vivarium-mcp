@@ -574,6 +574,57 @@ RUN set -eux; \
 USER 65532:65532
 
 # =============================================================================
+# Stage: fid-probes — same-toolchain consumer binaries for the DETERMINISTIC ELF-match gate.
+# =============================================================================
+# NOT shipped: worker-final does NOT COPY from here, so a normal `--target worker-final` build never
+# builds this stage. A static probe embeds real library CODE, which would (a) bloat the runtime image
+# and (b) trip Trivy image-SCA on the embedded library's CVEs — so it must stay out of the image.
+# Instead the live-regression CI job builds THIS stage, extracts the probes, and imports them through
+# the real worker. Each probe is compiled with the worker image's OWN toolchain (the same pinned wolfi
+# gcc + pinned library source that produced the bundled .fidbf), so the FID match is DETERMINISTIC
+# (same-toolchain) — a hard >=N gate, unlike the host-compiled, cross-toolchain (hence advisory)
+# test_identify_functions_elf_match.py. ADR-043. Bases on zlib-build (wolfi gcc + libz.a + zlib src);
+# musl's toolchain + static libc is copied in.
+FROM zlib-build AS fid-probes
+
+ARG ZLIB_VERSION
+
+COPY --from=musl-build /opt/musl /opt/musl
+
+RUN set -eux; \
+    mkdir -p /opt/fid-probes; \
+    # --- zlib consumer (static, wolfi gcc): embeds real zlib functions to identify -----------------
+    printf '%s\n' \
+        '#include <zlib.h>' \
+        '#include <string.h>' \
+        'int main(int argc, char **argv){(void)argv;unsigned char in[64],out[128];' \
+        'memset(in,(unsigned char)argc,sizeof in);z_stream s;memset(&s,0,sizeof s);' \
+        'if(deflateInit(&s,Z_DEFAULT_COMPRESSION)!=Z_OK)return 1;' \
+        's.next_in=in;s.avail_in=sizeof in;s.next_out=out;s.avail_out=sizeof out;' \
+        'deflate(&s,Z_FINISH);deflateEnd(&s);' \
+        'unsigned long c=crc32(0L,in,sizeof in);return (int)(c&0x7f);}' \
+        > /tmp/zlib_probe.c; \
+    gcc -O2 -g -static -no-pie -fno-pie -I /opt/zlib-src/zlib-${ZLIB_VERSION} \
+        -o /opt/fid-probes/zlib_probe /tmp/zlib_probe.c \
+        -L /opt/zlib-src/zlib-${ZLIB_VERSION} -lz; \
+    nm /opt/fid-probes/zlib_probe | grep -qE ' [TtWw] deflate$'; \
+    # --- musl consumer (static, musl-gcc): empty libatomic_asneeded stub satisfies wolfi's gcc spec -
+    ar rc /opt/musl/lib/libatomic_asneeded.a; \
+    printf '%s\n' \
+        '#include <stdlib.h>' \
+        '#include <string.h>' \
+        'static int cmp(const void*a,const void*b){return *(const int*)a-*(const int*)b;}' \
+        'int main(int argc, char **argv){char*b=malloc(64);if(!b)return 1;memset(b,0,64);' \
+        'memcpy(b,"vivarium",8);size_t n=strlen(b);int v[8];' \
+        'for(int i=0;i<8;i++)v[i]=(int)strtol(argv[0]+(i%n),NULL,10)+(8-i);' \
+        'qsort(v,8,sizeof(int),cmp);int a=(int)n+(strcmp(b,"vivarium")==0?1:0);' \
+        'for(int i=0;i<8;i++)a+=v[i];free(b);return a&0x7f;}' \
+        > /tmp/musl_probe.c; \
+    /opt/musl/bin/musl-gcc -O2 -g -static -no-pie -fno-pie \
+        -o /opt/fid-probes/musl_probe /tmp/musl_probe.c; \
+    nm /opt/fid-probes/musl_probe | grep -qE ' [TtWw] memcpy$'
+
+# =============================================================================
 # Stage 5: worker-final — the shipped worker image = `runtime` + the build-generated FID DBs.
 # =============================================================================
 # Default build target (last stage). Overlays ONLY the packed .fidbf files + provenance onto the

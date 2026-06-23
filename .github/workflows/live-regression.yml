@@ -201,6 +201,46 @@ jobs:
           podman pull "${WORKER_IMAGE}"
           echo "image=${WORKER_IMAGE}" >> "$GITHUB_OUTPUT"
 
+      # --- Build + extract the same-toolchain FID probes (deterministic ELF-match hard gate) -------
+      # Compile zlib + musl consumers with the worker image's OWN pinned toolchain (the `fid-probes`
+      # Containerfile stage: digest-pinned wolfi gcc + pinned library source — the same that produced
+      # the bundled .fidbf), so the FID match is DETERMINISTIC and the gate can assert a hard >=N count
+      # (vs the host-compiled, cross-toolchain advisory test). The probes are NOT shipped (a static
+      # probe would trip image-SCA on embedded-lib CVEs); they are built here on the fly and imported
+      # through the real worker. The `fid-probes` stage depends only on zlib-build/musl-build (no
+      # Ghidra), so this is a cheap compile — no Ghidra download. ADR-043.
+      #
+      # SELF-ACTIVATING: the deterministic hard gate only applies when the worker image UNDER TEST
+      # actually ships the bundled FID DBs. The lane pulls the PINNED RELEASED image, which may predate
+      # FID Phase 2 (no /opt/vivarium/fid/*.fidbf) — in that window the gate SKIPS (warn, excluded from
+      # the fail-loud count), and auto-upgrades to a hard >=N gate once a FID-containing image is
+      # released + pinned. This avoids reding the lane during the release lag.
+      - name: Build + extract same-toolchain FID probes (deterministic gate, self-activating)
+        env:
+          WORKER_IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          set -euo pipefail
+          if ! podman run --rm --entrypoint sh "$WORKER_IMAGE" -c \
+               'test -f /opt/vivarium/fid/zlib.fidbf && test -f /opt/vivarium/fid/musl.fidbf'; then
+            echo "::warning::worker image ${WORKER_IMAGE} has no bundled zlib/musl FID DBs (pre-FID" \
+                 "release) — deterministic ELF-match gate SKIPPED until a FID-containing worker image" \
+                 "is released + pinned"
+            echo "FID_DETERMINISTIC_GATE=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          podman build --target fid-probes \
+            -f Containerfile.worker -t "localhost/vivarium-fid-probes:live-regression" .
+          PROBE_DIR="/tmp/gmcp-fid-probes"
+          mkdir -p "$PROBE_DIR"
+          cid="$(podman create localhost/vivarium-fid-probes:live-regression)"
+          podman cp "$cid:/opt/fid-probes/zlib_probe" "$PROBE_DIR/zlib_probe"
+          podman cp "$cid:/opt/fid-probes/musl_probe" "$PROBE_DIR/musl_probe"
+          podman rm "$cid" >/dev/null
+          ls -l "$PROBE_DIR"
+          # DBs present → activate the hard gate. $GITHUB_ENV persists both to the pytest + assert steps.
+          echo "VIVARIUM_FID_PROBE_DIR=$PROBE_DIR" >> "$GITHUB_ENV"
+          echo "FID_DETERMINISTIC_GATE=1" >> "$GITHUB_ENV"
+
       # --- Run the F2 + F7 + profile HARD GATES against the real worker ---------------------------
       - name: Run F2 + F7 + analyzer-profile live regression (real worker under crun)
         env:
@@ -231,13 +271,22 @@ jobs:
           export VIVARIUM_WORKER_UID="$(id -u)"
           export VIVARIUM_WORKER_GID="$(id -g)"
           mkdir -p "$VIVARIUM_RPC_SOCKET_DIR" "$VIVARIUM_IMPORT_ROOT"
+          # Include the deterministic FID gate only when self-activated (worker image ships the DBs);
+          # otherwise it is omitted entirely (no skip → the fail-loud guard stays satisfied).
+          DETERMINISTIC=""
+          if [ "${FID_DETERMINISTIC_GATE:-0}" = "1" ]; then
+            DETERMINISTIC="tests/integration/test_identify_functions_deterministic.py"
+          else
+            echo "::notice::deterministic FID gate inactive (worker image lacks bundled DBs) — omitted this run"
+          fi
           pytest -m integration --no-cov -v \
             --junit-xml=live-regression-junit.xml \
             tests/integration/test_export_annotations_after_rename.py \
             tests/integration/test_export_known_count.py \
             tests/integration/test_analyze_profiles.py \
             tests/integration/test_identify_functions_fid.py \
-            tests/integration/test_identify_functions_selfmatch.py
+            tests/integration/test_identify_functions_selfmatch.py \
+            ${DETERMINISTIC}
 
       # --- FAIL-LOUD ON SKIP: a skipped hard gate is a FAILURE, not a silent pass ------------------
       - name: Assert all hard gates actually RAN (fail-loud on skip)
@@ -265,10 +314,16 @@ jobs:
 
           print(f"tests={tests} failures={failures} errors={errors} skipped={skipped}")
           problems = []
-          # Expect at least the hard-gate tests to have run: F2 (export-after-rename) + F7
-          # (known-count) + the 3 analyzer-profile params (default/light/deep) = 5.
-          if tests < 5:
-              problems.append(f"expected >=5 hard-gate tests to run, collected {tests}")
+          # Always-on hard gates: F2 (export-after-rename, 1) + F7 (known-count, 1) + analyzer-profile
+          # params (default/light/deep, 3) + FID well-formed (1) + FID self-match (1) = 7. The
+          # deterministic same-toolchain FID gate (zlib + musl, 2) is SELF-ACTIVATING: included only
+          # when the worker image ships the bundled DBs (FID_DETERMINISTIC_GATE=1), so the expected
+          # floor is 9 then, 7 otherwise. When inactive the test is omitted (not skipped), so the
+          # zero-skip rule below still holds.
+          import os
+          expected = 9 if os.environ.get("FID_DETERMINISTIC_GATE", "0") == "1" else 7
+          if tests < expected:
+              problems.append(f"expected >={expected} hard-gate tests to run, collected {tests}")
           if skipped:
               problems.append(f"{skipped} hard-gate test(s) SKIPPED — a skipped gate is a FAILURE")
           if failures or errors:
