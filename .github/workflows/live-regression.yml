@@ -563,3 +563,53 @@ jobs:
               --data-binary "${MSG} — ${RUN_URL}" \
               "${STATUS_NTFY_URL}" >/dev/null 2>&1 || echo "::warning::status push to ntfy failed (non-fatal)"
           fi
+
+  # ===============================================================================================
+  # fid-elf-match-gate — the ALWAYS-RUN required status check for branch protection.
+  # ===============================================================================================
+  # The `live-regression` job is conditionally SKIPPED on PRs (it auto-runs only on a SAME-REPO PR
+  # that touches a FID path, or ANY PR carrying the `live-regression` label). Pointing a required
+  # status check straight at a job that can be skipped is fragile: GitHub's "skipped == neutral"
+  # handling for required checks is inconsistent and can leave a non-FID PR blocked on a Pending
+  # check. This tiny job instead runs on EVERY PR (`if: always()`) and posts a DETERMINISTIC status,
+  # so it is safe to mark as the single required check for the FID real-worker gate:
+  #   * no FID-path change  -> the real-worker gate is N/A -> PASS (green); non-FID PRs never block.
+  #   * FID-path change      -> the `live-regression` job MUST have run AND succeeded, else FAIL. For
+  #                             a FORK PR (where `live-regression` is auto-skipped by the same-repo
+  #                             fork-hardening guard, #161/#162) this stays RED until a maintainer
+  #                             applies the `live-regression` label to run the real-worker suite — the
+  #                             gate ENFORCES the human-in-the-loop, it does not bypass it.
+  # FAIL-SAFE: a broken `changes` detector (job-level failure) is treated as a FID change, mirroring
+  # the live-regression job's own fail-safe — the gate errs toward REQUIRING the run, never skipping.
+  # Keyed off `needs.changes.outputs.fid`, computed by the `changes` job for ALL PRs (incl. forks) via
+  # a self-contained git diff. Branch protection evaluates required checks only on PRs, so the
+  # schedule/dispatch paths (where `changes` is skipped) are irrelevant here.
+  fid-elf-match-gate:
+    name: fid-elf-match-gate
+    needs: [changes, live-regression]
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read # least privilege; reads only the needs.* results, nothing is pushed
+    steps:
+      - name: Decide the FID real-worker gate
+        env:
+          FID_CHANGED: ${{ needs.changes.outputs.fid }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          LIVE_RESULT: ${{ needs.live-regression.result }}
+        run: |
+          set -euo pipefail
+          # Gate applies when a FID path changed OR the detector itself failed (fail-safe).
+          if [ "${CHANGES_RESULT}" != "failure" ] && [ "${FID_CHANGED}" != "true" ]; then
+            echo "::notice::no FID-path change on this PR — live-regression real-worker gate N/A (pass)"
+            exit 0
+          fi
+          echo "FID-path change (or broken detector) — requiring the real-worker live-regression gate"
+          if [ "${LIVE_RESULT}" != "success" ]; then
+            echo "::error::FID paths changed but the live-regression real-worker gate did not pass" \
+                 "(result=${LIVE_RESULT}). For a fork PR a maintainer must apply the 'live-regression'" \
+                 "label to run it before merge."
+            exit 1
+          fi
+          echo "::notice::live-regression real-worker gate passed — FID gate satisfied"
