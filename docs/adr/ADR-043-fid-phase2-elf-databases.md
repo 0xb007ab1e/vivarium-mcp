@@ -267,6 +267,16 @@ build stages live unmerged on a branch; `sources.toml` keeps `boost bundled = fa
   FID-containing worker image is released + pinned, so promotion makes the real-worker suite
   (F2/F7/profiles/FID-wellformed/self-match) a required gate on FID PRs now, with ELF-match enforced
   once the FID image ships.
+- **Required-check VERIFIED end-to-end (2026-06-24).** The promotion was proven to actually block,
+  two ways: **(1) logic** — the literal committed `fid-elf-match-gate` `run:` script was exercised
+  across the full input truth table; it exits 1 (RED) for every failing combination (FID-changed +
+  `live-regression` failed / cancelled / skipped-on-fork, plus the broken-detector fail-safe) and
+  passes only the two safe cases (no FID change → N/A; FID change + `live-regression` success).
+  **(2) enforcement** — a throwaway demo PR (#165) edited `live-regression.yml` (a FID path →
+  `changes` sets `fid=true`) with a deliberate `exit 1` first step: `live-regression` **failed (15s)**
+  → `fid-elf-match-gate` went **RED (3s)** → the PR reported **`mergeStateStatus: BLOCKED`**. PR #165
+  was closed unmerged and its branch deleted. Branch protection confirmed via API: `main`'s
+  `required_status_checks` includes `fid-elf-match-gate` with `strict: true`.
 - Keep the existing empty-match (ELF-vs-MSVC) gate.
 - License-gate negative test: a copyleft source in the DB build list fails the gate (SPIKE-2 §4).
 
