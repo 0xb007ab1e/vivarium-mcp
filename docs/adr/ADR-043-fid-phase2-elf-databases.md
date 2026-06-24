@@ -248,10 +248,25 @@ build stages live unmerged on a branch; `sources.toml` keeps `boost bundled = fa
   force-escape for any PR. **Mechanism note:** auto-*labeling* (the originally-proposed option) was
   rejected because a label applied with the default `GITHUB_TOKEN` does not re-trigger a workflow
   (GitHub anti-recursion), which would need a PAT/App secret; the path-filtered trigger needs no new
-  credential. **Required-check decision: NOT (yet) a branch-protection `required_status_check`** —
-  run-now / decide-required-later. It runs and reports per-PR; promotion to a *blocking* required
-  check is deferred until real per-PR runtime/cost is observed (the real-worker run is several
-  minutes). Revisit once that data exists.
+  credential.
+- **Required-check promotion (2026-06-24) — now a branch-protection required check, via an
+  always-run gate job.** The earlier "run-now / decide-required-later" deferral is resolved: per-PR
+  runtime is observed (~23 min real-worker, #161) and acceptable for the FID-path subset. The
+  `live-regression` job itself CANNOT be the required context — it is conditionally skipped on
+  non-FID PRs, and GitHub's "skipped == neutral" handling for required checks is inconsistent and can
+  leave a non-FID PR blocked on a Pending check. Instead a tiny **`fid-elf-match-gate`** job runs on
+  **every** PR (`if: always()`) and posts a deterministic status: PASS when no FID path changed
+  (gate N/A), and — when a FID path changed (or the `changes` detector failed, fail-safe) — it
+  requires the real-worker `live-regression` job to have **succeeded**, else FAIL. `fid-elf-match-gate`
+  is the single context added to `main`'s `required_status_checks` (the existing CI gates are
+  untouched, appended via the contexts endpoint). Consequence: a **fork** PR touching FID paths
+  (where `live-regression` auto-skips under the same-repo fork-hardening guard, #162) shows the gate
+  RED until a maintainer applies the `live-regression` label — the required check *enforces* the
+  human-in-the-loop rather than bypassing it. The self-activation caveat is unchanged: the
+  *deterministic ELF-match* assertion within `live-regression` stays self-omitted until a
+  FID-containing worker image is released + pinned, so promotion makes the real-worker suite
+  (F2/F7/profiles/FID-wellformed/self-match) a required gate on FID PRs now, with ELF-match enforced
+  once the FID image ships.
 - Keep the existing empty-match (ELF-vs-MSVC) gate.
 - License-gate negative test: a copyleft source in the DB build list fails the gate (SPIKE-2 §4).
 
