@@ -6,6 +6,37 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-06-24
+
+ELF library identification lands. `identify_functions` — Windows/MSVC-only in v0.11.0 — now returns
+real matches on Linux binaries: this release bundles **permissive-source FunctionID databases** (zlib,
+musl static libc, OpenSSL 3.x, Boost) into the worker image, so the tool labels libc / crypto /
+compression / C++ library code on ELF (Vivarium's primary target). Additive — no tool or contract
+change (catalog stays **56**); the only observable difference is non-empty matches on ELF.
+
+### Added
+- **Bundled ELF FunctionID databases (ADR-042/043 Phase 2; x86-64).** zlib (Zlib), musl static libc
+  (MIT), OpenSSL 3.x libcrypto/libssl (Apache-2.0), and Boost compiled libraries (BSL-1.0) — generated
+  build-time from digest-pinned source, baked into the worker image at `/opt/vivarium/fid/*.fidbf`, and
+  attached at worker startup. `identify_functions` now identifies Linux library code (previously ~0
+  matches on ELF). (#152–#157, #167)
+- **`--minimal-analysis` FID generator mode (ADR-043 Inc E).** Builds a FID database from a very large
+  C++ object (Boost) without overflowing Ghidra's analysis DB buffer cache; match-validated end-to-end
+  (215 Boost matches, zero false positives). (#167)
+
+### Changed
+- **FID generator modernized** off the deprecated `pyghidra.open_program` onto the supported
+  `open_project` + `program_loader` API — regression-free across the bundled databases. (#158)
+
+### Security / CI
+- **`fid-elf-match-gate` is now a required branch-protection check** — a deadlock-proof always-run gate
+  that requires the real-worker `live-regression` suite to pass on any FID-path PR; verified end-to-end.
+  Adds a deterministic same-toolchain ELF-match hard gate, per-PR auto-trigger on FID paths, and
+  fork-PR hardening (auto-run restricted to same-repo PRs). (#159–#162, #164, #166)
+- **FID source-license gate** (merge-blocking) restricts bundled databases to permissive licenses
+  (blocks copyleft / AGPL / pre-3.0 OpenSSL). (#151–#153)
+- hadolint hygiene on `Containerfile.worker` (justified DL4006 annotations). (#168)
+
 ## [0.11.0] — 2026-06-21
 
 Library-function identification: the new read-only `identify_functions` tool surfaces Ghidra
