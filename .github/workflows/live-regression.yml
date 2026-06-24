@@ -181,6 +181,11 @@ jobs:
       packages: read # pull the worker image from GHCR
       id-token: write # cosign keyless verify of the pulled image
     steps:
+      # ⚠️ DEMO ONLY — throwaway PR to prove `fid-elf-match-gate` BLOCKS a failing FID PR. NEVER MERGE.
+      - name: DEMO deliberate failure (verify the gate blocks merge)
+        run: |
+          echo "::error::DEMO: forcing live-regression to FAIL fast so fid-elf-match-gate goes red and blocks merge"
+          exit 1
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # actions/checkout@v6.0.3
         with:
