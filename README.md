@@ -13,10 +13,10 @@ and marked as untrusted before it reaches the model.
 The name fits the design: a vivarium is a sealed enclosure where you can safely keep and observe a live
 specimen. Here the specimen is an untrusted binary.
 
-> Current release: **v0.11.0** (2026-06-21). This release adds **library-function identification** — the
-> new read-only `identify_functions` tool surfaces Ghidra FunctionID matches as untrusted hints so an LLM
-> can skip known library code (Phase 1: MSVC databases), plus session/export provenance polish; one new
-> tool, catalog 55 → 56. See the [CHANGELOG](./CHANGELOG.md) for details. Vivarium is pre-1.0, so the tool
+> Current release: **v0.12.0** (2026-06-24). This release makes `identify_functions` work on **ELF**:
+> the worker now bundles permissive-source Ghidra **FunctionID databases** (zlib, musl libc, OpenSSL 3.x,
+> Boost), so the tool labels Linux library code instead of returning ~0 matches (Phase 1 was MSVC-only).
+> Additive — no tool/contract change, catalog stays **56**. See the [CHANGELOG](./CHANGELOG.md) for details. Vivarium is pre-1.0, so the tool
 > set and internal contracts may still change before 1.0.
 
 ## What it can do
@@ -91,7 +91,7 @@ The full design rationale is in the decision records under [`docs/adr/`](./docs/
   SQLite binary](./docs/examples/blind-analysis-sqlite.md) compared against the original source.
 - [`docs/runbooks/`](./docs/runbooks/): operational procedures (deploy, rollback, incident response, and
   more), including [HTTP exposure](./docs/runbooks/http-exposure.md).
-- [`docs/adr/`](./docs/adr/): the numbered design decisions (ADR-001 through ADR-042).
+- [`docs/adr/`](./docs/adr/): the numbered design decisions (ADR-001 through ADR-043).
 - [`SECURITY.md`](./SECURITY.md): how to report a vulnerability.
 - [`CHANGELOG.md`](./CHANGELOG.md): release history.
 - [`PLAN.md`](./PLAN.md): the delivery plan and locked decisions.
