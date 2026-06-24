@@ -337,6 +337,10 @@ WORKDIR /opt/zlib-src/zlib-${ZLIB_VERSION}
 # the dominant real-world case of zlib statically linked into a non-PIE binary (PIC codegen routes
 # global access through the GOT and changes instruction bytes, which would break FID full-hashes
 # against non-PIE consumers — ADR-043 D2: match-rate over a PIC build).
+# DL4006: `nm | awk | sort` allow-list gen on a LOCAL build artifact under `set -eux`; an nm
+# failure → empty allow-list, caught downstream by `test -s` on the generated DB. A SHELL pipefail
+# directive is avoided (wolfi /bin/sh pipefail support unverified; not worth a build-wide risk here).
+# hadolint ignore=DL4006
 RUN set -eux; \
     export CFLAGS="-O2 -g -fno-omit-frame-pointer"; \
     ./configure --static; \
@@ -442,6 +446,9 @@ RUN set -eux; \
 # still matches musl functions in fully-linked consumers (ADR-043 D2). `nm` is written to a file (no
 # pipe) and checked, failing closed if libc functions are missing/stripped.
 WORKDIR /opt/musl-src/musl-${MUSL_VERSION}
+# DL4006: as zlib — `nm | awk | sort` allow-list gen on a local artifact under `set -eux`;
+# empty-on-failure is caught downstream by `test -s`. (SHELL pipefail avoided — wolfi sh unverified.)
+# hadolint ignore=DL4006
 RUN set -eux; \
     export CFLAGS="-O2 -g -fno-omit-frame-pointer"; \
     ./configure --prefix=/opt/musl --disable-shared; \
@@ -534,6 +541,9 @@ RUN set -eux; \
 # (no executable link / crt; keeps -g/symbols). `nm` is written to a file (no pipe) and checked,
 # failing closed if the crypto functions are missing/stripped.
 WORKDIR /opt/openssl-src/openssl-${OPENSSL_VERSION}
+# DL4006: as zlib — `nm | awk | sort` allow-list gen on a local artifact under `set -eux`;
+# empty-on-failure is caught downstream by `test -s`. (SHELL pipefail avoided — wolfi sh unverified.)
+# hadolint ignore=DL4006
 RUN set -eux; \
     ./Configure no-shared no-tests no-docs no-apps linux-x86_64 -O2 -g -fno-omit-frame-pointer; \
     make -j"$(nproc)" build_libs; \
@@ -600,6 +610,10 @@ ARG ZLIB_VERSION
 
 COPY --from=musl-build /opt/musl /opt/musl
 
+# DL4006: the `nm <probe> | grep -qE` symbol asserts run on just-built local probes under `set -eux`
+# — an nm failure yields empty input, so `grep -q` exits non-zero and fails the RUN anyway. (SHELL
+# pipefail avoided — wolfi sh unverified.)
+# hadolint ignore=DL4006
 RUN set -eux; \
     mkdir -p /opt/fid-probes; \
     # --- zlib consumer (static, wolfi gcc): embeds real zlib functions to identify -----------------
