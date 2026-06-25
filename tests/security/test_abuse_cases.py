@@ -811,14 +811,9 @@ def test_pointer_to_self_is_allowed_fixed_size() -> None:
 
 
 # --- Case 44 — name-collision REJECT (no silent replace) (TB7-T) ---------------------------
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_name_collision_rejected_no_silent_replace() -> None:
-    """Case 44 (live): a ``define_struct``/``define_union`` whose ``name`` already names a type is
-    REJECTED ``analysis-failed`` with NO write (the existing in-use type is unchanged — the
-    fail-closed REJECT handler, ADR-015 §6); checked before ``startTransaction``, no partial type.
-    The redefine-in-use re-render / data-poisoning vector, proven absent. Promoted to WS5 (needs the
-    worker DataTypeManager lookup)."""
+# Case 44 → NOW LIVE (G4 Tier B1): tests/e2e/test_abuse_composite_oss.py
+#   ::test_name_collision_rejected_no_silent_replace — a re-define of an existing name REJECTs
+#   (analysis-failed) with no silent replace; the original type is unchanged.
 
 
 # --- Case 45 — oversized field-count / size DoS (TB7-D / CWE-400/190) ----------------------
@@ -835,13 +830,9 @@ def test_oversized_field_count_rejected_at_boundary() -> None:
     assert ei.value.envelope.type is ErrorType.LIMIT_EXCEEDED
 
 
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_oversized_total_size_rejected_at_worker() -> None:
-    """Case 45 (live): a composite whose total computed size exceeds ``_MAX_COMPOSITE_SIZE`` (e.g.
-    256 x ``char[65536]``) is rejected ``limit-exceeded`` during worker assembly with no finalized
-    type; the running size sum is overflow-guarded (ADR-015 §3 backstop). Promoted to WS5 (the cap
-    needs each resolved ``DataType.getLength()`` — a worker concern)."""
+# Case 45 → NOW LIVE (G4 Tier B1): tests/e2e/test_abuse_composite_oss.py
+#   ::test_oversized_total_size_rejected_at_worker — 256 x char[65536] (16 MiB) exceeds the 1 MiB
+#   _MAX_COMPOSITE_SIZE → rejected (limit-exceeded) at worker assembly, no type created.
 
 
 # --- Case 46 — duplicate member name rejected (TB7-T / integrity) --------------------------
@@ -889,12 +880,9 @@ def test_malicious_composite_name_is_rejected() -> None:
 
 
 # --- Case 48 — unresolvable field TypeRef fail-closed (TB7-T / atomicity) ------------------
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_unresolvable_field_typeref_fails_closed_with_no_write() -> None:
-    """Case 48 (live): a member ``FieldSpec.type`` with a well-formed but UNKNOWN ``named`` surfaces
-    ``not-found`` with the program unchanged — non-self field types resolve before the txn (ADR-015
-    §4); no partial/orphan type. Promoted to WS5 (needs the worker DataTypeManager lookup)."""
+# Case 48 → NOW LIVE (G4 Tier B1): tests/e2e/test_abuse_composite_oss.py
+#   ::test_unresolvable_field_typeref_fails_closed_with_no_write — an unknown member typeref →
+#   not-found; the struct is absent afterward (no orphan) and a valid define still succeeds.
 
 
 # --- Case 49 — TypeRef injection in a field rejected (TB7-T / design-eliminated C-parser) --
@@ -967,13 +955,9 @@ def test_composite_create_requires_structural_consent(structural_granted: bool) 
 
 
 # --- Case 51 — cross-session structural isolation (TB7-T / store-I) ------------------------
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_cross_session_composite_isolation() -> None:
-    """Case 51 (live): ``allow_structural`` + a ``define_struct`` on session A does NOT enable or
-    mutate session B; B stays read-only with an independent store. The consent-isolation unit proof
-    is in ``test_composite_mutation`` (gate fakes); the store-isolation half needs two live
-    workers — promoted to WS5."""
+# Case 51 → NOW LIVE (G4 Tier B1): tests/e2e/test_abuse_composite_oss.py
+#   ::test_cross_session_composite_isolation — A's allow_structural grant + define does NOT enable
+#   B's writes (B stays forbidden) nor leak A's type into B's independent store.
 
 
 # --- Case 52 — BOLA on the structural grant (TB7-E / BOLA) ---------------------------------
@@ -1027,13 +1011,19 @@ def test_phase_c_write_path_does_not_import_jvm_or_pyghidra() -> None:
 
 # --- Case 54 — commit-time atomicity (TB7-T / CWE-460) -------------------------------------
 @pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
+@pytest.mark.skip(
+    reason="Case 54 (commit-time rollback) is NOT client-triggerable: forcing the worker's "
+    "addDataType/commit to RAISE needs a fault-injection hook the MCP client cannot drive. The "
+    "_in_transaction rollback invariant (CWE-460) is unit-proven (three-branch) in "
+    "test_structural_mutation, and the mid-assembly rollback is observed LIVE (no orphan type "
+    "after a failed define) by the case 45/48 e2e tests in test_abuse_composite_oss.py. Kept as a "
+    "documented gap rather than a fabricated live assertion."
+)
 def test_define_struct_commit_failure_rolls_back() -> None:
     """Case 54 (live): a ``define_struct`` whose ``addDataType`` OR its commit raises rolls back
     (removing the pre-registered empty type) and surfaces ``analysis-failed`` — no dangling
-    transaction, no half-created type (the reused ``_in_transaction``, CWE-460). The unit-level
-    three-branch proof of ``_in_transaction`` lives in ``test_structural_mutation``; this is the
-    live composite-specific assertion. Promoted to WS5 (needs the real DataTypeManager)."""
+    transaction, no half-created type (the reused ``_in_transaction``, CWE-460). See the skip
+    reason: not client-triggerable; covered by the unit proof + the live case 45/48 rollback."""
 
 
 # ==============================================================================================
