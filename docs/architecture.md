@@ -20,7 +20,7 @@ hijack the LLM via prompt injection.
 | 3 | **Container-only**; Ghidra 12.1.2 + JDK 21 pinned **by digest**; host unsupported. | [ADR-003](adr/ADR-003-container-only-ghidra-jdk.md) |
 | 4 | Isolation tier: rootless OCI baseline + **gVisor** for the worker. | [ADR-004](adr/ADR-004-isolation-tier.md) |
 | 5 | **Untrusted-data envelope** wraps all binary-derived output. | [ADR-005](adr/ADR-005-untrusted-data-envelope.md) |
-| 6 | **stdio-first**; HTTP transport is a gated v1.1 increment. | [ADR-006](adr/ADR-006-stdio-first-transport.md) |
+| 6 | **stdio-first**; HTTP transport shipped as a separately-threat-modeled v1.1 increment. | [ADR-006](adr/ADR-006-stdio-first-transport.md), [011](adr/ADR-011-http-transport.md) |
 
 ## Component model (ports & adapters)
 
@@ -103,12 +103,18 @@ flowchart LR
    wrapped in the **untrusted-data envelope**; failures become **error envelopes**. Nothing is
    auto-executed.
 
-## What v1 does NOT include (extensibility, not built)
+## Scope: shipped since v1, and the one permanent exclusion
 
-- **HTTP transport** — design is transport-configurable, but only stdio is built/hardened in v1
-  (ADR-006). HTTP re-imports `std-owasp-api` + `std-zero-trust` and gets its own threat model.
-- **Tier-2 reporting/metrics** and **mutation tools** / `runScript` — deferred to v1.1; the tool
-  registry is an explicit allow-list so adding them is a reviewed, gated change.
+Built and hardened **since the v1 stdio core** (each a separately threat-modeled, gated increment;
+the tool registry is an explicit allow-list, so every addition was a reviewed change):
+
+- **HTTP transport** (ADR-011/019/033) — re-imports `std-owasp-api` + `std-zero-trust`, with its own
+  threat-model boundary (TB6) and pluggable bearer / mTLS / OAuth auth.
+- **Tier-2 reporting/metrics** (ADR-008) and **mutation/write tools** (ADR-012, TB7) — the latter
+  gated by per-session write-consent.
+
+**Permanently excluded by design:** arbitrary script execution / `runScript`. There is no
+script-execution path in the allow-listed catalog, and there is no plan to add one.
 
 ## Observability & ops
 

@@ -36,13 +36,16 @@ The authoritative threat model is [`docs/security/threat-model.md`](docs/securit
 - **Tool arguments are untrusted** and validated/allow-listed at the boundary (pydantic).
 
 ### In scope
-Sandbox escape from the worker; bypass of input validation or resource limits; cross-session data
-leakage; injection that escalates beyond returned data; denial of service (decompile bombs,
-zip/oversized inputs, pool starvation).
+Sandbox escape from the worker (TB3); bypass of input validation or resource limits; cross-session
+data leakage (TB4); injection that escalates beyond returned data; denial of service (decompile
+bombs, zip/oversized inputs, pool starvation). Now-shipped surfaces are **also in scope**: the
+**HTTP transport** (TB6 — authN/authZ, rate-limiting, CORS, BOLA, and the mTLS/OAuth/bearer auth
+modes); the **write/mutation tools** and their per-session consent gate (TB7 — e.g. consent bypass,
+cross-session mutation, structural-type isolation); and **annotation import** (TB8).
 
-### Out of scope (v1)
-- HTTP transport (v1 is **stdio-only**; HTTP is a separately threat-modeled v1.1 increment).
-- Mutation tools / `runScript` (not built in v1 — read-only core only).
+### Out of scope
+- **Arbitrary script execution / `runScript`** — permanently excluded by design (never built); the
+  tool catalog is an allow-list with no script-execution path.
 - Vulnerabilities in Ghidra or the JDK themselves — report those upstream; we track and patch the
   pinned image via CVE management (see the dependency-patch runbook).
 

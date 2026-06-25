@@ -55,9 +55,9 @@
 # run is still the catch-all alert (GitHub notifies the repo owner of default-branch
 # scheduled-workflow failures), mirroring scheduled-rescan.yml.
 #
-# NOTE (#160): this job is wired to RUN per-PR on FID paths but is deliberately NOT (yet) in
-# branch-protection `required_status_checks` — the run-now/decide-required-later call. Revisit
-# promoting it to a required check once real per-PR runtime/cost is observed (see ADR-043).
+# NOTE (#160 → promoted): this job runs per-PR on FID paths (path-filtered, same-repo only) AND the
+# `fid-elf-match-gate` context is now a branch-protection `required_status_check` on `main` — a
+# failing same-toolchain ELF match blocks merge. Cross-toolchain matching stays advisory (ADR-043).
 
 name: live-regression
 
