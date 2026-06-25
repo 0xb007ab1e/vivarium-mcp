@@ -130,7 +130,7 @@ jobs:
           mkdir -p "$VIVARIUM_RPC_SOCKET_DIR"
           pytest tests/e2e/test_groundtruth_oss.py -m integration -v --no-cov
 
-      - name: Run abuse-containment e2e (TB3 abuse cases 1/3/4/7/8 — G4 Phase 1)
+      - name: Run abuse e2e (TB3 containment 1/3/4/7/8 + TB7 composite 44/45/48/51 — G4 Phase 1/B1)
         env:
           VIVARIUM_INTEGRATION: "1"
           VIVARIUM_FIXTURES: ${{ github.workspace }}/_fixtures
@@ -147,7 +147,8 @@ jobs:
           export VIVARIUM_WORKER_UID="$(id -u)"
           export VIVARIUM_WORKER_GID="$(id -g)"
           mkdir -p "$VIVARIUM_RPC_SOCKET_DIR"
-          pytest tests/e2e/test_abuse_containment_oss.py -m "integration and abuse" -v --no-cov
+          pytest tests/e2e/test_abuse_containment_oss.py tests/e2e/test_abuse_composite_oss.py \
+            -m "integration and abuse" -v --no-cov
 
       - name: Run naming-eval e2e (reference loop + sandboxed compile; ADR-010 / TB5)
         env:
