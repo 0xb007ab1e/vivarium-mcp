@@ -21,11 +21,6 @@ from vivarium.security.limits import Limits, check_binary_size, resolve_limits
 
 pytestmark = pytest.mark.abuse
 
-_INTEGRATION_REASON = (
-    "WS5: implement against the real server/worker (WS1 shell + WS2 sessions) with synthetic "
-    "fixtures — control under test is outside WS4-owned modules."
-)
-
 
 # ==============================================================================================
 # Case 5 — Indirect prompt injection via strings/symbols/comments/decompiled text (TB4-S/E)
@@ -1385,15 +1380,14 @@ def test_mtls_cert_material_is_never_logged(caplog: pytest.LogCaptureFixture) ->
     assert marker not in repr(AuthContext(peer_certificate=_peer(marker)))
 
 
-# --- Live cross-principal cases (control needs the real server/worker) — WS5 ----------------
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_cross_principal_isolation_end_to_end_over_http() -> None:
-    """Case 61-63 (live): two principals with distinct bearer tokens over the real HTTP transport —
-    B presenting A's ``session_id`` to read/analyze/close gets ``SESSION_INVALID`` (no oracle), and
-    A's session/worker/store are untouched. The manager-level + authenticator-level controls are
-    proven hermetically above; the end-to-end wiring (per-request principal → ToolContext → manager)
-    is promoted to WS5 (needs the live ASGI stack + worker)."""
+# --- Case 61-63 — cross-principal isolation over HTTP — NOW LIVE (G4 Tier D) ----------------
+# Case 61-63 → NOW LIVE: tests/e2e/test_abuse_http_principal_oss.py
+#   ::test_cross_principal_isolation_end_to_end_over_http — the production server runs in HTTP mode
+#   (subprocess → run_http → uvicorn, loopback, two bearer tokens → two principals); B presenting
+#   A's session_id over the real Streamable-HTTP transport gets `session-invalid` (404, no oracle —
+#   NOT `forbidden`, ADR-036) and A's session is untouched. The manager + authenticator controls
+#   stay hermetic above; that test exercises the live per-request-principal → ToolContext → manager
+#   wiring. (session_create opens no worker → no binary needed; pure transport+auth+ownership.)
 
 
 # ==============================================================================================
@@ -1619,7 +1613,16 @@ def test_oauth_token_is_never_logged(caplog: pytest.LogCaptureFixture) -> None:
 
 # --- Live OAuth case (control needs a live IdP/JWKS endpoint) — integration-gated -----------
 @pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
+@pytest.mark.skip(
+    reason=(
+        "NOT CI-reproducible (G4 Tier D): requires an EXTERNAL OIDC issuer + network egress for a "
+        "real JWKS fetch — the gated CI run has no live IdP / network / real tokens, and a mocked "
+        "JWKS would just re-run the hermetic cases. The full validation logic (pinned-alg / iss / "
+        "aud / exp / nbf / sub, no-oracle reject, no token logging) is proven hermetically in "
+        "cases 72-82 with an in-test keypair + seeded JWKS. This live-IdP path is a manual/deploy "
+        "verification, not a CI gate."
+    )
+)
 def test_oauth_live_jwks_validation_end_to_end() -> None:
     """OAuth (live): the real :class:`jwt.PyJWKClient` fetches a real issuer's JWKS over the network
     and validates a real IdP-minted token end-to-end over the HTTP transport. The validation logic +
