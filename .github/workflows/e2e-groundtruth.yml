@@ -176,3 +176,23 @@ jobs:
           # image + crun runtime; they drive ContainerExecRunner directly (no worker/fixtures).
           pytest tests/e2e/test_naming_eval_oss.py tests/e2e/test_abuse_exec_sandbox_oss.py \
             -m integration -v --no-cov
+
+      - name: Run HTTP cross-principal e2e (TB6 multi-principal — G4 Tier D, cases 61-63)
+        env:
+          VIVARIUM_INTEGRATION: "1"
+          VIVARIUM_FIXTURES: ${{ github.workspace }}/_fixtures
+          VIVARIUM_CONTAINER_ENGINE: podman
+          VIVARIUM_WORKER_RUNTIME: crun     # no gVisor on stock runners — see note above.
+          VIVARIUM_E2E_TIMEOUT: "900"
+        run: |
+          set -euo pipefail
+          # The test launches the production server itself in HTTP mode (transport=http, loopback,
+          # two bearer tokens). session_create opens NO worker, so no container is spawned — this is
+          # a pure transport + auth + per-principal ownership test. VIVARIUM_WORKER_IMAGE (in the env
+          # from the verify-pull step) is only needed so the server config validates. Same short
+          # socket dir / uid constraints as the steps above (config requires them).
+          export VIVARIUM_RPC_SOCKET_DIR="/tmp/gmcp-run"
+          export VIVARIUM_WORKER_UID="$(id -u)"
+          export VIVARIUM_WORKER_GID="$(id -g)"
+          mkdir -p "$VIVARIUM_RPC_SOCKET_DIR"
+          pytest tests/e2e/test_abuse_http_principal_oss.py -m integration -v --no-cov
