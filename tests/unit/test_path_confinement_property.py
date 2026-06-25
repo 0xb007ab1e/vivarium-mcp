@@ -10,10 +10,12 @@ The load-bearing invariant (asserted over both arbitrary text and root-relative 
     **accept ⟹ under-root** — if the resolver RETURNS a size, the resolved real path is strictly
     inside ``import_root``. It must NEVER return a size for a path that escapes the root.
 
-A rejected ``source_ref`` raises (``OSError`` for an escape / missing file; ``ValueError`` for an
-embedded null byte — see the OPEN QUESTION in the G11 report re: the documented OSError contract).
-Either way no out-of-root path is ever accepted. Hermetic + deterministic; no worker, no I/O beyond
-a throwaway ``tmp_path`` root.
+A rejected ``source_ref`` raises ``OSError`` (escape / missing file / malformed path — incl. an
+embedded null byte: the resolver now fails closed to ``OSError`` → ``VALIDATION``, fixing the
+G11-found ``ValueError``-on-null-byte taxonomy gap). Catching ``OSError`` ONLY makes this a
+regression guard: a stray ``ValueError`` (or any other exception) escaping the resolver fails the
+test. No out-of-root path is ever accepted. Hermetic + deterministic; no worker, no I/O beyond a
+throwaway ``tmp_path`` root.
 """
 
 from __future__ import annotations
@@ -56,8 +58,8 @@ def _assert_confined(root: Path, resolver: object, source_ref: str) -> None:
     """The CWE-22 invariant: a returned size implies the resolved path is under ``root``."""
     try:
         size = resolver(source_ref)  # type: ignore[operator]
-    except (OSError, ValueError):
-        return  # rejected (escape / missing / null byte) — no out-of-root path was accepted
+    except OSError:
+        return  # rejected (escape / missing / malformed incl. null byte) — no out-of-root accepted
     assert isinstance(size, int) and size >= 0
     # Accepted → the resolver must have confirmed the resolved real path is under the root.
     assert Path(source_ref).resolve().is_relative_to(root)

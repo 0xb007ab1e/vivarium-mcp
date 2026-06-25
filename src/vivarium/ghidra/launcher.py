@@ -295,7 +295,13 @@ def make_confined_resolver(import_root: str) -> Callable[[str], int]:
     root = Path(import_root).resolve()
 
     def resolve(source_ref: str) -> int:
-        candidate = Path(source_ref).resolve()
+        try:
+            candidate = Path(source_ref).resolve()
+        except ValueError as exc:
+            # A malformed path (e.g. an embedded NUL byte makes ``Path.resolve()`` raise
+            # ``ValueError``) — fail closed as ``OSError`` so the adapter maps it to ``VALIDATION``
+            # (the documented contract), not a leaky ``internal-error`` (CWE-20; G11 finding).
+            raise OSError("source_ref is not a valid path") from exc
         if not candidate.is_relative_to(root):
             msg = "source_ref escapes the import root"
             raise OSError(msg)
