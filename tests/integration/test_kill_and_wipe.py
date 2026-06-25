@@ -23,7 +23,10 @@ def test_analysis_timeout_kills_worker(worker_image: str) -> None:
     Asserts (once wired): the worker process/container is gone after the deadline, and the client
     receives a ``TIMEOUT`` error (no hung JVM, no partial result leaked).
     """
-    pytest.skip("WS5 Wave-2: set a 1s analysis timeout, assert worker killed + TIMEOUT (WS2)")
+    pytest.skip(
+        "Covered live (G4 Phase 1) by tests/e2e/test_abuse_containment_oss.py::"
+        "test_decompile_bomb_bounded_kills_worker; this finer in-process variant is deferred."
+    )
 
 
 def test_eviction_verified_wipes_session_store(worker_image: str) -> None:
@@ -32,7 +35,10 @@ def test_eviction_verified_wipes_session_store(worker_image: str) -> None:
     Asserts (once wired): ``session_close`` returns ``store_wiped=True`` and the per-session store
     directory (and RPC socket) no longer exist on disk (ADR-002 verified wipe).
     """
-    pytest.skip("WS5 Wave-2: evict a session, assert store_wiped=True and store path removed (WS2)")
+    pytest.skip(
+        "Covered live (G4 Phase 1) by tests/e2e/test_abuse_containment_oss.py::"
+        "test_cross_session_store_isolation_and_verified_wipe; finer in-process variant deferred."
+    )
 
 
 def test_eviction_is_idempotent(worker_image: str) -> None:

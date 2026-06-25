@@ -222,36 +222,17 @@ def test_bola_foreign_and_unknown_ids_are_indistinguishable() -> None:
 
 
 # ==============================================================================================
-# Worker-dependent cases — promoted to live integration in WS5 (control outside WS4 modules).
+# Worker-dependent containment cases — NOW IMPLEMENTED LIVE (G4 Phase 1, Tier A). These are the
+# controls outside the WS4-owned modules, so they live where the real server→worker harness lives:
+#   tests/e2e/test_abuse_containment_oss.py  (gated: VIVARIUM_INTEGRATION + worker image)
+#     - Case 1  → test_decompile_bomb_bounded_kills_worker        (timeout kills worker)
+#     - Case 3  → test_oversized_input_rejected_at_boundary        (size cap, pre-worker)
+#     - Case 4  → test_malformed_loader_contained_no_rce           (contained; server healthy)
+#     - Case 7  → test_pool_starvation_backpressured               (limit-exceeded backpressure)
+#     - Case 8  → test_cross_session_store_isolation_and_verified_wipe (isolation + ADR-002 wipe)
+# The hermetic WS4 boundary-control proofs for the same cases (input validation, the size-cap
+# helper, the manager's authorization contract) remain above in this module.
 # ==============================================================================================
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_decompile_bomb_is_bounded_and_kills_worker() -> None:
-    """Case 1: a pathological function hits the tool/analysis timeout and kills the worker."""
-
-
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_zip_or_decompression_bomb_rejected() -> None:
-    """Case 3: archive/decompression-ratio abuse is rejected (no archive inputs in v1)."""
-
-
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_malformed_loader_input_contained_no_rce() -> None:
-    """Case 4: a crafted loader input crashes only the contained worker; server stays healthy."""
-
-
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_worker_pool_starvation_backpressured() -> None:
-    """Case 7 (live): exceeding the concurrency cap yields backpressure, not exhaustion."""
-
-
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_cross_session_project_store_isolation() -> None:
-    """Case 8: one session cannot read another's store; eviction verified-wipes it (ADR-002)."""
 
 
 # ==============================================================================================

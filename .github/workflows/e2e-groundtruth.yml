@@ -130,6 +130,25 @@ jobs:
           mkdir -p "$VIVARIUM_RPC_SOCKET_DIR"
           pytest tests/e2e/test_groundtruth_oss.py -m integration -v --no-cov
 
+      - name: Run abuse-containment e2e (TB3 abuse cases 1/3/4/7/8 — G4 Phase 1)
+        env:
+          VIVARIUM_INTEGRATION: "1"
+          VIVARIUM_FIXTURES: ${{ github.workspace }}/_fixtures
+          VIVARIUM_CONTAINER_ENGINE: podman
+          VIVARIUM_WORKER_RUNTIME: crun     # no gVisor on stock runners — see note above.
+          VIVARIUM_E2E_TIMEOUT: "900"
+        run: |
+          set -euo pipefail
+          # Same host-run-server / rootless-keep-id constraints as the ground-truth step above:
+          # short socket dir for AF_UNIX, worker runs as this runner's uid/gid (ADR-009). The abuse
+          # tests reuse the already-built OSS fixtures (cases 7/8/1) + synthetic blobs they write to
+          # tmp (cases 3/4); they set per-test server env (low cap / tiny timeout / low size cap).
+          export VIVARIUM_RPC_SOCKET_DIR="/tmp/gmcp-run"
+          export VIVARIUM_WORKER_UID="$(id -u)"
+          export VIVARIUM_WORKER_GID="$(id -g)"
+          mkdir -p "$VIVARIUM_RPC_SOCKET_DIR"
+          pytest tests/e2e/test_abuse_containment_oss.py -m "integration and abuse" -v --no-cov
+
       - name: Run naming-eval e2e (reference loop + sandboxed compile; ADR-010 / TB5)
         env:
           VIVARIUM_INTEGRATION: "1"

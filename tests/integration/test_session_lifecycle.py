@@ -39,4 +39,7 @@ def test_analyze_unrecognized_input_reports_analysis_failed(worker_image: str) -
 
     The worker must contain the failure to its fault domain and surface a safe error envelope.
     """
-    pytest.skip("WS5 Wave-2: assert ANALYSIS_FAILED on an unrecognized input via the live worker")
+    pytest.skip(
+        "Covered live (G4 Phase 1) by tests/e2e/test_abuse_containment_oss.py::"
+        "test_malformed_loader_contained_no_rce; this finer in-process variant is deferred."
+    )
