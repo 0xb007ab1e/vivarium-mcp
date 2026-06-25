@@ -27,9 +27,13 @@ htmlcov/
 !requirements.lock
 !requirements-dev.lock
 !requirements-groundtruth.lock
+!requirements-mutation.lock
 !requirements-sast.lock
 !uv.lock
 ghidra_projects/
+# mutmut working tree + caches (mutation.yml regenerates them; never committed)
+mutants/
+.mutmut-cache
 samples/        # binary samples are not committed; tests use synthetic fixtures
 
 # Bundled FID databases (ADR-043) — packed binary artifacts + their intermediates are GENERATED
