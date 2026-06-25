@@ -1123,26 +1123,16 @@ def test_behavioral_equivalence_none_without_trusted_reference() -> None:
     assert behavioral_equivalence(candidate_only, None) is None
 
 
-# --- Case 59 — hang / fork-bomb / over-allocate contained (LIVE) ---------------------------
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_exec_hang_forkbomb_overalloc_contained() -> None:
-    """Case 59 (live): a candidate TU that infinite-loops, fork-bombs, or over-allocates is
-    reclaimed by the engine ``--timeout`` / ``--pids-limit`` / ``--memory`` cap (mapped to
-    ``RunResult(ok=False)``), not an escape or a stuck harness. The argv-hardening half (the caps
-    are present) is asserted hermetically in ``tests/unit/test_naming_compile.py``; this is the live
-    containment. Promoted to WS5 (needs the real sandbox)."""
-
-
-# --- Case 60 — sandbox isolation parity with the compile runner (LIVE) ---------------------
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_exec_sandbox_isolation_parity() -> None:
-    """Case 60 (live): ``ContainerExecRunner`` build+run enforces the SAME hardening as
-    ``ContainerCompileRunner`` (``--network none``, read-only rootfs, dropped caps,
-    ``no-new-privileges``, resource caps) plus the exec-tmpfs/noexec-scratch split — a candidate
-    cannot egress, write the host, or escalate. The argv-hardening assertions are hermetic in
-    ``test_naming_compile.py``; the live containment is promoted to WS5 (real sandbox)."""
+# --- Cases 59/60 — exec-sandbox containment + isolation parity (TB5) — NOW LIVE (G4 Tier C) -
+# Case 59 → NOW LIVE: tests/e2e/test_abuse_exec_sandbox_oss.py
+#   ::test_exec_hang_forkbomb_overalloc_contained — a hang/fork-bomb/over-alloc candidate is
+#   reclaimed by the engine --timeout/--pids-limit/--memory caps (does NOT cleanly exit 0; the
+#   harness returns, not stuck). The LIVE signal is a non-zero exit (ok=True, exit_code!=0) or a
+#   spawn failure (ok=False) — NOT ok=False alone (a reclaimed run still has ok=True).
+# Case 60 → NOW LIVE: tests/e2e/test_abuse_exec_sandbox_oss.py
+#   ::test_exec_sandbox_isolation_parity — a candidate cannot egress (--network none → connect
+#   blocked) nor write the host rootfs (--read-only → fopen("w") fails); probe TUs self-report.
+# The argv-hardening half (caps/flags present) stays hermetic in tests/unit/test_naming_compile.py.
 
 
 # ==============================================================================================

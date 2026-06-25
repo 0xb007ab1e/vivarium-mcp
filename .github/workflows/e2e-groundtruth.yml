@@ -172,4 +172,7 @@ jobs:
           mkdir -p "$VIVARIUM_RPC_SOCKET_DIR"
           # Pre-pull the pinned compiler image so the timed sandbox run isn't racing the pull.
           podman pull "$VIVARIUM_COMPILER_IMAGE"
-          pytest tests/e2e/test_naming_eval_oss.py -m integration -v --no-cov
+          # The TB5 exec-sandbox abuse cases (G4 Tier C, 59/60) reuse this step's pinned compiler
+          # image + crun runtime; they drive ContainerExecRunner directly (no worker/fixtures).
+          pytest tests/e2e/test_naming_eval_oss.py tests/e2e/test_abuse_exec_sandbox_oss.py \
+            -m integration -v --no-cov
