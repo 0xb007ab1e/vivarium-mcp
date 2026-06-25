@@ -1744,12 +1744,10 @@ def test_batch_oversized_type_count_rejected_at_boundary() -> None:
     assert ei2.value.envelope.type is ErrorType.LIMIT_EXCEEDED
 
 
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_batch_total_size_rejected_at_worker() -> None:
-    """Case 87 (live): a batch whose BATCH-TOTAL computed size exceeds ``_MAX_COMPOSITE_SIZE`` is
-    rejected ``limit-exceeded`` during worker assembly with no finalized type; the running size sum
-    is overflow-guarded (ADR-021 §Bounds). Promoted to WS5 (needs resolved DataType lengths)."""
+# Case 87 → NOW LIVE (G4 Tier B3): tests/e2e/test_abuse_batch_oss.py
+#   ::test_batch_total_size_rejected_at_worker — two composites summing over _MAX_COMPOSITE_SIZE
+#   trip the batch-total cap at worker assembly (DoS-bounded; the size-cap path may leave a capped
+#   partial rather than fully roll back — the same CWE-460 wart B1 case 45 flagged).
 
 
 # --- Case 88 — duplicate type name in batch rejected --------------------------------------
@@ -1766,23 +1764,16 @@ def test_batch_duplicate_type_name_rejected() -> None:
 
 
 # --- Case 89 — collision with an existing program type (worker REJECT) ---------------------
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_batch_collision_with_existing_type_rejected() -> None:
-    """Case 89 (live): a batch name that already names a program type is fail-closed REJECTED
-    ``analysis-failed`` BEFORE assembly (the per-name ``_reject_type_collision`` lookup), and the
-    whole batch is rolled back — no partial type, no silent replace (ADR-015 §6 per member).
-    Promoted to WS5 (needs the worker DataTypeManager lookup)."""
+# Case 89 → NOW LIVE (G4 Tier B3): tests/e2e/test_abuse_batch_oss.py
+#   ::test_batch_collision_with_existing_type_rejected — a batch entry colliding with an existing
+#   program type → analysis-failed; the whole batch rolls back (valid sibling not created, existing
+#   type unchanged — no silent replace).
 
 
 # --- Case 90 — partial failure rolls back the WHOLE batch ---------------------------------
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_batch_partial_failure_rolls_back_whole_batch() -> None:
-    """Case 90 (live): any member failure (unresolvable ref → not-found, size cap, addDataType or
-    commit) inside the ONE transaction rolls back the WHOLE batch via ``_in_transaction``
-    (endTransaction False) — no partial/orphan type survives (ADR-021 §D2). Promoted to WS5 (needs
-    the real DTM pre-register-all + rollback)."""
+# Case 90 → NOW LIVE (G4 Tier B3): tests/e2e/test_abuse_batch_oss.py
+#   ::test_batch_partial_failure_rolls_back_whole_batch — a batch with one unresolvable-ref member
+#   fails wholesale (not-found); NEITHER batch type persists (whole-batch atomicity, ADR-021 §D2).
 
 
 # --- Case 91 — no C parsed (the design-eliminated parser surface) --------------------------
