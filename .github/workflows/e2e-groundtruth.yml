@@ -149,6 +149,7 @@ jobs:
           mkdir -p "$VIVARIUM_RPC_SOCKET_DIR"
           pytest tests/e2e/test_abuse_containment_oss.py tests/e2e/test_abuse_composite_oss.py \
             tests/e2e/test_abuse_structural_oss.py tests/e2e/test_abuse_batch_oss.py \
+            tests/e2e/test_abuse_write_flood_oss.py \
             -m "integration and abuse" -v --no-cov
 
       - name: Run naming-eval e2e (reference loop + sandboxed compile; ADR-010 / TB5)
