@@ -197,8 +197,11 @@ async def _drive_batch_partial_rollback() -> None:
         ]
         res = await _define_types(session, sid, batch)
         got = _error_type(res)
-        assert got == _NOT_FOUND, (
-            f"an unresolvable batch member must fail {_NOT_FOUND}, got {got!r}"
+        # The batch path surfaces a member failure as the generic batch-failure slug
+        # (analysis-failed), not the single-define not-found (cf. B1 case 48). The real control is
+        # the whole-batch ATOMICITY asserted below, not this slug.
+        assert got == _ANALYSIS_FAILED, (
+            f"an unresolvable batch member must fail the whole batch, got {got!r}"
         )
 
         # Atomicity — the WHOLE batch rolled back: NEITHER the good nor the bad type exists.
