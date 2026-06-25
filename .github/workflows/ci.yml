@@ -65,14 +65,14 @@ jobs:
       - name: Critical-path coverage 100%   # master §4: 100% on designated critical paths
         run: |
           # Critical modules (see pyproject [tool.coverage] note): validation, envelope, errors,
-          # sessions.manager, security.limits. Enforce 100% SCOPED to these.
+          # sessions.manager, security.limits, server.auth. Enforce 100% SCOPED to these.
           # NOTE: pyproject `[tool.coverage.run] source = ["vivarium"]` forces whole-package
           # measurement, so `--cov=<module> --cov-fail-under=100` would (wrongly) gate the whole
-          # package. Instead: measure once, then `coverage report --include=<the 5 files>
+          # package. Instead: measure once, then `coverage report --include=<the 6 files>
           # --fail-under=100` to gate exactly the critical paths.
           pytest -m "not integration" --cov=vivarium --cov-report=
           coverage report --fail-under=100 \
-            --include='*/vivarium/core/validation.py,*/vivarium/core/envelope.py,*/vivarium/core/errors.py,*/vivarium/sessions/manager.py,*/vivarium/security/limits.py'
+            --include='*/vivarium/core/validation.py,*/vivarium/core/envelope.py,*/vivarium/core/errors.py,*/vivarium/sessions/manager.py,*/vivarium/security/limits.py,*/vivarium/server/auth.py'
       - name: Upload coverage artifact
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # actions/upload-artifact@v7.0.1
