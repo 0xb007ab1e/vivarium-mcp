@@ -1,0 +1,13 @@
+# Ground-truth e2e fixture-build toolchain — source for requirements-groundtruth.lock.
+#
+# Used ONLY by the workflow_dispatch-gated e2e-groundtruth.yml job, by:
+#   - tests/fixtures/oss/extract_ground_truth.py  (ELF symbol/section truth + capstone disasm check)
+#   - scripts/naming_eval.py                       (ELF note/section parsing for the naming-eval loop)
+# NOT a dependency of the vivarium package, the server, unit CI, or the worker — kept out of
+# pyproject so it pins narrowly without dragging the base tree into the lock (std-supplychain).
+#
+# Regenerate the hash-pinned lock with:
+#   pip-compile --generate-hashes --output-file=requirements-groundtruth.lock requirements-groundtruth.in
+# Both are permissive-licensed (pyelftools: public-domain/Unlicense; capstone: BSD-3-Clause).
+pyelftools>=0.31
+capstone>=5.0
