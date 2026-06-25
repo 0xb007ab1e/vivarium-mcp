@@ -1,0 +1,130 @@
+# =============================================================================
+# gvisor-isolation.yml — automated ADR-004 gVisor (runsc) isolation verification (G12; GATED)
+# =============================================================================
+# The gated real-worker e2e (e2e-groundtruth / live-regression) runs under **crun** because stock
+# GitHub runners have no gVisor; the strong-tier control (runsc) was therefore only verified by the
+# MANUAL deploy drill `deploy/verify-isolation.sh` (ADR-004). This job AUTOMATES that drill: it
+# installs gVisor on the runner, then runs `verify-isolation.sh` UNDER runsc against the pinned,
+# cosign-verified worker image — asserting (from inside the worker) that seccomp is loaded, all caps
+# are dropped, the user is non-root, no-new-privileges is set, the rootfs is read-only, and there is
+# no network egress — the production isolation tier, proven not assumed.
+#
+# Stock runners are unprivileged VMs (no nested KVM), so runsc uses the **systrap** platform and
+# rootless podman needs **--ignore-cgroups** (no cgroup delegation) — passed via a runsc wrapper
+# (podman can't forward runtime flags). A runsc SMOKE step runs first so a runner that cannot host
+# gVisor fails fast with a clear diagnostic rather than a confusing isolation-check error.
+#
+# GATED (PLAN §6): manual dispatch only for now. Once a dispatch on `main` proves runsc runs on the
+# stock runner, add a weekly `schedule:` cron (a recurring isolation game-day — a failed scheduled
+# run alerts the repo owner, mirroring scheduled-rescan.yml) in a follow-up; landing the cron before
+# the runsc path is proven would spam weekly failures. Actions pinned BY DIGEST; the worker image is
+# pulled BY DIGEST from .github/worker-image.pin and cosign-verified before use.
+name: gvisor-isolation
+
+on:
+  workflow_dispatch: {} # manual run on demand (cron added once the runsc path is proven on main)
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gvisor-isolation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read # pull the worker image from GHCR
+      id-token: write # cosign keyless verify
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # actions/checkout@v6.0.3
+
+      - name: Install gVisor (runsc) + a rootless-podman runtime wrapper
+        run: |
+          set -euo pipefail
+          # Pinned release channel; runsc verifies its own download via the published sha512.
+          ARCH="$(uname -m)"
+          URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
+          wget -q "${URL}/runsc" "${URL}/runsc.sha512" \
+                  "${URL}/containerd-shim-runsc-v1" "${URL}/containerd-shim-runsc-v1.sha512"
+          sha512sum -c runsc.sha512 containerd-shim-runsc-v1.sha512
+          chmod a+rx runsc containerd-shim-runsc-v1
+          sudo mv runsc containerd-shim-runsc-v1 /usr/local/bin/
+          runsc --version
+          # podman can't forward per-runtime flags, so wrap runsc with the flags rootless GH runners
+          # need: --platform=systrap (no KVM on the runner) and --ignore-cgroups (no rootless cgroup
+          # delegation). The wrapper IS the OCI runtime podman invokes.
+          sudo tee /usr/local/bin/runsc-rootless >/dev/null <<'WRAP'
+          #!/bin/sh
+          exec /usr/local/bin/runsc --platform=systrap --ignore-cgroups "$@"
+          WRAP
+          sudo chmod a+rx /usr/local/bin/runsc-rootless
+          # Register the wrapper as the `runsc` runtime for rootless podman (this runner's user).
+          mkdir -p "${HOME}/.config/containers"
+          cat >>"${HOME}/.config/containers/containers.conf" <<'CONF'
+          [engine.runtimes]
+          runsc = ["/usr/local/bin/runsc-rootless"]
+          CONF
+
+      - name: Smoke-test runsc (fail fast if the runner cannot host gVisor)
+        run: |
+          set -euo pipefail
+          # A minimal rootless container under runsc must run + report the gVisor sentinel. If this
+          # fails, the runner cannot host gVisor (kernel/perms) — surface that, don't mask it as an
+          # isolation-check failure below.
+          out="$(podman run --rm --runtime runsc docker.io/library/busybox:latest \
+                   sh -c 'echo GVISOR-SMOKE-OK' 2>&1)" || {
+            echo "::error::runsc could not run a container on this runner — gVisor unavailable here."
+            echo "$out"
+            exit 1
+          }
+          echo "$out" | grep -q GVISOR-SMOKE-OK || { echo "::error::unexpected smoke output: $out"; exit 1; }
+          echo "runsc smoke OK"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # docker/login-action@v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # sigstore/cosign-installer@v3.7.0
+
+      - name: Verify + pull the signed worker image (by digest)
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.repository }}
+          WORKER_IMAGE_DIGEST_VAR: ${{ vars.WORKER_IMAGE_DIGEST }}
+        run: |
+          set -euo pipefail
+          PIN_FILE=".github/worker-image.pin"
+          DIGEST=""
+          if [ -f "${PIN_FILE}" ]; then
+            DIGEST="$(grep -oiE 'sha256:[0-9a-f]{64}' "${PIN_FILE}" | head -n1 || true)"
+          fi
+          [ -z "${DIGEST}" ] && DIGEST="${WORKER_IMAGE_DIGEST_VAR:-}"
+          if [ -z "${DIGEST}" ]; then
+            echo "::error::no worker-image pin (.github/worker-image.pin / vars.WORKER_IMAGE_DIGEST)" >&2
+            exit 1
+          fi
+          WORKER_IMAGE="ghcr.io/${OWNER}/vivarium-worker@${DIGEST}"
+          cosign verify \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity-regexp "^https://github.com/${REPO}/.github/workflows/worker-image.yml@" \
+            "$WORKER_IMAGE"
+          podman pull "$WORKER_IMAGE"
+          echo "VIVARIUM_WORKER_IMAGE=$WORKER_IMAGE" >> "$GITHUB_ENV"
+
+      - name: Verify ADR-004 isolation UNDER gVisor (runsc)
+        env:
+          VIVARIUM_WORKER_RUNTIME: runsc
+        run: |
+          set -euo pipefail
+          # The authoritative gVisor strong-tier check: the existing deploy drill, run live under
+          # runsc against the pinned worker image. Any failed control exits non-zero (fail closed).
+          deploy/verify-isolation.sh
