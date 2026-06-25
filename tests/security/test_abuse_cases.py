@@ -395,14 +395,13 @@ def test_cross_session_write_isolation() -> None:
     assert ei.value.envelope.type is ErrorType.VALIDATION
 
 
-# --- Case 19 — write-flood / consumption (TB7-D) — needs the live worker + timeout ---------
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_write_flood_is_bounded_by_caps() -> None:
-    """Case 19 (live): a burst of writes is bounded by the per-tool timeout + concurrency cap +
-    (HTTP) rate limit; a hung write kills the worker. Each write is one bounded transaction (no
-    unbounded growth). Promoted to live integration in WS5 (control needs the real worker/timeout).
-    """
+# --- Case 19 — write-flood / consumption (TB7-D) — NOW LIVE (G4) ---------------------------
+# Case 19 → NOW LIVE: tests/e2e/test_abuse_write_flood_oss.py
+#   ::test_write_flood_is_bounded_by_caps — a concurrent burst of annotation writes is handled as
+#   bounded transactions (all return, worker processes them serialized+bounded, session stays
+#   responsive). The non-stdio sub-properties are covered elsewhere: per-tool-timeout MECHANISM via
+#   the analysis-timeout case (test_abuse_containment_oss); (HTTP) rate limit via tests/security/
+#   test_http_abuse.py (TB6); per-write bounded-txn/rollback via the structural rollback suites.
 
 
 # --- Case 20 — BOLA on the grant (TB7-E / BOLA) --------------------------------------------
