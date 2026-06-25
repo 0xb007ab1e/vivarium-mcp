@@ -3,9 +3,12 @@
 Operational procedures, adapted to this service (`workflow-runbooks`). Runbooks are part of "done"
 for a deployable service; they are validated in a drill before being relied on.
 
-> **WS0 status:** these are **scaffolds** with the service-specific decision points filled in and
-> `<...>` placeholders for commands that depend on WS2/WS3 (worker runtime, deploy). WS3 + the
-> release workstream complete the commands and run the first drill.
+> **Status (pre-1.0):** the service-specific decision points, ownership, and escalation are filled
+> in for the solo-maintainer ops model (no formal on-call rotation pre-1.0; escalation + security
+> reports via GitHub — see [`SECURITY.md`](../../SECURITY.md)). The only remaining `<...>` are the
+> **deploy/promote commands**, which are deliberately deferred until the **WS3** deploy tooling
+> exists — fabricating them would be misleading. WS3 + the release workstream complete those
+> commands and run the first drill (no runbook is "validated" until drilled).
 
 | Runbook | When |
 |---------|------|

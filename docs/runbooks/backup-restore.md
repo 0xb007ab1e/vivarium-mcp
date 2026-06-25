@@ -16,7 +16,7 @@
 - Access to the repo + registry (images are immutable, available by digest); deploy role.
 
 ## Steps
-1. Recover config/IaC from git at the desired release tag: `<git checkout <tag>>`.
+1. Recover config/IaC from git at the desired release tag: `git checkout <release-tag>`.
 2. Redeploy the pinned server + worker digests (`deploy.md`).
 3. No data restore step — sessions are recreated on demand by clients.
 
@@ -30,4 +30,4 @@
 - `deploy.md`, `dependency-patch.md`; ADR-002/003; master §5.
 
 ---
-_Last validated: <date>. Owner: <team>._
+_Status: scaffold (pre-1.0) — deploy/promote commands pending WS3 tooling; not yet drill-validated. Owner: repo maintainer (solo — no formal on-call rotation pre-1.0)._
