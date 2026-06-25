@@ -209,8 +209,10 @@ exclude_lines = [
 # scoped to these modules with --fail-under=100. Listed here as the authoritative designation:
 #   - src/vivarium/core/validation.py     (trust boundary 1: client args)
 #   - src/vivarium/core/envelope.py       (trust boundary 4: untrusted-data + error envelopes)
+#   - src/vivarium/core/errors.py         (error envelope / fail-closed error taxonomy)
 #   - src/vivarium/sessions/manager.py    (session isolation / eviction / BOLA prevention)
 #   - src/vivarium/security/limits.py     (DoS bounds enforced before the worker)
+#   - src/vivarium/server/auth.py         (authN/authZ: principals, bearer/mTLS/OAuth, owner check)
 
 [tool.bandit]
 # bandit SAST config; asserts in tests are excluded via the test path, not by skipping checks.

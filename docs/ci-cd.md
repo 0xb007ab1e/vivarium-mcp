@@ -27,8 +27,9 @@ ELF FunctionID-match assertion (ADR-043). Path-filtered to **run per-PR on FID-p
 gated to same-repo PRs (fork-PR hardening — threat-model §4 delta).
 
 **Critical paths (100% — master §4):** `core.validation`, `core.envelope`, `core.errors`,
-`sessions.manager`, `security.limits` — the input-validation, untrusted/error envelopes, session
-isolation, and DoS-limit code (the four trust boundaries). Designated in `pyproject.toml`.
+`sessions.manager`, `security.limits`, `server.auth` — the input-validation, untrusted/error
+envelopes, session isolation, DoS-limit, and authN/authZ code (the trust boundaries). Designated in
+`pyproject.toml`.
 
 **Fail closed:** an errored or skipped security stage counts as a failure, not a pass.
 
