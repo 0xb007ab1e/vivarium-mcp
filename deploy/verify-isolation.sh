@@ -20,6 +20,15 @@ WORKER_IMAGE="${VIVARIUM_WORKER_IMAGE:?set VIVARIUM_WORKER_IMAGE to the pinned @
 WORKER_RUNTIME="${VIVARIUM_WORKER_RUNTIME:-runsc}"
 SECCOMP_PROFILE="${VIVARIUM_WORKER_SECCOMP:-RuntimeDefault}"
 
+# "RuntimeDefault" = the engine's built-in seccomp profile, applied by OMITTING the flag. Passing
+# the literal string makes podman/runsc try to open a profile FILE named "RuntimeDefault" and fail
+# ("opening seccomp profile failed: ... no such file or directory") — the same gotcha
+# ContainerWorkerLauncher avoids by dropping the flag. Only pass --security-opt for a real profile.
+SECCOMP_OPT=()
+if [ "${SECCOMP_PROFILE}" != "RuntimeDefault" ]; then
+  SECCOMP_OPT=(--security-opt "seccomp=${SECCOMP_PROFILE}")
+fi
+
 fail() { echo "ISOLATION CHECK FAILED: $*" >&2; exit 1; }
 pass() { echo "  [PASS] $*"; }
 
@@ -32,7 +41,7 @@ probe() {
     --user 65532:65532 --userns keep-id \
     --cap-drop ALL \
     --security-opt no-new-privileges \
-    --security-opt "seccomp=${SECCOMP_PROFILE}" \
+    "${SECCOMP_OPT[@]}" \
     --read-only \
     --tmpfs /tmp/ghidra:rw,noexec,nosuid,nodev,size=256m \
     --tmpfs /work/project:rw,noexec,nosuid,nodev,size=256m \
@@ -47,12 +56,26 @@ echo "runtime: ${WORKER_RUNTIME}"
 echo "seccomp: ${SECCOMP_PROFILE}"
 echo
 
-# 1. seccomp ACTUALLY loaded (ADR-004: "verified to load, not assumed").
-#    /proc/self/status Seccomp field: 0=disabled, 1=strict, 2=filter(BPF). Require >= 1.
-echo "[1] seccomp filter active"
-SECCOMP_MODE="$(probe sh -c 'grep -E "^Seccomp:" /proc/self/status | awk "{print \$2}"' || true)"
-[ "${SECCOMP_MODE:-0}" -ge 1 ] 2>/dev/null || fail "seccomp not active (Seccomp=${SECCOMP_MODE}); expected >=1"
-pass "seccomp mode = ${SECCOMP_MODE} (filter active)"
+# 1. Syscall confinement ACTUALLY active (ADR-004: "verified, not assumed"). The mechanism — and
+#    how to verify it from inside the guest — differs by runtime tier:
+#      - runc/crun: a host seccomp-BPF filter, guest-visible at /proc/self/status Seccomp
+#        (0=disabled, 1=strict, 2=filter). Require >= 1.
+#      - runsc/gVisor: the userspace kernel IS the syscall boundary; the host wraps the runsc
+#        sandbox in seccomp-BPF that the GUEST cannot see (guest Seccomp is 0 by design), so the
+#        guest-Seccomp check is N/A. Instead assert the worker is ACTUALLY running under gVisor —
+#        the container both ran under --runtime runsc AND /proc/version carries the gVisor
+#        signature (a runc fallback would not). That signature IS the confinement proof here.
+echo "[1] syscall confinement active"
+if [ "${WORKER_RUNTIME}" = "runsc" ]; then
+  PROC_VERSION="$(probe sh -c 'cat /proc/version 2>/dev/null' || true)"
+  printf '%s\n' "${PROC_VERSION}" | grep -qi 'gvisor' \
+    || fail "worker is not running under gVisor (proc/version: '${PROC_VERSION:-<empty>}')"
+  pass "gVisor is the syscall boundary (proc/version carries the gVisor signature)"
+else
+  SECCOMP_MODE="$(probe sh -c 'grep -E "^Seccomp:" /proc/self/status | awk "{print \$2}"' || true)"
+  [ "${SECCOMP_MODE:-0}" -ge 1 ] 2>/dev/null || fail "seccomp not active (Seccomp=${SECCOMP_MODE}); expected >=1"
+  pass "seccomp mode = ${SECCOMP_MODE} (filter active)"
+fi
 
 # 2. ALL capabilities dropped.
 #    CapEff (effective capability bitmask) MUST be 0000000000000000.
