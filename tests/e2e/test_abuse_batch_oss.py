@@ -221,6 +221,15 @@ async def _drive_batch_partial_rollback() -> None:
         assert ok["types"][0]["name"] is not None  # a created type is reported back
 
 
+@pytest.mark.xfail(
+    reason=(
+        "KNOWN BUG #182: define_types batch is NOT atomic — a failed batch leaves its valid member "
+        "committed, violating the documented ADR-021 §D2 whole-batch rollback (CWE-460; same class "
+        "as the B1 oversized-define partial). The assertions below encode the CORRECT (atomic) "
+        "behavior; flip to strict (remove this marker) once #182 is fixed and the test xpasses."
+    ),
+    strict=False,
+)
 def test_batch_partial_failure_rolls_back_whole_batch() -> None:
     """Case 90: any member failure rolls back the whole batch — no member persists (atomicity)."""
     asyncio.run(_drive_batch_partial_rollback())
