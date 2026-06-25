@@ -65,6 +65,9 @@ echo
 #        guest-Seccomp check is N/A. Instead assert the worker is ACTUALLY running under gVisor —
 #        the container both ran under --runtime runsc AND /proc/version carries the gVisor
 #        signature (a runc fallback would not). That signature IS the confinement proof here.
+# NOTE: the runsc-tier branch is keyed on the runtime NAME, but the /proc/version gVisor signature
+# below is what actually CATCHES a silent runc fallback (a non-gVisor kernel lacks the token →
+# fail) — so the name assumption is self-checking, not load-bearing on its own.
 echo "[1] syscall confinement active"
 if [ "${WORKER_RUNTIME}" = "runsc" ]; then
   PROC_VERSION="$(probe sh -c 'cat /proc/version 2>/dev/null' || true)"
