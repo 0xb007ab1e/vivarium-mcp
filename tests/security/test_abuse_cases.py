@@ -506,26 +506,24 @@ def test_type_ref_injection_payload_is_rejected(payload: str) -> None:
 
 
 # --- Case 32 — unresolvable-type fail-closed (TB7-T / atomicity) ---------------------------
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_unresolvable_named_type_fails_closed_with_no_write() -> None:
-    """Case 32 (live): a well-formed but UNKNOWN ``named`` TypeRef surfaces ``not-found`` with the
-    program unchanged — resolution runs before ``startTransaction`` (ADR-014 §4), so no transaction
-    is opened and there is no partial write. Promoted to live integration in WS5 (needs the worker
-    DataTypeManager lookup).
-    """
+# Case 32 → NOW LIVE (G4 Tier B2): tests/e2e/test_abuse_structural_oss.py
+#   ::test_unresolvable_named_type_fails_closed_with_no_write — apply_data_type with an unknown
+#   `named` type → not-found (resolution before startTransaction; no write), session stays writable.
 
 
 # --- Case 33 — signature re-flow corruption / commit-time atomicity (TB7-T / CWE-460) ------
 @pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
+@pytest.mark.skip(
+    reason="NOT client-triggerable (G4 Tier B2): forcing the worker's updateFunction / commit-time "
+    "re-flow to RAISE needs a fault-injection hook no client input can drive. The rollback "
+    "invariant is unit-proven (_in_transaction three-branch in test_structural_mutation) and the "
+    "live oversized-composite rollback in tests/e2e/test_abuse_composite_oss.py exercises the path."
+)
 def test_signature_reflow_commit_failure_rolls_back() -> None:
     """Case 33 (live): a signature change whose ``updateFunction`` OR its commit-time re-flow
     (re-rendering callers) raises rolls back and surfaces ``analysis-failed`` — no dangling
-    transaction, no untyped escape (the corrected ``_in_transaction``, CWE-460). The unit-level
-    three-branch proof lives in ``test_structural_mutation.test_in_transaction_*``; this is the
-    live signature-specific assertion. Promoted to WS5 (needs the real decompiler re-flow).
-    """
+    transaction, no untyped escape (the corrected ``_in_transaction``, CWE-460). See the skip
+    reason: not client-triggerable; unit-proven + exercised live via the composite rollback."""
 
 
 # --- Case 34 — oversized-params / construction DoS (TB7-D / CWE-400) ------------------------
@@ -600,14 +598,9 @@ def test_malicious_parameter_name_is_rejected(malicious: str) -> None:
 
 
 # --- Case 36 — cross-session structural isolation (TB7-T / store-I) -------------------------
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_cross_session_structural_type_isolation() -> None:
-    """Case 36 (live): ``allow_structural`` + a signature/type apply on session A does NOT enable or
-    mutate session B; B stays read-only with an independent store. The consent-isolation unit proof
-    is in ``test_structural_type_mutation`` (gate fakes); the store-isolation half needs two live
-    workers — promoted to WS5.
-    """
+# Case 36 → NOW LIVE (G4 Tier B2): tests/e2e/test_abuse_structural_oss.py
+#   ::test_cross_session_structural_type_isolation — A's structural grant + signature write does
+#   NOT leak structural consent to session B (B's identical op → forbidden; per-session, ADR-036).
 
 
 # --- Case 37 — structural-consent-required (TB7-E / gating) ---------------------------------
@@ -717,13 +710,9 @@ def test_apply_data_type_bad_address_rejected_at_boundary() -> None:
     assert ei.value.envelope.type is ErrorType.VALIDATION
 
 
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_apply_data_type_out_of_map_fails_closed() -> None:
-    """Case 40 (live): ``apply_data_type`` at an address outside the program memory map (or where
-    the type footprint would overrun a region) fails closed (``analysis-failed``/``not-found``) with
-    no write — worker map-confinement before the transaction. Promoted to WS5 (needs the real map).
-    """
+# Case 40 → NOW LIVE (G4 Tier B2): tests/e2e/test_abuse_structural_oss.py
+#   ::test_apply_data_type_out_of_map_fails_closed — apply_data_type at a valid-hex address outside
+#   the program memory map fails closed (analysis-failed/not-found), no write (worker map-confine).
 
 
 # ==============================================================================================
@@ -774,21 +763,22 @@ def test_by_value_self_embed_rejected_at_boundary() -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
+@pytest.mark.skip(
+    reason="NOT client-triggerable (G4 Tier B2): a by-value self-embed is REJECTED at the boundary "
+    "(validate_composite — proven in test_by_value_self_embed_rejected_at_boundary above), so it "
+    "never reaches the worker; the worker pre-register/rollback cannot be driven from a client. "
+    "The rollback is unit-proven (_in_transaction in test_structural_mutation) + live via the "
+    "composite/oversized rollback in tests/e2e/test_abuse_composite_oss.py."
+)
 def test_by_value_self_embed_worker_rolls_back() -> None:
     """Case 41 (live): even if a by-value self-embed slipped past the boundary, the worker assembly
-    aborts and ``_in_transaction`` rolls back the pre-registered empty type — no partial/orphan type
-    survives. Promoted to WS5 (needs the real DataTypeManager pre-register/rollback)."""
+    aborts and ``_in_transaction`` rolls back the pre-registered empty type. See the skip reason:
+    the boundary rejects self-embed pre-worker, so this is not client-triggerable; unit-proven."""
 
 
-# --- Case 42 — cross-type embed-cycle is unconstructable (TB7-D / integrity) ---------------
-@pytest.mark.integration
-@pytest.mark.skip(reason=_INTEGRATION_REASON)
-def test_cross_type_embed_cycle_cannot_be_assembled() -> None:
-    """Case 42 (live): the B-first-then-A flow cannot build a true embed-cycle (A embeds B embeds A)
-    — defining B with an embedded not-yet-existing A fails ``not-found``; one-composite-per-call
-    makes a cross-type by-value cycle unconstructable (ADR-015 §1/§3.2). Promoted to WS5 (needs the
-    resolver). The boundary half (self-embed rejected) is case 41."""
+# Case 42 → NOW LIVE (G4 Tier B2): tests/e2e/test_abuse_structural_oss.py
+#   ::test_cross_type_embed_cycle_cannot_be_assembled — B-first-then-A: define B, then A embedding
+#   B; the cycle-closing redefine of B is rejected (collision) → A↔B by-value cycle unbuildable.
 
 
 # --- Case 43 — pointer-to-self allowed, fixed size (positive control) ----------------------
