@@ -52,10 +52,20 @@ pytestmark = [
 ]
 
 #: Error-envelope ``type`` slugs (mirror ``core.errors.ErrorType``).
-_LIMIT_EXCEEDED = "limit-exceeded"
 _NOT_FOUND = "not-found"
 _ANALYSIS_FAILED = "analysis-failed"
 _FORBIDDEN = "forbidden"  # consent gate denies an owned-but-unconsented write (ADR-036)
+
+
+def _unwrap(field: Any) -> Any:
+    """Unwrap a binary-derived field from its untrusted-data envelope (ADR-005).
+
+    Program-sourced string fields (a type's ``name``/``definition``) arrive wrapped as
+    ``{"value": ..., "origin": ..., "truncated": ..., "encoding": ...}``; pass other values through.
+    """
+    if isinstance(field, dict) and "value" in field:
+        return field["value"]
+    return field
 
 
 def _field(name: str, *, base: str | None = None, named: str | None = None,
@@ -140,7 +150,8 @@ async def _drive_name_collision() -> None:
         existing = _structured(
             await session.call_tool("get_data_type", {"session_id": sid, "name": name})
         )
-        assert existing.get("name") == name
+        # The type name is binary-derived → wrapped in the untrusted-data envelope (ADR-005).
+        assert _unwrap(existing["name"]) == name
 
 
 def test_name_collision_rejected_no_silent_replace() -> None:
@@ -168,9 +179,16 @@ async def _drive_oversized_total_size() -> None:
         fields = [_field(f"f{i}", base="char", array_len=65536) for i in range(256)]
         over = await _define_struct(session, sid, "AbuseHuge45", fields)
         got = _error_type(over)
-        assert got == _LIMIT_EXCEEDED, (
+        # The worker enforces _MAX_COMPOSITE_SIZE post-resolve and maps the rejection to the generic
+        # worker-failure slug (analysis-failed), not a distinct limit-exceeded.
+        assert got == _ANALYSIS_FAILED, (
             f"an oversized composite must be rejected at the worker, got {got!r}"
         )
+        # The security property: the cap prevented the write — no oversized type was created.
+        absent = await session.call_tool(
+            "get_data_type", {"session_id": sid, "name": "AbuseHuge45"}
+        )
+        assert _error_type(absent) == _NOT_FOUND, "the rejected oversized composite must not exist"
 
 
 def test_oversized_total_size_rejected_at_worker() -> None:
@@ -251,7 +269,7 @@ async def _drive_cross_session_isolation() -> None:
         a_view = _structured(
             await session.call_tool("get_data_type", {"session_id": sid_a, "name": a_name})
         )
-        assert a_view.get("name") == a_name
+        assert _unwrap(a_view["name"]) == a_name
 
 
 def test_cross_session_composite_isolation() -> None:
