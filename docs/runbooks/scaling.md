@@ -35,4 +35,4 @@
 - `on-call.md`, `deploy.md`; ADR-002/004; threat model TB1-D/TB3-D.
 
 ---
-_Last validated: <date>. Owner: <team>._
+_Status: scaffold (pre-1.0) — deploy/promote commands pending WS3 tooling; not yet drill-validated. Owner: repo maintainer (solo — no formal on-call rotation pre-1.0)._

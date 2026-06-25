@@ -28,4 +28,4 @@
 - `incident-response.md`; `@rules/workflow-secrets.md`; ADR-006 (HTTP v1.1).
 
 ---
-_Last validated: <date>. Owner: <team>._
+_Status: scaffold (pre-1.0) — deploy/promote commands pending WS3 tooling; not yet drill-validated. Owner: repo maintainer (solo — no formal on-call rotation pre-1.0)._

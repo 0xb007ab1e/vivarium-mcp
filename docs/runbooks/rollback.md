@@ -26,10 +26,10 @@
 - If rollback itself fails → `incident-response.md`.
 
 ## Escalation
-- Page `<on-call>` / incident commander; notify `<stakeholders>`.
+- Page the maintainer / incident commander; notify affected users (via the repo).
 
 ## Related
 - `deploy.md`, `incident-response.md`, `dependency-patch.md`.
 
 ---
-_Last validated: <date>. Owner: <team>._
+_Status: scaffold (pre-1.0) — deploy/promote commands pending WS3 tooling; not yet drill-validated. Owner: repo maintainer (solo — no formal on-call rotation pre-1.0)._
