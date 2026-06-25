@@ -1,0 +1,102 @@
+# =============================================================================
+# mutation.yml — scheduled mutation testing of the critical modules (master §4)
+# =============================================================================
+# Coverage proves the critical-path tests EXECUTE every line/branch (the 100% gate in ci.yml);
+# mutation testing proves they CATCH faults. mutmut mutates the six designated critical modules
+# (config: pyproject [tool.mutmut]) and re-runs the suite per mutant — a "survived" mutant is a
+# test-quality gap (or an equivalent mutant). Far too slow to gate every PR, so this runs on a
+# SCHEDULE + manual dispatch (mirrors scheduled-rescan.yml), NOT as a required check.
+#
+# ADVISORY-FIRST: this job REPORTS the mutation score (to the run summary) and uploads the stats
+# artifact; it does not fail on a low score yet. Once a baseline is confirmed across a few CI runs,
+# set MUTATION_SCORE_MIN (below) to a floor just under the baseline to turn it into a regression
+# gate. Baseline at introduction (local, all six modules): 895 killed / 366 survived / 1261 → ~71%.
+name: mutation
+
+on:
+  schedule:
+    - cron: "23 4 * * 1" # weekly, Monday 04:23 UTC (off the top-of-hour load spike)
+  workflow_dispatch: {} # manual run on demand
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Advisory by default (0 = never fail on score). Set to e.g. 70 to enable the regression gate
+  # once the baseline is confirmed in CI — a run scoring below this then fails.
+  MUTATION_SCORE_MIN: "0"
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Run the package from src/ (src-layout) like the `quality` job — no editable install, so
+    # nothing unpinned is fetched. mutmut copies src/ into mutants/ and prepends it, so the mutated
+    # code wins over the PYTHONPATH source during mutant runs.
+    env:
+      PYTHONPATH: src
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # actions/checkout@v6.0.3
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # actions/setup-python@v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install (hash-pinned mutation lockfile — dev env + mutmut)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements-mutation.lock
+      - name: Run mutation testing (six critical modules — pyproject [tool.mutmut])
+        run: |
+          # mutmut exits non-zero when mutants survive; that is EXPECTED here (advisory). Capture
+          # but don't let it abort the job — the score is computed from the stats below.
+          mutmut run || true
+          mutmut export-cicd-stats
+      - name: Report mutation score (advisory; gate when MUTATION_SCORE_MIN > 0)
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+
+          stats_path = Path("mutants/mutmut-cicd-stats.json")
+          if not stats_path.exists():
+              print("::error::mutmut produced no stats file — the run failed to execute")
+              sys.exit(1)
+
+          s = json.loads(stats_path.read_text())
+          killed = s.get("killed", 0)
+          survived = s.get("survived", 0)
+          total = s.get("total", 0)
+          # "no tests" / suspicious / timeout count against the score (not killed).
+          score = (killed / total * 100.0) if total else 0.0
+
+          summary = (
+              f"## Mutation score: {score:.1f}%\n\n"
+              f"- killed: {killed}\n- survived: {survived}\n- total: {total}\n"
+              f"- timeout: {s.get('timeout', 0)} | suspicious: {s.get('suspicious', 0)} "
+              f"| no-tests: {s.get('no_tests', 0)}\n\n"
+              f"Scope: the six critical modules (pyproject `[tool.mutmut]`). "
+              f"Survivors are test-quality gaps or equivalent mutants — triage with `mutmut results`.\n"
+          )
+          print(summary)
+          gh_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if gh_summary:
+              Path(gh_summary).write_text(summary)
+
+          floor = float(os.environ.get("MUTATION_SCORE_MIN", "0") or "0")
+          if floor > 0 and score < floor:
+              print(f"::error::mutation score {score:.1f}% is below the floor {floor:.1f}%")
+              sys.exit(1)
+          PY
+      - name: Upload mutation stats
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact@v7.0.1
+        with:
+          name: mutation-stats
+          path: mutants/mutmut-cicd-stats.json
+          if-no-files-found: warn

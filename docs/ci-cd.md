@@ -31,6 +31,15 @@ gated to same-repo PRs (fork-PR hardening — threat-model §4 delta).
 envelopes, session isolation, DoS-limit, and authN/authZ code (the trust boundaries). Designated in
 `pyproject.toml`.
 
+**Mutation testing (test quality — master §4):** coverage proves the critical-path tests *execute*
+every line; mutation testing proves they *catch faults*. [`mutation.yml`](../.github/workflows/mutation.yml)
+runs `mutmut` over the same six critical modules (config: `pyproject [tool.mutmut]`) on a **weekly
+schedule + manual dispatch** — never per-PR (it re-runs the suite per mutant). It is **advisory**
+(reports the score to the run summary + uploads a stats artifact); set `MUTATION_SCORE_MIN` > 0 to
+turn it into a regression gate once the baseline is confirmed. Baseline at introduction: ~71%
+(895 killed / 366 survived / 1261). A failed scheduled run alerts the repo owner (like
+`scheduled-rescan.yml`).
+
 **Fail closed:** an errored or skipped security stage counts as a failure, not a pass.
 
 ## Supply-chain integrity (std-supplychain)

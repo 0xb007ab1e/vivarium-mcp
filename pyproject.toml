@@ -72,6 +72,13 @@ sast = [
   "semgrep>=1.0",      # broader SAST rulesets (p/python, p/security-audit).
   "pip-audit>=2.7",    # dependency CVE scan (SCA).
 ]
+
+# Mutation-testing tool, isolated like `sast`. Compiled WITH the dev extra into
+# requirements-mutation.lock (`pip-compile --extra=dev --extra=mutation --generate-hashes`) so the
+# scheduled mutation.yml job installs the whole test env + mutmut hash-pinned (std-supplychain).
+mutation = [
+  "mutmut>=3.6",       # mutation testing on the critical modules (master §4: test-quality gate).
+]
 # NOTE: the ground-truth e2e job's two extra tools (pyelftools, capstone — used by
 # tests/fixtures/oss/extract_ground_truth.py and scripts/naming_eval.py) are pinned out-of-band in
 # `requirements-groundtruth.lock` (compiled from `requirements-groundtruth.in` with
@@ -217,3 +224,31 @@ exclude_lines = [
 [tool.bandit]
 # bandit SAST config; asserts in tests are excluded via the test path, not by skipping checks.
 exclude_dirs = ["tests", ".venv"]
+
+# ---------------------------------------------------------------------------
+# Mutation testing (mutmut) — validates that the critical-path tests CATCH faults,
+# not just execute lines (master §4: mutation testing on critical modules). Run on a
+# schedule (mutation.yml), NOT per-PR (it runs the suite per mutant — too slow to gate).
+# SPIKE: errors.py only; expand source_paths to all six critical modules once proven.
+# ---------------------------------------------------------------------------
+[tool.mutmut]
+# Copy the WHOLE package into mutants/ (so tests that import or read other vivarium files by
+# path still resolve), but MUTATE only the six critical modules (only_mutate) — master §4:
+# mutation testing on critical paths. These are exactly the modules under the 100%-coverage
+# gate (see [tool.coverage] critical-paths note); mutation proves those tests catch faults.
+source_paths = ["src/vivarium"]
+only_mutate = [
+  "*/vivarium/core/validation.py",
+  "*/vivarium/core/envelope.py",
+  "*/vivarium/core/errors.py",
+  "*/vivarium/sessions/manager.py",
+  "*/vivarium/security/limits.py",
+  "*/vivarium/server/auth.py",
+]
+# Copy repo-root packages the suite needs at COLLECTION time: `worker/` (5 unit tests
+# `from worker import …`) and `scripts/` (test_naming_eval_script / test_generate_fidb_script
+# load scripts/*.py by path).
+also_copy = ["worker", "scripts", "deploy"]
+# Neutralize the repo pytest addopts (--cov*/--cov-fail-under) so mutmut reads raw pytest
+# exit codes (coverage-gate failures would otherwise be misread as mutant kills).
+pytest_add_cli_args = ["-o", "addopts=", "-p", "no:cacheprovider"]
