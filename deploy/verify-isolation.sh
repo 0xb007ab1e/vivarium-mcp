@@ -90,11 +90,21 @@ UID_IN="$(probe sh -c 'id -u' || true)"
 [ "${UID_IN}" != "0" ] || fail "worker is running as root (uid 0)"
 pass "uid = ${UID_IN} (non-root)"
 
-# 4. no_new_privs set.
+# 4. no_new_privs set. runc/crun reflect it in /proc/self/status (NoNewPrivs: 1). gVisor's emulated
+#    /proc OMITS the field (empty), so under runsc verify it BEHAVIOURALLY via
+#    prctl(PR_GET_NO_NEW_PRIVS=39) — gVisor implements that prctl and it is the kernel-authoritative
+#    source (1 = set). This is a real verification, not an assumption.
 echo "[4] no-new-privileges"
 NNP="$(probe sh -c 'grep -E "^NoNewPrivs:" /proc/self/status | awk "{print \$2}"' || true)"
-[ "${NNP}" = "1" ] || fail "NoNewPrivs not set (got '${NNP}')"
-pass "NoNewPrivs = 1"
+if [ -n "${NNP}" ]; then
+  [ "${NNP}" = "1" ] || fail "NoNewPrivs not set (/proc: got '${NNP}')"
+  pass "NoNewPrivs = 1 (/proc/self/status)"
+else
+  # /proc field absent (gVisor) — ask the kernel directly via prctl.
+  NNP_PRCTL="$(probe python -c 'import ctypes; print(ctypes.CDLL(None, use_errno=True).prctl(39,0,0,0,0))' 2>/dev/null || true)"
+  [ "${NNP_PRCTL}" = "1" ] || fail "no_new_privs not enforced (/proc field absent; prctl PR_GET_NO_NEW_PRIVS returned '${NNP_PRCTL:-<none>}')"
+  pass "no_new_privs enforced (prctl PR_GET_NO_NEW_PRIVS = 1; gVisor /proc omits the field)"
+fi
 
 # 5. read-only root filesystem — a write to a non-tmpfs path MUST fail.
 echo "[5] read-only rootfs"
