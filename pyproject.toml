@@ -58,6 +58,7 @@ dev = [
   "mypy>=1.10",        # static typing in --strict mode.
   "pytest>=8.0",
   "pytest-cov>=5.0",   # coverage gate (master §4).
+  "hypothesis>=6.0",   # property-based / fuzz testing of parsers (RPC framing TB2, paths TB3 — G11).
   "bandit>=1.7",       # Python SAST.
   "pip-audit>=2.7",    # dependency CVE scan (SCA).
 ]
