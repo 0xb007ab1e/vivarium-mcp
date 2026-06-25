@@ -135,26 +135,37 @@ def _structured(result: object) -> dict[str, Any]:
     raise AssertionError("no structured content in tool result")
 
 
+def _is_envelope(d: object) -> bool:
+    """Whether a decoded value is the frozen error envelope (the ``{type,title,detail}`` triple).
+
+    A success model never carries all three keys, so the triple unambiguously marks an error.
+    """
+    return isinstance(d, dict) and {"type", "title", "detail"} <= d.keys()
+
+
 def _error_type(result: object) -> str | None:
     """Return the error-envelope ``type`` slug for a failed tool call, or None on success.
 
-    Errors surface either as ``isError`` (the envelope serialized in a text block) or as a normal
-    result whose ``structuredContent`` is the frozen ``{type,title,detail,...}`` envelope shape
-    (the server returns the envelope as data — ADR-005). A success model has no ``type`` field.
+    The server returns the frozen ``{type,title,detail,status,...}`` envelope **as data** (ADR-005):
+    in practice it arrives as a ``content`` **text block of JSON** with ``isError`` False and
+    ``structuredContent`` None — so detect the envelope from EITHER ``structuredContent`` or any
+    content text block, independent of the ``isError`` flag (which the server does not set for a
+    returned envelope). ``isError`` without a parseable envelope is still treated as an error.
     """
-    if getattr(result, "isError", False):
-        for block in getattr(result, "content", []) or []:
-            text = getattr(block, "text", None)
-            if text:
-                try:
-                    return str(json.loads(text).get("type"))
-                except (ValueError, TypeError):
-                    return "unparseable-error"
-        return "unknown-error"
     sc = getattr(result, "structuredContent", None)
-    if isinstance(sc, dict) and "type" in sc and "title" in sc and "detail" in sc:
-        return str(sc["type"])
-    return None
+    if _is_envelope(sc):
+        return str(sc["type"])  # type: ignore[index]
+    for block in getattr(result, "content", []) or []:
+        text = getattr(block, "text", None)
+        if not text:
+            continue
+        try:
+            parsed = json.loads(text)
+        except (ValueError, TypeError):
+            continue
+        if _is_envelope(parsed):
+            return str(parsed["type"])
+    return "unknown-error" if getattr(result, "isError", False) else None
 
 
 async def _create(session: Any, label: str | None = None) -> object:
