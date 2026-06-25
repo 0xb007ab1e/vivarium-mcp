@@ -54,7 +54,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends build-essential xz-utils binutils skopeo
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-          pip install pyelftools capstone   # (pin via a lock before first real run)
+          # Fixture-build toolchain (pyelftools, capstone), hash-pinned (std-supplychain).
+          # Regenerate: pip-compile --generate-hashes -o requirements-groundtruth.lock requirements-groundtruth.in
+          pip install --require-hashes -r requirements-groundtruth.lock
 
       - name: Build ground-truth fixtures (fetch + verify sha256 + build -g -no-pie + truth + strip)
         run: |

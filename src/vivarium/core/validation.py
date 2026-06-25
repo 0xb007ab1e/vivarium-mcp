@@ -248,7 +248,7 @@ def parse_address(value: str) -> int:
     # exceed ``_MAX_ADDRESS`` (0xffff_ffff_ffff_ffff), so this branch is provably unreachable via
     # the validated path; it stays as an explicit bound and is excluded from coverage as dead-by-
     # construction (topic-defensive-programming; the live guard is the digit cap, tested above).
-    if address > _MAX_ADDRESS:  # pragma: no cover
+    if address > _MAX_ADDRESS:  # pragma: no cover - dead by construction (digit cap tested)
         raise _validation_error("address is out of range")
     return address
 

@@ -72,6 +72,12 @@ sast = [
   "semgrep>=1.0",      # broader SAST rulesets (p/python, p/security-audit).
   "pip-audit>=2.7",    # dependency CVE scan (SCA).
 ]
+# NOTE: the ground-truth e2e job's two extra tools (pyelftools, capstone — used by
+# tests/fixtures/oss/extract_ground_truth.py and scripts/naming_eval.py) are pinned out-of-band in
+# `requirements-groundtruth.lock` (compiled from `requirements-groundtruth.in` with
+# `--generate-hashes`), NOT as a pyproject extra: they are a narrow fixture-build toolchain, not a
+# package dependency group, and compiling them as an extra would drag the full base tree into the
+# lock and collide with the job's own `pip install -e ".[dev]"`. See e2e-groundtruth.yml.
 
 # WORKER-RUNTIME dependency (documented, NOT a pip/PyPI dependency of this package):
 #   The out-of-process worker additionally requires **PyGhidra** (+ JPype1), which is installed in
