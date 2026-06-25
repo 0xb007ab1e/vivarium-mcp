@@ -271,3 +271,17 @@ def test_confined_resolver_rejects_outside_root(tmp_path: Path) -> None:
         resolve(str(outside))
     with pytest.raises(OSError, match="import root"):
         resolve(str(root / ".." / "secret.bin"))
+
+
+def test_confined_resolver_null_byte_fails_closed_as_oserror(tmp_path: Path) -> None:
+    """A malformed ``source_ref`` (embedded NUL) fails closed as ``OSError`` (not ``ValueError``).
+
+    Regression for the G11 property-test finding: ``Path(source_ref).resolve()`` raises
+    ``ValueError`` on an embedded null byte; the resolver now maps it to ``OSError`` so the adapter
+    fails it closed as ``VALIDATION`` rather than leaking it as ``internal-error`` (CWE-20).
+    """
+    root = tmp_path / "imports"
+    root.mkdir()
+    resolve = make_confined_resolver(str(root))
+    with pytest.raises(OSError):  # NOT ValueError
+        resolve("foo\x00bar")
