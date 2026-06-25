@@ -14,15 +14,15 @@
 # (podman can't forward runtime flags). A runsc SMOKE step runs first so a runner that cannot host
 # gVisor fails fast with a clear diagnostic rather than a confusing isolation-check error.
 #
-# GATED (PLAN §6): manual dispatch + a weekly cron (a recurring isolation game-day — a failed
-# scheduled run alerts the repo owner, mirroring scheduled-rescan.yml). Actions pinned BY DIGEST;
-# the worker image is pulled BY DIGEST from .github/worker-image.pin and cosign-verified before use.
+# GATED (PLAN §6): manual dispatch only for now. Once a dispatch on `main` proves runsc runs on the
+# stock runner, add a weekly `schedule:` cron (a recurring isolation game-day — a failed scheduled
+# run alerts the repo owner, mirroring scheduled-rescan.yml) in a follow-up; landing the cron before
+# the runsc path is proven would spam weekly failures. Actions pinned BY DIGEST; the worker image is
+# pulled BY DIGEST from .github/worker-image.pin and cosign-verified before use.
 name: gvisor-isolation
 
 on:
-  schedule:
-    - cron: "41 5 * * 2" # weekly, Tuesday 05:41 UTC (off the top-of-hour load spike)
-  workflow_dispatch: {} # manual run on demand
+  workflow_dispatch: {} # manual run on demand (cron added once the runsc path is proven on main)
 
 permissions:
   contents: read
