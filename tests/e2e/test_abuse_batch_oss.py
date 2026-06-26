@@ -109,13 +109,12 @@ async def _drive_batch_total_size() -> None:
         got = _error_type(over)
         assert got in _REJECT_SLUGS, f"an oversized batch must be rejected, got {got!r}"
 
-        # DoS bound: no composite is assembled beyond _MAX_COMPOSITE_SIZE. (The size-cap path may
-        # leave a capped partial rather than fully roll back — the CWE-460 wart B1 case 45 flagged;
-        # assert the size bound, not full rollback.)
+        # Atomicity (#182): the batch-total size is checked BEFORE any composite is opened, so a
+        # rejected oversized batch leaves NO partial — neither member exists afterward.
         for name in ("AbuseBatch87a", "AbuseBatch87b"):
-            view = await session.call_tool("get_data_type", {"session_id": sid, "name": name})
-            if _error_type(view) is None:
-                assert _structured(view)["size"] <= _MAX_COMPOSITE_SIZE
+            assert await _type_absent(session, sid, name), (
+                f"a rejected oversized batch must leave no partial type ({name})"
+            )
 
 
 def test_batch_total_size_rejected_at_worker() -> None:
@@ -197,11 +196,12 @@ async def _drive_batch_partial_rollback() -> None:
         ]
         res = await _define_types(session, sid, batch)
         got = _error_type(res)
-        # The batch path surfaces a member failure as the generic batch-failure slug
-        # (analysis-failed), not the single-define not-found (cf. B1 case 48). The real control is
-        # the whole-batch ATOMICITY asserted below, not this slug.
-        assert got == _ANALYSIS_FAILED, (
-            f"an unresolvable batch member must fail the whole batch, got {got!r}"
+        # #182: the batch pre-validates every non-in-batch member ref BEFORE the txn, so an
+        # unresolvable ref surfaces the precise documented slug (not-found, matching single-define
+        # case 48) — not the analysis-failed the in-txn check masked. The real control is the
+        # whole-batch ATOMICITY asserted below.
+        assert got == _NOT_FOUND, (
+            f"an unresolvable batch member must fail the whole batch {_NOT_FOUND}, got {got!r}"
         )
 
         # Atomicity — the WHOLE batch rolled back: NEITHER the good nor the bad type exists.
@@ -221,15 +221,11 @@ async def _drive_batch_partial_rollback() -> None:
         assert ok["types"][0]["name"] is not None  # a created type is reported back
 
 
-@pytest.mark.xfail(
-    reason=(
-        "KNOWN BUG #182: define_types batch is NOT atomic — a failed batch leaves its valid member "
-        "committed, violating the documented ADR-021 §D2 whole-batch rollback (CWE-460; same class "
-        "as the B1 oversized-define partial). The assertions below encode the CORRECT (atomic) "
-        "behavior; flip to strict (remove this marker) once #182 is fixed and the test xpasses."
-    ),
-    strict=False,
-)
 def test_batch_partial_failure_rolls_back_whole_batch() -> None:
-    """Case 90: any member failure rolls back the whole batch — no member persists (atomicity)."""
+    """Case 90: any member failure rolls back the whole batch — no member persists (atomicity).
+
+    Was ``xfail`` for #182 (a failed batch left its valid member committed — the explicit
+    ``_remove_registered_composites`` rollback in ``_gh_define_types`` now honors the ADR-021 §D2
+    all-or-nothing guarantee). Strict since #182 was fixed.
+    """
     asyncio.run(_drive_batch_partial_rollback())
