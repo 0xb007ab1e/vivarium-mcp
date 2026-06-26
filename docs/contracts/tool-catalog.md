@@ -1,8 +1,11 @@
-# Contract: Tier-1 Read-Only Tool Catalog (FROZEN — WS0)
+# Contract: Tier-1 Tool Catalog (FROZEN — WS0)
 
 > Pydantic source of truth: [`src/vivarium/tools/schemas.py`](../../src/vivarium/tools/schemas.py).
 > Allow-list registry: [`src/vivarium/tools/registry.py`](../../src/vivarium/tools/registry.py).
-> **Read-only in v1** — no mutation tools, no `runScript`, no dynamic tool surface (PLAN §2).
+> **Read-by-default.** Most tools are read-only; the **14 mutation/write tools** below are
+> **default-deny**, gated by per-session write-consent (`session_enable_writes`) — structural writes
+> additionally by `allow_structural`. **`runScript`/arbitrary script execution is permanently out of
+> scope** (PLAN §2), and the tool surface is a **fixed allow-list** (no dynamic registration).
 
 ## Conventions (apply to every tool)
 
@@ -241,11 +244,11 @@ identifier allow-list / `validate_comment_text` normalization — stored-injecti
 
 > `*` marks an `Untrusted[...]`-wrapped (binary-derived) field.
 
-## Deferred (NOT yet built — gated, reviewed catalog additions)
-**Nested-define / multi-type batches** (defining several interdependent composites in one call — which
-would require a real by-value cycle detector, ADR-015 §3) and `runScript`/arbitrary script execution
-remain deferred, each a separate, separately-threat-modeled increment (`runScript` is permanently out
-of scope, PLAN §2). Adding any deferred tool is a reviewed, gated change to this allow-list (ADR-006
-extensibility seam). The full structural mutation arc — Phase A renames, Phase B signature/type-apply,
-Phase C composite *creation* (`define_struct`/`define_union`) — has shipped; see the Mutation section
-above.
+## Out of scope / deferred
+**`runScript` / arbitrary script execution is permanently out of scope** (PLAN §2) — it is the one
+capability deliberately excluded by design, not a pending increment. The full structural mutation arc
+has **shipped**: Phase A renames (ADR-013), Phase B signature/type-apply (ADR-014), Phase C composite
+*creation* (`define_struct`/`define_union`, ADR-015), the multi-type interdependent batch
+(`define_types` with its by-value cycle detector, ADR-021), and `delete_type` (ADR-031) — all in the
+Mutation section above. Adding any *new* tool is a reviewed, gated change to this fixed allow-list
+(ADR-006 extensibility seam).

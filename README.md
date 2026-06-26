@@ -85,10 +85,16 @@ The full design rationale is in the decision records under [`docs/adr/`](./docs/
 ## Documentation
 
 - [`docs/getting-started.md`](./docs/getting-started.md): set up and run Vivarium from scratch.
+- [`docs/faq.md`](./docs/faq.md): quick answers — what it is, is it safe on malware, read-only vs.
+  write, persistence, accuracy, limits.
 - [`docs/architecture.md`](./docs/architecture.md): how the pieces fit together.
 - [`docs/contracts/`](./docs/contracts/): the tool catalog, RPC protocol, and data envelopes.
-- [`docs/examples/`](./docs/examples/): worked examples, including a [blind analysis of a stripped
-  SQLite binary](./docs/examples/blind-analysis-sqlite.md) compared against the original source.
+- [`docs/examples/`](./docs/examples/README.md): tiered, hands-on RE workflows showing the actual tool
+  calls — [first look](./docs/examples/simple-first-look.md) (simple),
+  [triage an unknown ELF](./docs/examples/medium-triage.md) (medium),
+  [recover & document a cluster](./docs/examples/large-annotate-and-recover.md) (large) — plus a
+  [blind analysis of a stripped SQLite binary](./docs/examples/blind-analysis-sqlite.md) checked against
+  the original source.
 - [`docs/runbooks/`](./docs/runbooks/): operational procedures (deploy, rollback, incident response, and
   more), including [HTTP exposure](./docs/runbooks/http-exposure.md).
 - [`docs/adr/`](./docs/adr/): the numbered design decisions (ADR-001 through ADR-043).
