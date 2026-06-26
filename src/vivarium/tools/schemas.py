@@ -114,7 +114,7 @@ class SessionInfo(_Out):
         writes_enabled: Whether this session holds write consent (annotation mutation permitted —
             ADR-012 §3). Default-deny: ``False`` until ``session_enable_writes`` is called. Server-
             authoritative, safe.
-        allow_structural: Whether the (deferred) structural write set is additionally permitted on
+        allow_structural: Whether the structural write set is additionally permitted on
             this session — server-authoritative, safe. Defaults to ``False``.
     """
 
@@ -1392,7 +1392,7 @@ class SessionEnableWritesIn(_SessionScopedIn):
     (``session_disable_writes`` / implicit on evict), per-session, and non-transferable.
 
     Attributes:
-        allow_structural: Forward hook to additionally opt into the (deferred) structural write set
+        allow_structural: Forward hook to additionally opt into the structural write set
             (locals/signatures/types). Defaults to ``False``; the annotation set does not require
             it. Defined now so the consent shape is forward-compatible (ADR-012 §3).
     """
@@ -1406,7 +1406,7 @@ class SessionWriteStateOut(_Out):
     Attributes:
         session_id: The session's opaque id — safe.
         writes_enabled: Whether annotation writes are permitted on this session — safe.
-        allow_structural: Whether the (deferred) structural write set is additionally permitted —
+        allow_structural: Whether the structural write set is additionally permitted —
             safe.
     """
 
