@@ -17,7 +17,8 @@
 # GATED (PLAN §6): manual dispatch + a weekly schedule. The runsc-on-stock-runner path was proven
 # green (the full ADR-004 drill passed under gVisor), so a weekly cron now runs it as a recurring
 # isolation game-day — a failed scheduled run alerts the repo owner (mirroring scheduled-rescan.yml).
-# Actions pinned BY DIGEST; the worker image is pulled BY DIGEST from .github/worker-image.pin and
+# Actions pinned BY DIGEST; runsc is pinned to a specific gVisor release + hard-coded sha512 (not
+# `release/latest`); the worker image is pulled BY DIGEST from .github/worker-image.pin and
 # cosign-verified before use.
 name: gvisor-isolation
 
@@ -46,14 +47,25 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # actions/checkout@v6.0.3
 
       - name: Install gVisor (runsc) + a rootless-podman runtime wrapper
+        env:
+          # Pinned gVisor release + the EXPECTED sha512 of each binary (x86_64). We verify against
+          # these HARD-CODED digests, NOT the co-fetched `.sha512` files — a compromised/rolled
+          # bucket would ship a matching checksum, so a self-referential check is no supply-chain
+          # pin. To bump: pick a new release date, `curl … | sha512sum` both binaries, update here.
+          GVISOR_RELEASE: "20260622" # release-20260622.0 (validated green on this gate)
+          RUNSC_SHA512: "6df95d09363dbd9ee5d5c889c1549b457e1783b039ff60a8f9f16f8c94c774a2ca2eef5b1c370e36b863f6b0407b53ba3c69051c6ef051253843dabf89a6de4e"
+          SHIM_SHA512: "87c63197836574b7a2c057d2c0647d2badb679187f0b9175ecf78ac52207cdaa3f101629d3e5d165c95930ca35fe81bc26bb90fcf08e09b99c2ee047b6235ce2"
         run: |
           set -euo pipefail
-          # Pinned release channel; runsc verifies its own download via the published sha512.
           ARCH="$(uname -m)"
-          URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
-          wget -q "${URL}/runsc" "${URL}/runsc.sha512" \
-                  "${URL}/containerd-shim-runsc-v1" "${URL}/containerd-shim-runsc-v1.sha512"
-          sha512sum -c runsc.sha512 containerd-shim-runsc-v1.sha512
+          # The hard-coded digests above are x86_64-only (the sole arch this gate runs on) — fail
+          # closed on any other runner arch rather than skip verification.
+          [ "${ARCH}" = "x86_64" ] || { echo "::error::pinned runsc digests are x86_64-only, got ${ARCH}"; exit 1; }
+          URL="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE}/${ARCH}"
+          wget -q "${URL}/runsc" "${URL}/containerd-shim-runsc-v1"
+          # Verify against our pinned digests (authored from the published release, not re-fetched).
+          printf '%s  runsc\n%s  containerd-shim-runsc-v1\n' "${RUNSC_SHA512}" "${SHIM_SHA512}" \
+            | sha512sum -c -
           chmod a+rx runsc containerd-shim-runsc-v1
           sudo mv runsc containerd-shim-runsc-v1 /usr/local/bin/
           runsc --version
