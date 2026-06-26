@@ -142,7 +142,7 @@ class _Session:
         worker_started: Whether a worker was spawned (so eviction only kills a real worker).
         writes_enabled: Whether write consent was granted for this session (default-deny —
             ADR-012 §3). Mutation tools fail closed unless this is ``True``.
-        allow_structural: Whether the (deferred) structural write set is additionally permitted.
+        allow_structural: Whether the structural write set is additionally permitted.
             Only meaningful while ``writes_enabled`` is ``True``; reset on revoke.
     """
 
@@ -447,7 +447,7 @@ class SessionManager:
 
         Args:
             session_id: The opaque session id.
-            allow_structural: Additionally opt into the (deferred) structural write set.
+            allow_structural: Additionally opt into the structural write set.
             caller: The authenticated, server-derived calling-principal id.
 
         Returns:
@@ -521,7 +521,7 @@ class SessionManager:
 
         Args:
             session_id: The opaque session id.
-            structural: When ``True``, also require the (deferred) structural-write opt-in.
+            structural: When ``True``, also require the structural-write opt-in.
             caller: The authenticated, server-derived calling-principal id (ADR-017). A foreign
                 caller is rejected at the owner check before any consent state is consulted (a write
                 on another principal's session is BOLA-safe ``SESSION_INVALID``, no oracle).
