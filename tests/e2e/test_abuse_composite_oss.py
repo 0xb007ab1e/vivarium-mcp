@@ -189,10 +189,10 @@ async def _drive_oversized_total_size() -> None:
         assert got == _LIMIT_EXCEEDED, (
             f"an oversized composite must be rejected {_LIMIT_EXCEEDED}, got {got!r}"
         )
-        # All-or-nothing (#182 fixed): the rejected define leaves NO type — not even the size-capped
-        # partial the worker assembled before the cap tripped (the explicit
-        # _remove_registered_composites rollback in _gh_define_struct removes the pre-registered
-        # struct). The DoS bound also held (never assembled beyond _MAX_COMPOSITE_SIZE).
+        # All-or-nothing (#182 fixed): the rejected define leaves NO type. _gh_define_struct
+        # size-checks the pre-resolved members BEFORE the txn (_reject_oversized_resolved), so the
+        # struct is never opened (validate-before-mutate — a committed type can't be rolled back
+        # in-program). The DoS bound also held (never assembled beyond _MAX_COMPOSITE_SIZE).
         view = await session.call_tool("get_data_type", {"session_id": sid, "name": "AbuseHuge45"})
         assert _error_type(view) == _NOT_FOUND, (
             "the rejected oversized define must leave NO partial/orphan type (ADR-021 §D2 rollback)"

@@ -2514,11 +2514,13 @@ class PyGhidraBackend:
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Create a new struct from a resolved field list inside one transaction (ADR-015 §3).
 
-        Mirrors the ADR-015 ratified recursion model: name-collision REJECT (read-only lookup before
-        the txn), then INSIDE the one transaction — pre-register the empty ``StructureDataType``
-        (so a self-``named`` pointer resolves), resolve + add each member (size-checked against
-        ``_MAX_COMPOSITE_SIZE``), and let ``_in_transaction`` finalize/roll back. Any failure rolls
-        back and removes the pre-registered type (no partial/orphan type). NO C string is parsed.
+        Mirrors the ADR-015 ratified recursion model: name-collision REJECT + member resolution +
+        the size cap all happen read-only BEFORE the txn (``_reject_oversized_resolved``), so a
+        rejectable input fails-closed before the type is opened — the **all-or-nothing** guarantee
+        is by construction, since in this program a failed write does NOT roll back ``addDataType``
+        (#182; the in-txn size check is only a backstop for the self-pointer-size edge). Then INSIDE
+        the one transaction: pre-register the empty ``StructureDataType`` (so a self-``named``
+        pointer resolves) + add each member. NO C string is parsed.
 
         Args:
             name: The new struct's name (server-validated identifier).
@@ -2582,10 +2584,12 @@ class PyGhidraBackend:
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Create a new union from a resolved field list inside one transaction (ADR-015 §3).
 
-        Same ratified model as :meth:`_gh_define_struct` (name-collision REJECT, pre-register empty
-        ``UnionDataType`` inside the one txn so a self-``named`` pointer resolves, resolve + add
-        each member size-checked, finalize/roll back). A union overlays all members at offset 0
-        (``offset`` is ignored). NO C string is parsed.
+        Same ratified model as :meth:`_gh_define_struct`: name-collision REJECT + member resolution
+        + size cap all read-only BEFORE the txn (fail-closed before the type is opened — the
+        all-or-nothing guarantee is by construction, #182), then pre-register the empty
+        ``UnionDataType`` inside the one txn (so a self-``named`` pointer resolves) + add each
+        member. A union overlays all members at offset 0 (``offset`` is ignored). NO C string is
+        parsed.
 
         Args:
             name: The new union's name (server-validated identifier).
@@ -2701,13 +2705,14 @@ class PyGhidraBackend:
         """Create a BATCH of interdependent composites in ONE transaction (ADR-021).
 
         Generalizes :meth:`_gh_define_struct` / :meth:`_gh_define_union` from one composite to a
-        batch: name-collision REJECT for EACH batch name vs the existing program (read-only, before
-        the txn), then INSIDE the one transaction — pre-register EVERY empty composite (struct/union
-        per ``kind``) so an in-batch ``named`` ref (pointer OR by-value) resolves, resolve + add
-        each type's members against the pre-registered handles + existing/base types (batch-total
-        size-checked against ``_MAX_COMPOSITE_SIZE``), and let ``_in_transaction`` finalize/roll
-        back. ANY failure rolls back the WHOLE batch (no partial/orphan type — ``_in_transaction``
-        does ``endTransaction(False)`` on exception). The server has already rejected by-value
+        batch. BEFORE the txn (read-only, fail-closed — the all-or-nothing guarantee by
+        construction, #182): name-collision REJECT for EACH batch name, then resolve every
+        non-in-batch member ref (an unknown ref → ``not-found``) and cap the batch-total size
+        (``limit-exceeded``) — so a rejectable batch fails before any composite is opened (in this
+        program a failed write does NOT roll back ``addDataType``). Then INSIDE the one transaction:
+        pre-register EVERY empty composite (struct/union per ``kind``) so an in-batch ``named`` ref
+        resolves, and add each type's members against the pre-registered handles + existing/base
+        types (the in-txn checks remain as backstops). The server has already rejected by-value
         cycles at the boundary (the cycle detector). NO C string is parsed.
 
         Args:

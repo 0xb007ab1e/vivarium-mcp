@@ -996,18 +996,22 @@ def test_phase_c_write_path_does_not_import_jvm_or_pyghidra() -> None:
 # --- Case 54 — commit-time atomicity (TB7-T / CWE-460) -------------------------------------
 @pytest.mark.integration
 @pytest.mark.skip(
-    reason="Case 54 (commit-time rollback) is NOT client-triggerable: forcing the worker's "
-    "addDataType/commit to RAISE needs a fault-injection hook the MCP client cannot drive. The "
-    "_in_transaction rollback invariant (CWE-460) is unit-proven (three-branch) in "
-    "test_structural_mutation, and the mid-assembly rollback is observed LIVE (no orphan type "
-    "after a failed define) by the case 45/48 e2e tests in test_abuse_composite_oss.py. Kept as a "
-    "documented gap rather than a fabricated live assertion."
+    reason="Case 54 (commit-time atomicity) is NOT client-triggerable: forcing the worker's "
+    "addDataType/commit to RAISE *after* a composite is pre-registered needs a fault-injection "
+    "hook the MCP client cannot drive. The reachable #182 cases (oversize 45/87, unresolvable "
+    "member 48/90) are now rejected BEFORE the txn (validate-before-mutate — no partial is ever "
+    "opened), proven LIVE by the case 45/48/87/90 e2e tests in test_abuse_*_oss.py. This residual "
+    "in-txn-raise window cannot be rolled back in-program (#182: a committed DataTypeManager "
+    "change is not undoable) but is unreachable via client input; kept as a documented gap, not a "
+    "fabricated live assertion."
 )
 def test_define_struct_commit_failure_rolls_back() -> None:
-    """Case 54 (live): a ``define_struct`` whose ``addDataType`` OR its commit raises rolls back
-    (removing the pre-registered empty type) and surfaces ``analysis-failed`` — no dangling
-    transaction, no half-created type (the reused ``_in_transaction``, CWE-460). See the skip
-    reason: not client-triggerable; covered by the unit proof + the live case 45/48 rollback."""
+    """Case 54: an in-txn raise AFTER ``addDataType`` (a fault-injected ``addDataType``/commit
+    failure) is the one structural-write path that cannot be made atomic in-program — #182 proved
+    a committed ``DataTypeManager`` change is not roll-back-able (neither ``endTransaction(False)``
+    nor ``remove`` undoes it). It is NOT client-triggerable (offsets/names/cycles/sizes are all
+    server-validated or rejected pre-txn), so no client input reaches it. The reachable cases are
+    closed by validate-before-mutate (cases 45/48/87/90). See the skip reason."""
 
 
 # ==============================================================================================

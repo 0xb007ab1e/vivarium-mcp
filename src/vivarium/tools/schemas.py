@@ -1716,10 +1716,11 @@ class DefineStructIn(_SessionScopedIn):
     """Arguments for ``define_struct`` — create a NEW struct from a field list (ADR-015 §2.2).
 
     Gated by ``session_enable_writes{allow_structural: true}`` + ``require_write_consent(
-    structural=True)``. The empty struct is pre-registered in the ``DataTypeManager`` at the start
-    of the one transaction, fields are resolved + added (size-checked), then the type is finalized —
-    ANY failure rolls back and removes the pre-registered type (no partial/orphan — ADR-015 §3). A
-    name collision is a fail-closed REJECT (no silent replace — §6). NO free-form C is parsed.
+    structural=True)``. Members are resolved and the total size is capped read-only BEFORE the
+    transaction, so any rejectable input fails-closed before the type is opened — the all-or-nothing
+    guarantee is by construction (no partial/orphan — ADR-015 §3 / #182; the worker cannot roll back
+    a committed ``DataTypeManager`` change in-program). A name collision is a fail-closed REJECT (no
+    silent replace — §6). NO free-form C is parsed.
 
     Attributes:
         name: The new type's name — validated as a persisted write-name; collision-checked at the

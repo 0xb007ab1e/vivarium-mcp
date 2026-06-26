@@ -224,8 +224,9 @@ async def _drive_batch_partial_rollback() -> None:
 def test_batch_partial_failure_rolls_back_whole_batch() -> None:
     """Case 90: any member failure rolls back the whole batch — no member persists (atomicity).
 
-    Was ``xfail`` for #182 (a failed batch left its valid member committed — the explicit
-    ``_remove_registered_composites`` rollback in ``_gh_define_types`` now honors the ADR-021 §D2
-    all-or-nothing guarantee). Strict since #182 was fixed.
+    Was ``xfail`` for #182 (a failed batch left its valid member committed). ``_gh_define_types``
+    now resolves every non-in-batch member ref BEFORE the txn, so an unresolvable ref fails-closed
+    (``not-found``) before any composite is pre-registered — honoring the ADR-021 §D2 all-or-nothing
+    guarantee by construction. Strict since #182 was fixed.
     """
     asyncio.run(_drive_batch_partial_rollback())

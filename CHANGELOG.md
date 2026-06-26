@@ -6,6 +6,15 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **Structural writes are now atomic (#182, CWE-460/ADR-021 §D2).** A failed `define_struct` /
+  `define_union` / `define_types` no longer leaves a partial/orphan composite committed: members
+  are resolved and the size cap is enforced read-only **before** the transaction (validate-before-
+  mutate — a committed `DataTypeManager` change cannot be rolled back in-program). As a result the
+  error slugs now match the documented contract: an oversized composite → `limit-exceeded` and an
+  unresolvable member ref → `not-found` (previously masked as `analysis-failed`). Worker image
+  rebuilt + re-pinned to ship the fix.
+
 ## [0.12.0] — 2026-06-24
 
 ELF library identification lands. `identify_functions` — Windows/MSVC-only in v0.11.0 — now returns
