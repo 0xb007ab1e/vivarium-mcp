@@ -6,4 +6,4 @@
 # Do not hand-edit casually: changing this changes what CI trusts (a supply-chain decision).
 #
 # Format: a single `sha256:<64 hex>` token (comments/blank lines ignored).
-sha256:34d4a96e7c24584858b3c6fde7d60fb279e59b2d2ff82d5641d39e63aab61585
+sha256:61c42ad7202a3e919694de90a904074ab917591fcc65bc05e67f566a458b3ff5
