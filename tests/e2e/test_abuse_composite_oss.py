@@ -17,9 +17,10 @@ consent-gated write path (``session_enable_writes{allow_structural: true}`` → 
 
 Case 54 (commit-time rollback) is intentionally NOT live here — forcing the worker's
 ``addDataType``/commit to *raise* needs a fault-injection hook the client cannot drive; its rollback
-invariant is proven at the unit level (``_in_transaction`` in ``test_structural_mutation``) and
-observed live as the mid-assembly rollback of cases 45/48 (no orphan after a failed define). See
-its kept skip-stub in ``tests/security/test_abuse_cases.py``.
+invariant is proven at the unit level (``_in_transaction`` in ``test_structural_mutation``) and the
+"no orphan after a failed define" guarantee is observed live as the **fail-before-mutate** rejection
+of cases 45/48 (#182: both reject pre-txn — size and unknown-ref — so no partial type is ever
+opened). See its kept skip-stub in ``tests/security/test_abuse_cases.py``.
 
 GATING + NO REAL MALWARE: identical to ``test_abuse_containment_oss.py`` — the benign OSS
 ``.stripped`` fixture is a *valid* program; these exercise the write path on it (master §5).
@@ -54,6 +55,7 @@ pytestmark = [
 #: Error-envelope ``type`` slugs (mirror ``core.errors.ErrorType``).
 _NOT_FOUND = "not-found"
 _ANALYSIS_FAILED = "analysis-failed"
+_LIMIT_EXCEEDED = "limit-exceeded"  # size/DoS cap rejection (ADR-021 §Bounds)
 _FORBIDDEN = "forbidden"  # consent gate denies an owned-but-unconsented write (ADR-036)
 
 
@@ -182,21 +184,19 @@ async def _drive_oversized_total_size() -> None:
         fields = [_field(f"f{i}", base="char", array_len=65536) for i in range(256)]
         over = await _define_struct(session, sid, "AbuseHuge45", fields)
         got = _error_type(over)
-        # The worker enforces _MAX_COMPOSITE_SIZE post-resolve and maps the rejection to the generic
-        # worker-failure slug (analysis-failed), not a distinct limit-exceeded.
-        assert got == _ANALYSIS_FAILED, (
-            f"an oversized composite must be rejected at the worker, got {got!r}"
+        # The worker size-checks the resolved members BEFORE the txn (#182) and surfaces the
+        # precise documented slug (limit-exceeded) — not the analysis-failed the in-txn masked.
+        assert got == _LIMIT_EXCEEDED, (
+            f"an oversized composite must be rejected {_LIMIT_EXCEEDED}, got {got!r}"
         )
-        # The DoS bound held: the 16 MiB request is rejected and the worker NEVER assembles a
-        # composite beyond _MAX_COMPOSITE_SIZE. NOTE: the worker leaves a partial capped at exactly
-        # 1 MiB rather than fully rolling back the failed define — a CWE-460 atomicity wart tracked
-        # as a follow-up (the define still fails-closed; the type is ephemeral, evict-wiped).
-        # Assert the actual security property (size-bounded), not full rollback.
+        # All-or-nothing (#182 fixed): the rejected define leaves NO type. _gh_define_struct
+        # size-checks the pre-resolved members BEFORE the txn (_reject_oversized_resolved), so the
+        # struct is never opened (validate-before-mutate — a committed type can't be rolled back
+        # in-program). The DoS bound also held (never assembled beyond _MAX_COMPOSITE_SIZE).
         view = await session.call_tool("get_data_type", {"session_id": sid, "name": "AbuseHuge45"})
-        if _error_type(view) is None:  # a capped partial was left behind
-            assert _structured(view)["size"] <= 1_048_576, (
-                "the worker must never assemble a composite beyond _MAX_COMPOSITE_SIZE"
-            )
+        assert _error_type(view) == _NOT_FOUND, (
+            "the rejected oversized define must leave NO partial/orphan type (ADR-021 §D2 rollback)"
+        )
 
 
 def test_oversized_total_size_rejected_at_worker() -> None:

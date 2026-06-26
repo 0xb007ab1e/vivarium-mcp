@@ -2514,11 +2514,13 @@ class PyGhidraBackend:
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Create a new struct from a resolved field list inside one transaction (ADR-015 §3).
 
-        Mirrors the ADR-015 ratified recursion model: name-collision REJECT (read-only lookup before
-        the txn), then INSIDE the one transaction — pre-register the empty ``StructureDataType``
-        (so a self-``named`` pointer resolves), resolve + add each member (size-checked against
-        ``_MAX_COMPOSITE_SIZE``), and let ``_in_transaction`` finalize/roll back. Any failure rolls
-        back and removes the pre-registered type (no partial/orphan type). NO C string is parsed.
+        Mirrors the ADR-015 ratified recursion model: name-collision REJECT + member resolution +
+        the size cap all happen read-only BEFORE the txn (``_reject_oversized_resolved``), so a
+        rejectable input fails-closed before the type is opened — the **all-or-nothing** guarantee
+        is by construction, since in this program a failed write does NOT roll back ``addDataType``
+        (#182; the in-txn size check is only a backstop for the self-pointer-size edge). Then INSIDE
+        the one transaction: pre-register the empty ``StructureDataType`` (so a self-``named``
+        pointer resolves) + add each member. NO C string is parsed.
 
         Args:
             name: The new struct's name (server-validated identifier).
@@ -2542,6 +2544,9 @@ class PyGhidraBackend:
         # Resolve every member type BEFORE the txn (read-only fail-closed — no partial type opened),
         # EXCEPT a self-``named`` pointer, which can only resolve against the pre-registered type.
         resolved = self._resolve_composite_fields(name, fields)
+        # Size-check pre-txn too (#182): a failed write does NOT roll back addDataType in this
+        # program, so reject an oversized define BEFORE opening the type — never leave a partial.
+        self._reject_oversized_resolved(resolved)
 
         result_holder: dict[str, Any] = {}
 
@@ -2556,7 +2561,7 @@ class PyGhidraBackend:
                 length = int(dt.getLength())
                 total += max(length, 0)
                 if total > _MAX_COMPOSITE_SIZE:
-                    self._raise_composite_too_large()
+                    self._raise_composite_too_large()  # backstop (self-pointer edge — see pre-txn)
                 offset = field.get("offset")
                 if offset is None:
                     registered.add(dt, length, str(field["name"]), None)
@@ -2579,10 +2584,12 @@ class PyGhidraBackend:
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Create a new union from a resolved field list inside one transaction (ADR-015 §3).
 
-        Same ratified model as :meth:`_gh_define_struct` (name-collision REJECT, pre-register empty
-        ``UnionDataType`` inside the one txn so a self-``named`` pointer resolves, resolve + add
-        each member size-checked, finalize/roll back). A union overlays all members at offset 0
-        (``offset`` is ignored). NO C string is parsed.
+        Same ratified model as :meth:`_gh_define_struct`: name-collision REJECT + member resolution
+        + size cap all read-only BEFORE the txn (fail-closed before the type is opened — the
+        all-or-nothing guarantee is by construction, #182), then pre-register the empty
+        ``UnionDataType`` inside the one txn (so a self-``named`` pointer resolves) + add each
+        member. A union overlays all members at offset 0 (``offset`` is ignored). NO C string is
+        parsed.
 
         Args:
             name: The new union's name (server-validated identifier).
@@ -2602,6 +2609,9 @@ class PyGhidraBackend:
         manager = program.getDataTypeManager()
         self._reject_type_collision(manager, name)
         resolved = self._resolve_composite_fields(name, fields)
+        # Size-check pre-txn (#182): reject an oversized union before opening it — abort does not
+        # roll back addDataType in this program, so the partial must never be created.
+        self._reject_oversized_resolved(resolved)
 
         result_holder: dict[str, Any] = {}
 
@@ -2615,7 +2625,7 @@ class PyGhidraBackend:
                 # SUM too so a flood of large members is rejected (ADR-015 §3 backstop).
                 total += max(length, 0)
                 if total > _MAX_COMPOSITE_SIZE:
-                    self._raise_composite_too_large()
+                    self._raise_composite_too_large()  # backstop (self-pointer edge — see pre-txn)
                 registered.add(dt, length, str(field["name"]), None)
             result_holder["size"] = int(registered.getLength())
             result_holder["field_count"] = int(registered.getNumComponents())
@@ -2695,13 +2705,14 @@ class PyGhidraBackend:
         """Create a BATCH of interdependent composites in ONE transaction (ADR-021).
 
         Generalizes :meth:`_gh_define_struct` / :meth:`_gh_define_union` from one composite to a
-        batch: name-collision REJECT for EACH batch name vs the existing program (read-only, before
-        the txn), then INSIDE the one transaction — pre-register EVERY empty composite (struct/union
-        per ``kind``) so an in-batch ``named`` ref (pointer OR by-value) resolves, resolve + add
-        each type's members against the pre-registered handles + existing/base types (batch-total
-        size-checked against ``_MAX_COMPOSITE_SIZE``), and let ``_in_transaction`` finalize/roll
-        back. ANY failure rolls back the WHOLE batch (no partial/orphan type — ``_in_transaction``
-        does ``endTransaction(False)`` on exception). The server has already rejected by-value
+        batch. BEFORE the txn (read-only, fail-closed — the all-or-nothing guarantee by
+        construction, #182): name-collision REJECT for EACH batch name, then resolve every
+        non-in-batch member ref (an unknown ref → ``not-found``) and cap the batch-total size
+        (``limit-exceeded``) — so a rejectable batch fails before any composite is opened (in this
+        program a failed write does NOT roll back ``addDataType``). Then INSIDE the one transaction:
+        pre-register EVERY empty composite (struct/union per ``kind``) so an in-batch ``named`` ref
+        resolves, and add each type's members against the pre-registered handles + existing/base
+        types (the in-txn checks remain as backstops). The server has already rejected by-value
         cycles at the boundary (the cycle detector). NO C string is parsed.
 
         Args:
@@ -2728,6 +2739,23 @@ class PyGhidraBackend:
         batch_names = {str(_require(spec, "name")) for spec in types}
         for name in batch_names:
             self._reject_type_collision(manager, name)  # read-only, before the txn (no partial)
+
+        # Pre-validate every member ref BEFORE the txn (#182): in this program a failed batch does
+        # NOT roll back its pre-registered composites (abort/remove are ineffective on the DTM), so
+        # any rejectable input must fail BEFORE the first addDataType. In-batch ``named`` refs
+        # resolve against pre-registered handles inside the txn; every OTHER ref must resolve
+        # against an existing/base type NOW (an unknown ref → ``not-found``, matching the doc), and
+        # the batch-total size over the resolvable members is capped here (``limit-exceeded``).
+        # The in-txn checks remain as backstops for in-batch pointer sizes.
+        pre_total = 0
+        for spec in types:
+            for field in _require(spec, "fields"):
+                ref = _require(field, "type")
+                if ref.get("named") in batch_names:
+                    continue  # in-batch ref — resolved in _write against a pre-registered handle
+                pre_total += max(int(self._gh_resolve_type_ref(ref).getLength()), 0)
+                if pre_total > _MAX_COMPOSITE_SIZE:
+                    self._raise_composite_too_large()
 
         result_holder: dict[str, list[dict[str, Any]]] = {"types": []}
 
@@ -3106,6 +3134,35 @@ class PyGhidraBackend:
             with contextlib.suppress(Exception):
                 program.endTransaction(txn, False)  # best-effort rollback; cleanup must not throw
             raise WorkerError(CODE_ANALYSIS_FAILED, "write failed and was rolled back") from exc
+
+    def _reject_oversized_resolved(
+        self, resolved: dict[int, Any]
+    ) -> None:  # pragma: no cover - JVM
+        """Pre-txn batch-total size cap over PRE-RESOLVED members (#182 / ADR-021 §D2).
+
+        Validating the size BEFORE the transaction is the all-or-nothing fix: in this program a
+        failed structural write does **not** roll back its ``DataTypeManager.addDataType`` calls
+        (neither ``endTransaction(commit=False)`` nor a follow-up ``remove`` undoes them — observed
+        live, issue #182), so the only robust guarantee is to never open the partial. The members
+        are already resolved read-only by :meth:`_resolve_composite_fields` before the txn, so
+        their lengths are known here. Raises the precise ``limit-exceeded`` (matching the handler
+        docstrings — the in-txn check had masked it as ``analysis-failed``).
+
+        Self-``named`` pointer members (deferred, not in ``resolved``) add only a pointer each and
+        are intentionally NOT summed here — undercounting is conservative (never falsely rejects a
+        valid type); the in-txn check remains the backstop for that pathological self-pointer edge.
+
+        Args:
+            resolved: index → resolved ``DataType`` for the non-self members (pre-txn).
+
+        Raises:
+            WorkerError: ``limit-exceeded`` if the running member-size sum exceeds the cap.
+        """
+        total = 0
+        for data_type in resolved.values():
+            total += max(int(data_type.getLength()), 0)
+            if total > _MAX_COMPOSITE_SIZE:
+                self._raise_composite_too_large()
 
     def _require_program(self) -> Any:  # pragma: no cover - JVM edge
         """Return the open program or raise a safe ``analysis-failed`` error.
