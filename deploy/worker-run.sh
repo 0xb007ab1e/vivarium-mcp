@@ -47,6 +47,13 @@ CONTAINER_NAME="vivarium-worker-${SESSION_ID}"
 
 # Stricter seccomp profile is OPT-IN after validation (infra/seccomp/README.md); default RuntimeDefault.
 SECCOMP_PROFILE="${VIVARIUM_WORKER_SECCOMP:-RuntimeDefault}"
+# "RuntimeDefault" = the engine's built-in seccomp profile, applied by OMITTING the flag. Passing
+# the literal string makes podman/runsc try to open a profile FILE named "RuntimeDefault" and fail
+# — the same gotcha ContainerWorkerLauncher avoids. Only pass --security-opt for a real profile.
+SECCOMP_OPT=()
+if [ "${SECCOMP_PROFILE}" != "RuntimeDefault" ]; then
+  SECCOMP_OPT=(--security-opt "seccomp=${SECCOMP_PROFILE}")
+fi
 
 # -----------------------------------------------------------------------------
 # The hardened run command (ADR-004). Each flag annotated with the control it realizes.
@@ -67,8 +74,9 @@ exec podman run \
   --cap-drop ALL \
   `# --- no privilege escalation via setuid binaries etc. ---` \
   --security-opt no-new-privileges \
-  `# --- seccomp RuntimeDefault (verified to load by deploy/verify-isolation.sh) ---` \
-  --security-opt "seccomp=${SECCOMP_PROFILE}" \
+  `# --- seccomp RuntimeDefault: applied by OMITTING the flag (see SECCOMP_OPT above); a real ---` \
+  `# --- profile is passed as --security-opt. Verified to load by deploy/verify-isolation.sh. ---` \
+  "${SECCOMP_OPT[@]}" \
   `# --- read-only root filesystem: the entire image FS is immutable at runtime ---` \
   --read-only \
   `# --- writable scratch ONLY via tmpfs (noexec,nosuid,nodev). mode=1777: a fresh tmpfs is ---` \
