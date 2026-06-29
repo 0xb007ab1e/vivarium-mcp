@@ -48,16 +48,23 @@
 # read-only rootfs, dropped caps, `--network none`, seccomp) and the input is a BENIGN, locally-built
 # micro-binary (master §5 — no real malware). Production keeps runsc/gVisor (deploy/README.md).
 #
-# Cadence: nightly cron + manual dispatch + PRs that TOUCH a FID path (auto, via the `changes`
-# detector — #160) + ANY PR manually carrying the `live-regression` label (force-escape). It does
-# NOT run on every PR (the real-worker run is expensive) — only FID-path PRs auto-trigger it, so a
-# FID-match regression is caught at merge time and not just on the nightly run. A failed scheduled
-# run is still the catch-all alert (GitHub notifies the repo owner of default-branch
-# scheduled-workflow failures), mirroring scheduled-rescan.yml.
+# Cadence: nightly cron + manual dispatch + PRs that TOUCH a FID path OR a CORE runtime path (auto,
+# via the `changes` detector — #160 / N2) + ANY PR manually carrying the `live-regression` label
+# (force-escape). It does NOT run on EVERY PR (the real-worker run is expensive) — only FID-/core-path
+# PRs auto-trigger it, so a real-worker regression is caught at merge time and not just on the nightly
+# run. A failed scheduled run is still the catch-all alert (GitHub notifies the repo owner of
+# default-branch scheduled-workflow failures), mirroring scheduled-rescan.yml.
 #
 # NOTE (#160 → promoted): this job runs per-PR on FID paths (path-filtered, same-repo only) AND the
-# `fid-elf-match-gate` context is now a branch-protection `required_status_check` on `main` — a
-# failing same-toolchain ELF match blocks merge. Cross-toolchain matching stays advisory (ADR-043).
+# `fid-elf-match-gate` context is a branch-protection `required_status_check` on `main` — a failing
+# same-toolchain ELF match blocks merge. Cross-toolchain matching stays advisory (ADR-043).
+#
+# NOTE (N2): the CORE-path auto-trigger broadens WHEN the real-worker suite RUNS (it now fires on
+# same-repo PRs touching src/vivarium/{ghidra,server,sessions,tools,jobs}/** + Containerfile.worker),
+# so a real-worker regression on a core surface is surfaced on the PR. It is deliberately NOT (yet)
+# wired into the blocking `fid-elf-match-gate` required check — that gate still enforces ONLY the FID
+# deterministic match. Making a ~60-min real-worker run a hard merge-blocker for every core PR is a
+# separate policy decision (operator call); until then the broadened run is a visible per-PR signal.
 
 name: live-regression
 
@@ -103,12 +110,13 @@ jobs:
       contents: read
     outputs:
       fid: ${{ steps.filter.outputs.fid }}
+      core: ${{ steps.filter.outputs.core }}
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # actions/checkout@v6.0.3
         with:
           fetch-depth: 0 # need both base and head commits to diff
-      - name: Detect FID-path changes
+      - name: Detect FID- and core-path changes
         id: filter
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -117,17 +125,21 @@ jobs:
           set -euo pipefail
           # Ensure both endpoints are present locally (base lives on the target branch).
           git fetch --no-tags --quiet origin "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || true
-          # FAIL-SAFE: if the diff cannot be computed (missing object on a fork PR, etc.), assume a
-          # FID change so the gate RUNS rather than silently being skipped (fail-safe, not fail-open).
+          # FAIL-SAFE: if the diff cannot be computed (missing object on a fork PR, etc.), assume BOTH
+          # a FID and a core change so the run HAPPENS rather than silently being skipped (fail-safe,
+          # not fail-open).
           if ! files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null)"; then
-            echo "::warning::could not diff $BASE_SHA..$HEAD_SHA — assuming a FID change (fail-safe)"
+            echo "::warning::could not diff $BASE_SHA..$HEAD_SHA — assuming FID+core change (fail-safe)"
             echo "fid=true" >> "$GITHUB_OUTPUT"
+            echo "core=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "Changed files:"; echo "$files"
           fid=false
+          core=false
           while IFS= read -r f; do
             [ -z "$f" ] && continue
+            # FID paths: a subset that also drives the same-toolchain deterministic probe build.
             case "$f" in
               Containerfile.worker | \
               scripts/fid/* | \
@@ -137,22 +149,39 @@ jobs:
               .github/workflows/live-regression.yml)
                 fid=true ;;
             esac
+            # CORE paths (N2): runtime surfaces whose JVM-edge / real-worker behavior hermetic unit
+            # tests cannot reach (ADR-001 stops at the PyGhidra boundary). A change here should
+            # exercise the REAL worker, not just FID changes. Containerfile.worker + the workflow
+            # itself are already FID paths (covered above) and so always trigger.
+            case "$f" in
+              src/vivarium/ghidra/* | \
+              src/vivarium/server/* | \
+              src/vivarium/sessions/* | \
+              src/vivarium/tools/* | \
+              src/vivarium/jobs/* | \
+              Containerfile.worker | \
+              .github/workflows/live-regression.yml)
+                core=true ;;
+            esac
           done <<< "$files"
           echo "fid=$fid" >> "$GITHUB_OUTPUT"
-          echo "::notice::FID-path change detected: $fid"
+          echo "core=$core" >> "$GITHUB_OUTPUT"
+          echo "::notice::FID-path change: $fid | core-path change: $core"
 
   live-regression:
-    # Run when: scheduled, manually dispatched, a SAME-REPO PR that TOUCHES a FID path (auto — #160),
-    # OR ANY PR manually carrying the `live-regression` label (force-escape; the `labeled` event also
-    # fires for OTHER labels, so gate on the specific name). `!cancelled()` keeps this job evaluating
-    # its `if:` even though the `changes` dependency is SKIPPED on schedule/dispatch (a skipped need
-    # would otherwise skip this job too). FAIL-SAFE: the `needs.changes.result == 'failure'` clause
-    # runs the gate when the `changes` detector itself FAILED at the job level (checkout/OOM/etc.) — so
-    # a broken detector errs toward RUNNING the gate, never silently skipping it (complements the
-    # in-step diff-failure fail-safe).
+    # Run when: scheduled, manually dispatched, a SAME-REPO PR that TOUCHES a FID path (auto — #160)
+    # OR a CORE runtime path (auto — N2: src/vivarium/{ghidra,server,sessions,tools,jobs}/** +
+    # Containerfile.worker — the real-worker / JVM-edge surfaces hermetic unit tests cannot reach,
+    # ADR-001), OR ANY PR manually carrying the `live-regression` label (force-escape; the `labeled`
+    # event also fires for OTHER labels, so gate on the specific name). `!cancelled()` keeps this job
+    # evaluating its `if:` even though the `changes` dependency is SKIPPED on schedule/dispatch (a
+    # skipped need would otherwise skip this job too). FAIL-SAFE: the `needs.changes.result ==
+    # 'failure'` clause runs the gate when the `changes` detector itself FAILED at the job level
+    # (checkout/OOM/etc.) — so a broken detector errs toward RUNNING the gate, never silently skipping
+    # it (complements the in-step diff-failure fail-safe).
     #
-    # FORK-PR HARDENING (threat-model §4 delta, post-#161 re-analysis): the two AUTO branches
-    # (`fid == 'true'` and detector-`failure`) are gated to **same-repo** PRs via
+    # FORK-PR HARDENING (threat-model §4 delta, post-#161 re-analysis): the AUTO branches
+    # (`fid == 'true'`, `core == 'true'`, and detector-`failure`) are gated to **same-repo** PRs via
     # `head.repo.full_name == github.repository`. This job pulls images and `podman build`s +
     # `pytest`-runs PR-supplied content (Containerfile.worker / FID probe + test sources); a fork PR
     # auto-triggering it would run fork-influenced content in the runner without a human in the loop
@@ -169,7 +198,7 @@ jobs:
         (github.event_name == 'pull_request' && github.event.label.name == 'live-regression') ||
         (github.event_name == 'pull_request' &&
          github.event.pull_request.head.repo.full_name == github.repository &&
-         needs.changes.outputs.fid == 'true') ||
+         (needs.changes.outputs.fid == 'true' || needs.changes.outputs.core == 'true')) ||
         (github.event_name == 'pull_request' &&
          github.event.pull_request.head.repo.full_name == github.repository &&
          needs.changes.result == 'failure')
