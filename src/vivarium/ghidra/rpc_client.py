@@ -716,8 +716,9 @@ class RpcGhidraAdapter:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("stream deadline elapsed during chunk read-loop")
-            sock.settimeout(remaining)
-            frame = self._read_frame(sock)
+            # _read_frame re-arms the socket timeout to the shrinking remaining time before EACH
+            # recv (slow-loris hardening), so the whole frame is bounded by the same deadline.
+            frame = self._read_frame(sock, deadline)
             if rpc_framing.is_progress_notification(frame):
                 progress = rpc_framing.parse_progress(frame, expected_id=expected_id)
                 _log.info("stream.progress", extra=_progress_log_payload(progress))
@@ -1686,9 +1687,9 @@ class RpcGhidraAdapter:
                     on_progress=on_progress,
                 )
             else:
-                # Unchanged single-frame path — IDENTICAL to today for every non-opted-in call.
-                sock.settimeout(timeout_s)
-                response_obj = self._read_frame(sock)
+                # Single-frame path. Bound the WHOLE frame read by an absolute deadline (not a
+                # per-recv timeout) so a dribbling worker can't hold it open (slow-loris — N11).
+                response_obj = self._read_frame(sock, time.monotonic() + timeout_s)
             return rpc_framing.parse_response(response_obj, expected_id=request_id)
         except RpcCallError as exc:
             # A method-level failure: the worker is healthy; do NOT kill. Map the slug.
@@ -1876,8 +1877,7 @@ class RpcGhidraAdapter:
                 # Deadline elapsed inside the loop → behave exactly like a single-read timeout
                 # (caller kills the worker + returns the TIMEOUT envelope). Deadline NOT extended.
                 raise TimeoutError("analysis deadline elapsed during progress read-loop")
-            sock.settimeout(remaining)
-            frame = self._read_frame(sock)
+            frame = self._read_frame(sock, deadline)
             if not rpc_framing.is_progress_notification(frame):
                 return frame  # the response (or error) frame — let the caller validate it
             progress_count += 1
@@ -1907,13 +1907,16 @@ class RpcGhidraAdapter:
                         _log.warning("analyze.progress_relay_failed", extra={"method": method})
             # else: coalesced (too-soon since the last relayed frame) — counted but not logged.
 
-    def _read_frame(self, sock: socket.socket) -> dict[str, Any]:
-        """Read exactly one length-prefixed JSON-RPC frame from the socket.
+    def _read_frame(self, sock: socket.socket, deadline: float) -> dict[str, Any]:
+        """Read exactly one length-prefixed JSON-RPC frame from the socket under a deadline.
 
-        Bounds the declared length BEFORE allocating the body buffer (no large-allocation DoS).
+        Bounds the declared length BEFORE allocating the body buffer (no large-allocation DoS), and
+        threads ``deadline`` through BOTH reads (prefix + body) so the whole frame — not merely each
+        individual ``recv`` — is bounded in time (slow-loris hardening, see :meth:`_recv_exact`).
 
         Args:
             sock: The connected stream socket.
+            deadline: Absolute :func:`time.monotonic` time by which the full frame must arrive.
 
         Returns:
             The decoded JSON object.
@@ -1922,29 +1925,44 @@ class RpcGhidraAdapter:
             FramingError: On a short/oversized frame.
             RpcProtocolError: On malformed JSON.
             EOFError: If the worker closed the socket mid-frame.
+            TimeoutError: If the deadline elapses before the full frame arrived.
         """
-        prefix = self._recv_exact(sock, rpc_framing.LENGTH_PREFIX_BYTES)
+        prefix = self._recv_exact(sock, rpc_framing.LENGTH_PREFIX_BYTES, deadline)
         n = rpc_framing.decode_length_prefix(prefix, max_frame_bytes=self._max_response_bytes)
-        body = self._recv_exact(sock, n) if n else b""
+        body = self._recv_exact(sock, n, deadline) if n else b""
         return rpc_framing.decode_body(body)
 
     @staticmethod
-    def _recv_exact(sock: socket.socket, n: int) -> bytes:
-        """Receive exactly ``n`` bytes, raising on premature EOF.
+    def _recv_exact(sock: socket.socket, n: int, deadline: float) -> bytes:
+        """Receive exactly ``n`` bytes under an ABSOLUTE deadline, raising on EOF/timeout.
+
+        Re-arms the socket timeout to the REMAINING time before every ``recv`` so the TOTAL time
+        to read the frame is bounded by ``deadline`` no matter how the peer paces the bytes. A
+        worker dribbling one byte just under a fixed per-``recv`` timeout previously kept the read
+        open indefinitely (a per-recv ``settimeout`` resets its clock on each call); threading the
+        absolute deadline closes that slow-loris hole (the worker is potentially hostile — TB2;
+        CWE-400 resource exhaustion). ``socket.timeout`` is a ``TimeoutError`` subclass (Py3.10+),
+        so a recv that blocks past the remaining budget surfaces as ``TimeoutError`` too.
 
         Args:
             sock: The connected stream socket.
             n: Number of bytes to read.
+            deadline: Absolute :func:`time.monotonic` time by which all ``n`` bytes must arrive.
 
         Returns:
             Exactly ``n`` bytes.
 
         Raises:
             EOFError: If the peer closed the connection before ``n`` bytes arrived.
+            TimeoutError: If the deadline elapses before ``n`` bytes arrived.
         """
         chunks: list[bytes] = []
         remaining = n
         while remaining > 0:
+            time_left = deadline - time.monotonic()
+            if time_left <= 0:
+                raise TimeoutError("frame read deadline elapsed")
+            sock.settimeout(time_left)
             chunk = sock.recv(remaining)
             if not chunk:
                 raise EOFError("worker closed connection mid-frame")
