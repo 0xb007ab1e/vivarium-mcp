@@ -185,6 +185,7 @@ addopts = [
   "--strict-markers",
   "--strict-config",
   "--cov=vivarium",
+  "--cov=worker",
   "--cov-branch",
   "--cov-report=term-missing",
   "--cov-report=xml",
@@ -200,8 +201,10 @@ markers = [
 
 [tool.coverage.run]
 branch = true
-source = ["vivarium"]
+source = ["vivarium", "worker"]
 # Worker-side Ghidra/JVM glue is exercised only in the integration suite (real worker), not unit CI.
+# `worker/` (the JVM-free RPC bootstrap + dispatch + entrypoint) IS measured under the 90% baseline
+# (gap N6); only the PyGhidra bridge edge stays omitted.
 omit = ["src/vivarium/ghidra/_jvm_bridge.py"]
 
 [tool.coverage.report]
