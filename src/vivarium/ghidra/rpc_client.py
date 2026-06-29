@@ -2846,7 +2846,8 @@ def _exported_field_spec_from_plain(r: dict[str, Any]) -> s.ExportedFieldSpec:
     )
 
 
-def _build_exported_entry(r: dict[str, Any]) -> s.ExportedEntry:
+# C901: flat field-by-field mapping of one untrusted export record into the typed entry (one over).
+def _build_exported_entry(r: dict[str, Any]) -> s.ExportedEntry:  # noqa: C901
     """Build one exported annotation entry from a plain worker dict (binary strings → Untrusted).
 
     Dispatches on the worker-reported ``kind``; binary-derived read-out values (current names,

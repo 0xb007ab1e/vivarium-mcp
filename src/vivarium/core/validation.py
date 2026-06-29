@@ -671,7 +671,8 @@ def validate_composite(
             raise _validation_error("a union member may not carry an offset")
 
 
-def _detect_by_value_cycle(types: list[CompositeSpec]) -> None:
+# C901: by-value type-cycle detection walks a type graph — inherent branchiness, fully unit-tested.
+def _detect_by_value_cycle(types: list[CompositeSpec]) -> None:  # noqa: C901
     """Reject ANY by-value cycle among the batch's composites (the load-bearing control — ADR-021).
 
     Builds a directed graph over the batch and runs a pure, ``O(V+E)`` cycle detector (iterative DFS
@@ -779,7 +780,8 @@ def validate_types_batch(payload: DefineTypesIn) -> None:
     _detect_by_value_cycle(types)
 
 
-def validate_entry(entry: Entry) -> None:
+# C901: dispatches re-validation across all annotation-entry kinds — flat per-kind branching.
+def validate_entry(entry: Entry) -> None:  # noqa: C901
     """Re-validate ONE annotation-document entry through the EXISTING live validators (ADR-018 §4).
 
     The imported document is fully untrusted (it may have been tampered offline), so every entry is

@@ -139,7 +139,8 @@ def _normalize(adjacency: AdjacencyMap, nodes: list[str]) -> tuple[dict[str, lis
     return succ, self_loops
 
 
-def _tarjan_sccs(nodes: list[str], succ: dict[str, list[str]]) -> list[list[str]]:
+# C901: Tarjan's SCC is a standard iterative algorithm — splitting it would obscure its invariant.
+def _tarjan_sccs(nodes: list[str], succ: dict[str, list[str]]) -> list[list[str]]:  # noqa: C901
     """Compute strongly-connected components iteratively (Tarjan's algorithm).
 
     Iterative (explicit work stack) rather than recursive so a deeply nested or long cyclic graph

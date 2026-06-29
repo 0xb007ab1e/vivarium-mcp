@@ -568,7 +568,8 @@ def _load_oauth_algorithms(src: dict[str, str]) -> tuple[str, ...]:
     return tuple(algs)
 
 
-def _load_http_config(src: dict[str, str]) -> HttpConfig:
+# C901: validates many independent HTTP config fields/modes — flat per-field branching, not nesting.
+def _load_http_config(src: dict[str, str]) -> HttpConfig:  # noqa: C901
     """Build + validate the HTTP config (fail-closed, secure-by-default — ADR-011 §2/§4/§5).
 
     Args:

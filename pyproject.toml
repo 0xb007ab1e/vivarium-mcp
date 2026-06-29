@@ -133,11 +133,18 @@ select = [
   "PTH",           # use pathlib (path-traversal hygiene)
   "RUF",           # ruff-specific
   "D",             # pydocstyle — DOCSTRING MANDATE on public symbols (master §1)
+  "C90",           # mccabe cyclomatic complexity (topic-defensive-programming — cap per-function)
 ]
 ignore = [
   "D203",  # one-blank-line-before-class (conflicts with D211)
   "D213",  # multi-line-summary-second-line (conflicts with D212)
 ]
+
+[tool.ruff.lint.mccabe]
+# Cap cyclomatic complexity at 10 (topic-defensive-programming). New code over 10 fails CI; the
+# handful of existing functions above it carry a justified `# noqa: C901` (JVM-edge handlers only
+# reachable via live-regression, or established algorithms whose decomposition would obscure them).
+max-complexity = 10
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -147,7 +154,7 @@ convention = "google"
 # IMPORTANT (topic-testing false-pass trap): docstring-gate probe fixtures MUST use a
 # PUBLIC module name — a leading underscore marks a module private and `D` exempts it,
 # giving a false PASS. Do not add `examples/`-style globs that silently exempt probes.
-"tests/**" = ["S101", "D"]
+"tests/**" = ["S101", "D", "C901"]
 
 # ---------------------------------------------------------------------------
 # Mypy — strict typing (lang-python: strict for new code).

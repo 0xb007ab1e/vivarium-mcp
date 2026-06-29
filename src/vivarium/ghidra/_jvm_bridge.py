@@ -797,7 +797,9 @@ class PyGhidraBackend:
         self._analyzed = True
         return _session_info_dict("ready", self._sha256, analysis_complete=True)
 
-    def _run_monitored_analysis(
+    # C901: PyGhidra analysis+monitor sequencing across the JVM boundary (ADR-001) — only
+    # live-regression covers it; decomposing risks the careful PyGhidra call ordering.
+    def _run_monitored_analysis(  # noqa: C901
         self, emit_progress: Callable[[int | None, str], None]
     ) -> None:  # pragma: no cover - JVM edge
         """Run auto-analysis under a custom progress ``TaskMonitor`` (ADR-030 Phase 1, opted-in).
@@ -1634,7 +1636,9 @@ class PyGhidraBackend:
             "analysis_complete": bool(self._analyzed),
         }
 
-    def _gh_call_graph(
+    # C901: PyGhidra call-graph enumeration across the JVM boundary (ADR-001) — live-regression-only
+    # coverage; decomposition risks the bounded BFS/ref-iteration ordering.
+    def _gh_call_graph(  # noqa: C901
         self, root: str | None, max_depth: int, max_nodes: int, max_edges: int
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Extract a bounded resolved-call adjacency (v1.1 — ADR-007; worker-only per ADR-001).
@@ -2699,7 +2703,9 @@ class PyGhidraBackend:
             "dependents_reverted": dependents,
         }
 
-    def _gh_define_types(
+    # C901: PyGhidra type-definition application across the JVM boundary (ADR-001) —
+    # live-regression-only coverage; the DataTypeManager transaction ordering must stay intact.
+    def _gh_define_types(  # noqa: C901
         self, types: list[dict[str, Any]]
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Create a BATCH of interdependent composites in ONE transaction (ADR-021).
@@ -2827,7 +2833,9 @@ class PyGhidraBackend:
         return {"types": result_holder["types"], "applied": True}
 
     # --- annotation-persistence JVM edge (ADR-018/ADR-027; export read-out, read-only) ----------
-    def _gh_export_annotations(
+    # C901: PyGhidra annotation-export enumeration across the JVM boundary (ADR-001) —
+    # live-regression-only coverage; the symbol/comment walk + count invariants must stay together.
+    def _gh_export_annotations(  # noqa: C901
         self,
         comment_targets: list[tuple[str, str]],
         composite_targets: list[str],
