@@ -1,0 +1,77 @@
+"""Background periodic session reaper (gap N5 / ADR-025).
+
+:meth:`SessionManager.reap_expired` is lock-safe and in-flight-exempt, but nothing called it on a
+schedule — eviction was purely **lazy** (a session is only evicted on its *next* call). So an
+**abandoned** session (the common case when an MCP client disconnects — stdio host crash, HTTP
+client drop) never gets another call: its TTL/idle never fires, and its hardened worker keeps the
+hostile binary resident with the per-session store **unwiped** until ``shutdown()``. That is a
+resource leak + a confidentiality window (master §5).
+
+This daemon sweeps expired sessions on a fixed interval, closing that window. It is deliberately
+tiny: the manager already owns all the locking, in-flight exemption, and the verified store-wipe
+(ADR-025 D4) — the reaper just calls it. Stop is interruptible (an ``Event``), so graceful shutdown
+does not wait out the interval.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+from typing import Protocol
+
+_log = logging.getLogger(__name__)
+
+
+class _Reapable(Protocol):
+    """The narrow slice of the session manager the reaper needs (interface segregation)."""
+
+    def reap_expired(self) -> int:
+        """Evict every session past its TTL/idle (in-flight-exempt); return the count evicted."""
+        ...
+
+
+class PeriodicReaper:
+    """Daemon thread calling :meth:`_Reapable.reap_expired` every ``interval_s`` until stopped."""
+
+    def __init__(self, manager: _Reapable, *, interval_s: float) -> None:
+        """Initialize the reaper (does not start it).
+
+        Args:
+            manager: The session manager (only its ``reap_expired`` is used).
+            interval_s: Seconds between sweeps. Must be positive.
+        """
+        if interval_s <= 0:
+            raise ValueError("reaper interval_s must be positive")
+        self._manager = manager
+        self._interval_s = interval_s
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        """Spawn the daemon sweeper thread (idempotent — a second call is a no-op)."""
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._run, name="vivarium-session-reaper", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self, *, timeout_s: float = 5.0) -> None:
+        """Signal the sweeper to exit and join it (idempotent; bounded by ``timeout_s``)."""
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join(timeout_s)
+
+    def _run(self) -> None:
+        """Sweep loop: wait the interval (interruptibly), then reap; exit when ``stop`` is set."""
+        # Event.wait returns True the moment stop() fires (→ exit immediately, no interval wait), or
+        # False on timeout (→ time to sweep). A reap exception must NEVER kill the daemon — that
+        # would silently halt all future sweeps — so it is logged and the loop continues.
+        while not self._stop.wait(self._interval_s):
+            try:
+                evicted = self._manager.reap_expired()
+                if evicted:
+                    _log.info("session.reaper.swept", extra={"evicted": evicted})
+            except Exception:
+                _log.exception("session.reaper.error")

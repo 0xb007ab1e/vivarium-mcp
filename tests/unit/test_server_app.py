@@ -272,7 +272,7 @@ def test_main_happy_path_wires_and_serves(monkeypatch: pytest.MonkeyPatch) -> No
         built["ok"] = True
         return _RunnableApp()
 
-    def fake_run(app: object, *, session_manager: object) -> int:
+    def fake_run(app: object, *, session_manager: object, reap_interval_s: float = 60.0) -> int:
         return 0
 
     monkeypatch.setattr(entry, "build_app", fake_build)
