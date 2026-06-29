@@ -161,7 +161,7 @@ def _patch_runners(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         calls.append("http")
         return 0
 
-    def _stdio_runner(app: Any, *, session_manager: Any) -> int:
+    def _stdio_runner(app: Any, *, session_manager: Any, reap_interval_s: float = 60.0) -> int:
         calls.append("stdio")
         return 0
 

@@ -39,6 +39,7 @@ from vivarium.server.http_middleware import (
     SecurityHeadersMiddleware,
 )
 from vivarium.sessions.manager import SessionManager
+from vivarium.sessions.reaper import PeriodicReaper
 from vivarium.tools.registry import ToolContext, register_tools
 
 _log = get_logger(__name__)
@@ -272,12 +273,15 @@ def _http_principal_resolver(app: FastMCP) -> Callable[[], Principal]:
     return _resolve
 
 
-def run_stdio(app: FastMCP, *, session_manager: SessionManager) -> int:
+def run_stdio(
+    app: FastMCP, *, session_manager: SessionManager, reap_interval_s: float = 60.0
+) -> int:
     """Run the MCP server on the stdio transport until shutdown, then drain.
 
-    Installs SIGTERM/SIGINT handlers that request a graceful stop, runs FastMCP over stdio, and —
-    on exit for any reason — evicts all sessions (kills workers + verified-wipes stores) via the
-    session manager (topic-resource-management graceful shutdown; ADR-002).
+    Installs SIGTERM/SIGINT handlers that request a graceful stop, starts the background session
+    reaper (gap N5), runs FastMCP over stdio, and — on exit for any reason — stops the reaper then
+    evicts all sessions (kills workers + verified-wipes stores) via the session manager
+    (topic-resource-management graceful shutdown; ADR-002).
 
     Note:
         The ``session_manager`` keyword extends the WS0 stub signature ``run_stdio(app)`` additively
@@ -286,11 +290,15 @@ def run_stdio(app: FastMCP, *, session_manager: SessionManager) -> int:
     Args:
         app: The FastMCP application from :func:`build_app`.
         session_manager: The session manager to drain on shutdown.
+        reap_interval_s: Background-reaper sweep interval (production passes
+            ``config.session_reap_interval_s``; the default mirrors that config default).
 
     Returns:
         Process exit code: ``0`` on clean shutdown.
     """
     _install_shutdown_handlers()
+    reaper = PeriodicReaper(session_manager, interval_s=reap_interval_s)
+    reaper.start()
     try:
         # FastMCP.run() blocks until the stdio transport closes (host disconnects) or a signal
         # interrupts it. Transport selection is the only transport-aware line in the codebase
@@ -301,8 +309,9 @@ def run_stdio(app: FastMCP, *, session_manager: SessionManager) -> int:
         _log.info("server.interrupted")
         return 0
     finally:
-        # Always drain: kill every worker and wipe every store, even on error (fail closed —
-        # leaving a worker alive with a hostile binary loaded is unacceptable).
+        # Always drain: stop the reaper, then kill every worker and wipe every store, even on error
+        # (fail closed — leaving a worker alive with a hostile binary loaded is unacceptable).
+        reaper.stop()
         try:
             session_manager.shutdown()
             _log.info("server.shutdown.complete")
@@ -425,6 +434,8 @@ def run_http(
     )
     asgi = build_http_asgi_app(app.streamable_http_app(), http, authenticator=authenticator)
     _install_shutdown_handlers()
+    reaper = PeriodicReaper(session_manager, interval_s=config.session_reap_interval_s)
+    reaper.start()
     log_level = config.log_level.lower()
     # mTLS (ADR-019 D2): require + verify a CA-signed client cert at the TLS handshake (the first
     # gate). Without this uvicorn would not request a client cert and the in-app authenticator would
@@ -461,6 +472,7 @@ def run_http(
         _log.info("server.interrupted")
         return 0
     finally:
+        reaper.stop()
         try:
             session_manager.shutdown()
             _log.info("server.shutdown.complete")

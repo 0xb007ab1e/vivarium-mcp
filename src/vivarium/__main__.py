@@ -148,7 +148,9 @@ def main(
     _log.info("startup.serving", extra={"transport": config.transport})
     if config.transport == "http":
         return run_http(app, config, session_manager=session_manager)
-    return run_stdio(app, session_manager=session_manager)
+    return run_stdio(
+        app, session_manager=session_manager, reap_interval_s=config.session_reap_interval_s
+    )
 
 
 if __name__ == "__main__":
