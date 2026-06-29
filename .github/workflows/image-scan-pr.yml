@@ -1,0 +1,110 @@
+# =============================================================================
+# image-scan-pr.yml — per-PR container-IMAGE CVE scan + SBOM on Containerfile changes (gap N8)
+# =============================================================================
+# ci.yml's `container-iac-scan` scans the Containerfiles as IaC (misconfig) only; the actual
+# built-IMAGE CVE scan (Trivy image) + SBOM run only on tag/dispatch (worker-image.yml) and the
+# daily scheduled-rescan.yml. So a PR that bumps a base-image digest or edits a Containerfile could
+# merge with a freshly-vulnerable image and the HIGH/CRITICAL would not surface until the next daily
+# rescan — up to ~24h of exposure on `main` (workflow-vuln-mgmt: SCA on the real surface, fail
+# closed). This job closes that window by rebuilding + Trivy-IMAGE-scanning each image on any PR
+# that touches a Containerfile (path-filtered), with the SAME trivy config + waivers as the release
+# and rescan pipelines, so a waiver that expires re-blocks identically everywhere.
+#
+# SCANS ONLY — never builds-to-push, signs, or publishes (detection, not publication). The build is
+# local (`load: true`) so Trivy can scan by image-ref.
+#
+# GATING SCOPE (deliberate, mirrors the N2 treatment): this runs + FAILS CLOSED on a HIGH/CRITICAL
+# as a VISIBLE per-PR check. It is NOT (yet) wired into branch protection as a required check — a
+# path-filtered workflow does not start on non-Containerfile PRs, so making it required needs the
+# always-run wrapper pattern (cf. fid-elf-match-gate). Promoting it is a one-line operator step
+# (add an always-run gate job + the context to required checks); until then a maintainer sees the
+# red check on the Containerfile PR. CI runners have no gVisor; the build/scan need none (no worker
+# is run here — only built + statically scanned).
+
+name: image-scan-pr
+
+on:
+  pull_request:
+    # Only PRs that can change the built image (or the scan policy itself). Keeps the expensive
+    # image build off every other PR.
+    paths:
+      - "Containerfile.worker"
+      - "Containerfile.server"
+      - "infra/trivy.yaml"
+      - ".trivyignore.yaml"
+      - ".github/workflows/image-scan-pr.yml"
+
+permissions:
+  contents: read # least privilege; scan-only, nothing is pushed
+
+concurrency:
+  group: image-scan-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Rebuild from the digest-pinned Containerfiles + Trivy-image-scan + emit an SBOM. Both images are
+  # scanned (fail-fast: false) even when only one Containerfile changed, because a shared base bump
+  # or a trivy.yaml/.trivyignore edit affects both — surface every finding in one run.
+  image-scan:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: worker
+            containerfile: Containerfile.worker
+          - name: server
+            containerfile: Containerfile.server
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # actions/checkout@v6.0.3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # docker/setup-buildx-action@v4.1.0
+
+      - name: Build locally for scanning (${{ matrix.name }}) — no push, no sign
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # docker/build-push-action@v7.2.0
+        with:
+          context: .
+          file: ${{ matrix.containerfile }}
+          push: false
+          load: true # load into the local daemon so Trivy can scan by image-ref
+          tags: vivarium-${{ matrix.name }}:pr-scan
+          build-args: |
+            GHIDRA_VERSION=${{ vars.GHIDRA_VERSION }}
+            GHIDRA_RELEASE_TAG=${{ vars.GHIDRA_RELEASE_TAG }}
+            GHIDRA_ZIP_URL=${{ vars.GHIDRA_ZIP_URL }}
+            GHIDRA_ZIP_SHA256=${{ vars.GHIDRA_ZIP_SHA256 }}
+
+      - name: Trivy image scan (${{ matrix.name }}) — fail closed on HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: vivarium-${{ matrix.name }}:pr-scan
+          # Identical gate to the release + rescan pipelines: same config + the same time-boxed
+          # waivers, so a waiver that expires here re-blocks exactly as it would at release time.
+          trivy-config: infra/trivy.yaml
+          trivyignores: .trivyignore.yaml
+          format: sarif
+          output: image-scan-trivy-${{ matrix.name }}.sarif
+          severity: HIGH,CRITICAL
+          exit-code: "1" # fail closed on a new HIGH/CRITICAL — blocks an unsafe Containerfile change
+
+      - name: Generate CycloneDX SBOM (${{ matrix.name }})
+        if: always() # produce the SBOM even when the scan gate fails, for triage/provenance
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: vivarium-${{ matrix.name }}:pr-scan
+          format: cyclonedx
+          output: sbom-${{ matrix.name }}.cdx.json
+
+      - name: Upload Trivy SARIF + SBOM (${{ matrix.name }})
+        if: always() # keep the reports even when the gate fails, for triage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact@v7.0.1
+        with:
+          name: image-scan-${{ matrix.name }}
+          path: |
+            image-scan-trivy-${{ matrix.name }}.sarif
+            sbom-${{ matrix.name }}.cdx.json
+          if-no-files-found: warn
