@@ -84,8 +84,9 @@ jobs:
   # migration); the worker stays on 3.12. `requires-python = ">=3.12"` covers both, so the suite
   # MUST also pass on the server's 3.14 runtime (dev/prod parity — topic-config-environments). The
   # version-agnostic lint + the 3.12-min-targeted type-check stay in `quality`; this leg proves the
-  # deps install and the tests pass on 3.14. To make it merge-blocking, add `quality-py314` to the
-  # branch-protection required checks (a GATED admin step) alongside `quality`.
+  # deps install and the tests pass on 3.14. `quality-py314` IS merge-blocking: it is one of the
+  # branch-protection required status checks on `main` (alongside `quality`, `sast`, `sca`,
+  # `secret-scan`, `container-iac-scan`, `fid-license-gate`, `fid-elf-match-gate`).
   quality-py314:
     runs-on: ubuntu-latest
     # Same src-layout / no-editable-install posture as `quality` (no unpinned build-backend fetch).
