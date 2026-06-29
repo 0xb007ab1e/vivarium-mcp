@@ -1,0 +1,59 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    "security:openssf-scorecard"
+  ],
+  "description": "Automated dependency-update PRs for Vivarium (gap N9). Covers the pip-compile hash lockfiles, GitHub Actions (digest-pinned), and the Containerfile.* base images. Renovate NEVER auto-merges here: every bump opens a PR that must pass the full merge-blocking gate set and carry a verified-signed commit (branch protection: 8 required checks + linear history + required_signatures + enforce_admins). Activation requires enabling the Renovate GitHub App on the repo (a one-time operator action); until then this config is version-controlled but inert.",
+  "timezone": "America/Chicago",
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "rebaseWhen": "conflicted",
+  "dependencyDashboard": true,
+  "labels": ["dependencies"],
+  "pinDigests": true,
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "labels": ["security", "dependencies"],
+    "schedule": ["at any time"],
+    "prCreation": "immediate"
+  },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on the first day of the month"]
+  },
+  "packageRules": [
+    {
+      "description": "Group GitHub Actions bumps; keep them pinned to commit SHAs (supply-chain: std-supplychain — pin actions by digest, not floating tags).",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions",
+      "pinDigests": true
+    },
+    {
+      "description": "Group the Containerfile base-image digest bumps. The worker base is ALSO auto-bumped on release by worker-image.yml; this catches Containerfile.server + off-release drift. Pin by digest.",
+      "matchManagers": ["dockerfile"],
+      "groupName": "container base images",
+      "pinDigests": true
+    },
+    {
+      "description": "Group the Python dev/runtime lockfile bumps (pip-compile --generate-hashes). Renovate re-runs pip-compile so the hashes regenerate.",
+      "matchManagers": ["pip-compile", "pip_requirements"],
+      "groupName": "python dependencies"
+    },
+    {
+      "description": "Separate any major bump out of the groups so the breaking-change review is isolated (workflow-release SemVer).",
+      "matchUpdateTypes": ["major"],
+      "groupName": null,
+      "addLabels": ["major-update"]
+    }
+  ],
+  "pip-compile": {
+    "managerFilePatterns": ["/(^|/)requirements[\\w-]*\\.lock$/"]
+  },
+  "dockerfile": {
+    "managerFilePatterns": ["/(^|/)Containerfile[^/]*$/"]
+  }
+}
