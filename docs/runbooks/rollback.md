@@ -27,6 +27,12 @@
 3. In-flight sessions are ephemeral — they are evicted on the old process exit (workers killed +
    stores wiped). Clients re-open sessions against the rolled-back version.
 
+## Drill (dry-run)
+- `python scripts/drill_runbooks.py --runbook rollback` validates the recovery levers (a distinct
+  prior worker digest exists in history, a previous release tag exists, `gh` is available) and
+  prints the exact command plan **without mutating anything**. Run it periodically + before relying
+  on this runbook; then perform a real game-day and stamp the footer below.
+
 ## Verification
 - Health green; error rates back to baseline; the original symptom is gone; a smoke session passes.
 

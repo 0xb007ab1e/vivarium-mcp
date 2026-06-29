@@ -62,6 +62,13 @@
      never written to disk, ADR-002), so it is destroyed with the container by construction.
    - No `vivarium-worker-${SID}` container remains: re-run the step-1 `podman ps` filter → absent.
 
+## Drill (dry-run)
+- `python scripts/drill_runbooks.py --runbook evict --session-id <sid>` prints the exact
+  identify → (evidence) → kill → verify command plan for a session and checks the container engine
+  is available — **without killing anything** (the session id is allow-list-validated so the printed
+  commands can't carry an injection). Run it to rehearse, then perform a real game-day and stamp the
+  footer below.
+
 ## Verification
 - The session is no longer listed; `store_wiped: true` was logged; no orphan worker container
   remains; `worker-unavailable`/`timeout` rates return to baseline. A **wipe failure** (`store_wiped:
