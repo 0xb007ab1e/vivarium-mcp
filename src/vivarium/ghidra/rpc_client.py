@@ -33,6 +33,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import socket
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -261,12 +262,23 @@ class _Session:
         sock: The connected UDS stream socket, or ``None`` before connect / after close.
         socket_path: Filesystem path of the per-session UDS.
         active_stream_id: The request id of the in-flight ``start_decompile_stream`` call (ADR-041),
-            or ``None`` when no stream is producing. Set when the streaming generator sends its RPC
-            and cleared when it terminates; ``cancel_job`` sends a ``$/cancel`` targeting THIS id so
-            the worker stops the right call between functions.
+            or ``None`` when no stream is producing. Set (under :attr:`lock`) when the streaming
+            generator sends its RPC and cleared when it terminates. It doubles as the **socket-owner
+            flag** (gap N1): while it is set, a plain :meth:`RpcGhidraAdapter._call` refuses to use
+            the socket (the stream's reader holds no lock, so the flag — not a lock — is what
+            excludes a concurrent call). ``cancel_job`` sends a ``$/cancel`` targeting THIS id, so
+            worker stops the right call between functions.
+        lock: Serializes **short, same-thread** socket sections (gap N1): the whole request→response
+            transaction in :meth:`RpcGhidraAdapter._call`, and the brief connect+send+set-flag at a
+            stream's start. It is NOT held across the streaming read — the generator is resumed by
+            different pump threads and a thread-owned lock must be released by its acquiring thread,
+            so the stream uses the ``active_stream_id`` flag for exclusion instead. Reentrant
+            (``RLock``). ``kill_worker``/``_send_cancel`` deliberately do NOT take it: closing the
+            socket is the mechanism that interrupts a hung read, and a ``$/cancel`` is the sole
+            writer concurrent with the (lock-free) streamer read (full-duplex-safe).
     """
 
-    __slots__ = ("active_stream_id", "sock", "socket_path", "worker")
+    __slots__ = ("active_stream_id", "lock", "sock", "socket_path", "worker")
 
     def __init__(self, worker: WorkerProcess, socket_path: str) -> None:
         """Initialize per-session state.
@@ -279,6 +291,7 @@ class _Session:
         self.sock: socket.socket | None = None
         self.socket_path = socket_path
         self.active_stream_id: str | None = None
+        self.lock = threading.RLock()
 
 
 class RpcGhidraAdapter:
@@ -346,6 +359,10 @@ class RpcGhidraAdapter:
         self._preflight_mode = preflight_mode if preflight_mode in PREFLIGHT_MODES else "warn"
         self._stream_jobs = stream_jobs
         self._sessions: dict[str, _Session] = {}
+        # Guards the _sessions dict STRUCTURE (add/pop/get) + the brief detached worker spawn (gap
+        # N1). NEVER held across a request/stream socket transaction — that long socket I/O is
+        # serialized per session by each _Session.lock, so distinct sessions stay fully concurrent.
+        self._sessions_lock = threading.Lock()
 
     # --- worker/session lifecycle -----------------------------------------------------------
     def start_worker(self, session_id: str) -> None:
@@ -354,11 +371,12 @@ class RpcGhidraAdapter:
         Args:
             session_id: The opaque session id (also names the per-session socket).
         """
-        if session_id in self._sessions:
-            return  # idempotent: a worker already exists for this session
-        sock_path = self._socket_path(session_id)
-        worker = self._launcher(session_id, sock_path)
-        self._sessions[session_id] = _Session(worker, sock_path)
+        with self._sessions_lock:
+            if session_id in self._sessions:
+                return  # idempotent: a worker already exists for this session
+            sock_path = self._socket_path(session_id)
+            worker = self._launcher(session_id, sock_path)
+            self._sessions[session_id] = _Session(worker, sock_path)
 
     def kill_worker(self, session_id: str) -> None:
         """Forcibly terminate the session's worker and drop its socket. Idempotent.
@@ -366,9 +384,13 @@ class RpcGhidraAdapter:
         Args:
             session_id: The session whose worker to kill.
         """
-        sess = self._sessions.pop(session_id, None)
+        with self._sessions_lock:
+            sess = self._sessions.pop(session_id, None)
         if sess is None:
             return
+        # Close the socket WITHOUT taking sess.lock: a hung in-flight call/stream is holding that
+        # lock blocked in recv(), and closing the fd from outside is precisely what unblocks it
+        # (its recv raises → that path kills+evicts). Taking the lock here would deadlock (gap N1).
         self._close_socket(sess)
         # Best-effort kill: a launcher/runtime hiccup must not stop eviction (fail closed → drop).
         with contextlib.suppress(Exception):
@@ -579,7 +601,8 @@ class RpcGhidraAdapter:
         Yields:
             One :class:`DecompiledFunction` per worker ``$/chunk``.
         """
-        sess = self._sessions.get(sid)
+        with self._sessions_lock:
+            sess = self._sessions.get(sid)
         if sess is None:
             raise _errors.make_error(ErrorType.WORKER_UNAVAILABLE, "no worker for session")
         request_id = uuid.uuid4().hex
@@ -591,13 +614,21 @@ class RpcGhidraAdapter:
         # A bulk decompile is a long operation; bound it by the analysis deadline (kill-on-expiry,
         # NOT extended by chunks — ADR-002). The job lives inside the worker's bounded lifetime.
         deadline = time.monotonic() + self._analysis_timeout_s
+        # gap N1: a concurrent same-session _call must not read frames off this socket while a
+        # produces (it would steal chunks). We do NOT hold sess.lock across the stream — the
+        # generator is resumed by different pump threads, and a thread-owned lock must be freed by
+        # the SAME thread that took it. Instead, briefly hold sess.lock (same thread) to connect,
+        # send the start, and set the active_stream_id FLAG atomically against a concurrent _call;
+        # then release. The read loop below holds NO lock: _call refuses while active_stream_id is
+        # set, only one pump runs at a time (job-manager lock), and _send_cancel is the sole writer
+        # concurrent with our read (full-duplex). The flag is cleared in the finally.
         try:
-            sock = self._ensure_connected(sess)
-            self._send_all_with_timeout(sock, frame, self._analysis_timeout_s)
-            # Record the in-flight streaming id so a concurrent cancel_job can send a $/cancel that
-            # targets THIS call (ADR-041). Set only after the start RPC is on the wire (so a cancel
-            # before the worker even sees the start cannot mis-target an unsent id).
-            sess.active_stream_id = request_id
+            with sess.lock:
+                sock = self._ensure_connected(sess)
+                self._send_all_with_timeout(sock, frame, self._analysis_timeout_s)
+                # Set only after the start RPC is on the wire so a cancel before the worker sees the
+                # start cannot mis-target an unsent id (ADR-041).
+                sess.active_stream_id = request_id
             yield from self._read_stream_chunks(
                 sock, sid, expected_id=request_id, deadline=deadline, terminal=terminal
             )
@@ -643,7 +674,8 @@ class RpcGhidraAdapter:
             # the active id so a later cancel_job does not target a finished call (ADR-041 D6 — a
             # $/cancel for a finished id is a worker no-op anyway, but not sending one is cleaner).
             # Re-fetch by sid: the session may have been evicted/replaced during the stream.
-            live = self._sessions.get(sid)
+            with self._sessions_lock:
+                live = self._sessions.get(sid)
             if live is sess and live.active_stream_id == request_id:
                 live.active_stream_id = None
 
@@ -848,8 +880,11 @@ class RpcGhidraAdapter:
         so the worker — polling between functions — stops the right call at the next boundary. A
         notification, NOT a request: it adds no request/response pair to the streaming socket
         (ADR-041 D1). Best-effort — the caller suppresses failures; when no stream is active or no
-        connection exists there is nothing to signal (a no-op). The send serializes against the
-        adapter's own socket use via the session lock model (single-threaded server request path).
+        connection exists there is nothing to signal (a no-op). **Deliberately lock-free** (gap N1):
+        it only fires when ``active_stream_id`` is set, i.e. while a stream owns the socket and its
+        reader is *reading* (the reader holds no lock — exclusion is the flag). This is therefore
+        the sole writer concurrent with that read (full-duplex-safe), and a plain ``_call``
+        refuses the socket while the flag is set, so none is mid-transaction.
 
         Args:
             sid: The session id whose worker to signal.
@@ -1609,7 +1644,8 @@ class RpcGhidraAdapter:
         Raises:
             GhidraMcpError: On any failure, mapped to the public error envelope.
         """
-        sess = self._sessions.get(session_id)
+        with self._sessions_lock:
+            sess = self._sessions.get(session_id)
         if sess is None:
             raise _errors.make_error(ErrorType.WORKER_UNAVAILABLE, "no worker for session")
 
@@ -1618,7 +1654,24 @@ class RpcGhidraAdapter:
             rpc_framing.build_request(request_id, method, params),
             max_frame_bytes=self._max_response_bytes,
         )
+        # gap N1: serialize this session's socket transaction (connect→send→read) so two concurrent
+        # same-session requests (HTTP threadpool) cannot interleave frames / steal each other's
+        # response on the one UDS. RLock ⇒ same-thread reentrant; released in the finally below.
+        # kill_worker/_send_cancel intentionally do NOT take this lock (see _Session.lock).
+        # BOUNDED acquire (gap N1 review): fail closed on the per-call deadline rather than block
+        # indefinitely if the lock is briefly held; the caller gets a retryable worker-unavailable.
+        if not sess.lock.acquire(timeout=timeout_s):
+            raise _errors.make_error(
+                ErrorType.WORKER_UNAVAILABLE, "session busy (another call or stream holds it)"
+            )
         try:
+            # A streaming job owns the socket between its start and terminal (the reader holds no
+            # lock, only this flag — gap N1). A plain call must NOT read off the socket then or it
+            # would steal the stream's chunks; refuse fast (retryable) instead.
+            if sess.active_stream_id is not None:
+                raise _errors.make_error(
+                    ErrorType.WORKER_UNAVAILABLE, "session busy (a stream is in progress)"
+                )
             sock = self._ensure_connected(sess)
             self._send_all_with_timeout(sock, frame, timeout_s)
             if expect_progress:
@@ -1705,6 +1758,8 @@ class RpcGhidraAdapter:
                 # the JVM ExitOnOutOfMemoryError heap-OOM self-exit (ExitCode 3, ADR-037 §D1).
                 raise _errors.resource_exhausted(self._worker_mem_mib) from exc
             raise _errors.make_error(ErrorType.WORKER_UNAVAILABLE, "worker unavailable") from exc
+        finally:
+            sess.lock.release()  # gap N1: paired with the acquire() above; releases on every exit
 
     def _ensure_connected(self, sess: _Session) -> socket.socket:
         """Connect (lazily) to the session's UDS, returning a stream socket.

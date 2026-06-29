@@ -240,6 +240,76 @@ def test_timeout_kills_worker() -> None:
     wrk.close()
 
 
+def test_call_holds_session_lock_across_the_io_transaction() -> None:
+    """gap N1: ``_call`` holds the per-session lock across send→read so a concurrent same-session
+    caller cannot use the one UDS mid-transaction (the HTTP threadpool makes this reachable).
+
+    A worker thread reads the request, then pauses *before* replying; while the adapter call is
+    blocked in the read, a DIFFERENT thread must not be able to acquire ``sess.lock``. After the
+    call completes the lock is fully released.
+    """
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+    sess = adapter._sessions["s"]  # white-box: assert the per-session lock is held mid-call
+    entered = threading.Event()
+    proceed = threading.Event()
+    result = {
+        "session_id": "s",
+        "state": "ready",
+        "created_at": 1,
+        "expires_at": 2,
+        "binary_sha256": None,
+    }
+
+    def _paused_worker() -> None:
+        obj = dispatch.read_frame(wrk, max_frame_bytes=_CAP)
+        entered.set()  # the adapter has sent + is now blocked reading the response (lock held)
+        proceed.wait(3)
+        resp = {"jsonrpc": "2.0", "result": result, "id": obj["id"]}
+        wrk.sendall(rpc_framing.encode_frame(resp, max_frame_bytes=_CAP))
+
+    out: list[s.SessionInfo] = []
+
+    def _caller() -> None:
+        out.append(adapter.analyze("s", s.SessionAnalyzeIn(session_id="s", timeout_seconds=3)))
+
+    wt = threading.Thread(target=_paused_worker, daemon=True)
+    ct = threading.Thread(target=_caller, daemon=True)
+    wt.start()
+    ct.start()
+    assert entered.wait(3), "worker never received the request"
+    # Mid-transaction: the call thread holds the per-session lock → another thread cannot take it.
+    assert sess.lock.acquire(blocking=False) is False
+    proceed.set()
+    ct.join(timeout=4)
+    wt.join(timeout=4)
+    assert out and out[0].state == "ready"
+    # Released on completion → now acquirable.
+    assert sess.lock.acquire(blocking=False) is True
+    sess.lock.release()
+    wrk.close()
+
+
+def test_call_refuses_while_a_stream_owns_the_session() -> None:
+    """gap N1: while a stream owns the socket (``active_stream_id`` set), a plain call refuses fast
+    (retryable ``worker-unavailable``) instead of reading the stream's chunks off the socket. The
+    streamer's reader holds no lock, so this flag — not a held lock — is the exclusion mechanism.
+    """
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+    adapter._sessions["s"].active_stream_id = "stream-abc"  # simulate an in-flight stream
+    with pytest.raises(GhidraMcpError) as ei:
+        adapter.decompile_function("s", s.DecompileFunctionIn(session_id="s", function="main"))
+    assert ei.value.envelope.type is ErrorType.WORKER_UNAVAILABLE
+    assert worker.killed == 0  # refusing a busy session is not a worker fault — never kill
+    # The lock was acquired for the check and released in the finally → still free afterwards.
+    assert adapter._sessions["s"].lock.acquire(blocking=False) is True
+    adapter._sessions["s"].lock.release()
+    wrk.close()
+
+
 def test_oversized_declared_frame_kills_worker() -> None:
     srv, wrk = socket.socketpair(socket.AF_UNIX)
     worker = _FakeWorker()
