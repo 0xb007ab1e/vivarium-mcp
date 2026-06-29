@@ -487,6 +487,45 @@ def test_authorize_threads_static_principal_as_caller(ctx: reg.ToolContext) -> N
     assert ctx.sessions.callers == ["local"]  # type: ignore[attr-defined]
 
 
+# --- optional-argument validation branches (gap N16) ---
+# These handlers validate an OPTIONAL arg only when it is supplied. Existing tests exercised the
+# omitted-arg path (+ the disassemble cross-field require, below); these cover the supplied-arg
+# branches, taking registry.py to 100% branch coverage.
+def test_disassemble_validates_start_when_provided(ctx: reg.ToolContext) -> None:
+    """disassemble with an explicit start runs the address validator + dispatches."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["disassemble"](session_id=_VALID_SID, start="0x401000")
+    assert isinstance(out, s.DisassembleOut)
+
+
+def test_disassemble_validates_function_when_provided(ctx: reg.ToolContext) -> None:
+    """disassemble with an explicit function runs the name validator + dispatches."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["disassemble"](session_id=_VALID_SID, function="main")
+    assert isinstance(out, s.DisassembleOut)
+
+
+def test_list_functions_validates_name_contains_when_provided(ctx: reg.ToolContext) -> None:
+    """list_functions with a name_contains filter runs the name validator + dispatches."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["list_functions"](session_id=_VALID_SID, name_contains="ma")
+    assert isinstance(out, s.FunctionListOut)
+
+
+def test_list_symbols_validates_name_contains_when_provided(ctx: reg.ToolContext) -> None:
+    """list_symbols with a name_contains filter runs the name validator + dispatches."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["list_symbols"](session_id=_VALID_SID, name_contains="ma")
+    assert isinstance(out, s.SymbolListOut)
+
+
+def test_get_comments_validates_address_when_provided(ctx: reg.ToolContext) -> None:
+    """get_comments with an explicit address runs the address validator + dispatches."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["get_comments"](session_id=_VALID_SID, address="0x401000")
+    assert isinstance(out, s.CommentListOut)
+
+
 def test_caller_id_uses_static_principal_by_default() -> None:
     c = reg.ToolContext(
         config=_config(),
