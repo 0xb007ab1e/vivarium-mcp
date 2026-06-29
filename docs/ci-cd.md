@@ -40,6 +40,14 @@ turn it into a regression gate once the baseline is confirmed. Baseline at intro
 (895 killed / 366 survived / 1261). A failed scheduled run alerts the repo owner (like
 `scheduled-rescan.yml`).
 
+**gVisor isolation verification (`gvisor-isolation.yml`).** The ADR-004 worker-isolation drill
+(`deploy/verify-isolation.sh`) runs in CI under **real gVisor/runsc** against the pinned,
+cosign-verified worker image — asserting all six controls (gVisor kernel, caps dropped, non-root,
+no-new-privs, read-only rootfs, no network) from inside the worker. It runs on a **weekly schedule +
+manual dispatch** (gated, not a per-PR merge gate — stock runners need a one-time runsc setup the job
+performs). A failed scheduled run alerts the repo owner. The per-PR gated real-worker e2e
+(`e2e-groundtruth` / `live-regression`) runs under `crun`; this job is the strong-tier (gVisor) check.
+
 **Fail closed:** an errored or skipped security stage counts as a failure, not a pass.
 
 ## Supply-chain integrity (std-supplychain)
@@ -48,7 +56,7 @@ turn it into a regression gate once the baseline is confirmed. Baseline at intro
   `REPLACE_WITH_DIGEST_FOR_<tag>` placeholders; resolving each to its SHA and pinning it is a
   **GATED** step done before CI runs (no network in WS0).
 - **Dependencies:** install from a **hash-pinned lockfile** (`pip install --require-hashes`);
-  generating the lock (`uv lock` / `pip-compile --generate-hashes`) is gated (see the lockfile-intent
+  generating the lock (`pip-compile --generate-hashes` — the project pins with pip-compile) is gated (see the lockfile-intent
   note in `pyproject.toml`).
 - **Worker image:** pinned **by digest** (ADR-003); image scan + **SBOM** generation run in the WS3
   build/release workflow (not PR CI). Release artifacts are signed with provenance.

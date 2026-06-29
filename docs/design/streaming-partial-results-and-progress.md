@@ -133,7 +133,17 @@ read from the same server-side counter, so they cannot diverge.
   the terminal-error path. Time-based behavior (ETA, flush cadence) needs an injected clock so
   tests stay deterministic.
 
-## 7. Open questions (resolve before the ADR)
+## 7. Open questions — RESOLVED (shipped via ADR-040 + ADR-041)
+
+> These were resolved when streaming shipped (v0.10.0). In short: **pull on both transports** (a
+> job + monotonic cursor — no push dependency); **unit = one decompiled function**; **backpressure
+> = pause extraction** (never silent-drop); a **generic** job contract (`start_decompile_stream` +
+> the reusable `fetch_job_results`/`job_status`/`cancel_job`); and **explicit cancellation**
+> (`cancel_job` → server→worker `$/cancel`, ADR-041) in addition to worker-timeout. See
+> [`ADR-040`](../adr/ADR-040-streaming-partial-results.md) and
+> [`ADR-041`](../adr/ADR-041-mid-stream-cancellation.md); the catalog entries are in
+> [tool-catalog.md](../contracts/tool-catalog.md) (the "Streaming extraction" section). The original
+> questions are kept below as the design record.
 
 1. **Transport.** Do we require the HTTP transport for true push streaming and let stdio fall
    back to pull-only, or make pull (A2) the single path on both? (Leaning: pull on both, push
