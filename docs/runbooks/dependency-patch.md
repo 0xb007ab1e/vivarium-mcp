@@ -1,7 +1,7 @@
 # Runbook: Patch a Ghidra / JDK / Dependency CVE via Digest Bump
 
 > Service-specific (ADR-003, `std-supplychain`). Rules: `@rules/workflow-cve-management.md`,
-> `@rules/workflow-vuln-mgmt.md`. SCAFFOLD — commands `<...>` finalized in WS3.
+> `@rules/workflow-vuln-mgmt.md`.
 
 ## When to use
 - SCA (pip-audit) flags a vulnerable Python dep, OR an advisory / **CISA KEV** entry matches the
@@ -26,16 +26,33 @@
 ## Steps
 ### A. Python dependency
 1. Confirm exposure + VEX (`affected` / `not affected` + reason).
-2. Determine the fixed version (OSV/GHSA/NVD); update `pyproject.toml` floor + regenerate the
-   **hash-pinned lockfile**: `<uv lock>` / `<pip-compile --generate-hashes>`.
-3. Run the full gates (`<make ci>`); check for breaking changes.
+2. Determine the fixed version (OSV/GHSA/NVD); update the `pyproject.toml` floor + regenerate the
+   **hash-pinned lockfile** (the project pins with `pip-compile --generate-hashes`, NOT uv — one
+   lock per `.in`):
+   `pip-compile --generate-hashes -o requirements.lock pyproject.toml` (and `requirements-dev.lock`,
+   `requirements-*.lock` similarly). Resolution needs network → run it via `cot` (the sandbox has
+   no egress). **The lock-gen Python must match the consuming job's Python** (cot is 3.13; e.g.
+   `mutation.yml` runs on 3.13 for this reason).
+3. Run the gates locally (there is no `make` target — these mirror `ci.yml`):
+   `ruff check . && ruff format --check . && mypy && pytest` (the merge-blocking SAST/SCA —
+   bandit/semgrep/pip-audit/gitleaks — run in CI). Check for breaking changes.
 
 ### B. Ghidra / JDK / base image (the worker)
-1. Identify the fixed Ghidra/JDK version or patched base image.
-2. Rebuild the worker image; obtain the **new `@sha256:` digest**: `<build + inspect digest>`.
-3. **Vet the digest** (provenance/signature where available) and **surface it for human approval**
-   (gated). Update the pinned digest in `deploy/` and `.env.example`'s `VIVARIUM_WORKER_IMAGE`.
-4. Regenerate the worker **SBOM**; re-run the image/IaC scan (Trivy) → no high/critical remaining.
+1. Identify the fixed Ghidra/JDK version or patched base image (bump the relevant `ARG …_SHA256` /
+   base digest in `Containerfile.worker`).
+2. Rebuild the worker image via the **`worker-image.yml`** workflow (GATED — it builds, Trivy-scans,
+   SBOMs, and **cosign-signs** the image, then records the signed digest as the `worker-image-digest`
+   artifact): `gh workflow run worker-image.yml --ref <branch>`, then
+   `gh run download <run-id> -n worker-image-digest` → the new `sha256:` token. (For a quick local
+   check only: `podman build -f Containerfile.worker -t vivarium-worker:<tag> .` then
+   `podman image inspect --format '{{index .RepoDigests 0}}' …` — but the signed CI digest is what
+   ships.)
+3. **Vet the digest** (cosign verify — identity `worker-image.yml@<repo>`) and **surface it for
+   human approval** (gated). Advance the authoritative trust pin **`.github/worker-image.pin`** (the
+   single `sha256:` token the live-regression / e2e workflows cosign-verify + pull); also update
+   `.env.example`'s `VIVARIUM_WORKER_IMAGE`.
+4. Worker **SBOM** + the image/IaC scan (Trivy) are produced by the same `worker-image.yml` run →
+   confirm no high/critical remaining.
 
 ## Verification
 - Re-run SCA + image scan: the finding is gone for **all** affected artifacts. Add/confirm a
@@ -54,4 +71,5 @@
 - `deploy.md`, `rollback.md`, `incident-response.md`; ADR-003; threat model §4 (supply chain).
 
 ---
-_Last validated: <date>. Owner: <team>._
+_Last validated: not yet drilled (the worker-image rebuild + `.github/worker-image.pin` bump path
+was exercised live in #190). Owner: repo maintainer (no formal on-call rotation pre-1.0)._
