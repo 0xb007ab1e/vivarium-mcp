@@ -241,6 +241,20 @@ def test_resume_cursor_older_than_replay_window_fails_closed() -> None:
     assert ei.value.envelope.type is ErrorType.VALIDATION
 
 
+def test_replay_window_bounded_by_bytes_evicts_oldest() -> None:
+    """The BYTE bound evicts independently of the count bound (mirrors the buffer-byte test)."""
+    # A 1-byte replay cap is below any real chunk, so the keep-newest rule retains only the latest
+    # delivered chunk — exercising the byte operand of the eviction condition (not the count one).
+    mgr = _manager(limits=Limits(max_stream_replay_bytes=1))
+    job_id = mgr.start_job(_SID, producer=_producer(4), total=4, caller=_OWNER)
+    mgr.fetch(_SID, job_id, limit=3, caller=_OWNER)  # delivers 0,1,2 → window keeps only seq 2
+    # seq 2 (the newest) is still replayable, but anything older fails closed.
+    assert [c.seq for c in mgr.fetch(_SID, job_id, cursor=2, limit=2, caller=_OWNER).chunks] == [2]
+    with pytest.raises(GhidraMcpError) as ei:
+        mgr.fetch(_SID, job_id, cursor=1, limit=2, caller=_OWNER)
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+
+
 @pytest.mark.critical
 def test_resume_cursor_ahead_of_server_is_rejected() -> None:
     mgr = _manager()
