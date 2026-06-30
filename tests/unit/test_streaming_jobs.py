@@ -202,13 +202,43 @@ def test_chunks_are_never_reordered_under_partial_fetches() -> None:
 # ---------------------------------------------------------------------------------------------
 
 
-def test_resume_cursor_at_or_behind_server_is_accepted() -> None:
+def test_resume_cursor_behind_server_replays_from_the_window() -> None:
+    """A re-fetch from an earlier cursor REPLAYS the already-delivered chunks (ADR-040 §D7)."""
     mgr = _manager()
     job_id = mgr.start_job(_SID, producer=_producer(3), total=3, caller=_OWNER)
-    mgr.fetch(_SID, job_id, limit=2, caller=_OWNER)  # cursor now 2
-    # Re-fetch acknowledging an earlier cursor (idempotent client-dedupe signal): accepted.
+    mgr.fetch(_SID, job_id, limit=2, caller=_OWNER)  # delivers seq 0,1 → cursor now 2
+    # Re-fetch from cursor=1: the client lost the earlier response and resumes — seq 1 is replayed
+    # from the bounded window (at-least-once in spirit; the client dedupes by seq).
     res = mgr.fetch(_SID, job_id, cursor=1, limit=2, caller=_OWNER)
-    assert [c.seq for c in res.chunks] == [2]  # server is authoritative on what remains
+    assert [c.seq for c in res.chunks] == [1]  # replayed, NOT the next forward batch
+    assert res.cursor == 2  # forward cursor untouched by the read-only replay
+    # A subsequent forward fetch still delivers the un-consumed tail exactly once (seq 2).
+    fwd = mgr.fetch(_SID, job_id, limit=2, caller=_OWNER)
+    assert [c.seq for c in fwd.chunks] == [2]
+
+
+def test_replay_is_bounded_by_the_fetch_limit_and_reports_done_when_caught_up() -> None:
+    """A replay returns at most ``limit`` chunks; ``done`` flips only once caught up."""
+    mgr = _manager()
+    job_id = mgr.start_job(_SID, producer=_producer(4), total=4, caller=_OWNER)
+    mgr.fetch(_SID, job_id, limit=4, caller=_OWNER)  # delivers 0..3 → cursor 4, window holds all
+    first = mgr.fetch(_SID, job_id, cursor=0, limit=2, caller=_OWNER)  # replay bounded to 2
+    assert [c.seq for c in first.chunks] == [0, 1]  # break at the fetch limit
+    assert first.cursor == 2 and first.done is False  # still replaying history → not done
+    second = mgr.fetch(_SID, job_id, cursor=2, limit=2, caller=_OWNER)  # finish the replay
+    assert [c.seq for c in second.chunks] == [2, 3]
+    assert second.cursor == 4 and second.done is True  # caught up to the forward cursor → done
+
+
+def test_resume_cursor_older_than_replay_window_fails_closed() -> None:
+    """A cursor below the retained replay window is rejected (no silent gap) — fail closed."""
+    # Window keeps only the single newest delivered chunk (the floor of 1 + the keep-newest rule).
+    mgr = _manager(limits=Limits(max_stream_replay_chunks=1))
+    job_id = mgr.start_job(_SID, producer=_producer(4), total=4, caller=_OWNER)
+    mgr.fetch(_SID, job_id, limit=3, caller=_OWNER)  # delivers 0,1,2 → window holds only seq 2
+    with pytest.raises(GhidraMcpError) as ei:
+        mgr.fetch(_SID, job_id, cursor=0, limit=2, caller=_OWNER)  # 0 is below the window
+    assert ei.value.envelope.type is ErrorType.VALIDATION
 
 
 @pytest.mark.critical

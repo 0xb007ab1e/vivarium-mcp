@@ -15,7 +15,8 @@ design doc §6 "Security and contract impact" — invariants that MUST hold):
   lifts when the client drains the buffer by fetching.
 - **Ordering, resume, idempotency.** Chunks carry a monotonic, **gap-free** ``seq`` starting at 0;
   the cursor is the next expected ``seq``. A client resumes/dedupes by cursor — a re-fetch from an
-  already-consumed cursor is honored (at-least-once in spirit; the client dedupes).
+  already-consumed cursor is honored out of a **bounded replay window** (at-least-once in spirit;
+  the client dedupes); a cursor older than the window fails closed rather than returning a gap.
 - **Fail closed and honest.** On a producer error mid-stream the job terminates with an explicit
   terminal error (``error`` state + an :class:`~vivarium.core.errors.ErrorEnvelope`), never an
   ambiguous early ``done``.
@@ -291,8 +292,12 @@ class _StreamingJob:
         "_error",
         "_max_buffer_bytes",
         "_max_buffer_chunks",
+        "_max_replay_bytes",
+        "_max_replay_chunks",
         "_next_seq",
         "_producer",
+        "_replay",
+        "_replay_bytes",
         "_started_mono",
         "_state",
         "_terminal",
@@ -341,10 +346,16 @@ class _StreamingJob:
         self._terminal = terminal if terminal is not None else StreamTerminal()
         self._max_buffer_chunks = limits.max_stream_buffer_chunks
         self._max_buffer_bytes = limits.max_stream_buffer_bytes
+        self._max_replay_chunks = limits.max_stream_replay_chunks
+        self._max_replay_bytes = limits.max_stream_replay_bytes
         self._clock = clock
         self._started_mono = clock()
         self._buffer: deque[StreamChunk] = deque()
         self.buffered_bytes = 0
+        # Bounded replay window of already-delivered chunks (seq in [replay_floor, cursor)) so a
+        # client can re-fetch from an earlier cursor (ADR-040 §D7). Oldest evicted past a bound.
+        self._replay: deque[StreamChunk] = deque()
+        self._replay_bytes = 0
         self._next_seq = 0
         self.cursor = 0
         self._state = JobState.RUNNING
@@ -477,6 +488,9 @@ class _StreamingJob:
         ``paused`` job back to ``running`` (the drain made room) so the next :meth:`pump` resumes
         producing. Does not itself pump — the manager pumps after draining.
 
+        Each delivered chunk is also retained in the bounded replay window (evicting the oldest past
+        either replay bound) so a later re-fetch from an earlier cursor can replay it (ADR-040 §D7).
+
         Args:
             max_chunks: Maximum chunks to return this fetch (already bounded by the manager).
 
@@ -489,9 +503,60 @@ class _StreamingJob:
             self.buffered_bytes -= _chunk_size_bytes(chunk)
             self.cursor = chunk.seq + 1
             out.append(chunk)
+            self._retain_for_replay(chunk)
         # Draining freed room: a paused job can resume producing (running). Terminal states stick.
         if self._state is JobState.PAUSED:
             self._state = JobState.RUNNING
+        return out
+
+    def _retain_for_replay(self, chunk: StreamChunk) -> None:
+        """Append a just-delivered chunk to the replay window, evicting oldest past either bound."""
+        self._replay.append(chunk)
+        self._replay_bytes += _chunk_size_bytes(chunk)
+        # Evict from the front while over EITHER bound, but always keep at least the newest chunk so
+        # a single oversized chunk does not empty the window entirely.
+        while len(self._replay) > 1 and (
+            len(self._replay) > self._max_replay_chunks
+            or self._replay_bytes > self._max_replay_bytes
+        ):
+            evicted = self._replay.popleft()
+            self._replay_bytes -= _chunk_size_bytes(evicted)
+
+    @property
+    def replay_floor(self) -> int:
+        """Lowest ``seq`` still replayable (the oldest retained chunk, or the cursor if empty)."""
+        return self._replay[0].seq if self._replay else self.cursor
+
+    def replay(self, from_seq: int, max_chunks: int) -> list[StreamChunk]:
+        """Return already-delivered chunks from ``from_seq`` onward, from the bounded replay window.
+
+        A read-only lookback for cursor-resume (ADR-040 §D7): it never advances the forward cursor,
+        never touches the live buffer, and never reorders. ``from_seq`` must be in
+        ``[replay_floor, cursor)`` — a cursor older than the retained window fails closed (the
+        client must restart rather than receive a silent gap).
+
+        Args:
+            from_seq: The earlier cursor to replay from (``< cursor``, ``>= replay_floor``).
+            max_chunks: Maximum chunks to return (already bounded by the manager).
+
+        Returns:
+            The ordered retained chunks with ``seq`` in ``[from_seq, from_seq + max_chunks)``.
+
+        Raises:
+            GhidraMcpError: ``VALIDATION`` if ``from_seq`` is below the retained replay window.
+        """
+        if from_seq < self.replay_floor:
+            raise _errors.make_error(
+                ErrorType.VALIDATION,
+                "resume cursor is older than the bounded replay window; restart the stream",
+            )
+        out: list[StreamChunk] = []
+        for chunk in self._replay:
+            if chunk.seq < from_seq:
+                continue
+            if len(out) >= max_chunks:
+                break
+            out.append(chunk)
         return out
 
     def cancel(self) -> None:
@@ -512,6 +577,10 @@ class _StreamingJob:
         self._state = JobState.CANCELLED
         self._buffer.clear()
         self.buffered_bytes = 0
+        # Also drop the replay window — no already-delivered binary-derived chunks linger after a
+        # cancel (confidentiality + resource win); a cancelled job cannot be resumed anyway.
+        self._replay.clear()
+        self._replay_bytes = 0
 
     def status(self) -> StreamJobStatus:
         """Snapshot the server-authored status (no binary content), with an injected-clock ETA.
@@ -687,18 +756,22 @@ class StreamingJobManager:
         cursor), then pumps the producer to refill (lifting any backpressure pause). The returned
         ``cursor`` is the resume point for the next fetch.
 
-        ``cursor`` is accepted for client-driven resume/dedupe semantics: chunks are delivered
-        exactly once from the server buffer (popped on drain), and the client dedupes by ``seq``
-        against its own progress; supplying a cursor that does not match the server's next cursor is
-        a client-side bookkeeping signal only (the server is the authority on what remains buffered)
-        and is rejected as a validation error if it runs *ahead* of the server (a client claiming to
-        have consumed chunks the server never produced — fail closed).
+        ``cursor`` drives resume/dedupe (ADR-040 §D7):
+          * ``None`` or ``== cursor`` — the forward path: drain the next un-delivered chunks and
+            advance the cursor (each is also retained in the bounded replay window).
+          * ``< cursor`` — RESUME: replay the already-delivered chunks from that point out of the
+            bounded replay window (read-only; the forward cursor + buffer are untouched). A cursor
+            older than the retained window fails closed (the client must restart — no silent gap).
+          * ``> cursor`` — rejected (the client claims chunks the server never produced — fail
+            closed).
+        Delivery is **at-least-once in spirit**: a replayed chunk may be returned again, so the
+        client dedupes by ``seq``.
 
         Args:
             session_id: The owning session id.
             job_id: The opaque job handle.
-            cursor: Optional client resume cursor; when supplied it must not exceed the server's
-                current cursor (it may be <= for an idempotent re-fetch acknowledgement).
+            cursor: Optional client resume cursor; must not exceed the server's current cursor. A
+                smaller value replays from the bounded window; a larger value is rejected.
             limit: Max chunks to return this pull (bounded to ``_MAX_FETCH_BATCH``).
             caller: The authenticated, server-derived calling-principal id (ADR-017).
 
@@ -724,6 +797,28 @@ class StreamingJobManager:
                 raise _errors.make_error(
                     ErrorType.VALIDATION,
                     "resume cursor is ahead of the stream",
+                )
+            if cursor is not None and cursor < job.cursor:
+                # RESUME (ADR-040 §D7): the client is re-fetching already-delivered chunks (a
+                # dropped response / reconnect). Replay from the bounded window — read-only: the
+                # forward cursor + live buffer are untouched and the producer is NOT pumped (no
+                # buffer room freed). A cursor older than the window fails closed inside replay().
+                replayed = job.replay(cursor, limit)
+                next_cursor = replayed[-1].seq + 1 if replayed else cursor
+                caught_up = next_cursor >= job.cursor
+                return StreamFetchResult(
+                    job_id=job.job_id,
+                    chunks=replayed,
+                    cursor=next_cursor,
+                    # While still replaying history the client has more to pull, so never report a
+                    # terminal state/done early; only once caught up to the forward cursor does the
+                    # job's true terminal state apply.
+                    state=job.effective_state if caught_up else JobState.RUNNING,
+                    done=job.effective_done and caught_up,
+                    truncated=job.truncated if caught_up else False,
+                    error=(
+                        job.error if caught_up and job.effective_state is JobState.ERROR else None
+                    ),
                 )
             chunks = job.drain(limit)
             job.pump()

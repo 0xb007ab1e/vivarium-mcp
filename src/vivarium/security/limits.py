@@ -31,12 +31,23 @@ DEFAULT_MAX_SESSIONS = 4
 DEFAULT_MAX_STREAM_BUFFER_CHUNKS = 256
 DEFAULT_MAX_STREAM_BUFFER_BYTES = 4 * 1024 * 1024  # 4 MiB — mirrors a single response cap
 
+# Streaming-job REPLAY-window caps (ADR-040 §D7 resume — gap N4). After a chunk is fetched it is
+# retained in a BOUNDED replay window so a client that re-fetches from an earlier cursor (a dropped
+# response / reconnect) gets the already-delivered chunks back ("at-least-once in spirit; the client
+# dedupes by seq"). The window is bounded by BOTH a chunk COUNT and a total BYTE size — the oldest
+# retained chunks are evicted past either bound, so memory stays bounded (CWE-400); a cursor older
+# than the window fails closed (no silent gap). Defaults mirror the buffer caps; clamped DOWN.
+DEFAULT_MAX_STREAM_REPLAY_CHUNKS = 256
+DEFAULT_MAX_STREAM_REPLAY_BYTES = 4 * 1024 * 1024  # 4 MiB
+
 # Hard clamps — config can never exceed these (defense against misconfig widening the surface).
 HARD_MAX_BINARY_BYTES = 1024 * 1024 * 1024  # 1 GiB absolute ceiling
 HARD_MAX_ANALYSIS_TIMEOUT_S = 3600
 HARD_MAX_SESSIONS = 32
 HARD_MAX_STREAM_BUFFER_CHUNKS = 4096
 HARD_MAX_STREAM_BUFFER_BYTES = 64 * 1024 * 1024  # 64 MiB absolute buffer ceiling per job
+HARD_MAX_STREAM_REPLAY_CHUNKS = 4096
+HARD_MAX_STREAM_REPLAY_BYTES = 64 * 1024 * 1024  # 64 MiB absolute replay-window ceiling per job
 
 # Worker container resource bounds (ADR-023 / F1). Integer-MiB memory/tmpfs + whole-CPU + pid caps
 # the launcher renders to engine spelling at argv build. Defaults mirror the previously-hardcoded
@@ -70,6 +81,8 @@ _HARD_CEILINGS: dict[str, int] = {
     "max_sessions_per_owner": HARD_MAX_SESSIONS,
     "max_stream_buffer_chunks": HARD_MAX_STREAM_BUFFER_CHUNKS,
     "max_stream_buffer_bytes": HARD_MAX_STREAM_BUFFER_BYTES,
+    "max_stream_replay_chunks": HARD_MAX_STREAM_REPLAY_CHUNKS,
+    "max_stream_replay_bytes": HARD_MAX_STREAM_REPLAY_BYTES,
 }
 
 # Per-field hard ceiling for worker-resource overrides (ADR-023 / F1). Same clamp-down semantics as
@@ -110,6 +123,11 @@ class Limits:
             pauses (backpressure — ADR-040 / streaming design §6). Bounds chunk COUNT.
         max_stream_buffer_bytes: Max total buffered (un-fetched) chunk bytes before the producer
             pauses. Bounds buffer SIZE independently of the count so a few large chunks also pause.
+        max_stream_replay_chunks: Max already-delivered chunks retained per job for cursor-resume
+            (ADR-040 §D7). Bounds replay-window COUNT; older chunks are evicted (a cursor below the
+            window fails closed).
+        max_stream_replay_bytes: Max total bytes of retained replay chunks per job. Bounds the
+            replay window SIZE independently of the count.
     """
 
     max_binary_bytes: int = DEFAULT_MAX_BINARY_BYTES
@@ -120,6 +138,8 @@ class Limits:
     max_sessions_per_owner: int | None = None
     max_stream_buffer_chunks: int = DEFAULT_MAX_STREAM_BUFFER_CHUNKS
     max_stream_buffer_bytes: int = DEFAULT_MAX_STREAM_BUFFER_BYTES
+    max_stream_replay_chunks: int = DEFAULT_MAX_STREAM_REPLAY_CHUNKS
+    max_stream_replay_bytes: int = DEFAULT_MAX_STREAM_REPLAY_BYTES
 
 
 def _validation_error(detail: str) -> GhidraMcpError:
