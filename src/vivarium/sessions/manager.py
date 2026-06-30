@@ -317,6 +317,15 @@ class SessionManager:
         with self._lock:
             return len(self._sessions)
 
+    def has_capacity(self) -> bool:
+        """Whether a new session can be created (pool below the concurrency cap) — readiness signal.
+
+        A full pool reports not-ready so a load balancer pauses NEW traffic (backpressure), while
+        liveness stays healthy for in-flight sessions.
+        """
+        with self._lock:
+            return len(self._sessions) < self._max_sessions
+
     def authorize(self, session_id: str, *, caller: str = _LOCAL_PRINCIPAL_ID) -> SessionInfo:
         """Look up and authorize a live session by id for ``caller``, refreshing its idle clock.
 

@@ -35,6 +35,7 @@ from vivarium.server.auth import Authenticator, Principal, build_authenticator
 from vivarium.server.http_middleware import (
     SCOPE_PRINCIPAL_KEY,
     AuthenticationMiddleware,
+    HealthMiddleware,
     RateLimitMiddleware,
     RequestSizeLimitMiddleware,
     SecurityHeadersMiddleware,
@@ -369,19 +370,23 @@ def build_http_asgi_app(
     *,
     authenticator: Authenticator,
     clock: Callable[[], float] = time.monotonic,
+    is_ready: Callable[[], bool] = lambda: True,
 ) -> ASGIApp:
     """Compose the TB6 middleware stack around the inner MCP Streamable-HTTP app (ADR-011 §5).
 
-    Request flow (outer → inner): security-headers → CORS → request-size-limit → rate-limit →
-    authenticate → ``inner``. CORS preflight is handled by the CORS layer and exempt from auth;
-    rejected requests (413/429/401) never reach ``inner``. Pure composition (no I/O) — unit-testable
-    by injecting a fake ``inner`` + ``clock``.
+    Request flow (outer → inner): health → security-headers → CORS → request-size-limit →
+    rate-limit → authenticate → ``inner``. Health probes (``/healthz``/``/readyz``) are answered at
+    the OUTERMOST layer, so they are unauthenticated + not rate-limited (N3b — operator decision).
+    CORS preflight is handled by the CORS layer and exempt from auth; rejected requests
+    (413/429/401) never reach ``inner``. Pure composition — unit-testable with a fake ``inner``.
 
     Args:
         inner: The MCP Streamable-HTTP ASGI app (``FastMCP.streamable_http_app()``).
         http: Validated HTTP config (bind/auth/TLS/CORS/limits).
         authenticator: The auth strategy (from :func:`vivarium.server.auth.build_authenticator`).
         clock: Monotonic clock for the rate limiter (injected for deterministic tests).
+        is_ready: Readiness predicate for ``/readyz`` (production passes the session-pool capacity
+            check); defaults to always-ready.
 
     Returns:
         The wrapped ASGI application ready to serve.
@@ -405,7 +410,9 @@ def build_http_asgi_app(
         )
     # HSTS when the endpoint is served over TLS (in-app cert, or a network bind whose TLS is
     # proxy-terminated — a network bind always has TLS by the config fail-closed rule).
-    return SecurityHeadersMiddleware(guarded, hsts=http.tls_cert is not None or http.is_network)
+    guarded = SecurityHeadersMiddleware(guarded, hsts=http.tls_cert is not None or http.is_network)
+    # Health probes outermost: unauthenticated + not rate-limited (N3b).
+    return HealthMiddleware(guarded, is_ready=is_ready)
 
 
 def run_http(
@@ -459,7 +466,12 @@ def run_http(
         proxy_secret_header=http.proxy_secret_header,
         proxy_identity_header=http.proxy_identity_header,
     )
-    asgi = build_http_asgi_app(app.streamable_http_app(), http, authenticator=authenticator)
+    asgi = build_http_asgi_app(
+        app.streamable_http_app(),
+        http,
+        authenticator=authenticator,
+        is_ready=session_manager.has_capacity,
+    )
     _install_shutdown_handlers()
     reaper = PeriodicReaper(session_manager, interval_s=config.session_reap_interval_s)
     reaper.start()
