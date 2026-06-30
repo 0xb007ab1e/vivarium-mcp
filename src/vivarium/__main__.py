@@ -149,7 +149,10 @@ def main(
     if config.transport == "http":
         return run_http(app, config, session_manager=session_manager)
     return run_stdio(
-        app, session_manager=session_manager, reap_interval_s=config.session_reap_interval_s
+        app,
+        session_manager=session_manager,
+        reap_interval_s=config.session_reap_interval_s,
+        metrics_interval_s=config.metrics_snapshot_interval_s,
     )
 
 

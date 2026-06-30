@@ -23,6 +23,7 @@ from vivarium.server.auth import (
 from vivarium.server.http_middleware import (
     _SCOPE_PRINCIPAL_KEY,
     AuthenticationMiddleware,
+    HealthMiddleware,
     RateLimitMiddleware,
     RequestSizeLimitMiddleware,
 )
@@ -335,3 +336,54 @@ def test_auth_proxy_wrong_secret_is_401() -> None:
     )
     status, _ = _drive(mw, _proxy_scope(secret=b"wrong-but-long-enough-secret"))
     assert status == 401 and app.called is False
+
+
+# --- HealthMiddleware (N3b: unauthenticated, detail-free liveness/readiness) ---
+def _probe_scope(method: str, path: str) -> dict[str, Any]:
+    """A minimal HTTP scope for a health-probe request (carries the path)."""
+    return {"type": "http", "method": method, "path": path, "headers": [], "client": ("1.2.3.4", 5)}
+
+
+def test_health_liveness_is_always_200_and_bare() -> None:
+    """GET /healthz short-circuits to a 200 with no body (no internals leaked) — app not called."""
+    app = _App()
+    mw = HealthMiddleware(app, is_ready=lambda: False)  # readiness is irrelevant to liveness
+    status, body = _drive(mw, _probe_scope("GET", "/healthz"))
+    assert status == 200 and body == b"" and app.called is False
+
+
+def test_health_readiness_reflects_the_predicate() -> None:
+    """GET /readyz is 200 when ready and 503 when not — both bare; app never called."""
+    ready_app, not_ready_app = _App(), _App()
+    ok, _ = _drive(
+        HealthMiddleware(ready_app, is_ready=lambda: True), _probe_scope("GET", "/readyz")
+    )
+    busy, _ = _drive(
+        HealthMiddleware(not_ready_app, is_ready=lambda: False), _probe_scope("GET", "/readyz")
+    )
+    assert ok == 200 and busy == 503
+    assert ready_app.called is False and not_ready_app.called is False
+
+
+def test_health_passes_through_non_probe_path() -> None:
+    """A normal request path is delegated to the wrapped app unchanged."""
+    app = _App()
+    mw = HealthMiddleware(app, is_ready=lambda: True)
+    _drive(mw, _probe_scope("POST", "/mcp"))
+    assert app.called is True
+
+
+def test_health_passes_through_get_on_non_probe_path() -> None:
+    """A GET to a non-probe path falls past both probe checks and delegates to the app."""
+    app = _App()
+    mw = HealthMiddleware(app, is_ready=lambda: True)
+    _drive(mw, _probe_scope("GET", "/mcp"))
+    assert app.called is True
+
+
+def test_health_passes_through_non_get_on_a_probe_path() -> None:
+    """A POST to /healthz is NOT a probe (only GET/HEAD) → delegated, not short-circuited."""
+    app = _App()
+    mw = HealthMiddleware(app, is_ready=lambda: True)
+    _drive(mw, _probe_scope("POST", "/healthz"))
+    assert app.called is True

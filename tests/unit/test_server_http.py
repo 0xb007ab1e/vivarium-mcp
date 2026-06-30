@@ -152,6 +152,9 @@ def _min_http_env() -> dict[str, str]:
 class _FakeSM:
     def shutdown(self) -> None: ...
 
+    def active_count(self) -> int:
+        return 0
+
 
 def _patch_runners(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     calls: list[str] = []
@@ -161,7 +164,13 @@ def _patch_runners(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         calls.append("http")
         return 0
 
-    def _stdio_runner(app: Any, *, session_manager: Any, reap_interval_s: float = 60.0) -> int:
+    def _stdio_runner(
+        app: Any,
+        *,
+        session_manager: Any,
+        reap_interval_s: float = 60.0,
+        metrics_interval_s: float = 60.0,
+    ) -> int:
         calls.append("stdio")
         return 0
 

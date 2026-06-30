@@ -95,6 +95,17 @@ def test_concurrency_cap_applies_backpressure() -> None:
     assert ei.value.envelope.retryable is True
 
 
+def test_has_capacity_tracks_the_pool_for_readiness() -> None:
+    """has_capacity() (the /readyz signal — N3b) is True below the cap, False at it."""
+    mgr, _ = _mgr(max_sessions=2)
+    assert mgr.has_capacity() is True and mgr.active_count() == 0
+    a = mgr.create()
+    mgr.create()
+    assert mgr.has_capacity() is False and mgr.active_count() == 2  # pool full → not-ready
+    mgr.evict(a.session_id, reason="close")
+    assert mgr.has_capacity() is True and mgr.active_count() == 1  # a slot freed → ready again
+
+
 @pytest.mark.critical
 def test_cap_frees_a_slot_after_eviction() -> None:
     mgr, _ = _mgr(max_sessions=1)

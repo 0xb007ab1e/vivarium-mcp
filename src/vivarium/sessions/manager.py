@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
 
+from vivarium import metrics
 from vivarium.core.errors import ErrorType
 from vivarium.ghidra import _errors
 from vivarium.logging import get_logger
@@ -308,7 +309,24 @@ class SessionManager:
                     "principal_id": owner,
                 },
             )
+            metrics.record_session_created()
             return self._to_info(sess)
+
+    def active_count(self) -> int:
+        """Return the number of currently-live sessions (the metrics live-session gauge)."""
+        with self._lock:
+            return len(self._sessions)
+
+    def has_capacity(self) -> bool:
+        """Whether a new session can be created (pool below the concurrency cap) — readiness signal.
+
+        A full pool reports not-ready so a load balancer pauses NEW traffic (backpressure), while
+        liveness stays healthy for in-flight sessions. This is **single-instance** backpressure: an
+        operator fronting MULTIPLE replicas with one LB should weigh gating routing on liveness only
+        (or accept that a fleet-wide burst can mark several replicas not-ready at once).
+        """
+        with self._lock:
+            return len(self._sessions) < self._max_sessions
 
     def authorize(self, session_id: str, *, caller: str = _LOCAL_PRINCIPAL_ID) -> SessionInfo:
         """Look up and authorize a live session by id for ``caller``, refreshing its idle clock.
@@ -1002,6 +1020,7 @@ class SessionManager:
         # 3) Mark evicted and drop from the table (idempotent: re-evict is a no-op success).
         sess.state = STATE_EVICTED
         self._sessions.pop(session_id, None)
+        metrics.record_session_evicted(reason)
 
         # 4) Queue the on-evict callback to run AFTER the lock is released (lock-ordering safety —
         #    the callback may take another lock; never call out while holding ``_lock``).

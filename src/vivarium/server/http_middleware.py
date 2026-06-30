@@ -29,6 +29,7 @@ from typing import Any, cast
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from vivarium import metrics
 from vivarium.server.auth import AuthContext, Authenticator
 
 #: ASGI ``scope["state"]`` key under which :class:`AuthenticationMiddleware` stashes the
@@ -116,6 +117,47 @@ async def _send_error(send: Send, status: int, title: str, detail: str) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
+async def _send_bare(send: Send, status: int) -> None:
+    """Send a DETAIL-FREE response: just the status code + an empty body.
+
+    Health probes must not leak any internal/worker state to an unauthenticated caller (operator
+    decision — N3b), so there is no JSON body, only the status line (200 vs 503).
+    """
+    await send(
+        {"type": "http.response.start", "status": status, "headers": [(b"content-length", b"0")]}
+    )
+    await send({"type": "http.response.body", "body": b""})
+
+
+class HealthMiddleware:
+    """Unauthenticated, detail-free liveness (``/healthz``) + readiness (``/readyz``) probes (N3b).
+
+    Outermost in the stack so probes are reachable WITHOUT auth/rate-limit (orchestrators + the
+    tailnet poll them). Liveness is "the process is up" → always ``200``. Readiness consults an
+    injected predicate (the session-pool capacity — backpressure): ``200`` when ready, ``503`` when
+    not, so a load balancer pauses NEW traffic while in-flight sessions stay served. Both are bare
+    status-only responses (no body) — no internals leak (master §5). Every non-probe request (and
+    any non-GET/HEAD method) passes straight through to the wrapped app.
+    """
+
+    def __init__(self, app: ASGIApp, *, is_ready: Callable[[], bool]) -> None:
+        """Wrap ``app``; ``is_ready`` is the readiness predicate consulted for ``/readyz``."""
+        self.app = app
+        self._is_ready = is_ready
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Answer ``/healthz`` + ``/readyz`` (GET/HEAD) directly; delegate everything else."""
+        if scope["type"] == "http" and scope.get("method") in ("GET", "HEAD"):
+            path = scope.get("path", "")
+            if path == "/healthz":
+                await _send_bare(send, 200)
+                return
+            if path == "/readyz":
+                await _send_bare(send, 200 if self._is_ready() else 503)
+                return
+        await self.app(scope, receive, send)
+
+
 class RequestSizeLimitMiddleware:
     """Reject bodies whose ``Content-Length`` exceeds ``max_body_bytes`` (``413``; API4).
 
@@ -193,10 +235,19 @@ class RateLimitMiddleware:
 class AuthenticationMiddleware:
     """Default-deny auth: reject → generic ``401``; accept → stash the principal on scope."""
 
-    def __init__(self, app: ASGIApp, *, authenticator: Authenticator) -> None:
-        """Wrap ``app`` so every request is authenticated by ``authenticator`` (default-deny)."""
+    def __init__(
+        self, app: ASGIApp, *, authenticator: Authenticator, mode: str = "unknown"
+    ) -> None:
+        """Wrap ``app`` so every request is authenticated by ``authenticator`` (default-deny).
+
+        Args:
+            app: The inner ASGI app.
+            authenticator: The auth strategy.
+            mode: The auth-mode label for the metrics auth-decision counter (``bearer``/``mtls``/…).
+        """
         self.app = app
         self.authenticator = authenticator
+        self.mode = mode
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Authenticate every HTTP request except CORS preflight; ``401`` on reject (no oracle)."""
@@ -217,8 +268,10 @@ class AuthenticationMiddleware:
             )
         )
         if principal is None:
+            metrics.record_auth_decision(self.mode, metrics.AUTH_DENY)
             await _send_error(send, 401, "Unauthorized", "Authentication required.")
             return
+        metrics.record_auth_decision(self.mode, metrics.AUTH_ALLOW)
         # Stash for the per-request authZ + session-ownership check (slice 4). scope state is a
         # per-request dict; create it if the server didn't.
         state: dict[str, Any] = scope.setdefault("state", {})

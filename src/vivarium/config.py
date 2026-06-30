@@ -42,6 +42,7 @@ _ENV_LOG_FORMAT = "VIVARIUM_LOG_FORMAT"
 _ENV_SESSION_TTL = "VIVARIUM_SESSION_TTL_SECONDS"
 _ENV_SESSION_IDLE = "VIVARIUM_SESSION_IDLE_SECONDS"
 _ENV_SESSION_REAP_INTERVAL = "VIVARIUM_SESSION_REAP_INTERVAL_SECONDS"
+_ENV_METRICS_SNAPSHOT_INTERVAL = "VIVARIUM_METRICS_SNAPSHOT_INTERVAL_SECONDS"
 _ENV_MAX_SESSIONS = "VIVARIUM_MAX_SESSIONS"
 _ENV_MAX_SESSIONS_PER_OWNER = "VIVARIUM_MAX_SESSIONS_PER_OWNER"
 _ENV_MAX_BINARY_BYTES = "VIVARIUM_MAX_BINARY_BYTES"
@@ -118,6 +119,9 @@ _DEFAULT_SESSION_IDLE_S = 900
 # How often the background reaper sweeps expired sessions (gap N5). 60s gives prompt eviction of an
 # abandoned session (well under the 900s idle / 3600s TTL) without busy-looping.
 _DEFAULT_SESSION_REAP_INTERVAL_S = 60
+# Interval between metrics-snapshot log lines (gap N3a). 60s mirrors the reaper cadence — frequent
+# enough to be a useful SLI trend, infrequent enough to be log-cheap.
+_DEFAULT_METRICS_SNAPSHOT_INTERVAL_S = 60
 _DEFAULT_WORKER_RUNTIME = "runsc"
 _DEFAULT_WORKER_UID = 65532
 _DEFAULT_WORKER_GID = 65532
@@ -299,6 +303,9 @@ class Config:
     # Defaulted (gap N5): the background reaper sweep interval; existing keyword constructions stay
     # valid. Resolved from VIVARIUM_SESSION_REAP_INTERVAL_SECONDS in ``load_config``.
     session_reap_interval_s: int = _DEFAULT_SESSION_REAP_INTERVAL_S
+    # Defaulted (gap N3a): the metrics-snapshot log interval. Resolved from
+    # VIVARIUM_METRICS_SNAPSHOT_INTERVAL_SECONDS in ``load_config``.
+    metrics_snapshot_interval_s: int = _DEFAULT_METRICS_SNAPSHOT_INTERVAL_S
 
 
 def _startup_error(detail: str) -> GhidraMcpError:
@@ -742,6 +749,9 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     session_reap_interval_s = _read_positive_int(
         src, _ENV_SESSION_REAP_INTERVAL, _DEFAULT_SESSION_REAP_INTERVAL_S
     )
+    metrics_snapshot_interval_s = _read_positive_int(
+        src, _ENV_METRICS_SNAPSHOT_INTERVAL, _DEFAULT_METRICS_SNAPSHOT_INTERVAL_S
+    )
 
     # Validate all required/string fields BEFORE resolving limits, so a missing/invalid required
     # value fails fast on its own merits (and config validation is fully exercisable independent of
@@ -820,6 +830,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         session_ttl_s=session_ttl_s,
         session_idle_s=session_idle_s,
         session_reap_interval_s=session_reap_interval_s,
+        metrics_snapshot_interval_s=metrics_snapshot_interval_s,
         limits=limits,
         worker_image=worker_image,
         worker_runtime=worker_runtime,
