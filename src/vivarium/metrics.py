@@ -222,16 +222,24 @@ class PeriodicMetricsLogger:
         self._thread.start()
 
     def stop(self, *, timeout_s: float = 5.0) -> None:
-        """Emit a final snapshot, signal the daemon to exit, and join it (idempotent)."""
-        was_running = self._thread is not None
+        """Signal the daemon to exit, join it, then emit a final snapshot (idempotent).
+
+        The final snapshot is emitted ONLY once the daemon thread has actually exited (the bounded
+        join completed). If the join TIMES OUT (a slow emit still in flight) we skip it rather than
+        run a second ``_emit()`` concurrently with the daemon's still-running one. That concurrency
+        is benign (``snapshot()`` is lock-guarded, counters are read-only) but the "emit, signal,
+        join"
+        contract was subtly unsound on a slow emit; this makes it strict. A never-started logger
+        (thread is ``None``) stays silent.
+        """
         self._stop.set()
         thread, self._thread = self._thread, None
         if thread is not None:
             thread.join(timeout_s)
-        # A final snapshot on shutdown captures the last interval's activity (only if it had been
-        # started — a never-started logger stays silent).
-        if was_running:
-            self._emit()
+            # Final snapshot captures the last interval's activity — but only if the daemon truly
+            # exited; a timed-out join means it is still emitting, so we must not race it.
+            if not thread.is_alive():
+                self._emit()
 
     def _emit(self) -> None:
         """Emit one snapshot, swallowing+logging any failure (an emit must never propagate)."""

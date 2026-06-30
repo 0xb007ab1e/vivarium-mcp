@@ -177,6 +177,32 @@ def test_never_started_logger_stop_is_silent() -> None:
     assert reg.calls == 0
 
 
+def test_stop_skips_final_emit_when_join_times_out() -> None:
+    """If the daemon is mid-emit and the bounded join times out, stop() does NOT emit again (P6).
+
+    Guards the race: a timed-out join means the daemon thread is still running ``_emit()``; stop()
+    must not fire a second concurrent emit. Deterministic via a blocking fake (Events, no sleeps).
+    """
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[int] = []
+
+    class _BlockingRegistry:
+        def log_snapshot(self, *, active_sessions: int | None = None) -> None:
+            calls.append(1)
+            started.set()
+            release.wait(5)  # hold the daemon inside its emit until released
+
+    logger = PeriodicMetricsLogger(_BlockingRegistry(), interval_s=0.005)  # type: ignore[arg-type]
+    logger.start()
+    try:
+        assert started.wait(2), "daemon never entered its emit"
+        logger.stop(timeout_s=0.05)  # join times out — the daemon is still blocked in log_snapshot
+        assert len(calls) == 1, "stop() raced a second concurrent emit instead of skipping it"
+    finally:
+        release.set()  # let the daemon finish its emit + exit cleanly
+
+
 # --- instrument site: RED at the tool error-boundary ---------------------------------------------
 def test_error_boundary_records_red_for_success_and_failure() -> None:
     """The tool boundary records OUTCOME_OK on success and the error-type slug on failure."""
