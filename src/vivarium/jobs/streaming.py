@@ -362,11 +362,6 @@ class _StreamingJob:
         self._error: ErrorEnvelope | None = None
 
     @property
-    def state(self) -> JobState:
-        """The job's current lifecycle state."""
-        return self._state
-
-    @property
     def is_terminal(self) -> bool:
         """Whether the job has reached a terminal state (no more chunks will be produced).
 
