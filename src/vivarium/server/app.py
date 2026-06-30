@@ -25,6 +25,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError as PydanticValidationError
 from starlette.types import ASGIApp
 
+from vivarium import metrics
 from vivarium.config import Config, HttpConfig
 from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from vivarium.ghidra.port import GhidraPort
@@ -157,17 +158,27 @@ def _with_error_boundary(tool_name: str, handler: Callable[..., Any]) -> Callabl
 
     def _guarded(*args: Any, **kwargs: Any) -> Any:
         correlation_id = _correlation_id()
+        start = time.monotonic()
         try:
-            return handler(*args, **kwargs)
+            result = handler(*args, **kwargs)
         except Exception as exc:
-            return _to_envelope(exc, correlation_id)
+            env = _to_envelope(exc, correlation_id)
+            metrics.record_tool_call(tool_name, env.type.value, time.monotonic() - start)
+            return env
+        metrics.record_tool_call(tool_name, metrics.OUTCOME_OK, time.monotonic() - start)
+        return result
 
     async def _guarded_async(*args: Any, **kwargs: Any) -> Any:
         correlation_id = _correlation_id()
+        start = time.monotonic()
         try:
-            return await handler(*args, **kwargs)
+            result = await handler(*args, **kwargs)
         except Exception as exc:
-            return _to_envelope(exc, correlation_id)
+            env = _to_envelope(exc, correlation_id)
+            metrics.record_tool_call(tool_name, env.type.value, time.monotonic() - start)
+            return env
+        metrics.record_tool_call(tool_name, metrics.OUTCOME_OK, time.monotonic() - start)
+        return result
 
     guard: Callable[..., Any] = _guarded_async if inspect.iscoroutinefunction(handler) else _guarded
     # Preserve the typed signature so the SDK derives the same input JSON schema post-wrap.
@@ -274,7 +285,11 @@ def _http_principal_resolver(app: FastMCP) -> Callable[[], Principal]:
 
 
 def run_stdio(
-    app: FastMCP, *, session_manager: SessionManager, reap_interval_s: float = 60.0
+    app: FastMCP,
+    *,
+    session_manager: SessionManager,
+    reap_interval_s: float = 60.0,
+    metrics_interval_s: float = 60.0,
 ) -> int:
     """Run the MCP server on the stdio transport until shutdown, then drain.
 
@@ -292,6 +307,8 @@ def run_stdio(
         session_manager: The session manager to drain on shutdown.
         reap_interval_s: Background-reaper sweep interval (production passes
             ``config.session_reap_interval_s``; the default mirrors that config default).
+        metrics_interval_s: Metrics-snapshot log interval (gap N3a; production passes
+            ``config.metrics_snapshot_interval_s``).
 
     Returns:
         Process exit code: ``0`` on clean shutdown.
@@ -299,6 +316,12 @@ def run_stdio(
     _install_shutdown_handlers()
     reaper = PeriodicReaper(session_manager, interval_s=reap_interval_s)
     reaper.start()
+    mlog = metrics.PeriodicMetricsLogger(
+        metrics.metrics(),
+        interval_s=metrics_interval_s,
+        active_sessions=session_manager.active_count,
+    )
+    mlog.start()
     try:
         # FastMCP.run() blocks until the stdio transport closes (host disconnects) or a signal
         # interrupts it. Transport selection is the only transport-aware line in the codebase
@@ -309,8 +332,10 @@ def run_stdio(
         _log.info("server.interrupted")
         return 0
     finally:
-        # Always drain: stop the reaper, then kill every worker and wipe every store, even on error
-        # (fail closed — leaving a worker alive with a hostile binary loaded is unacceptable).
+        # Always drain: stop the reaper + metrics logger (a final snapshot emits on stop), then
+        # kill every worker and wipe every store, even on error (fail closed — a worker left alive
+        # with a hostile binary loaded is unacceptable).
+        mlog.stop()
         reaper.stop()
         try:
             session_manager.shutdown()
@@ -361,7 +386,9 @@ def build_http_asgi_app(
     Returns:
         The wrapped ASGI application ready to serve.
     """
-    guarded: ASGIApp = AuthenticationMiddleware(inner, authenticator=authenticator)
+    guarded: ASGIApp = AuthenticationMiddleware(
+        inner, authenticator=authenticator, mode=http.auth_mode
+    )
     guarded = RateLimitMiddleware(
         guarded, rate_per_second=http.rate_per_second, burst=http.rate_burst, clock=clock
     )
@@ -436,6 +463,12 @@ def run_http(
     _install_shutdown_handlers()
     reaper = PeriodicReaper(session_manager, interval_s=config.session_reap_interval_s)
     reaper.start()
+    mlog = metrics.PeriodicMetricsLogger(
+        metrics.metrics(),
+        interval_s=config.metrics_snapshot_interval_s,
+        active_sessions=session_manager.active_count,
+    )
+    mlog.start()
     log_level = config.log_level.lower()
     # mTLS (ADR-019 D2): require + verify a CA-signed client cert at the TLS handshake (the first
     # gate). Without this uvicorn would not request a client cert and the in-app authenticator would
@@ -472,6 +505,7 @@ def run_http(
         _log.info("server.interrupted")
         return 0
     finally:
+        mlog.stop()
         reaper.stop()
         try:
             session_manager.shutdown()

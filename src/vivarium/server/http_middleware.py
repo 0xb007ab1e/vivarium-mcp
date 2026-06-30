@@ -29,6 +29,7 @@ from typing import Any, cast
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from vivarium import metrics
 from vivarium.server.auth import AuthContext, Authenticator
 
 #: ASGI ``scope["state"]`` key under which :class:`AuthenticationMiddleware` stashes the
@@ -193,10 +194,19 @@ class RateLimitMiddleware:
 class AuthenticationMiddleware:
     """Default-deny auth: reject → generic ``401``; accept → stash the principal on scope."""
 
-    def __init__(self, app: ASGIApp, *, authenticator: Authenticator) -> None:
-        """Wrap ``app`` so every request is authenticated by ``authenticator`` (default-deny)."""
+    def __init__(
+        self, app: ASGIApp, *, authenticator: Authenticator, mode: str = "unknown"
+    ) -> None:
+        """Wrap ``app`` so every request is authenticated by ``authenticator`` (default-deny).
+
+        Args:
+            app: The inner ASGI app.
+            authenticator: The auth strategy.
+            mode: The auth-mode label for the metrics auth-decision counter (``bearer``/``mtls``/…).
+        """
         self.app = app
         self.authenticator = authenticator
+        self.mode = mode
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Authenticate every HTTP request except CORS preflight; ``401`` on reject (no oracle)."""
@@ -217,8 +227,10 @@ class AuthenticationMiddleware:
             )
         )
         if principal is None:
+            metrics.record_auth_decision(self.mode, metrics.AUTH_DENY)
             await _send_error(send, 401, "Unauthorized", "Authentication required.")
             return
+        metrics.record_auth_decision(self.mode, metrics.AUTH_ALLOW)
         # Stash for the per-request authZ + session-ownership check (slice 4). scope state is a
         # per-request dict; create it if the server didn't.
         state: dict[str, Any] = scope.setdefault("state", {})
