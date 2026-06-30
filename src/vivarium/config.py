@@ -50,6 +50,7 @@ _ENV_ANALYSIS_TIMEOUT = "VIVARIUM_ANALYSIS_TIMEOUT_SECONDS"
 _ENV_TOOL_TIMEOUT = "VIVARIUM_TOOL_TIMEOUT_SECONDS"
 _ENV_MAX_RESPONSE_BYTES = "VIVARIUM_MAX_RESPONSE_BYTES"
 _ENV_MAX_STREAM_BUFFER_CHUNKS = "VIVARIUM_MAX_STREAM_BUFFER_CHUNKS"
+_ENV_MAX_STREAM_REPLAY_CHUNKS = "VIVARIUM_MAX_STREAM_REPLAY_CHUNKS"
 _ENV_WORKER_IMAGE = "VIVARIUM_WORKER_IMAGE"
 _ENV_WORKER_RUNTIME = "VIVARIUM_WORKER_RUNTIME"
 _ENV_WORKER_UID = "VIVARIUM_WORKER_UID"
@@ -786,6 +787,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         (_ENV_TOOL_TIMEOUT, "tool_timeout_s"),
         (_ENV_MAX_RESPONSE_BYTES, "max_response_bytes"),
         (_ENV_MAX_STREAM_BUFFER_CHUNKS, "max_stream_buffer_chunks"),
+        (_ENV_MAX_STREAM_REPLAY_CHUNKS, "max_stream_replay_chunks"),
     ):
         value = _read_int(src, env_name)
         if value is not None:
