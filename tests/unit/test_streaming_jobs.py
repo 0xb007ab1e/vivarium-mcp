@@ -378,6 +378,30 @@ def test_new_job_allowed_after_cancel() -> None:
     assert j2 != j1
 
 
+def test_start_gcs_prior_terminal_job_so_jobs_stays_bounded() -> None:
+    """gap round-4 Q2: starting a new stream drops the session's prior terminal job from `_jobs`.
+
+    Without GC-on-reuse, a long-lived session's repeated start→finish cycles accumulate a terminal
+    `_StreamingJob` (+ its bounded replay window of already-delivered chunks) forever —
+    `discard_session` (on eviction) was the only pruning. Assert `_jobs` stays bounded to the live
+    job across many cycles, and a GC'd prior job id fails closed.
+    """
+    mgr = _manager()
+    ids: list[str] = []
+    for _ in range(6):
+        jid = mgr.start_job(_SID, producer=_producer(2), total=2, caller=_OWNER)
+        ids.append(jid)
+        while True:  # drain to effective-done so the next start takes the slot-clear path
+            res = mgr.fetch(_SID, jid, limit=10, caller=_OWNER)
+            if res.done and not res.chunks:
+                break
+    # `_jobs` holds ONLY the current (last) job, not all six — bounded regardless of lifetime.
+    assert list(mgr._jobs.keys()) == [ids[-1]]
+    # A GC'd prior job id is gone → fails closed (BOLA-safe), not a stale fetch.
+    with pytest.raises(GhidraMcpError):
+        mgr.fetch(_SID, ids[0], limit=1, caller=_OWNER)
+
+
 def test_two_sessions_each_get_their_own_active_job() -> None:
     mgr = _manager()
     j1 = mgr.start_job("sess-1", producer=_producer(3), total=3, caller=_OWNER)
