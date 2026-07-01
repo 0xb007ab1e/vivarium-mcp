@@ -240,13 +240,13 @@ exclude_dirs = ["tests", ".venv"]
 # Mutation testing (mutmut) — validates that the critical-path tests CATCH faults,
 # not just execute lines (master §4: mutation testing on critical modules). Run on a
 # schedule (mutation.yml), NOT per-PR (it runs the suite per mutant — too slow to gate).
-# SPIKE: errors.py only; expand source_paths to all six critical modules once proven.
 # ---------------------------------------------------------------------------
 [tool.mutmut]
 # Copy the WHOLE package into mutants/ (so tests that import or read other vivarium files by
-# path still resolve), but MUTATE only the six critical modules (only_mutate) — master §4:
+# path still resolve), but MUTATE only the seven critical modules (only_mutate) — master §4:
 # mutation testing on critical paths. These are exactly the modules under the 100%-coverage
 # gate (see [tool.coverage] critical-paths note); mutation proves those tests catch faults.
+# (jobs/streaming.py added round-3 P5 — critical-tested; BOLA + resource bounds + the N4 replay window.)
 source_paths = ["src/vivarium"]
 only_mutate = [
   "*/vivarium/core/validation.py",
@@ -255,6 +255,7 @@ only_mutate = [
   "*/vivarium/sessions/manager.py",
   "*/vivarium/security/limits.py",
   "*/vivarium/server/auth.py",
+  "*/vivarium/jobs/streaming.py",
 ]
 # Copy repo-root packages the suite needs at COLLECTION time: `worker/` (5 unit tests
 # `from worker import …`) and `scripts/` (test_naming_eval_script / test_generate_fidb_script
