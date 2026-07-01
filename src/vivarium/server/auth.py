@@ -36,6 +36,7 @@ and the HTTP shell (a later slice) adapts its request to :class:`AuthContext`.
 from __future__ import annotations
 
 import hmac
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
@@ -511,6 +512,11 @@ class OAuthResourceAuthenticator:
     _jwks_client: list[PyJWKClient] = field(
         default_factory=list, repr=False, compare=False, hash=False
     )
+    #: Guards the lazy build of ``_jwks_client`` so concurrent first requests can't each construct a
+    #: client (double-checked locking below). Excluded from repr/eq/hash (an internal handle).
+    _client_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False, hash=False
+    )
 
     def __post_init__(self) -> None:
         """Reject an empty or non-allow-listed algorithm list at construction (fail closed).
@@ -525,12 +531,18 @@ class OAuthResourceAuthenticator:
                 raise ValueError("unsupported OAuth algorithm")
 
     def _client(self) -> PyJWKClient:
-        """Return the cached :class:`~jwt.PyJWKClient`, building it on first use (fetch + cache)."""
-        if not self._jwks_client:
-            # PyJWKClient caches fetched keys (lifespan-bounded); one instance is reused so the JWKS
-            # endpoint is hit at most on a cache miss, not per request (TB6-D, `std-zero-trust`).
-            self._jwks_client.append(PyJWKClient(self.jwks_uri))
-        return self._jwks_client[0]
+        """Return the cached :class:`~jwt.PyJWKClient`, building it on first use (fetch + cache).
+
+        Thread-safe: the build-or-return runs under ``_client_lock`` so concurrent first requests
+        construct exactly one client (not one each — no redundant JWKS fetch on a cold race). The
+        lock is uncontended after the first build and negligible next to the per-request JWT crypto.
+        PyJWKClient caches fetched keys (lifespan-bounded); one instance is reused so the JWKS
+        endpoint is hit at most on a cache miss, not per request (TB6-D, `std-zero-trust`).
+        """
+        with self._client_lock:
+            if not self._jwks_client:
+                self._jwks_client.append(PyJWKClient(self.jwks_uri))
+            return self._jwks_client[0]
 
     def authenticate(self, ctx: AuthContext) -> Principal | None:
         """Validate the Bearer JWT (sig via JWKS + iss/aud/exp/nbf), map ``sub`` to a principal.
