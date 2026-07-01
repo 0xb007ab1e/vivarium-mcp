@@ -229,8 +229,11 @@ def build_app(config: Config, *, session_manager: SessionManager, port: GhidraPo
     )
     port.attach_stream_jobs(stream_jobs)
     # Lifetime binding (ADR-040 D10): session eviction (TTL/idle/close/poison/timeout) discards the
-    # session's jobs. The session manager stores this as its injected `on_evict` hook.
-    session_manager._on_evict = stream_jobs.discard_session
+    # session's jobs. Bound here (not via __init__) because the two managers are mutually dependent
+    # — stream_jobs needs session_manager.authorize, and session_manager needs
+    # stream_jobs.discard_session — so one hook is wired after both exist. `set_evict_callback` is
+    # the documented, call-once composition seam for that (no private-attr poke).
+    session_manager.set_evict_callback(stream_jobs.discard_session)
     # HTTP is multi-principal: resolve the owner/caller per request from the authenticated scope
     # principal (ADR-017). stdio is single-principal (the implicit local operator) — no resolver.
     resolve_principal = _http_principal_resolver(app) if config.transport == "http" else None

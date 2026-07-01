@@ -47,6 +47,9 @@ class _FakeSessions:
         # ADR-029 B: the recorded effective analysis profile (echoed back via authorize).
         self.profile: Literal["default", "light", "deep"] | None = None
 
+    def set_evict_callback(self, on_evict: object) -> None:
+        """Composition seam (ADR-040) — build_app binds the streaming discard hook here; no-op."""
+
     def begin_call(self, session_id: str, *, caller: str | None = None) -> None:
         self.events.append(f"begin:{session_id}")
 

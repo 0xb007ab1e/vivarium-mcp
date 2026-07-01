@@ -255,6 +255,38 @@ class SessionManager:
         #: avoiding a lock-ordering inversion with the streaming authorizer (topic-concurrency).
         self._pending_evicted: list[str] = []
 
+    def set_evict_callback(self, on_evict: Callable[[str], None]) -> None:
+        """Bind the eviction callback once, at composition time (the documented wiring seam).
+
+        The composition root (:func:`vivarium.server.app.build_app`) uses this instead of reaching
+        into the private ``_on_evict`` attribute, because the callback and this manager have a
+        MUTUAL dependency that ``__init__`` cannot satisfy: the streaming-job manager needs this
+        manager's ``authorize`` to be constructed, and this manager needs that manager's
+        ``discard_session`` as its ``on_evict`` hook (ADR-040 §6). One of the two must be wired
+        after both objects exist — this is the encapsulated seam for that (replacing an
+        encapsulation-breaking private-attr poke).
+
+        Call **once**, before the manager begins serving (composition-root only). A rebinding — or
+        calling this when a callback was already supplied to ``__init__`` — raises ``RuntimeError``:
+        a silent second binding would drop the first callback's sessions on eviction (fail closed,
+        master §2 / topic-error-handling). The check-and-set is done under the manager lock so the
+        call-once guard is atomic (topic-concurrency).
+
+        Args:
+            on_evict: The eviction callback; see the ``on_evict`` constructor argument for its
+                contract (fired on every eviction path, after the lock, best-effort).
+
+        Raises:
+            RuntimeError: if an eviction callback is already bound (call-once composition seam).
+        """
+        with self._lock:
+            if self._on_evict is not None:
+                raise RuntimeError(
+                    "evict callback already bound — set_evict_callback is a call-once "
+                    "composition-root seam"
+                )
+            self._on_evict = on_evict
+
     def create(self, *, owner: str = _LOCAL_PRINCIPAL_ID, label: str | None = None) -> SessionInfo:
         """Open a new session with an opaque id, owned by ``owner``; spawn nothing until import.
 
