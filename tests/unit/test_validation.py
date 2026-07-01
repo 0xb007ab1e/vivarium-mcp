@@ -196,3 +196,28 @@ def test_error_details_are_safe_and_bounded() -> None:
     detail = exc.value.envelope.detail
     assert 0 < len(detail) <= 2048
     assert "DROP TABLE" not in detail
+
+
+def test_validation_error_envelope_contract() -> None:
+    """The ``_validation_error`` envelope pins its STABLE contract: VALIDATION / 400 / terminal.
+
+    Pins the status code + type + retryable (a stable HTTP/error contract), NOT the detail wording
+    (deliberately generic + not asserted — topic-testing). Kills the mutation survivors that blank
+    the status (``status=400`` → ``None``) / flip ``retryable`` on this shared helper (gap P7).
+    """
+    env = v._validation_error("field is invalid").envelope
+    assert env.type is ErrorType.VALIDATION
+    assert env.status == 400
+    assert env.retryable is False
+
+
+def test_limit_error_envelope_contract() -> None:
+    """The ``_limit_error`` envelope pins its stable contract: LIMIT_EXCEEDED / 413 / retryable.
+
+    Same rationale as the validation-error contract test — pins status/type/retryable (stable), not
+    the detail text; kills the shared-helper status/retryable mutants (gap P7).
+    """
+    env = v._limit_error("count exceeds the maximum").envelope
+    assert env.type is ErrorType.LIMIT_EXCEEDED
+    assert env.status == 413
+    assert env.retryable is False

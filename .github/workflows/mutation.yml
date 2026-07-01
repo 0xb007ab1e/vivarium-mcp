@@ -2,15 +2,25 @@
 # mutation.yml — scheduled mutation testing of the critical modules (master §4)
 # =============================================================================
 # Coverage proves the critical-path tests EXECUTE every line/branch (the 100% gate in ci.yml);
-# mutation testing proves they CATCH faults. mutmut mutates the six designated critical modules
+# mutation testing proves they CATCH faults. mutmut mutates the seven designated critical modules
 # (config: pyproject [tool.mutmut]) and re-runs the suite per mutant — a "survived" mutant is a
 # test-quality gap (or an equivalent mutant). Far too slow to gate every PR, so this runs on a
 # SCHEDULE + manual dispatch (mirrors scheduled-rescan.yml), NOT as a required check.
 #
-# ADVISORY-FIRST: this job REPORTS the mutation score (to the run summary) and uploads the stats
-# artifact; it does not fail on a low score yet. Once a baseline is confirmed across a few CI runs,
-# set MUTATION_SCORE_MIN (below) to a floor just under the baseline to turn it into a regression
-# gate. Baseline at introduction (local, all six modules): 895 killed / 366 survived / 1261 → ~71%.
+# REGRESSION-GATE (gap round-3 P7): MUTATION_SCORE_MIN is a floor set just under the measured
+# baseline, so the score cannot silently drop; a run below it FAILS. It is deliberately conservative
+# (see below) — it guards against regression, it does not (yet) assert a high absolute bar.
+#
+# BASELINE (2026-07-01, local run, all SEVEN modules): 1183 killed / 518 survived / 1701 → 69.5%.
+# SURVIVOR TAXONOMY (why the bar isn't higher, and why chasing it further is iterative): the DOMINANT
+# survivor class is **string-literal mutations** in error `detail` and log-message text (e.g.
+# `"address must be a string"` → `"XX…XX"`, `"session.evict"` → `"XX…XX"`). "Killing" those would
+# require asserting exact error/log WORDING — brittle and discouraged (topic-testing; the error
+# envelope contract makes `detail` a generic, non-stable field, and log text is not an API). So they
+# are consciously NOT chased. Raising the bar means targeting the *logic* mutants (conditions,
+# boundaries, stable contract values like status codes) iteratively — gap round-3 P7 killed the
+# error-envelope `status`/`retryable` contract survivors as a first such batch. Full per-mutant
+# triage remains iterative future work; this floor locks in "don't regress" meanwhile.
 name: mutation
 
 on:
@@ -32,9 +42,12 @@ env:
   # measures test quality (version-insensitive); the suite passes on 3.12/3.13/3.14. Regenerate the
   # lock under whatever version this job uses.
   PYTHON_VERSION: "3.13"
-  # Advisory by default (0 = never fail on score). Set to e.g. 70 to enable the regression gate
-  # once the baseline is confirmed in CI — a run scoring below this then fails.
-  MUTATION_SCORE_MIN: "0"
+  # Regression floor (gap round-3 P7): a run scoring below this FAILS. Set to 65 — conservatively
+  # just under the local 69.5% baseline (a ~4.5pt margin absorbs mutmut nondeterminism + any
+  # dev-vs-mutation-lockfile env variance, so the scheduled gate is a real regression guard without
+  # being flaky). TIGHTEN toward the baseline once a CI run confirms its own score; RAISE it only
+  # after triaging the logic (non-string) survivors up (see the taxonomy note in the header).
+  MUTATION_SCORE_MIN: "65"
 
 jobs:
   mutation:
@@ -56,7 +69,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install --require-hashes -r requirements-mutation.lock
-      - name: Run mutation testing (six critical modules — pyproject [tool.mutmut])
+      - name: Run mutation testing (seven critical modules — pyproject [tool.mutmut])
         run: |
           # mutmut exits non-zero when mutants survive; that is EXPECTED here (advisory). Capture
           # but don't let it abort the job — the score is computed from the stats below.
@@ -85,7 +98,7 @@ jobs:
               f"- killed: {killed}\n- survived: {survived}\n- total: {total}\n"
               f"- timeout: {s.get('timeout', 0)} | suspicious: {s.get('suspicious', 0)} "
               f"| no-tests: {s.get('no_tests', 0)}\n\n"
-              f"Scope: the six critical modules (pyproject `[tool.mutmut]`). "
+              f"Scope: the seven critical modules (pyproject `[tool.mutmut]`). "
               f"Survivors are test-quality gaps or equivalent mutants — triage with `mutmut results`.\n"
           )
           print(summary)
