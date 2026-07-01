@@ -14,6 +14,13 @@ load-bearing invariants:
 - **Oversize is rejected:** ``encode_frame`` of a body over the cap raises ``FramingError``.
 - **Total response parse:** ``parse_response`` over an arbitrary decoded object raises only the
   documented ``RpcProtocolError`` / ``RpcCallError`` (no ``KeyError``/``TypeError``).
+- **Total notification decode (gap round-4 Q5):** ``parse_progress`` / ``parse_chunk`` /
+  ``parse_cancel`` over an arbitrary (or plausibly-shaped-but-fuzzed) object either raise
+  ``RpcProtocolError`` or return a value whose fields meet the documented bounds (percent in
+  ``0..100`` or ``None``; seq a non-negative int; kind/phase in the closed vocabulary; cancel id a
+  str) — never another exception. ``_parse_error`` is TOTAL (never raises) and bounds its outputs
+  (message ≤ 512 chars, detail ≤ ``_MAX_DETAIL_CHARS`` or ``None``, code an int). These decode
+  frames from a potentially hostile worker (TB2/TB3) — the canonical "fuzz your decoders" boundary.
 
 Hermetic + deterministic (``derandomize``); no worker, no I/O. Runs in the unit ``quality`` job.
 """
@@ -29,13 +36,23 @@ from hypothesis import example, given, settings  # noqa: E402
 from hypothesis import strategies as st  # noqa: E402
 
 from vivarium.ghidra.rpc_framing import (  # noqa: E402
+    _MAX_DETAIL_CHARS,
+    CANCEL_METHOD,
+    CHUNK_KINDS,
+    CHUNK_METHOD,
     LENGTH_PREFIX_BYTES,
+    PROGRESS_METHOD,
+    PROGRESS_PHASES,
     FramingError,
     RpcCallError,
     RpcProtocolError,
+    _parse_error,
     decode_body,
     decode_length_prefix,
     encode_frame,
+    parse_cancel,
+    parse_chunk,
+    parse_progress,
     parse_response,
 )
 
@@ -128,3 +145,101 @@ def test_parse_response_raises_only_documented_errors(obj: dict[str, Any]) -> No
     except (RpcProtocolError, RpcCallError):
         return  # the only documented failure modes
     assert isinstance(result, dict)  # success → the result object
+
+
+# --- notification decoders: parse_progress / parse_chunk / parse_cancel / _parse_error (Q5) ------
+# These decode $/progress, $/chunk, $/cancel notifications + the JSON-RPC error member from a
+# potentially HOSTILE worker (TB2/TB3). Below: strategies mixing valid + junk field values so both
+# the accept path (bounds asserted on the return) and near-miss reject paths are generated.
+_EID = "req-correlated-id"
+
+_id_vals = st.just(_EID) | _utf8_text | st.none()
+_percent_vals = (
+    st.none() | st.integers(min_value=0, max_value=100) | st.integers() | st.booleans() | _utf8_text
+)
+_phase_vals = st.sampled_from(sorted(PROGRESS_PHASES)) | _utf8_text
+_seq_vals = st.integers(min_value=0, max_value=2**40) | st.integers() | st.booleans() | _utf8_text
+_kind_vals = st.sampled_from(sorted(CHUNK_KINDS)) | _utf8_text
+_payload_vals = _json_objects | st.none() | _utf8_text | st.integers()
+
+_progress_frames = st.fixed_dictionaries(
+    {
+        "jsonrpc": st.just("2.0") | _utf8_text,
+        "method": st.just(PROGRESS_METHOD) | _utf8_text,
+        "params": st.fixed_dictionaries(
+            {"id": _id_vals, "percent": _percent_vals, "phase": _phase_vals}
+        )
+        | _json_objects
+        | st.none(),
+    }
+)
+_chunk_frames = st.fixed_dictionaries(
+    {
+        "jsonrpc": st.just("2.0") | _utf8_text,
+        "method": st.just(CHUNK_METHOD) | _utf8_text,
+        "params": st.fixed_dictionaries(
+            {"id": _id_vals, "seq": _seq_vals, "kind": _kind_vals, "payload": _payload_vals}
+        )
+        | _json_objects
+        | st.none(),
+    }
+)
+_cancel_frames = st.fixed_dictionaries(
+    {
+        "jsonrpc": st.just("2.0") | _utf8_text,
+        "method": st.just(CANCEL_METHOD) | _utf8_text,
+        "params": st.fixed_dictionaries({"id": _id_vals}) | _json_objects | st.none(),
+    }
+)
+
+
+@_PROFILE
+@given(obj=_progress_frames | _json_objects)
+def test_parse_progress_is_total_and_bounded(obj: dict[str, Any]) -> None:
+    """parse_progress raises RpcProtocolError or returns percent None-or-0..100 + phase in vocab."""
+    try:
+        p = parse_progress(obj, expected_id=_EID)
+    except RpcProtocolError:
+        return  # the only documented failure mode
+    assert p.request_id == _EID
+    assert p.percent is None or (isinstance(p.percent, int) and 0 <= p.percent <= 100)
+    assert p.phase in PROGRESS_PHASES
+
+
+@_PROFILE
+@given(obj=_chunk_frames | _json_objects)
+def test_parse_chunk_is_total_and_bounded(obj: dict[str, Any]) -> None:
+    """parse_chunk raises RpcProtocolError or returns seq≥0 (int) + kind∈vocab + a dict payload."""
+    try:
+        c = parse_chunk(obj, expected_id=_EID)
+    except RpcProtocolError:
+        return
+    assert c.request_id == _EID
+    assert isinstance(c.seq, int) and not isinstance(c.seq, bool) and c.seq >= 0
+    assert c.kind in CHUNK_KINDS
+    assert isinstance(c.payload, dict)
+
+
+@_PROFILE
+@given(obj=_cancel_frames | _json_objects)
+def test_parse_cancel_is_total_and_shape_valid(obj: dict[str, Any]) -> None:
+    """parse_cancel raises RpcProtocolError or returns a str request_id (no id-mismatch raise)."""
+    try:
+        c = parse_cancel(obj, expected_id=_EID)
+    except RpcProtocolError:
+        return
+    assert isinstance(c.request_id, str)
+
+
+@_PROFILE
+@given(err=_json_values)
+@example(err={"code": 5, "message": "m" * 600, "data": {"type": "x", "detail": "d" * 400}})
+@example(err="not-a-dict")  # non-object error member → safe defaults
+@example(err={"data": {"type": 123, "detail": 456}})  # non-str slug/detail → ignored
+def test_parse_error_is_total_and_bounded(err: Any) -> None:
+    """_parse_error NEVER raises; bounds output (code int, message <=512, detail <=cap or None)."""
+    e = _parse_error(err)  # total by contract — no exception permitted
+    assert isinstance(e.code, int)
+    assert isinstance(e.message, str) and len(e.message) <= 512
+    assert e.type_slug is None or isinstance(e.type_slug, str)
+    assert e.detail is None or (isinstance(e.detail, str) and len(e.detail) <= _MAX_DETAIL_CHARS)
