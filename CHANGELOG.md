@@ -6,6 +6,25 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Operational observability layer (#208, gap N3).** RED (per-tool request/error/duration),
+  session-lifecycle (created/evicted), and auth-decision (allow/deny) counters accumulate in an
+  in-process registry and are emitted as a periodic, redaction-safe `metrics.snapshot` structured-log
+  line (interval `VIVARIUM_METRICS_SNAPSHOT_INTERVAL_SECONDS`, default 60s) — no new dependency, no
+  scrape endpoint. Adds **unauthenticated, detail-free** `/healthz` (liveness) and `/readyz`
+  (readiness, backed by session-pool capacity) HTTP probes.
+- **Background session reaper (#197, gap N5).** A periodic daemon sweeps expired sessions (interval
+  `VIVARIUM_SESSION_REAP_INTERVAL_SECONDS`, default 60s), reclaiming an abandoned session's worker +
+  per-session store without waiting for its next call — closing a resource-leak + confidentiality
+  window.
+
+### Changed
+- **Streaming resume is now at-least-once within a bounded replay window (#207, gap N4 / ADR-040 §D7).**
+  A `fetch_job_results` re-fetch from an earlier cursor now **replays** already-delivered chunks from
+  a bounded (count + bytes) window (clients dedupe by `seq`); previously drained chunks were gone
+  (effectively at-most-once). A cursor older than the window fails closed with a typed validation
+  error. New cap `VIVARIUM_MAX_STREAM_REPLAY_CHUNKS`.
+
 ### Fixed
 - **Structural writes are now atomic (#182, CWE-460/ADR-021 §D2).** A failed `define_struct` /
   `define_union` / `define_types` no longer leaves a partial/orphan composite committed: members
@@ -14,6 +33,30 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   error slugs now match the documented contract: an oversized composite → `limit-exceeded` and an
   unresolvable member ref → `not-found` (previously masked as `analysis-failed`). Worker image
   rebuilt + re-pinned to ship the fix.
+- **RPC frame reads bounded by an absolute deadline (#201, gap N11, CWE-400).** A length-prefixed
+  frame is read under one monotonic deadline instead of a per-`recv` timeout, closing a slow-loris
+  dribble from a hostile/slow worker.
+- **Per-session adapter locking under concurrent HTTP (#196, gap N1).** Per-session socket/stream
+  state is guarded (RLock for short sections + a stream-exclusion flag, lock-free kill/cancel,
+  bounded acquire), removing a race/TOCTOU that assumed a single-threaded request path.
+
+### Security
+- **Signed-commit + admin enforcement on `main` (gap N7).** Branch protection now requires
+  verified-signed commits and applies to admins (`enforce_admins`), alongside the 8 required checks +
+  linear history.
+- **Per-PR container-image CVE scan + SBOM (#202, gap N8).** A Containerfile change triggers a Trivy
+  image scan (fail-closed on HIGH/CRITICAL) + a CycloneDX SBOM, closing the window between the
+  IaC-only PR scan and the daily rescan.
+- **Broadened real-worker regression coverage (#198/#209, gap N2).** `live-regression` auto-runs on
+  core-runtime-path PRs (not just FID); the required `fid-elf-match-gate` was decoupled so non-FID PRs
+  no longer wait on the real-worker run.
+
+### Internal / tooling
+- Renovate config for gated dependency-bump PRs (#199, N9 — inert until the GitHub App is enabled);
+  cyclomatic-complexity lint `C901` at max 10 (#200, N13); IOC/crypto property/fuzz tests (#203, N14);
+  stdio BOLA + boundary-validation e2e + worker-coverage gate (#204/#195, N15/N6); CI-comment + registry
+  branch-coverage hygiene (#205, N16); a read-only dry-run rollback / evict-poisoned-worker drill
+  harness (#206, N10).
 
 ## [0.12.0] — 2026-06-24
 
