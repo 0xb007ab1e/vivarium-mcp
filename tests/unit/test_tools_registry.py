@@ -81,11 +81,11 @@ class FakeSessionManager:
         # ``events`` records the interleaving so tests can assert begin → handler → end ordering.
         self.events: list[str] = []
 
-    def begin_call(self, session_id: str) -> None:
+    def begin_call(self, session_id: str, *, caller: str | None = None) -> None:
         """Record the start-of-call in-flight mark (best-effort; no auth)."""
         self.events.append(f"begin:{session_id}")
 
-    def end_call(self, session_id: str) -> None:
+    def end_call(self, session_id: str, *, caller: str | None = None) -> None:
         """Record the end-of-call clear (the dispatch ``finally`` counterpart)."""
         self.events.append(f"end:{session_id}")
 

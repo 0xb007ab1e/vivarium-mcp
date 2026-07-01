@@ -1760,7 +1760,7 @@ def _bind_analyze(ctx: ToolContext) -> Callable[..., Any]:
         # In-flight liveness marker (ADR-025 / F4), same contract as _bind: refresh the idle clock
         # for the whole (possibly 18-26 min) call so analyze cannot idle-evict itself. analyze
         # always carries a session_id (required field), so this path always applies.
-        ctx.sessions.begin_call(model.session_id)
+        ctx.sessions.begin_call(model.session_id, caller=ctx.caller_id)
         try:
             if token is None or context is None:
                 # No client progress requested → byte-for-byte the pre-Phase-2 path (sync on loop;
@@ -1786,7 +1786,7 @@ def _bind_analyze(ctx: ToolContext) -> Callable[..., Any]:
                 functools.partial(_handle_session_analyze, ctx, model, on_progress=_relay)
             )
         finally:
-            ctx.sessions.end_call(model.session_id)
+            ctx.sessions.end_call(model.session_id, caller=ctx.caller_id)
 
     _bound.__signature__ = _signature_from_model(in_schema, with_context=True)  # type: ignore[attr-defined]
     annotations = _annotations_from_model(in_schema)
@@ -1838,11 +1838,11 @@ def _bind(
         session_id = getattr(model, "session_id", None)
         if session_id is None:
             return handler(ctx, model)
-        ctx.sessions.begin_call(session_id)
+        ctx.sessions.begin_call(session_id, caller=ctx.caller_id)
         try:
             return handler(ctx, model)
         finally:
-            ctx.sessions.end_call(session_id)
+            ctx.sessions.end_call(session_id, caller=ctx.caller_id)
 
     _bound.__signature__ = _signature_from_model(in_schema)  # type: ignore[attr-defined]
     _bound.__annotations__ = _annotations_from_model(in_schema)

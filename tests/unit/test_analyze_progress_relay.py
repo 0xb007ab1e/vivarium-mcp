@@ -47,10 +47,10 @@ class _FakeSessions:
         # ADR-029 B: the recorded effective analysis profile (echoed back via authorize).
         self.profile: Literal["default", "light", "deep"] | None = None
 
-    def begin_call(self, session_id: str) -> None:
+    def begin_call(self, session_id: str, *, caller: str | None = None) -> None:
         self.events.append(f"begin:{session_id}")
 
-    def end_call(self, session_id: str) -> None:
+    def end_call(self, session_id: str, *, caller: str | None = None) -> None:
         self.events.append(f"end:{session_id}")
 
     def record_analysis_profile(
