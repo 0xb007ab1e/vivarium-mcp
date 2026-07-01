@@ -927,6 +927,52 @@ def test_import_unresolvable_source_is_validation_error() -> None:
     wrk.close()
 
 
+def test_import_resolver_valueerror_is_validation_error() -> None:
+    """A confined resolver rejecting a ref via ``ValueError`` also fails closed as VALIDATION.
+
+    The default resolver only ever raises ``OSError`` (stat), but a deploy-supplied allow-list/
+    path-confinement resolver signals a rejected ``source_ref`` (e.g. outside its root) by raising
+    ``ValueError``. That must map to the SAME fail-closed ``VALIDATION`` with a fixed, content-free
+    detail — never the resolver's own message (master §5).
+    """
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+
+    def _reject(ref: str) -> int:
+        raise ValueError("path /etc/shadow escapes allow-list root /srv/inputs")
+
+    adapter = _import_adapter(srv, worker, limits=Limits(), resolver=_reject)
+    with pytest.raises(GhidraMcpError) as ei:
+        adapter.import_binary("s", s.SessionImportIn(session_id="s", source_ref="../../etc/shadow"))
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+    assert "shadow" not in ei.value.envelope.detail  # resolver message never crosses the boundary
+    assert "allow-list" not in ei.value.envelope.detail
+    assert worker.killed == 0  # rejected pre-Ghidra; worker untouched
+    srv.close()
+    wrk.close()
+
+
+def test_import_resolver_unexpected_error_propagates_unmasked() -> None:
+    """A non-resolution error (wiring/programmer bug) propagates — it is NOT masked as VALIDATION.
+
+    Broadening the resolver catch to ``(OSError, ValueError)`` must NOT swallow other exceptions:
+    a ``TypeError`` (e.g. a mis-wired resolver) is a programmer error and must fail fast, not be
+    laundered into an input-validation error (``topic-error-handling``: fail fast on bugs).
+    """
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+
+    def _misbehaving(ref: str) -> int:
+        raise TypeError("resolver wired with the wrong argument shape")
+
+    adapter = _import_adapter(srv, worker, limits=Limits(), resolver=_misbehaving)
+    with pytest.raises(TypeError):
+        adapter.import_binary("s", s.SessionImportIn(session_id="s", source_ref="ok"))
+    assert worker.killed == 0
+    srv.close()
+    wrk.close()
+
+
 def test_import_within_cap_feeds_worker() -> None:
     """A within-cap binary passes the check and the import RPC reaches the worker."""
     srv, wrk = socket.socketpair(socket.AF_UNIX)
