@@ -1,37 +1,19 @@
-"""Integration: full session lifecycle against a real Ghidra worker (WS5 scaffold).
+"""Integration: session lifecycle fault path against a real Ghidra worker.
 
-Primary worker-backed journey (PLAN §2, ADR-002): create a session → import a synthetic benign
-binary → analyze → run a read-only tool → close (evict + verified store wipe). Marked
-``integration`` so it is skipped in the unit/coverage job and only runs in the dedicated
-integration job once the worker image exists and is pinned by digest (WS3).
+The happy-path worker-backed journey (create → import → analyze → read-only tool → close with
+verified store wipe) is exercised live by ``tests/e2e/test_groundtruth_oss.py`` over the real
+server→worker chain (run in ``e2e-groundtruth.yml``). This file holds the fail-closed fault case:
+an unrecognized input yields a safe ``ANALYSIS_FAILED`` envelope rather than a crash.
 
-Synthetic fixtures only — never real malware (master §5, PLAN §6). When the implementation
-(WS1/WS2) and the worker image land, the bodies replace the placeholder skips with real
-assertions against the live worker; the structure (markers, gating, synthetic inputs) is already
-correct so wiring is incremental.
+Marked ``integration`` (skipped in the unit/coverage job; runs in the dedicated integration job
+once the worker image is pinned). Synthetic fixtures only — never real malware (master §5, PLAN §6).
 """
 
 from __future__ import annotations
 
 import pytest
 
-from tests._fixtures import build_elf64
-
 pytestmark = pytest.mark.integration
-
-
-def test_create_import_analyze_close_round_trip(worker_image: str) -> None:
-    """Open → import (synthetic ELF) → analyze → close against the real worker.
-
-    Asserts (once wired): the session reaches ``ready``, ``program_metadata`` reports the ELF
-    format, and ``session_close`` returns ``store_wiped=True`` (verified-wipe — ADR-002).
-    """
-    elf = build_elf64()
-    assert elf[:4] == b"\x7fELF"  # synthetic input is well-formed before we hand it to the worker
-    pytest.skip(
-        "WS5 Wave-2: drive a real SessionManager + RpcGhidraAdapter through "
-        "create/import/analyze/close once WS1/WS2 and the worker image (WS3) are integrated"
-    )
 
 
 def test_analyze_unrecognized_input_reports_analysis_failed(worker_image: str) -> None:
