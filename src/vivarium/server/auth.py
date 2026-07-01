@@ -67,25 +67,28 @@ PROXY_SECRET_HEADER_DEFAULT = "x-proxy-auth"  # noqa: S105  # nosec B105 - a hea
 PROXY_IDENTITY_HEADER_DEFAULT = "x-client-cert-subject"
 _DEFAULT_PROXY_SECRET_HEADER = PROXY_SECRET_HEADER_DEFAULT
 _DEFAULT_PROXY_IDENTITY_HEADER = PROXY_IDENTITY_HEADER_DEFAULT
-#: Upper bound on a forwarded identity (a subject CN/DN). Bounds the principal-id length the proxy
-#: can assert (it becomes the session-owner key — ADR-017); a longer value fails closed.
-_MAX_PROXY_IDENTITY_LEN = 256
+#: Upper bound on a principal id derived from a certificate/header identity (a subject CN/DN or a
+#: SAN). Bounds the session-owner key length (ADR-017); a longer value fails closed. Applies to both
+#: the proxy-forwarded identity (ADR-034) and the direct-mTLS cert field (ADR-019 D2 — gap P9).
+_MAX_PRINCIPAL_ID_LEN = 256
 
 
-def _valid_proxy_identity(value: str) -> bool:
-    """Return whether a proxy-forwarded identity is a safe principal id (ADR-034; fail closed).
+def _valid_principal_id(value: str) -> bool:
+    """Return whether a cert/header-derived identity is a safe principal id (fail closed).
 
-    Non-empty, ``<= _MAX_PROXY_IDENTITY_LEN`` chars, and free of control/newline characters (it is
-    attacker-influenced if the proxy is compromised, and becomes the session-owner key — bound it).
-    A subject DN's ``=,/ .`` etc. are allowed; only control characters are rejected.
+    Non-empty, ``<= _MAX_PRINCIPAL_ID_LEN`` chars, and free of control/newline characters. The value
+    is attacker-influenced (a compromised proxy's forwarded header — ADR-034; or a client-chosen
+    subject CN/SAN in a CA-issued cert — ADR-019 D2) and becomes the session-owner key, so bound it
+    the same way regardless of source. A subject DN's ``=,/ .`` etc. are allowed; only control
+    characters are rejected.
 
     Args:
-        value: The raw identity-header value (already confirmed non-``None`` by the caller).
+        value: The raw identity value (already confirmed non-``None`` by the caller).
 
     Returns:
         ``True`` iff the value is a usable, bounded, control-char-free principal id.
     """
-    if not value or len(value) > _MAX_PROXY_IDENTITY_LEN:
+    if not value or len(value) > _MAX_PRINCIPAL_ID_LEN:
         return False
     return not any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
 
@@ -392,7 +395,10 @@ class MtlsAuthenticator:
             value = _dn_from_subject(cert.get("subject"))
         else:  # san-dns / san-uri / san-email — validated, so the tag lookup always hits
             value = _first_san(cert.get("subjectAltName"), _SAN_FIELD_TAGS[self.principal_field])
-        if not value:  # missing or empty mapped field → fail closed (no anonymous principal)
+        # Fail closed on a missing/empty field OR an unsafe id (over-long / control chars). The
+        # CN/SAN is client-chosen within a CA-issued cert and becomes the session-owner key, so
+        # bound it like the proxy path bounds its identity (gap P9 — parity + defense in depth).
+        if not value or not _valid_principal_id(value):
             return None
         return Principal(id=value)
 
@@ -448,7 +454,7 @@ class ReverseProxyMtlsAuthenticator:
         ):
             return None
         identity = ctx.headers.get(self.identity_header)
-        if identity is None or not _valid_proxy_identity(identity):
+        if identity is None or not _valid_principal_id(identity):
             return None  # missing/empty/over-long/control-char identity → fail closed
         return Principal(id=identity)
 
