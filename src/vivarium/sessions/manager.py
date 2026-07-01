@@ -373,7 +373,7 @@ class SessionManager:
             # that the lock is released (lock-ordering safety — see _flush_evicted).
             self._flush_evicted()
 
-    def begin_call(self, session_id: str) -> None:
+    def begin_call(self, session_id: str, *, caller: str | None = None) -> None:
         """Mark a session in-flight for the duration of a tool call (ADR-025 / F4); refresh idle.
 
         Called by the dispatch chokepoint as a session-scoped tool call begins, paired with
@@ -381,27 +381,36 @@ class SessionManager:
         ``last_used_mono`` so a long-running single operation (e.g. an 18-26 min ``analyze``) cannot
         idle-evict itself: while in-flight the idle branch of :meth:`_is_expired` exempts it (F4).
 
-        This is a **best-effort marker**, not an authorization step: it is keyed only by
-        ``session_id`` (no owner/expiry check) and is a silent no-op for an unknown or already-
-        evicted id. Authorization stays the sole responsibility of :meth:`authorize` /
-        :meth:`_get_live_locked`, which the handler invokes itself — so marking in-flight never
-        grants access (a foreign caller is still denied the BOLA-safe ``SESSION_INVALID``) and never
-        resurrects an evicted session. Idempotent-safe under overlapping calls via the counter.
+        This is a **best-effort marker**, not an authorization step (authorization stays the sole
+        responsibility of :meth:`authorize` / :meth:`_get_live_locked`, which the handler invokes
+        itself). It is a silent no-op for an unknown or already-evicted id — marking never grants
+        access nor resurrects a session. Idempotent-safe under overlapping calls via the counter.
+
+        **Owner-scoped (gap round-4 Q10):** when ``caller`` is supplied (the dispatch passes the
+        authenticated principal), a caller that does not own the session is a **no-op** — a foreign
+        caller presenting a *valid* session id it does not own must not bump another principal's
+        in-flight/idle state (which could defer that owner's idle-eviction) before the handler's
+        ``authorize`` rejects it. ``caller=None`` (internal/marker use) skips the owner check.
 
         Lock-safe: all mutation happens under ``_lock``; no I/O is performed while holding it.
 
         Args:
             session_id: The opaque id of the session the call targets.
+            caller: The authenticated calling-principal id; when set, the mark is applied only if
+                the caller owns the session. ``None`` (default) is the internal marker-only path.
         """
         with self._lock:
             sess = self._sessions.get(session_id)
             if sess is None or sess.state == STATE_EVICTED:
                 # Unknown/evicted: nothing to mark. The handler's authorize fails closed regardless.
                 return
+            if caller is not None and sess.owner != caller:
+                # Foreign caller (Q10): do not touch another principal's in-flight/idle state.
+                return
             sess.in_flight += 1
             sess.last_used_mono = self._clock()
 
-    def end_call(self, session_id: str) -> None:
+    def end_call(self, session_id: str, *, caller: str | None = None) -> None:
         """Clear a session's in-flight mark when a tool call ends (ADR-025 / F4); refresh idle.
 
         The ``finally`` counterpart of :meth:`begin_call`. Decrements the in-flight counter (never
@@ -411,15 +420,22 @@ class SessionManager:
         a session whose call just ended is fresh.
 
         A silent no-op for an unknown/evicted id (e.g. the session was evicted mid-call by the
-        timeout-kill path). Lock-safe: mutation under ``_lock``, no I/O held.
+        timeout-kill path). **Owner-scoped (gap round-4 Q10):** mirrors :meth:`begin_call` — a
+        supplied ``caller`` that does not own the session is a no-op, so a foreign caller's paired
+        ``finally`` cannot decrement/refresh another principal's session (keeping begin/end
+        balanced). ``caller=None`` skips the owner check. Lock-safe: mutation under ``_lock``.
 
         Args:
             session_id: The opaque id of the session the finished call targeted.
+            caller: The authenticated calling-principal id; when set, applied only if the caller
+                owns the session. ``None`` (default) is the internal marker-only path.
         """
         with self._lock:
             sess = self._sessions.get(session_id)
             if sess is None or sess.state == STATE_EVICTED:
                 return
+            if caller is not None and sess.owner != caller:
+                return  # foreign caller (Q10): leave the owner's counter/idle untouched
             # Clamp at zero: an unmatched end_call must never drive the counter negative (which
             # would leave a phantom-negative in-flight that under-counts a real concurrent call).
             sess.in_flight = max(0, sess.in_flight - 1)
