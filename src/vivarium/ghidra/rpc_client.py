@@ -624,8 +624,10 @@ class RpcGhidraAdapter:
         # concurrent with our read (full-duplex). The flag is cleared in the finally.
         try:
             with sess.lock:
-                sock = self._ensure_connected(sess)
-                self._send_all_with_timeout(sock, frame, self._analysis_timeout_s)
+                # Q4: connect + send share the stream's absolute analysis deadline (connect gives up
+                # at the earlier of connect_timeout_s or the deadline), so warm-up can't overrun it.
+                sock = self._ensure_connected(sess, deadline=deadline)
+                self._send_all_with_timeout(sock, frame, max(0.0, deadline - time.monotonic()))
                 # Set only after the start RPC is on the wire so a cancel before the worker sees the
                 # start cannot mis-target an unsent id (ADR-041).
                 sess.active_stream_id = request_id
@@ -1661,6 +1663,10 @@ class RpcGhidraAdapter:
         # kill_worker/_send_cancel intentionally do NOT take this lock (see _Session.lock).
         # BOUNDED acquire (gap N1 review): fail closed on the per-call deadline rather than block
         # indefinitely if the lock is briefly held; the caller gets a retryable worker-unavailable.
+        # Q4: ONE absolute deadline for the WHOLE call (lock acquire + connect + send + read). Every
+        # bounded sub-step below is charged against it, so total call time never exceeds timeout_s —
+        # previously connect (up to connect_timeout_s) + a fresh read timeout could overrun it.
+        deadline = time.monotonic() + timeout_s
         if not sess.lock.acquire(timeout=timeout_s):
             raise _errors.make_error(
                 ErrorType.WORKER_UNAVAILABLE, "session busy (another call or stream holds it)"
@@ -1673,8 +1679,10 @@ class RpcGhidraAdapter:
                 raise _errors.make_error(
                     ErrorType.WORKER_UNAVAILABLE, "session busy (a stream is in progress)"
                 )
-            sock = self._ensure_connected(sess)
-            self._send_all_with_timeout(sock, frame, timeout_s)
+            sock = self._ensure_connected(sess, deadline=deadline)
+            # Q4: send + read share the ONE call deadline (connect may have consumed part of it), so
+            # the remaining budget — not a fresh full timeout — bounds each subsequent step.
+            self._send_all_with_timeout(sock, frame, max(0.0, deadline - time.monotonic()))
             if expect_progress:
                 # Bounded progress read-loop: relay $/progress to the log, return the response.
                 # The deadline bounds the WHOLE loop and is NOT extended by progress frames (ADR-030
@@ -1683,13 +1691,13 @@ class RpcGhidraAdapter:
                     sock,
                     expected_id=request_id,
                     method=method,
-                    total_timeout_s=timeout_s,
+                    total_timeout_s=max(0.0, deadline - time.monotonic()),
                     on_progress=on_progress,
                 )
             else:
-                # Single-frame path. Bound the WHOLE frame read by an absolute deadline (not a
+                # Single-frame path. Bound the WHOLE frame read by the absolute call deadline (not a
                 # per-recv timeout) so a dribbling worker can't hold it open (slow-loris — N11).
-                response_obj = self._read_frame(sock, time.monotonic() + timeout_s)
+                response_obj = self._read_frame(sock, deadline)
             return rpc_framing.parse_response(response_obj, expected_id=request_id)
         except RpcCallError as exc:
             # A method-level failure: the worker is healthy; do NOT kill. Map the slug.
@@ -1762,17 +1770,22 @@ class RpcGhidraAdapter:
         finally:
             sess.lock.release()  # gap N1: paired with the acquire() above; releases on every exit
 
-    def _ensure_connected(self, sess: _Session) -> socket.socket:
+    def _ensure_connected(self, sess: _Session, *, deadline: float) -> socket.socket:
         """Connect (lazily) to the session's UDS, returning a stream socket.
 
         Args:
             sess: The per-session state.
+            deadline: The caller's absolute (monotonic) deadline for the WHOLE call. Connect gives
+                up at the EARLIER of ``connect_timeout_s`` from now OR this deadline (gap round-4
+                Q4), so a worker slow to bind its UDS cannot make connect — which runs while
+                ``sess.lock`` is held — push the total call time past the caller's budget.
 
         Returns:
             The connected stream socket.
 
         Raises:
-            OSError: If the worker socket cannot be reached (→ ``worker-unavailable``).
+            OSError: If the worker socket cannot be reached before the connect budget elapses
+                (→ ``worker-unavailable``).
         """
         if sess.sock is not None:
             return sess.sock
@@ -1782,17 +1795,23 @@ class RpcGhidraAdapter:
         # bound and accepting or the connect budget elapses. The two expected transient conditions
         # are ENOENT (socket file not created yet) and ECONNREFUSED (created but not yet
         # listening); any other OSError is non-transient and propagates immediately (fail fast).
-        start = time.monotonic()
+        # Q4: the budget is the EARLIER of connect_timeout_s or the call deadline, and each
+        # attempt's socket timeout is capped by the remaining budget — connect never overruns.
+        connect_deadline = min(deadline, time.monotonic() + self._connect_timeout_s)
         while True:
+            remaining = connect_deadline - time.monotonic()
+            if remaining <= 0:
+                raise ConnectionError("worker connect budget elapsed before the call deadline")
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.settimeout(self._connect_timeout_s)
+            sock.settimeout(remaining)
             try:
                 sock.connect(sess.socket_path)
             except (FileNotFoundError, ConnectionRefusedError):
                 sock.close()
-                if time.monotonic() - start >= self._connect_timeout_s:
+                if time.monotonic() >= connect_deadline:
                     raise
-                time.sleep(_CONNECT_RETRY_INTERVAL_S)
+                nap = min(_CONNECT_RETRY_INTERVAL_S, max(0.0, connect_deadline - time.monotonic()))
+                time.sleep(nap)
                 continue
             sess.sock = sock
             return sock

@@ -53,7 +53,7 @@ class _ConnectedAdapter(RpcGhidraAdapter):
         super().__init__(**kw)  # type: ignore[arg-type]
         self._wired = server_sock
 
-    def _ensure_connected(self, sess: object) -> socket.socket:
+    def _ensure_connected(self, sess: object, *, deadline: float = 0.0) -> socket.socket:
         sess.sock = self._wired  # type: ignore[attr-defined]
         return self._wired
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
@@ -79,7 +80,7 @@ class _ConnectedAdapter(RpcGhidraAdapter):
         super().__init__(**kw)  # type: ignore[arg-type]
         self._wired = server_sock
 
-    def _ensure_connected(self, sess: object) -> socket.socket:
+    def _ensure_connected(self, sess: object, *, deadline: float = 0.0) -> socket.socket:
         """Return the pre-wired socket instead of dialing a real UDS.
 
         Args:
@@ -1355,17 +1356,25 @@ def test_ensure_connected_retries_until_worker_binds(monkeypatch: pytest.MonkeyP
         connect_timeout_s=5.0,
     )
     sess = rc._Session(_FakeWorker(), "/run/x/s/s.sock")
-    got = adapter._ensure_connected(sess)
+    # Q4: a far-future call deadline → the connect budget is bounded by connect_timeout_s (5s), so
+    # the three fast (no-op-sleep) retries succeed exactly as before.
+    got = adapter._ensure_connected(sess, deadline=time.monotonic() + 100.0)
     assert attempts["n"] == 3
     assert got is sess.sock
 
 
 def test_ensure_connected_gives_up_after_connect_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A worker that never binds within the budget makes connect raise (→ worker-unavailable)."""
+    """A worker that never binds within the budget makes connect raise (→ worker-unavailable).
+
+    Controlled 3-tick monotonic clock so the first attempt runs (remaining>0), gets
+    ``ConnectionRefusedError`` (bound-but-not-accepting), and the post-attempt budget check sees the
+    budget elapsed → re-raises it (NOT the loop-top ``ConnectionError``). Ticks: connect_deadline
+    computation, loop-top remaining, post-attempt give-up check.
+    """
     from vivarium.ghidra import rpc_client as rc
 
     monkeypatch.setattr("vivarium.ghidra.rpc_client.time.sleep", lambda *_: None)
-    clock = iter([0.0, 100.0])  # start, then a check already past the connect budget
+    clock = iter([0.0, 0.0, 100.0])  # min()+budget, loop-top remaining, then past the budget
     monkeypatch.setattr("vivarium.ghidra.rpc_client.time.monotonic", lambda: next(clock))
 
     class _DeadSock:
@@ -1386,8 +1395,41 @@ def test_ensure_connected_gives_up_after_connect_timeout(monkeypatch: pytest.Mon
         connect_timeout_s=5.0,
     )
     sess = rc._Session(_FakeWorker(), "/run/x/s/s.sock")
+    # A far-future literal deadline (no monotonic() call) so the connect_timeout_s budget expires
+    # first → the caught ConnectionRefusedError is re-raised (worker-unavailable), not the top one.
     with pytest.raises(ConnectionRefusedError):
-        adapter._ensure_connected(sess)
+        adapter._ensure_connected(sess, deadline=1000.0)
+
+
+def test_ensure_connected_fails_closed_when_call_deadline_already_passed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """gap round-4 Q4: if the per-call deadline is already spent on entry (e.g. the lock acquire ate
+    the budget), connect makes NO socket attempt and fails closed → worker-unavailable.
+
+    A past deadline makes ``connect_deadline`` already elapsed, so the loop-top guard raises before
+    any ``socket()`` — proving connect can't run (under sess.lock) once the call budget is gone.
+    """
+    from vivarium.ghidra import rpc_client as rc
+
+    clock = iter([10.0, 10.0])  # connect_deadline computation, then loop-top remaining (<= 0)
+    monkeypatch.setattr("vivarium.ghidra.rpc_client.time.monotonic", lambda: next(clock))
+    # No socket() should ever be constructed; make it explode if the guard fails to short-circuit.
+    monkeypatch.setattr(
+        "vivarium.ghidra.rpc_client.socket.socket",
+        lambda *a, **k: pytest.fail("connect attempted despite an elapsed call deadline"),
+    )
+    adapter = RpcGhidraAdapter(
+        launcher=lambda sid, path: _FakeWorker(),
+        socket_dir="/run/x",
+        tool_timeout_s=2.0,
+        analysis_timeout_s=2.0,
+        max_response_bytes=_CAP,
+        connect_timeout_s=5.0,
+    )
+    sess = rc._Session(_FakeWorker(), "/run/x/s/s.sock")
+    with pytest.raises(ConnectionError):  # OSError family → mapped to worker-unavailable by _call
+        adapter._ensure_connected(sess, deadline=0.0)  # already in the past
 
 
 def test_socket_path_fits_af_unix_limit_with_real_session_id() -> None:
