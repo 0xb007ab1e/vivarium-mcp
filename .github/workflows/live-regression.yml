@@ -244,7 +244,7 @@ jobs:
       # Containerfile so the gate still runs (build is local-only — never pushed/signed here).
       - name: Log in to GHCR
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.build_image) }}
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # docker/login-action@v3.6.0
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # docker/login-action@v4.2.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
