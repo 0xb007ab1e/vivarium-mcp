@@ -88,3 +88,27 @@ def test_start_is_idempotent() -> None:
     reaper.start()  # no-op
     assert reaper._thread is thread
     reaper.stop()
+
+
+def test_concurrent_start_spawns_exactly_one_thread() -> None:
+    """A start() stampede spawns ONE sweeper thread — the lifecycle lock serializes the check.
+
+    Without the lock, concurrent callers could each pass the ``_thread is None`` check and spawn
+    their own thread; the lock guarantees exactly one is created.
+    """
+    reaper = PeriodicReaper(_CountingManager(), interval_s=3600)  # long → threads just wait
+    barrier = threading.Barrier(8)
+
+    def _start() -> None:
+        barrier.wait()  # release all at once to maximise the race on the idempotency check
+        reaper.start()
+
+    threads = [threading.Thread(target=_start) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(2)
+    live = [th for th in threading.enumerate() if th.name == "vivarium-session-reaper"]
+    assert len(live) == 1  # exactly one sweeper despite 8 concurrent start() calls
+    reaper.stop()
+    assert reaper._thread is None
