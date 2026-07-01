@@ -6,6 +6,7 @@ needed. Asserts default-deny, the generic (oracle-free) bearer reject, and the p
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -693,6 +694,29 @@ def test_oauth_real_client_built_lazily_and_cached() -> None:
     first = auth._client()
     second = auth._client()
     assert first is second  # cached — same instance, not rebuilt
+
+
+def test_oauth_client_built_once_under_concurrency() -> None:
+    """Concurrent first requests build exactly ONE JWKS client (``_client_lock`` serializes build).
+
+    PyJWKClient does not fetch on construction, so this is hermetic (no network). Without the lock a
+    cold race could append several clients; the lock guarantees a single shared instance is reused.
+    """
+    auth = OAuthResourceAuthenticator(issuer=_ISS, audience=_AUD, jwks_uri=_JWKS)
+    clients: list[jwt.PyJWKClient] = []
+    barrier = threading.Barrier(8)
+
+    def _hit() -> None:
+        barrier.wait()  # release all threads at once to maximise contention on the cold build
+        clients.append(auth._client())
+
+    threads = [threading.Thread(target=_hit) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(2)
+    assert len(auth._jwks_client) == 1  # built exactly once despite the stampede
+    assert all(c is auth._jwks_client[0] for c in clients)  # every caller got the one instance
 
 
 # --- Fail-closed: every failure → generic None, no oracle, token never logged -----------------
