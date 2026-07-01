@@ -100,6 +100,13 @@ WorkerLauncher = Callable[[str, str], WorkerProcess]
 #: confinement + DoS cap, both server-side and pre-Ghidra). WS3/deploy injects the concrete,
 #: allow-list-confined resolver; the built-in default stats a path under the OS (used only when the
 #: composition root wires no resolver). It returns a non-negative ``int`` size.
+#:
+#: **Failure contract:** signal an unresolvable/rejected ``source_ref`` by raising ``OSError`` (the
+#: default's stat failures) or ``ValueError`` (e.g. a confined resolver rejecting a path outside its
+#: allow-list root). :meth:`RpcClient.import_binary` maps BOTH to a fail-closed ``VALIDATION`` error
+#: with a fixed, content-free detail — the resolver's exception is chained server-side only, never
+#: forwarded to the client (master §5). Any OTHER exception is treated as a wiring/programmer bug
+#: and propagates (fail fast — ``topic-error-handling``), not masked as input validation.
 SourceResolver = Callable[[str], int]
 
 
@@ -402,7 +409,8 @@ class RpcGhidraAdapter:
         The binary-size cap is checked server-side and pre-Ghidra (DoS first line — PLAN §3 F7,
         ADR-001: no byte reaches the JVM until it has passed the cap). The ``source_ref`` is
         resolved by the injected confined resolver; an over-cap input raises ``LIMIT_EXCEEDED``
-        before the worker is contacted, and an unresolvable ref fails closed as ``VALIDATION``.
+        before the worker is contacted, and an unresolvable/rejected ref (resolver raising
+        ``OSError`` or ``ValueError`` — see :data:`SourceResolver`) fails closed as ``VALIDATION``.
 
         After the hard cap, the configurable OOM pre-flight (ADR-029 C) runs: in ``reject`` mode an
         input above the OOM-plausible threshold fails closed with ``resource-exhausted`` BEFORE the
@@ -417,13 +425,20 @@ class RpcGhidraAdapter:
             carrying the server-resolved ``binary_size`` overlaid onto the worker's reply.
 
         Raises:
-            GhidraMcpError: ``VALIDATION`` if the ref cannot be resolved; ``LIMIT_EXCEEDED`` if over
-                the hard size cap; ``RESOURCE_EXHAUSTED`` if the pre-flight is in ``reject`` mode
-                and the input exceeds the OOM-plausible threshold.
+            GhidraMcpError: ``VALIDATION`` if the ref cannot be resolved (resolver raised
+                ``OSError`` or ``ValueError``); ``LIMIT_EXCEEDED`` if over the hard size cap;
+                ``RESOURCE_EXHAUSTED`` if the pre-flight is in ``reject`` mode and the input
+                exceeds the OOM-plausible threshold.
         """
         try:
             size_bytes = self._source_resolver(args.source_ref)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            # Fail closed: the resolver signalled an unresolvable/rejected ref (OSError from a
+            # stat, or ValueError from a confined resolver rejecting a path outside its allow-list
+            # root). Map to VALIDATION with a fixed, content-free detail; the underlying exception
+            # is chained SERVER-SIDE only (never forwarded to the client — master §5). Any other
+            # exception type is a wiring/programmer bug and propagates unmasked (fail fast —
+            # topic-error-handling).
             raise _errors.make_error(
                 ErrorType.VALIDATION, "input reference could not be resolved"
             ) from exc
