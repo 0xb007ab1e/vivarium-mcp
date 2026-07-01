@@ -101,3 +101,36 @@ def test_no_callback_when_on_evict_is_none() -> None:
     mgr = SessionManager(clock=clock.monotonic, wall_clock=clock.time)
     info = mgr.create()
     assert mgr.evict(info.session_id, reason="close") is True
+
+
+@pytest.mark.critical
+def test_set_evict_callback_binds_and_fires_on_eviction() -> None:
+    # The public composition seam (used by build_app) binds the hook without a private-attr poke;
+    # the bound callback fires on eviction exactly like a constructor-injected one.
+    clock = FrozenClock()
+    seen: list[str] = []
+    mgr = SessionManager(clock=clock.monotonic, wall_clock=clock.time)  # no on_evict at ctor
+    mgr.set_evict_callback(seen.append)
+    info = mgr.create()
+    mgr.evict(info.session_id, reason="close")
+    assert seen == [info.session_id]
+
+
+@pytest.mark.critical
+def test_set_evict_callback_is_call_once_and_fails_closed_on_rebind() -> None:
+    # Rebinding must raise (fail closed): a silent second binding would drop the first callback's
+    # sessions on eviction. Holds whether the first binding came from __init__ or the seam itself.
+    clock = FrozenClock()
+    first: list[str] = []
+    mgr = _manager(clock, first.append)  # first binding via __init__
+    with pytest.raises(RuntimeError, match="already bound"):
+        mgr.set_evict_callback(lambda _sid: None)
+    # A second set_evict_callback after a first one also raises.
+    mgr2 = SessionManager(clock=clock.monotonic, wall_clock=clock.time)
+    mgr2.set_evict_callback(first.append)
+    with pytest.raises(RuntimeError, match="already bound"):
+        mgr2.set_evict_callback(lambda _sid: None)
+    # The original binding still fires — the rejected rebind did not disturb it.
+    info = mgr.create()
+    mgr.evict(info.session_id, reason="close")
+    assert first == [info.session_id]

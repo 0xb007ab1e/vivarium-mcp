@@ -41,8 +41,9 @@ def _wire(
         limits=limits if limits is not None else Limits(),
         clock=clock.monotonic,
     )
-    # Lifetime binding: a session eviction discards its streaming jobs (ADR-040 §6).
-    sessions._on_evict = jobs.discard_session  # wiring the injected hook directly
+    # Lifetime binding: a session eviction discards its streaming jobs (ADR-040 §6). Uses the
+    # public call-once composition seam (build_app shape), not a private-attr poke.
+    sessions.set_evict_callback(jobs.discard_session)
     port = FakeGhidraPort()
     return sessions, jobs, port
 

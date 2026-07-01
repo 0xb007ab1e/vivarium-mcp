@@ -112,6 +112,9 @@ def test_boundary_preserves_handler_signature() -> None:
 
 # --- build_app -----------------------------------------------------------------------
 class _FakeSessions:
+    def set_evict_callback(self, on_evict: object) -> None:
+        """Composition seam (ADR-040) — build_app binds the streaming discard hook here; no-op."""
+
     def begin_call(self, session_id: str, *, caller: str | None = None) -> None:
         """In-flight marker (ADR-025 / F4) — no-op for these app tests."""
 
