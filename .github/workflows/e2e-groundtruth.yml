@@ -14,14 +14,28 @@
 # worker-style sandbox (ContainerCompileRunner / TB5) — proving the whole tools→loop→compile→metrics
 # machinery end to end. The compiler image is pinned BY DIGEST (std-supplychain).
 #
-# GATED (PLAN §6, std-supplychain): manual dispatch only. Source tarballs are SHA-256-pinned in
-# tests/fixtures/oss/manifest.toml (build fails closed on a mismatch). Actions are pinned BY DIGEST.
-# The worker image is pulled BY DIGEST (from .github/worker-image.pin — the signed digest
-# auto-bumped via a reviewed PR by worker-image.yml on release) and cosign-verified before trust.
+# GATED (PLAN §6, std-supplychain): nightly schedule + manual dispatch. Source tarballs are
+# SHA-256-pinned in tests/fixtures/oss/manifest.toml (build fails closed on a mismatch). Actions are
+# pinned BY DIGEST. The worker image is pulled BY DIGEST (from .github/worker-image.pin — the signed
+# digest auto-bumped via a reviewed PR by worker-image.yml on release) and cosign-verified before trust.
+#
+# WHY A SCHEDULE (gap round-4 Q1): this workflow is the ONLY place the LIVE abuse/containment
+# guarantees are verified — decompile-bomb → worker-kill, verified store-wipe on eviction,
+# cross-session isolation, TB5 exec-sandbox forkbomb/hang containment, and cross-principal HTTP BOLA
+# (the `test_abuse_*_oss.py` steps below) — and several unit-test skips explicitly DEFER to them. On
+# `workflow_dispatch` only, those live guarantees were verified on human whim, so a live-only
+# regression would pass every automatic gate. A nightly run makes the verification continuous and
+# alerts the repo owner on a default-branch scheduled-workflow failure (the scheduled-rescan.yml /
+# live-regression.yml / mutation.yml pattern). It stays a SCHEDULE (not a per-PR trigger): the run is
+# heavy (network source builds + a signed-worker container + a pinned compiler sandbox), so a nightly
+# catch-all + on-demand dispatch is the proportionate close of the "no automatic trigger" gap without
+# making an expensive real-worker suite block or spam every PR.
 name: e2e-groundtruth
 
 on:
-  workflow_dispatch: {}        # manual, gated trigger only.
+  schedule:
+    - cron: "37 5 * * *"       # nightly 05:37 UTC (off-peak; distinct from the other scheduled jobs)
+  workflow_dispatch: {}        # manual, gated trigger (also runs the full suite on demand).
 
 permissions:
   contents: read
