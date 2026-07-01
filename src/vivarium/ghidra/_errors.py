@@ -85,6 +85,41 @@ def make_error(
     return GhidraMcpError(envelope)
 
 
+#: Fixed, safe client-facing detail for a worker JSON-RPC **method** error, by mapped type. The
+#: worker's own free-form ``message`` is NEVER placed on the client envelope (gap round-4 Q8): it is
+#: binary-adjacent, untrusted text from a potentially-hostile worker (TB2/TB3) and bypasses the
+#: untrusted-data envelope's bidi/control normalization. These canned strings are used instead; the
+#: worker message is logged (log-only), like ``data.detail`` already is.
+_WORKER_METHOD_DETAIL: dict[ErrorType, str] = {
+    ErrorType.VALIDATION: "the worker rejected the request arguments",
+    ErrorType.NOT_FOUND: "the requested item was not found in the program",
+    ErrorType.LIMIT_EXCEEDED: "the request exceeded a worker limit",
+    ErrorType.ANALYSIS_FAILED: "the worker could not analyze the program",
+    ErrorType.INTERNAL: "the worker reported an internal error",
+}
+
+
+def worker_method_error(
+    error_type: ErrorType, *, correlation_id: str | None = None
+) -> GhidraMcpError:
+    """Build a client error for a worker JSON-RPC **method** error with a FIXED, safe detail.
+
+    The worker's free-form ``message`` is deliberately NOT forwarded to the client (gap round-4 Q8):
+    it is untrusted worker output (TB2/TB3) that would otherwise reach ``ErrorEnvelope.detail``
+    un-normalized. A fixed per-type detail is used; the caller logs the worker's message separately
+    (log-only). Falls back to a generic detail for any unmapped type (fail closed).
+
+    Args:
+        error_type: The public error category (from :func:`map_worker_slug`).
+        correlation_id: Optional id tying the error to redacted server-side logs.
+
+    Returns:
+        A ready-to-raise :class:`GhidraMcpError` whose detail is a fixed safe string.
+    """
+    detail = _WORKER_METHOD_DETAIL.get(error_type, "the worker reported an error")
+    return make_error(error_type, detail, correlation_id=correlation_id)
+
+
 def session_invalid(correlation_id: str | None = None) -> GhidraMcpError:
     """Build the BOLA-safe ``session-invalid`` error.
 

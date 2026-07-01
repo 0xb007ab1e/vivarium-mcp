@@ -637,12 +637,18 @@ class RpcGhidraAdapter:
         except RpcCallError as exc:
             # A method-level worker failure mid-stream: the worker is healthy, do NOT kill. Map the
             # slug; the job manager turns the raised GhidraMcpError into a terminal error chunk.
+            # Q8: the worker's free-form message is LOG-ONLY (never the client envelope) — it is
+            # untrusted worker output (TB2/TB3) that would bypass the envelope normalization.
             _log.warning(
                 "stream.worker_error",
-                extra={"slug": exc.error.type_slug, "detail": exc.error.detail},
+                extra={
+                    "slug": exc.error.type_slug,
+                    "detail": exc.error.detail,
+                    "worker_message": exc.error.message,
+                },
             )
             etype = _errors.map_worker_slug(exc.error.type_slug)
-            raise _errors.make_error(etype, exc.error.message) from exc
+            raise _errors.worker_method_error(etype) from exc
         except TimeoutError as exc:
             _log.warning("stream.rpc_failed", extra={"cause": "timeout", "detail": str(exc)[:300]})
             self.kill_worker(sid)
@@ -1707,16 +1713,19 @@ class RpcGhidraAdapter:
             # (``method``/``slug``/``detail`` carry no sensitive substring); the value is the
             # worker-scrubbed class-name template, never binary-derived text. The client envelope
             # is UNCHANGED — detail is never placed on it.
+            # Q8: the worker's free-form message is LOG-ONLY (never the client envelope) — it is
+            # untrusted worker output (TB2/TB3) that would bypass the envelope normalization.
             _log.warning(
                 "worker.method_error",
                 extra={
                     "method": method,
                     "slug": exc.error.type_slug,
                     "detail": exc.error.detail,
+                    "worker_message": exc.error.message,
                 },
             )
             etype = _errors.map_worker_slug(exc.error.type_slug)
-            raise _errors.make_error(etype, exc.error.message) from exc
+            raise _errors.worker_method_error(etype) from exc
         except TimeoutError as exc:
             _log.warning(
                 "worker.rpc_failed",
