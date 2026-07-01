@@ -15,6 +15,7 @@ All time is injected (a fake monotonic clock) so tests are deterministic and her
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -311,6 +312,51 @@ def test_reap_expired_keeps_live_sessions() -> None:
     mgr.create()
     clock.advance(10)
     assert mgr.reap_expired() == 0
+
+
+def test_reap_expired_runs_kill_and_wipe_outside_the_session_lock() -> None:
+    """gap P10: the reaper detaches under ``_lock`` but performs the worker-kill/store-wipe I/O
+    OUTSIDE it, so a slow kill on the timer cannot stall request threads. Proven by having a second
+    thread acquire ``_lock`` while the reaper is blocked inside ``kill_worker`` (``_lock`` is
+    reentrant, so the grabber MUST be a different thread to genuinely test contention).
+    """
+    kill_started = threading.Event()
+    other_took_lock = threading.Event()
+    release_kill = threading.Event()
+
+    class _BlockingKillPort(_FakePort):
+        def kill_worker(self, session_id: str) -> None:
+            super().kill_worker(session_id)
+            kill_started.set()
+            assert release_kill.wait(5), "test did not release the blocked kill"
+
+    port = _BlockingKillPort()
+    mgr, clock = _mgr(port=port, ttl_s=100, idle_s=10_000, max_sessions=8)
+    info = mgr.create()
+    mgr._sessions[info.session_id].worker_started = True  # so eviction triggers kill_worker
+    clock.advance(150)  # absolute TTL elapsed → the session is reapable
+
+    reaped: list[int] = []
+    reaper = threading.Thread(target=lambda: reaped.append(mgr.reap_expired()))
+    reaper.start()
+    try:
+        assert kill_started.wait(5), "reaper never reached kill_worker"
+
+        # The reaper is INSIDE kill_worker now. If it still held _lock, a different thread could
+        # not acquire it — prove it can (the P10 guarantee):
+        def _grab_lock() -> None:
+            with mgr._lock:
+                other_took_lock.set()
+
+        grabber = threading.Thread(target=_grab_lock)
+        grabber.start()
+        assert other_took_lock.wait(5), "lock held during reaper kill (P10 regression)"
+        grabber.join(5)
+    finally:
+        release_kill.set()
+        reaper.join(5)
+    assert reaped == [1]
+    assert port.killed == [info.session_id]
 
 
 @pytest.mark.critical
