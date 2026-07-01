@@ -24,6 +24,11 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   a bounded (count + bytes) window (clients dedupe by `seq`); previously drained chunks were gone
   (effectively at-most-once). A cursor older than the window fails closed with a typed validation
   error. New cap `VIVARIUM_MAX_STREAM_REPLAY_CHUNKS`.
+- **Session-reaper eviction I/O runs off the session lock (#217, gap round-3 P10).** The periodic
+  reaper now detaches an expired session in-memory under the lock, then performs the worker-kill +
+  verified store-wipe **outside** it — so a slow kill/wipe on the timer can no longer stall request
+  threads (or `/readyz`) waiting on the lock. Kill-before-wipe ordering and the synchronous `evict()`
+  contract are unchanged.
 
 ### Fixed
 - **Structural writes are now atomic (#182, CWE-460/ADR-021 §D2).** A failed `define_struct` /
@@ -39,6 +44,9 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 - **Per-session adapter locking under concurrent HTTP (#196, gap N1).** Per-session socket/stream
   state is guarded (RLock for short sections + a stream-exclusion flag, lock-free kill/cancel,
   bounded acquire), removing a race/TOCTOU that assumed a single-threaded request path.
+- **Metrics final-snapshot race on a timed-out join (#211, gap round-3 P6).** `PeriodicMetricsLogger.stop()`
+  now emits the shutdown snapshot only after the daemon thread has actually exited, so it can no
+  longer race a second concurrent emit with an in-flight one.
 
 ### Security
 - **Signed-commit + admin enforcement on `main` (gap N7).** Branch protection now requires
@@ -50,6 +58,18 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 - **Broadened real-worker regression coverage (#198/#209, gap N2).** `live-regression` auto-runs on
   core-runtime-path PRs (not just FID); the required `fid-elf-match-gate` was decoupled so non-FID PRs
   no longer wait on the real-worker run.
+- **`/readyz` pre-auth DoS + occupancy-oracle hardening (#214, gap round-3 P3).** The readiness
+  probe's capacity check is now cached (single-flight, lock-free fast path), so the unauthenticated,
+  pre-rate-limit `/readyz` can no longer drive session-lock contention (CWE-400) and its 200/503
+  answer is coarsened (blunting the pool-occupancy oracle, CWE-200). New knob
+  `VIVARIUM_READINESS_CACHE_TTL_SECONDS` (default 1s).
+- **Direct-mTLS cert principal-id bounded + sanitized (#216, gap round-3 P9).** The cert CN/SAN mapped
+  to a principal now goes through the same length-bound + control-char rejection as the reverse-proxy
+  path (`_valid_principal_id`), so a hostile-but-CA-issued cert cannot inject an over-long or
+  log-poisoning session-owner id.
+- **FID real-worker gate fails fast if its sibling never runs (#220, gap round-3 P13).** The
+  `fid-elf-match-gate` poll now fails loudly within a bounded grace if the `live-regression` job it
+  depends on is renamed / never scheduled, instead of silently hanging to the 65-min timeout.
 
 ### Internal / tooling
 - Renovate config for gated dependency-bump PRs (#199, N9 — inert until the GitHub App is enabled);
@@ -57,6 +77,14 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   stdio BOLA + boundary-validation e2e + worker-coverage gate (#204/#195, N15/N6); CI-comment + registry
   branch-coverage hygiene (#205, N16); a read-only dry-run rollback / evict-poisoned-worker drill
   harness (#206, N10).
+- **Round-3 test-quality + docs + hygiene:** `jobs/streaming.py` enforced at 100% coverage + mutation
+  (#212, P5); property/fuzz tests for `parse_address`/`validate_name` + an autouse metrics-reset
+  fixture (#218, P14/P16); retired 3 coverage-theater RPC round-trip skip-stubs (#219, P8); the
+  operational-observability reference `docs/observability.md` — snapshot schema, SLIs/SLOs, log-based
+  alerts (#215, P4); the Renovate manual-bump decision + a health-probe `root_path` caveat (#221,
+  P12/P16); corrected stale GitHub-Action version tag-comments (#213, P11); the mutation gate turned
+  into a regression floor (`MUTATION_SCORE_MIN=65`, baseline 69.5%) + killed the error-envelope status
+  survivors (#222, P7).
 
 ## [0.12.0] — 2026-06-24
 

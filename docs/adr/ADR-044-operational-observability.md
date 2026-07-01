@@ -76,8 +76,9 @@ Two operational gaps, both with a genuine design choice:
   Consuming the SLIs is an operator responsibility: the snapshot schema, the SLIs/SLOs, and the exact
   log-based alert queries are now specified in [`docs/observability.md`](../observability.md) (gap
   round-3 P4 — the previously-deferred item is now a documented decision, not a gap). The reaper
-  performs worker-kill + store-wipe under the session lock on a timer (bounded; pool is small) — noted
-  in the reliability/threat-model notes.
+  detaches an expired session in-memory under the session lock, then performs the worker-kill +
+  store-wipe **outside** the lock (`_run_eviction_io`, #217/round-3 P10) — so a slow kill/wipe on the
+  timer cannot stall request threads waiting on the lock — noted in the reliability/threat-model notes.
 
 ## Related
 
