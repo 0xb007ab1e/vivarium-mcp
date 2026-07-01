@@ -13,9 +13,13 @@ from __future__ import annotations
 
 import pytest
 
-from vivarium.core import validation as v
-from vivarium.core.errors import ErrorType, GhidraMcpError
-from vivarium.tools import schemas as s
+hypothesis = pytest.importorskip("hypothesis")  # skip cleanly if the property-test extra is absent
+from hypothesis import given, settings  # noqa: E402
+from hypothesis import strategies as st  # noqa: E402
+
+from vivarium.core import validation as v  # noqa: E402
+from vivarium.core.errors import ErrorType, GhidraMcpError  # noqa: E402
+from vivarium.tools import schemas as s  # noqa: E402
 
 
 def _ref(**kw: object) -> s.TypeRef:
@@ -613,3 +617,70 @@ def test_batch_with_shared_target_visited_twice_is_acyclic() -> None:
         ]
     )
     v.validate_types_batch(batch)  # no raise (B finalized once; the second visit is skipped)
+
+
+# --- property/fuzz: the by-value cycle detector vs an independent oracle (gap round-4 Q7) --------
+# The by-value cycle detector (_detect_by_value_cycle, via validate_types_batch) is graph-traversal
+# logic guarding an infinite-size-type DoS (CWE-400). Build random by-value/pointer edge graphs over
+# a small fixed node set and assert the validator rejects a batch IFF an independent oracle finds a
+# by-value cycle — a missed cycle would be an infinite composite.
+_PROFILE = settings(max_examples=300, deadline=None, derandomize=True)
+_N_NODES = 4
+
+
+_WHITE, _GREY, _BLACK = 0, 1, 2  # DFS visit colours for the cycle oracle
+
+
+def _has_by_value_cycle(adjacency: dict[int, list[int]]) -> bool:
+    """Independent 3-colour DFS cycle oracle over the by-value adjacency (self-loop counts)."""
+    colour = dict.fromkeys(adjacency, _WHITE)
+
+    def visit(node: int) -> bool:
+        colour[node] = _GREY
+        for nxt in adjacency[node]:
+            if colour[nxt] == _GREY:  # back-edge (incl. a self-loop) → cycle
+                return True
+            if colour[nxt] == _WHITE and visit(nxt):
+                return True
+        colour[node] = _BLACK
+        return False
+
+    return any(colour[n] == _WHITE and visit(n) for n in adjacency)
+
+
+@_PROFILE
+@given(
+    edges=st.lists(
+        st.tuples(
+            st.integers(min_value=0, max_value=_N_NODES - 1),
+            st.integers(min_value=0, max_value=_N_NODES - 1),
+            st.booleans(),  # True → by-value (pointer_levels=0, makes an edge); False → pointer
+        ),
+        max_size=10,
+    )
+)
+def test_cycle_detector_matches_an_independent_oracle(edges: list[tuple[int, int, bool]]) -> None:
+    """validate_types_batch rejects (VALIDATION) IFF the by-value edge graph has a cycle.
+
+    Every generated batch is valid in every OTHER respect (unique names ``T0..``, unique + valid
+    field names, in-batch refs, ≥1 field/type, all structs) so the ONLY reason it can raise is a
+    by-value cycle — pointer edges (pointer_levels≥1) create NO edge (mutually-recursive pointers
+    are allowed). The independent oracle is the ground truth the detector must match exactly.
+    """
+    node_fields: dict[int, list[s.FieldSpec]] = {i: [] for i in range(_N_NODES)}
+    adjacency: dict[int, list[int]] = {i: [] for i in range(_N_NODES)}
+    for idx, (src, dst, by_value) in enumerate(edges):
+        node_fields[src].append(
+            _named_field(f"e{idx}", f"T{dst}", pointer_levels=0 if by_value else 1)
+        )
+        if by_value:
+            adjacency[src].append(dst)
+    specs = [_spec("struct", f"T{i}", node_fields[i] or [_field("pad")]) for i in range(_N_NODES)]
+    batch = _batch(specs)
+
+    if _has_by_value_cycle(adjacency):
+        with pytest.raises(GhidraMcpError) as ei:
+            v.validate_types_batch(batch)
+        assert ei.value.envelope.type is ErrorType.VALIDATION
+    else:
+        v.validate_types_batch(batch)  # acyclic (or pointer-only cycles) → accepted, no raise

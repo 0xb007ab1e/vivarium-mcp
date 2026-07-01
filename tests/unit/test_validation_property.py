@@ -32,7 +32,9 @@ from hypothesis import strategies as st  # noqa: E402
 from vivarium.core.errors import ErrorType, GhidraMcpError  # noqa: E402
 from vivarium.core.validation import (  # noqa: E402
     MAX_NAME_LEN,
+    MAX_READ_BYTES,
     parse_address,
+    validate_byte_range,
     validate_name,
 )
 
@@ -112,3 +114,37 @@ def test_validate_name_rejects_any_control_or_separator(pre: str, bad: str, post
     with pytest.raises(GhidraMcpError) as ei:
         validate_name(pre + bad + post)
     assert ei.value.envelope.type is ErrorType.VALIDATION
+
+
+# --- validate_byte_range (CWE-190 overflow guard; gap round-4 Q7) -------------------------------
+# Values span below/within/above the bounds AND straddle the 64-bit ceiling so the offset+length-1
+# overflow guard is actually exercised (not just the simple range checks).
+_range_ints = (
+    st.integers(min_value=-4, max_value=4)
+    | st.integers(min_value=0, max_value=MAX_READ_BYTES + 4)
+    | st.integers(min_value=_MAX_ADDR - 4, max_value=_MAX_ADDR + 4)
+    | st.integers()
+)
+
+
+@settings(max_examples=600)
+@given(offset=_range_ints, length=_range_ints)
+@example(offset=_MAX_ADDR, length=1)  # inclusive end == ceiling → accepted (boundary)
+@example(offset=_MAX_ADDR, length=2)  # inclusive end == ceiling+1 → overflow reject
+@example(offset=_MAX_ADDR - 3, length=4)  # exactly fills to the ceiling → accepted
+def test_validate_byte_range_never_accepts_an_overflowing_range(offset: int, length: int) -> None:
+    """Accept ⟹ 0<=offset, 1<=length<=MAX_READ_BYTES, and offset+length-1 <= 2**64-1 (CWE-190).
+
+    Total + fail-closed: over arbitrary ints the guard returns the pair UNCHANGED meeting every
+    bound, or raises VALIDATION / LIMIT_EXCEEDED — never another exception, never an accepted range
+    whose inclusive end escapes the 64-bit address space.
+    """
+    try:
+        got_off, got_len = validate_byte_range(offset, length)
+    except GhidraMcpError as exc:
+        assert exc.envelope.type in (ErrorType.VALIDATION, ErrorType.LIMIT_EXCEEDED)
+    else:
+        assert (got_off, got_len) == (offset, length)  # returned unchanged
+        assert 0 <= got_off <= _MAX_ADDR
+        assert 1 <= got_len <= MAX_READ_BYTES
+        assert got_off + got_len - 1 <= _MAX_ADDR  # the overflow invariant — never violated
