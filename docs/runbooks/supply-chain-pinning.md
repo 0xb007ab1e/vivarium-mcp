@@ -205,6 +205,19 @@ uv run bandit -r src -c pyproject.toml                       # gate 5 SAST
 2. **ADR-004 isolation acceptance** on a gVisor-capable host: `deploy/verify-isolation.sh`.
 3. **First commit** of the integrated tree (separate gate — `@rules/workflow-git.md`, noreply email).
 
+## Dependency-bump automation (Renovate) — status & decision
+
+`renovate.json` is committed and well-formed, but the **Renovate GitHub App is not enabled** on the
+repository. Until it is, that config is inert and dependency / action-SHA / base-image bumps are done
+**manually** via this runbook + `docs/runbooks/dependency-patch.md` — that is the current, deliberate
+decision (gap round-3 **P12**), not an oversight: pre-1.0, a maintainer-driven bump keeps every pin a
+reviewed, digest-verified change (Renovate would still open PRs that must pass the same gates).
+
+**To enable it** (a one-time operator action — gated, `@rules/workflow-gated-actions.md`): install the
+Renovate GitHub App on the repo (or add a self-hosted Renovate workflow), confirm it reads
+`renovate.json`, and verify its first PRs pass all required checks + preserve digest pinning. Then this
+section becomes "Renovate opens bump PRs; a human reviews + merges."
+
 ## Rollback / abort
 - Any phase: `git checkout -- Containerfile.* infra/Makefile .github/workflows/*.yml .env.example deploy/*.sh`
   restores the placeholders; `rm -f uv.lock requirements*.lock` undoes the lock. Pins are immutable —
