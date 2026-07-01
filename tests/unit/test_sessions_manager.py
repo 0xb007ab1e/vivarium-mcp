@@ -1087,6 +1087,42 @@ def test_begin_and_end_call_on_unknown_or_evicted_session_are_noops() -> None:
 
 
 @pytest.mark.critical
+def test_begin_and_end_call_are_owner_scoped() -> None:
+    """gap round-4 Q10: begin_call/end_call with a ``caller`` only mark a session the caller OWNS.
+
+    A foreign caller (a valid non-owned session id) must not bump in-flight or refresh the idle
+    clock — that would let it defer another principal's idle-eviction before the handler's authorize
+    rejects it. begin/end stay balanced (both no-op for the foreign caller).
+    """
+    mgr, clock = _mgr(ttl_s=1000, idle_s=100, max_sessions=8)
+    sid = mgr.create(owner="alice").session_id
+    # Foreign caller: begin_call AND end_call are no-ops — the owner's counter is untouched.
+    mgr.begin_call(sid, caller="mallory")
+    assert mgr._sessions[sid].in_flight == 0
+    mgr.end_call(sid, caller="mallory")
+    assert mgr._sessions[sid].in_flight == 0
+    # The owning caller marks it in-flight (exempt from idle reaping); end clears it.
+    mgr.begin_call(sid, caller="alice")
+    assert mgr._sessions[sid].in_flight == 1
+    clock.advance(200)  # past idle, but in-flight → NOT reaped
+    assert mgr.reap_expired() == 0
+    mgr.end_call(sid, caller="alice")
+    assert mgr._sessions[sid].in_flight == 0
+
+
+@pytest.mark.critical
+def test_foreign_begin_call_cannot_defer_owners_idle_eviction() -> None:
+    """gap round-4 Q10 (the security property): a foreign caller's begin_call does NOT keep another
+    principal's session alive — it idle-expires on schedule despite the foreign marker attempt."""
+    mgr, clock = _mgr(ttl_s=1000, idle_s=100, max_sessions=8)
+    sid = mgr.create(owner="alice").session_id
+    clock.advance(60)
+    mgr.begin_call(sid, caller="mallory")  # foreign: no refresh, no in-flight exemption
+    clock.advance(60)  # 120s idle since create; mallory did NOT refresh it
+    assert mgr.reap_expired() == 1  # alice's session idle-expires (not kept alive by mallory)
+
+
+@pytest.mark.critical
 def test_end_call_does_not_drive_counter_negative() -> None:
     # An unmatched/spurious end_call clamps at zero — it must not leave a phantom-negative in-flight
     # that would under-count a later real concurrent call (fail safe).

@@ -165,10 +165,10 @@ class _FakeSessions:
         """Initialize with an empty authorize log."""
         self.authorized: list[str] = []
 
-    def begin_call(self, session_id: str) -> None:
+    def begin_call(self, session_id: str, *, caller: str | None = None) -> None:
         """No-op in-flight begin mark (test stub)."""
 
-    def end_call(self, session_id: str) -> None:
+    def end_call(self, session_id: str, *, caller: str | None = None) -> None:
         """No-op in-flight end mark (test stub)."""
 
     def authorize(self, session_id: str, *, caller: str = "local") -> s.SessionInfo:
