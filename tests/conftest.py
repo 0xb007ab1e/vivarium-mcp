@@ -29,10 +29,27 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
 
+from vivarium import metrics as _metrics
 from vivarium.core.envelope import DataOrigin, Untrusted
 from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from vivarium.jobs import streaming as st
 from vivarium.tools import schemas as s
+
+
+@pytest.fixture(autouse=True)
+def _reset_metrics_registry() -> Iterator[None]:
+    """Reset the process-global metrics registry before + after each test (gap round-3 P16).
+
+    ``vivarium.metrics`` exposes a module-level default registry (in-process counters are inherently
+    process-global). Instrument sites (the tool error-boundary, the auth middleware, the session
+    manager) record onto it, so counts would otherwise LEAK across tests and make an assertion on
+    ``metrics().snapshot()`` order-dependent. An autouse reset makes every test start (and leave)
+    the registry clean — hermeticity (topic-testing) without each test resetting by hand.
+    """
+    _metrics.metrics().reset()
+    yield
+    _metrics.metrics().reset()
+
 
 if TYPE_CHECKING:
     from vivarium.ghidra.port import GhidraPort
