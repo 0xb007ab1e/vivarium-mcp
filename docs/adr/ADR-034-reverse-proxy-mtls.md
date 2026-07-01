@@ -35,6 +35,15 @@ header **only** when the request also carries a correct pre-shared secret:
   trusted proxy can reach it (private bind / network policy). The shared secret is defense in depth
   *and* the code-enforced anchor; the operator must still not expose the server publicly. This is
   called out loudly in the threat model + deploy docs.
+- **Rate-limit deployment constraint (gap round-4 Q9):** the app's per-client rate limiter keys on
+  the transport **peer IP** — and it deliberately does NOT trust `X-Forwarded-For` (spoofable). In
+  `mtls-proxy` mode every request arrives from the proxy's single IP, so the limiter collapses to
+  **one shared bucket** for all principals (a per-principal request-rate DoS is not bounded by the
+  app; it is a limitation, not a bypass). The **fronting proxy MUST enforce per-client rate
+  limiting** in this mode. The per-owner **session cap** (ADR-017 STRIDE-D) still bounds resource
+  starvation (one principal cannot exhaust the worker pool), so the residual is request-rate only.
+  A post-auth per-principal limiter is a possible future enhancement, deliberately deferred (the
+  limiter is pre-auth by design — reject cheaply before auth work — and moving it would weaken that).
 
 ### D2 — The proxy forwards a pre-extracted identity string (not a cert to re-parse)
 

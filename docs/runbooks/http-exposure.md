@@ -118,6 +118,12 @@ $ssl_client_s_dn;`). The server trusts the identity **only** when the secret mat
 >    the mode refuses to boot without one) and have the proxy **strip** any client-supplied
 >    `x-proxy-auth`/`x-client-cert-subject` headers before injecting its own (so a client can't
 >    smuggle them through). Rotate it via `runbooks/secret-rotation.md`.
+> 3. **Enforce per-client rate limiting AT THE PROXY** (gap round-4 Q9). The server's own limiter
+>    (`VIVARIUM_HTTP_RATE_PER_SECOND`) keys on the peer IP and does NOT trust `X-Forwarded-For`, so
+>    behind a proxy all principals share ONE bucket — a per-principal request-rate DoS isn't bounded
+>    by the app in this mode (the per-owner session cap still bounds worker-pool starvation). Add a
+>    per-client rate limit at the proxy (e.g. nginx `limit_req_zone` keyed on the client cert / real
+>    client IP).
 
 ## Secret handling (bearer token + TLS key)
 

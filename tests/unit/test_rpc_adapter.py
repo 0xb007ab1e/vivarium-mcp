@@ -1731,6 +1731,46 @@ def test_call_method_error_logs_redacted_detail_and_does_not_change_envelope(
     wrk.close()
 
 
+def test_worker_message_is_not_forwarded_to_client_detail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """gap round-4 Q8: a worker method-error's free-form message never reaches the client envelope.
+
+    The worker is a hostile fault domain (TB2/TB3); its ``message`` bypasses the untrusted-data
+    envelope normalization, so it is NOT placed on ``ErrorEnvelope.detail`` (a fixed per-type detail
+    is used) — it is captured log-only for diagnosis, like ``data.detail`` already is.
+    """
+    import logging
+
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+
+    # bidi override (U+202E) + BEL (U+0007) + over the 512-char cap; chr() so the source
+    # carries no raw ambiguous/invisible char (RUF001).
+    bidi, bel = chr(0x202E), chr(0x07)
+    hostile = "PWN" + bidi + "inject" + bel + "x" * 600
+    err = {
+        "jsonrpc": "2.0",
+        "error": {"code": -32004, "message": hostile, "data": {"type": "not-found"}},
+    }
+    t = threading.Thread(target=_serve_one, args=(wrk, err), daemon=True)
+    t.start()
+    with caplog.at_level(logging.WARNING), pytest.raises(GhidraMcpError) as ei:
+        adapter.get_function("s", s.GetFunctionIn(session_id="s", function="main"))
+    t.join(timeout=2)
+
+    env = ei.value.envelope
+    assert env.type is ErrorType.NOT_FOUND
+    # The untrusted worker message is NOT on the client envelope — a FIXED safe detail is used.
+    assert "PWN" not in env.detail and bidi not in env.detail and bel not in env.detail
+    assert env.detail == "the requested item was not found in the program"
+    # It IS captured server-side (log-only, non-reserved key) for diagnosis.
+    rec = next(r for r in caplog.records if r.message == "worker.method_error")
+    assert "PWN" in rec.worker_message  # type: ignore[attr-defined]
+    wrk.close()
+
+
 def test_serve_connection_round_trip_then_shutdown() -> None:
     a, b = socket.socketpair(socket.AF_UNIX)
     be = _FakeBackend()
