@@ -231,6 +231,7 @@ exclude_lines = [
 #   - src/vivarium/sessions/manager.py    (session isolation / eviction / BOLA prevention)
 #   - src/vivarium/security/limits.py     (DoS bounds enforced before the worker)
 #   - src/vivarium/server/auth.py         (authN/authZ: principals, bearer/mTLS/OAuth, owner check)
+#   - src/vivarium/jobs/streaming.py      (streaming BOLA + resource bounds + the N4 replay window)
 
 [tool.bandit]
 # bandit SAST config; asserts in tests are excluded via the test path, not by skipping checks.
