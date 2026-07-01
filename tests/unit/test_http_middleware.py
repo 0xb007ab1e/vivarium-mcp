@@ -23,6 +23,7 @@ from vivarium.server.auth import (
 from vivarium.server.http_middleware import (
     _SCOPE_PRINCIPAL_KEY,
     AuthenticationMiddleware,
+    CachedReadiness,
     HealthMiddleware,
     RateLimitMiddleware,
     RequestSizeLimitMiddleware,
@@ -387,3 +388,64 @@ def test_health_passes_through_non_get_on_a_probe_path() -> None:
     mw = HealthMiddleware(app, is_ready=lambda: True)
     _drive(mw, _probe_scope("POST", "/healthz"))
     assert app.called is True
+
+
+# --- CachedReadiness (gap P3: bound the pre-auth /readyz predicate to 1 call per TTL window) ---
+class _FakeClock:
+    """A manually-advanced monotonic clock (deterministic — no wall-clock/sleep in tests)."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self._t = start
+
+    def now(self) -> float:
+        return self._t
+
+    def advance(self, seconds: float) -> None:
+        self._t += seconds
+
+
+class _Counter:
+    """A readiness predicate that counts calls and returns a settable value (fake for the cache)."""
+
+    def __init__(self, value: bool = True) -> None:
+        self.value = value
+        self.calls = 0
+
+    def __call__(self) -> bool:
+        self.calls += 1
+        return self.value
+
+
+def test_cached_readiness_memoizes_within_ttl() -> None:
+    """Within the TTL the underlying predicate is called ONCE, however many probes arrive."""
+    clock = _FakeClock()  # starts at 0.0, advances only when told
+    pred = _Counter(value=True)
+    cached = CachedReadiness(pred, ttl_s=1.0, clock=clock.now)
+    assert cached() is True  # first call computes
+    for _ in range(50):  # a flood within the window
+        assert cached() is True
+    assert pred.calls == 1  # only one underlying (session-lock-taking) call
+
+
+def test_cached_readiness_recomputes_after_ttl() -> None:
+    """Once the TTL elapses the value is recomputed (and reflects the new underlying answer)."""
+    clock = _FakeClock()
+    pred = _Counter(value=True)
+    cached = CachedReadiness(pred, ttl_s=1.0, clock=clock.now)
+    assert cached() is True and pred.calls == 1
+    clock.advance(0.5)
+    assert cached() is True and pred.calls == 1  # still fresh
+    pred.value = False
+    clock.advance(0.6)  # now 1.1 > ttl → recompute
+    assert cached() is False and pred.calls == 2
+
+
+def test_cached_readiness_boundary_is_exclusive() -> None:
+    """At exactly ttl_s elapsed the entry is stale (``< ttl_s`` is the freshness test)."""
+    clock = _FakeClock()
+    pred = _Counter(value=True)
+    cached = CachedReadiness(pred, ttl_s=1.0, clock=clock.now)
+    cached()
+    clock.advance(1.0)  # elapsed == ttl → NOT < ttl → recompute
+    cached()
+    assert pred.calls == 2

@@ -43,6 +43,7 @@ _ENV_SESSION_TTL = "VIVARIUM_SESSION_TTL_SECONDS"
 _ENV_SESSION_IDLE = "VIVARIUM_SESSION_IDLE_SECONDS"
 _ENV_SESSION_REAP_INTERVAL = "VIVARIUM_SESSION_REAP_INTERVAL_SECONDS"
 _ENV_METRICS_SNAPSHOT_INTERVAL = "VIVARIUM_METRICS_SNAPSHOT_INTERVAL_SECONDS"
+_ENV_READINESS_CACHE_TTL = "VIVARIUM_READINESS_CACHE_TTL_SECONDS"
 _ENV_MAX_SESSIONS = "VIVARIUM_MAX_SESSIONS"
 _ENV_MAX_SESSIONS_PER_OWNER = "VIVARIUM_MAX_SESSIONS_PER_OWNER"
 _ENV_MAX_BINARY_BYTES = "VIVARIUM_MAX_BINARY_BYTES"
@@ -122,6 +123,11 @@ _DEFAULT_SESSION_REAP_INTERVAL_S = 60
 # Interval between metrics-snapshot log lines (gap N3a). 60s mirrors the reaper cadence — frequent
 # enough to be a useful SLI trend, infrequent enough to be log-cheap.
 _DEFAULT_METRICS_SNAPSHOT_INTERVAL_S = 60
+# TTL for the cached /readyz capacity answer (gap P3). /readyz is served pre-auth + pre-rate-limit,
+# so caching bounds the session-lock check to one call per window (no DoS) and coarsens the
+# occupancy oracle. 1s: fresh enough for an orchestrator probe (polls on a multi-second interval),
+# long enough that a probe flood cannot contend on the session lock.
+_DEFAULT_READINESS_CACHE_TTL_S = 1
 _DEFAULT_WORKER_RUNTIME = "runsc"
 _DEFAULT_WORKER_UID = 65532
 _DEFAULT_WORKER_GID = 65532
@@ -306,6 +312,9 @@ class Config:
     # Defaulted (gap N3a): the metrics-snapshot log interval. Resolved from
     # VIVARIUM_METRICS_SNAPSHOT_INTERVAL_SECONDS in ``load_config``.
     metrics_snapshot_interval_s: int = _DEFAULT_METRICS_SNAPSHOT_INTERVAL_S
+    # Defaulted (gap P3): TTL for the cached /readyz capacity answer. Resolved from
+    # VIVARIUM_READINESS_CACHE_TTL_SECONDS in ``load_config``.
+    readiness_cache_ttl_s: int = _DEFAULT_READINESS_CACHE_TTL_S
 
 
 def _startup_error(detail: str) -> GhidraMcpError:
@@ -752,6 +761,9 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     metrics_snapshot_interval_s = _read_positive_int(
         src, _ENV_METRICS_SNAPSHOT_INTERVAL, _DEFAULT_METRICS_SNAPSHOT_INTERVAL_S
     )
+    readiness_cache_ttl_s = _read_positive_int(
+        src, _ENV_READINESS_CACHE_TTL, _DEFAULT_READINESS_CACHE_TTL_S
+    )
 
     # Validate all required/string fields BEFORE resolving limits, so a missing/invalid required
     # value fails fast on its own merits (and config validation is fully exercisable independent of
@@ -831,6 +843,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         session_idle_s=session_idle_s,
         session_reap_interval_s=session_reap_interval_s,
         metrics_snapshot_interval_s=metrics_snapshot_interval_s,
+        readiness_cache_ttl_s=readiness_cache_ttl_s,
         limits=limits,
         worker_image=worker_image,
         worker_runtime=worker_runtime,

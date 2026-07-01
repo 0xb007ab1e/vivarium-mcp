@@ -53,9 +53,32 @@ def test_load_config_minimal_uses_secure_defaults(
     assert cfg.worker_uid == 65532
     assert cfg.worker_gid == 65532
     assert cfg.rpc_socket_dir == "/run/vivarium"
+    assert cfg.session_reap_interval_s == 60
+    assert cfg.metrics_snapshot_interval_s == 60
+    assert cfg.readiness_cache_ttl_s == 1  # gap P3 default
     assert isinstance(cfg.limits, Limits)
     # No overrides set → resolve_limits called with None.
     assert fake_resolve_limits == [None]
+
+
+def test_load_config_readiness_cache_ttl_overridable(
+    fake_resolve_limits: list[dict[str, int] | None],
+) -> None:
+    """VIVARIUM_READINESS_CACHE_TTL_SECONDS overrides the /readyz cache TTL (gap P3)."""
+    env = dict(_MINIMAL_ENV)
+    env["VIVARIUM_READINESS_CACHE_TTL_SECONDS"] = "5"
+    cfg = cfgmod.load_config(env)
+    assert cfg.readiness_cache_ttl_s == 5
+
+
+def test_load_config_rejects_non_positive_readiness_cache_ttl(
+    fake_resolve_limits: list[dict[str, int] | None],
+) -> None:
+    """A non-positive readiness TTL is a misconfig — fail closed (gap P3)."""
+    env = dict(_MINIMAL_ENV)
+    env["VIVARIUM_READINESS_CACHE_TTL_SECONDS"] = "0"
+    with pytest.raises(GhidraMcpError):
+        cfgmod.load_config(env)
 
 
 def test_load_config_worker_uid_gid_overridable(

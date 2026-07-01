@@ -23,6 +23,8 @@ frozen :class:`~vivarium.core.errors.ErrorEnvelope` shape and leak nothing.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections import OrderedDict
 from collections.abc import Callable
 from typing import Any, cast
@@ -127,6 +129,60 @@ async def _send_bare(send: Send, status: int) -> None:
         {"type": "http.response.start", "status": status, "headers": [(b"content-length", b"0")]}
     )
     await send({"type": "http.response.body", "body": b""})
+
+
+class CachedReadiness:
+    """Memoize the readiness predicate for a short TTL so ``/readyz`` can't be weaponized (gap P3).
+
+    :class:`HealthMiddleware` answers ``/readyz`` at the OUTERMOST layer — before auth AND before
+    the rate limiter (N3b, so orchestrators + the tailnet can always probe). The production
+    predicate is the session-pool capacity check, which takes the session-manager lock on EVERY
+    call. Left raw, an unauthenticated caller could (a) poll ``200``/``503`` as a fine-grained
+    pool-occupancy oracle (CWE-200) and (b) drive uncapped session-lock contention against real
+    request threads (CWE-400) — both ahead of the rate limiter. Caching the answer for ``ttl_s``
+    seconds bounds the underlying predicate to at most ONE call per window (removes the contention
+    vector) and coarsens the oracle to a value up to ``ttl_s`` stale.
+
+    A stale readiness answer is harmless: a load balancer polls on an interval anyway, and the
+    ``create`` path — not the probe — is the real capacity gate (the probe is advisory; the TB6
+    residual-risk note in ``docs/security/threat-model.md`` records this). Thread-safe with a
+    lock-free fast path (fresh reads take no lock) + single-flight recompute (a burst past the TTL
+    recomputes once, not once per caller).
+    """
+
+    def __init__(
+        self,
+        predicate: Callable[[], bool],
+        *,
+        ttl_s: float,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """Wrap ``predicate``, memoizing its result for ``ttl_s`` seconds (monotonic ``clock``)."""
+        self._predicate = predicate
+        self._ttl_s = ttl_s
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._value = False  # fail-safe default: "not ready" until the first computation
+        self._computed_at: float | None = None
+
+    def _is_fresh(self, computed_at: float | None) -> bool:
+        """True if a value computed at ``computed_at`` is still within the TTL window."""
+        return computed_at is not None and self._clock() - computed_at < self._ttl_s
+
+    def __call__(self) -> bool:
+        """Return the cached readiness, recomputing (single-flight) once the TTL has elapsed."""
+        if self._is_fresh(self._computed_at):
+            return self._value  # fast path: fresh — no lock, no underlying predicate call
+        with self._lock:
+            # Double-check under the lock so a burst past the TTL recomputes ONCE, not per caller.
+            # This True branch is reached only when another thread refreshed the entry while this
+            # caller was blocked on the lock (a genuine race); the fast path + recompute are the
+            # deterministically-tested paths.
+            if self._is_fresh(self._computed_at):  # pragma: no cover - race-only double-check
+                return self._value  # pragma: no cover
+            self._value = self._predicate()
+            self._computed_at = self._clock()
+            return self._value
 
 
 class HealthMiddleware:
