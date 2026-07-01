@@ -73,6 +73,11 @@ ADR-044 D2) — and return a bare status with no body (no internals leak):
 > (they are unauthenticated by design — see the TB6 residual-risk note in
 > [`security/threat-model.md`](security/threat-model.md)).
 
+> Path-matching caveat (gap round-3 P16, accepted): the health middleware matches the probe paths
+> **exactly** (`/healthz`, `/readyz`). The server is not mounted under a sub-path today, so this is
+> correct; if a future deployment mounts it behind a `root_path` prefix, the probe matching would need
+> prefix-awareness. Noted here so the assumption is explicit, not silently load-bearing.
+
 ## SLIs → SLOs (minimal, pre-1.0)
 
 These are **starting targets**, not contractual — tune to your deployment and revisit as real
