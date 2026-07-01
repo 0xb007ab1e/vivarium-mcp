@@ -222,11 +222,13 @@ enforced — closing the BOLA gap that ADR-011 §6 deferred (TB6-I).
 >   ADR-044 D1), so the metrics path leaks nothing either. **Accepted residual risk:** coarse
 >   occupancy is observable to an unauth party; deployment expectation is probes reachable from the
 >   orchestrator/tailnet, **not the open internet**.
-> - **D (DoS):** `/readyz` is **un-rate-limited** (outside the limiter) and takes the session `_lock`
->   per call → an unauth flood can contend the lock with real session ops (CWE-400). **Bounded** by
->   the GIL + a short critical section + the loopback/tailnet deployment expectation. **Planned
->   hardening (round-3 P3):** cache the readiness value (recompute ≤ every N ms) or add a probe-scoped
->   rate cap, removing the unauth lock-contention channel cheaply.
+> - **D (DoS):** `/readyz` is **un-rate-limited** (outside the limiter). It once took the session
+>   `_lock` per call → an unauth flood could contend the lock with real session ops (CWE-400).
+>   **Mitigated (#214, round-3 P3):** the readiness answer is now cached (single-flight, lock-free
+>   fast path; TTL `VIVARIUM_READINESS_CACHE_TTL_SECONDS`, default 1s), so the underlying capacity
+>   check runs at most once per window — removing the unauth lock-contention channel and coarsening
+>   the occupancy oracle (I, above) to a value up to the TTL stale. Residual exposure is bounded by
+>   the loopback/tailnet deployment expectation.
 > - **No new authenticated surface, no new data class crossing to the client** (status-only); the
 >   tool/worker layers (TB1–TB4) and the read-only catalog are unchanged. The periodic reaper
 >   (ADR-044 D3) is internal (no boundary). Net: a small, analyzed, accepted unauthenticated surface.
