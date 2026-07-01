@@ -160,6 +160,9 @@ These are the settings most people change. All are environment variables read by
 | `VIVARIUM_SESSION_TTL_SECONDS` / `VIVARIUM_SESSION_IDLE_SECONDS` | Session lifetime and idle eviction | see config |
 | `VIVARIUM_TRANSPORT` | `stdio` (default) or `http` | `stdio` |
 | `VIVARIUM_LOG_LEVEL` / `VIVARIUM_LOG_FORMAT` | Logging verbosity and format | see config |
+| `VIVARIUM_METRICS_SNAPSHOT_INTERVAL_SECONDS` | Seconds between `metrics.snapshot` SLI log lines — see [observability](observability.md) | `60` |
+| `VIVARIUM_SESSION_REAP_INTERVAL_SECONDS` | Background reaper sweep interval for expired sessions | `60` |
+| `VIVARIUM_READINESS_CACHE_TTL_SECONDS` | Max staleness of the cached `/readyz` capacity answer (HTTP) | `1` |
 
 On a rootless-podman host you may also need `VIVARIUM_WORKER_UID` and `VIVARIUM_WORKER_GID` set to your
 own user and group ids, and a writable `VIVARIUM_RPC_SOCKET_DIR`, so the worker can own the per-session

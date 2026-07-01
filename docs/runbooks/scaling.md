@@ -4,15 +4,19 @@
 
 ## When to use
 - Backpressure (`limit-exceeded` from the session cap) under legitimate load, or tuning per-worker
-  resource limits / the concurrency cap (`VIVARIUM_MAX_SESSIONS`).
+  resource limits / the concurrency cap (`VIVARIUM_MAX_SESSIONS`). On the HTTP transport, a
+  sustained or flapping `/readyz` `503` (the pool-full backpressure signal — see
+  [`observability.md`](../observability.md)) is the readiness-level symptom of the same condition.
 
 ## Prerequisites & access
 - Access to config/orchestrator + dashboards. Know the real bottleneck (CPU/mem/pids per worker,
   disk for project stores).
 
 ## Steps
-1. Confirm the constraint from metrics — **scale the actual bottleneck**. Each session = one worker
-   (ADR-002); total load ≈ `max_sessions` × per-worker CPU/mem.
+1. Confirm the constraint from metrics — **scale the actual bottleneck**. Read the latest
+   `metrics.snapshot` (`sessions_active` vs `max_sessions`, `limit-exceeded`/`timeout` share of
+   `tool_calls`; see [`observability.md`](../observability.md)) and `/readyz`. Each session = one
+   worker (ADR-002); total load ≈ `max_sessions` × per-worker CPU/mem.
 2. Tune deliberately: raise `VIVARIUM_MAX_SESSIONS` only if host CPU/mem/disk headroom exists
    (clamped to `HARD_MAX_SESSIONS`); adjust per-worker CPU/mem/pids limits in `deploy/`.
 3. If the host is saturated, **shed load** via backpressure (the cap returning `limit-exceeded`) and
@@ -32,7 +36,8 @@
 - If tuning can't relieve it (hard host limit) → `on-call.md` / open an incident.
 
 ## Related
-- `on-call.md`, `deploy.md`; ADR-002/004; threat model TB1-D/TB3-D.
+- [`../observability.md`](../observability.md) (readiness + capacity signals); `on-call.md`,
+  `deploy.md`; ADR-002/004; threat model TB1-D/TB3-D.
 
 ---
 _Status: scaffold (pre-1.0) — deploy/promote commands pending WS3 tooling; not yet drill-validated. Owner: repo maintainer (solo — no formal on-call rotation pre-1.0)._
