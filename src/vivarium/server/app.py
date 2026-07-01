@@ -475,9 +475,7 @@ def run_http(
         # pre-rate-limit, so a raw predicate that takes the session lock every call is both a
         # pool-occupancy oracle and an uncapped lock-contention vector. The cache bounds the
         # underlying check to one call per window and coarsens the answer.
-        is_ready=CachedReadiness(
-            session_manager.has_capacity, ttl_s=config.readiness_cache_ttl_s
-        ),
+        is_ready=CachedReadiness(session_manager.has_capacity, ttl_s=config.readiness_cache_ttl_s),
     )
     _install_shutdown_handlers()
     reaper = PeriodicReaper(session_manager, interval_s=config.session_reap_interval_s)
