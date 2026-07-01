@@ -69,14 +69,19 @@ Two operational gaps, both with a genuine design choice:
   interruptible `Event` stop + bounded join + swallow-and-log).
 - **Negative / residual risk:** `/readyz` is a coarse, unauthenticated **capacity oracle** and is
   **not rate-limited** (it sits outside the limiter) — a documented residual risk (threat-model TB6
-  delta); deployment expectation is that probes are reachable from the orchestrator/tailnet, not the
-  open internet. The metrics are **log-only** — alerting/SLO wiring is deferred (a separate,
-  documented decision; see the round-3 register P4) and an operator must scrape the `metrics.snapshot`
-  line. The reaper performs worker-kill + store-wipe under the session lock on a timer (bounded; pool
-  is small) — noted in the reliability/threat-model notes.
+  delta); the `/readyz` answer is now cached (gap P3) so it is at most `VIVARIUM_READINESS_CACHE_TTL_SECONDS`
+  stale and cannot drive session-lock contention; deployment expectation is that probes are reachable
+  from the orchestrator/tailnet, not the open internet. The metrics are **log-only** — there is no
+  scrape endpoint and **no external alerting engine is bundled** (a deliberate pre-1.0 decision).
+  Consuming the SLIs is an operator responsibility: the snapshot schema, the SLIs/SLOs, and the exact
+  log-based alert queries are now specified in [`docs/observability.md`](../observability.md) (gap
+  round-3 P4 — the previously-deferred item is now a documented decision, not a gap). The reaper
+  performs worker-kill + store-wipe under the session lock on a timer (bounded; pool is small) — noted
+  in the reliability/threat-model notes.
 
 ## Related
 
+- [`docs/observability.md`](../observability.md) — the operator-facing signal reference (schema, SLOs, alerts).
 - ADR-002 (verified store wipe), ADR-025 (session lifecycle / `reap_expired`), ADR-011/ADR-017 (TB6
   HTTP transport + multi-principal authZ), master §5 (redaction), `topic-logging-observability`,
   `topic-reliability`. Threat-model: the **TB6 delta — v1.x operational observability** note.

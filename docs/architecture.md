@@ -119,5 +119,9 @@ script-execution path in the allow-listed catalog, and there is no plan to add o
 ## Observability & ops
 
 Structured JSON logs to stderr (stdout is the stdio transport), with **mandatory redaction** (no
-binary content/secrets). Operational procedures live in [`docs/runbooks/`](runbooks/), including
-**evicting/rotating a poisoned worker** and **patching a Ghidra/JDK CVE via a digest bump**.
+binary content/secrets). Aggregated SLIs are published as a periodic `metrics.snapshot` log line and
+readiness/liveness via unauthenticated `/readyz`·`/healthz` probes (no scrape endpoint, no metrics
+dependency) — the schema, SLOs, and log-based alerts are specified in
+[`docs/observability.md`](observability.md) (design: [ADR-044](adr/ADR-044-operational-observability.md)).
+Operational procedures live in [`docs/runbooks/`](runbooks/), including **evicting/rotating a
+poisoned worker** and **patching a Ghidra/JDK CVE via a digest bump**.
