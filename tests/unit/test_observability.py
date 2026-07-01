@@ -170,6 +170,30 @@ def test_logger_start_is_idempotent() -> None:
     logger.stop()
 
 
+def test_logger_concurrent_start_spawns_exactly_one_thread() -> None:
+    """A start() stampede spawns ONE snapshot thread — the lifecycle lock serializes the check.
+
+    Without the lock, concurrent callers could each pass the ``_thread is None`` check and spawn
+    their own thread; the lock guarantees exactly one is created.
+    """
+    logger = PeriodicMetricsLogger(Metrics(), interval_s=3600)  # long → threads just wait
+    barrier = threading.Barrier(8)
+
+    def _start() -> None:
+        barrier.wait()  # release all at once to maximise the race on the idempotency check
+        logger.start()
+
+    threads = [threading.Thread(target=_start) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(2)
+    live = [th for th in threading.enumerate() if th.name == "vivarium-metrics-logger"]
+    assert len(live) == 1  # exactly one snapshot thread despite 8 concurrent start() calls
+    logger.stop()
+    assert logger._thread is None
+
+
 def test_never_started_logger_stop_is_silent() -> None:
     """Stopping a logger that was never started emits nothing (no spurious snapshot)."""
     reg = _SignallingRegistry()
