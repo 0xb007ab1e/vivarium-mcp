@@ -35,6 +35,7 @@ from vivarium.server.auth import Authenticator, Principal, build_authenticator
 from vivarium.server.http_middleware import (
     SCOPE_PRINCIPAL_KEY,
     AuthenticationMiddleware,
+    CachedReadiness,
     HealthMiddleware,
     RateLimitMiddleware,
     RequestSizeLimitMiddleware,
@@ -470,7 +471,13 @@ def run_http(
         app.streamable_http_app(),
         http,
         authenticator=authenticator,
-        is_ready=session_manager.has_capacity,
+        # Cache the capacity check for a short TTL (gap P3): /readyz is answered pre-auth +
+        # pre-rate-limit, so a raw predicate that takes the session lock every call is both a
+        # pool-occupancy oracle and an uncapped lock-contention vector. The cache bounds the
+        # underlying check to one call per window and coarsens the answer.
+        is_ready=CachedReadiness(
+            session_manager.has_capacity, ttl_s=config.readiness_cache_ttl_s
+        ),
     )
     _install_shutdown_handlers()
     reaper = PeriodicReaper(session_manager, interval_s=config.session_reap_interval_s)
