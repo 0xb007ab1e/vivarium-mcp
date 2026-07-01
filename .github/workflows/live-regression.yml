@@ -639,37 +639,54 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # The sibling real-worker job this gate polls, BY NAME (the coupling). Kept in one variable
+          # so a rename is a one-line change here AND so the "never appeared" assertion below names it.
+          SIBLING="live-regression"
           # Non-FID (and the detector didn't fail) → the real-worker FID gate is N/A → PASS FAST,
-          # WITHOUT waiting on any live-regression run N2's core-path trigger may have started.
+          # WITHOUT waiting on any ${SIBLING} run N2's core-path trigger may have started.
           if [ "${CHANGES_RESULT}" != "failure" ] && [ "${FID_CHANGED}" != "true" ]; then
-            echo "::notice::no FID-path change — real-worker FID gate N/A (pass); not waiting on live-regression"
+            echo "::notice::no FID-path change — real-worker FID gate N/A (pass); not waiting on ${SIBLING}"
             exit 0
           fi
-          # FID-path change (or a broken detector — fail-safe): require THIS run's live-regression
-          # sibling job to complete AND succeed. Polled via the API (not a `needs:` dep) so the
-          # non-FID path above never blocks on it. A SKIPPED job (fork PR without the maintainer
-          # `live-regression` label — #161/#162 fork hardening) is conclusion!=success → FAIL, so the
-          # human-in-the-loop is still enforced, not bypassed.
-          echo "FID-path change (or broken detector) — requiring the live-regression sibling job"
-          deadline=$(( $(date +%s) + 3900 )) # ~65 min, matching live-regression's job timeout
+          # FID-path change (or a broken detector — fail-safe): require THIS run's ${SIBLING} sibling
+          # job to complete AND succeed. Polled via the API (not a `needs:` dep) so the non-FID path
+          # above never blocks on it. A SKIPPED job (fork PR without the maintainer `live-regression`
+          # label — #161/#162 fork hardening) is conclusion!=success → FAIL, so the human-in-the-loop
+          # is still enforced, not bypassed.
+          echo "FID-path change (or broken detector) — requiring the ${SIBLING} sibling job"
+          deadline=$(( $(date +%s) + 3900 ))       # ~65 min, matching ${SIBLING}'s job timeout
+          # gap P13: a job that was RENAMED or never scheduled would make the name filter return empty
+          # forever — silently degrading the fast-fail into a 65-min hang. So give the sibling a bounded
+          # grace to REGISTER; if it never appears within it, fail FAST + LOUD (naming the likely cause)
+          # rather than spinning. This distinguishes "not registered yet" (transient) from "absent".
+          appear_deadline=$(( $(date +%s) + 300 )) # sibling must appear within 5 min, else misconfig
+          seen=false
           while :; do
             line="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" --paginate \
-                      --jq '.jobs[] | select(.name=="live-regression") | "\(.status) \(.conclusion // "")"' \
+                      --jq ".jobs[] | select(.name==\"${SIBLING}\") | \"\(.status) \(.conclusion // \"\")\"" \
                     2>/dev/null | tail -n1 || true)"
-            status="${line%% *}"
-            conclusion="${line#* }"
-            if [ "${status}" = "completed" ]; then
-              if [ "${conclusion}" = "success" ]; then
-                echo "::notice::live-regression succeeded — FID real-worker gate satisfied"
-                exit 0
+            if [ -n "${line}" ]; then
+              seen=true
+              status="${line%% *}"
+              conclusion="${line#* }"
+              if [ "${status}" = "completed" ]; then
+                if [ "${conclusion}" = "success" ]; then
+                  echo "::notice::${SIBLING} succeeded — FID real-worker gate satisfied"
+                  exit 0
+                fi
+                echo "::error::FID paths changed but ${SIBLING} did not pass" \
+                     "(conclusion=${conclusion:-none}). For a fork PR a maintainer must apply the" \
+                     "'live-regression' label to run the real-worker suite before merge."
+                exit 1
               fi
-              echo "::error::FID paths changed but live-regression did not pass" \
-                   "(conclusion=${conclusion:-none}). For a fork PR a maintainer must apply the" \
-                   "'live-regression' label to run the real-worker suite before merge."
+            elif [ "${seen}" = "false" ] && [ "$(date +%s)" -ge "${appear_deadline}" ]; then
+              echo "::error::the '${SIBLING}' sibling job never appeared in this run within 5 min —" \
+                   "it was likely RENAMED or not scheduled. This gate polls by job name; fix the" \
+                   "job name / trigger. Failing fast (fail-closed) rather than hanging to the timeout."
               exit 1
             fi
             if [ "$(date +%s)" -ge "${deadline}" ]; then
-              echo "::error::timed out waiting for the live-regression sibling job to complete"
+              echo "::error::timed out waiting for the ${SIBLING} sibling job to complete"
               exit 1
             fi
             sleep 30
