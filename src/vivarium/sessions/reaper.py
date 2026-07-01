@@ -46,20 +46,26 @@ class PeriodicReaper:
         self._interval_s = interval_s
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        #: Serializes the start()/stop() lifecycle transitions so concurrent callers can't both
+        #: pass the idempotency check (double-start) or both swap out `_thread` (double-join). The
+        #: join itself runs OUTSIDE this lock so a slow join can't block a concurrent transition.
+        self._lock = threading.Lock()
 
     def start(self) -> None:
         """Spawn the daemon sweeper thread (idempotent — a second call is a no-op)."""
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=self._run, name="vivarium-session-reaper", daemon=True
-        )
-        self._thread.start()
+        with self._lock:
+            if self._thread is not None:
+                return
+            self._thread = threading.Thread(
+                target=self._run, name="vivarium-session-reaper", daemon=True
+            )
+            self._thread.start()
 
     def stop(self, *, timeout_s: float = 5.0) -> None:
         """Signal the sweeper to exit and join it (idempotent; bounded by ``timeout_s``)."""
         self._stop.set()
-        thread, self._thread = self._thread, None
+        with self._lock:
+            thread, self._thread = self._thread, None
         if thread is not None:
             thread.join(timeout_s)
 

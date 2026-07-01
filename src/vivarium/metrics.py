@@ -211,15 +211,21 @@ class PeriodicMetricsLogger:
         self._active_sessions = active_sessions
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        #: Serializes the start()/stop() lifecycle transitions so concurrent callers can't both
+        #: pass the idempotency check (double-start) or both swap out `_thread` (double-join). The
+        #: join + final emit run OUTSIDE this lock so a slow join can't block a concurrent
+        #: transition.
+        self._lock = threading.Lock()
 
     def start(self) -> None:
         """Spawn the daemon snapshot thread (idempotent — a second call is a no-op)."""
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=self._run, name="vivarium-metrics-logger", daemon=True
-        )
-        self._thread.start()
+        with self._lock:
+            if self._thread is not None:
+                return
+            self._thread = threading.Thread(
+                target=self._run, name="vivarium-metrics-logger", daemon=True
+            )
+            self._thread.start()
 
     def stop(self, *, timeout_s: float = 5.0) -> None:
         """Signal the daemon to exit, join it, then emit a final snapshot (idempotent).
@@ -233,7 +239,8 @@ class PeriodicMetricsLogger:
         (thread is ``None``) stays silent.
         """
         self._stop.set()
-        thread, self._thread = self._thread, None
+        with self._lock:
+            thread, self._thread = self._thread, None
         if thread is not None:
             thread.join(timeout_s)
             # Final snapshot captures the last interval's activity — but only if the daemon truly
