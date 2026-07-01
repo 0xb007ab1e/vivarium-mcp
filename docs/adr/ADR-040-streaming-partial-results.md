@@ -73,6 +73,16 @@ left seven open questions (§7). This ADR resolves them.
   at-least-once in spirit: a client may re-`fetch` from an earlier cursor and **must dedupe by
   `seq`**. The server never reorders. `next_cursor` + `done` are authoritative for completion.
 
+  > **D7 addendum (v1.x — gap N4, #207): bounded replay window.** The initial implementation drained
+  > destructively (`popleft`), so a re-`fetch` from an already-consumed cursor returned the *next*
+  > batch, not the earlier chunks — effectively **at-most-once**, contradicting this clause. N4 added
+  > a per-job **bounded replay window** (retained delivered chunks, capped by BOTH count and bytes —
+  > `VIVARIUM_MAX_STREAM_REPLAY_CHUNKS` / `…_BYTES`, clamped down): a re-`fetch` with `cursor <
+  > server-cursor` now **replays** the retained chunks read-only (the forward cursor + live buffer are
+  > untouched, the producer is not pumped); a cursor **older than the window fails closed** with a
+  > typed `validation-error` (no silent gap — at-least-once *within the window*, fail-closed beyond
+  > it). The window is cleared on cancel/eviction (confidentiality). This makes the code match §D7.
+
 - **D8 — Bounds preserved + new per-stream caps.** The job's **total** is capped equal to the
   batch it replaces (the existing bulk-decompile function-count cap); reaching it sets the final
   chunk's job `done=true` with a job-level `truncated=true` when the requested set exceeded the

@@ -208,6 +208,29 @@ enforced — closing the BOLA gap that ADR-011 §6 deferred (TB6-I).
 | **D** | Request flood / huge payloads, **or one principal starving others** | M×H=**High** | per-client **rate limit + quota**, **request size caps**, timeouts + backpressure (`topic-reliability`); bounded by ADR-002 one-worker-per-session + eviction; an **operator-configurable per-owner session cap** (`VIVARIUM_MAX_SESSIONS_PER_OWNER`; **default off** — the global `max_sessions` bounds total exhaustion) so a multi-principal deployment can stop one principal monopolizing the pool (noisy-neighbor — `topic-multi-tenancy`); loopback default limits reach |
 | **E** | Remote caller escalates via the network edge to actions beyond the read-only catalog, **or acts on another principal's session/worker** | L×H=**Med** | **same frozen read-only catalog** (no new/mutation tools); the network edge does not bypass per-call validation/allow-listing (defense in depth); least privilege. A principal **cannot read or write another's session** (owner-checked read+write) and **cannot gain another's worker** (`ensure_worker` is owner-gated before spawn); write-consent is bound to principal+session (ADR-012) on top of the owner-scoped session. The hostile-binary containment (TB3) is unchanged and unaffected by transport |
 
+> **TB6 delta — v1.x operational observability: unauthenticated health probes + metrics SLIs
+> (ADR-044; gap N3). NEW unauthenticated network surface on TB6 — analyzed here.** `HealthMiddleware`
+> answers `GET`/`HEAD` `/healthz` (liveness) + `/readyz` (readiness = `SessionManager.has_capacity()`)
+> as the **outermost** ASGI layer — *before* auth and *before* the rate limiter — so orchestrators /
+> the tailnet can probe without credentials. Operator decision (ADR-044 D2): **unauthenticated but
+> detail-free** — both are **status-only (bare 200/503, empty body)**; only those two exact paths +
+> GET/HEAD short-circuit, everything else passes through to the authenticated stack.
+> - **I (info disclosure):** `/readyz` is a **coarse capacity oracle** — an unauthenticated caller
+>   learns pool-full (503) vs has-room (200) (`max_sessions`~4 → a load signal). **Bounded:** no
+>   session id, principal, or binary-derived content (detail-free); the `metrics.snapshot` log line
+>   uses **closed-vocabulary labels only** (tool name / outcome slug / evict reason / auth mode —
+>   ADR-044 D1), so the metrics path leaks nothing either. **Accepted residual risk:** coarse
+>   occupancy is observable to an unauth party; deployment expectation is probes reachable from the
+>   orchestrator/tailnet, **not the open internet**.
+> - **D (DoS):** `/readyz` is **un-rate-limited** (outside the limiter) and takes the session `_lock`
+>   per call → an unauth flood can contend the lock with real session ops (CWE-400). **Bounded** by
+>   the GIL + a short critical section + the loopback/tailnet deployment expectation. **Planned
+>   hardening (round-3 P3):** cache the readiness value (recompute ≤ every N ms) or add a probe-scoped
+>   rate cap, removing the unauth lock-contention channel cheaply.
+> - **No new authenticated surface, no new data class crossing to the client** (status-only); the
+>   tool/worker layers (TB1–TB4) and the read-only catalog are unchanged. The periodic reaper
+>   (ADR-044 D3) is internal (no boundary). Net: a small, analyzed, accepted unauthenticated surface.
+
 ## 4. Supply chain (build-time)
 | Threat | L×I | Mitigation |
 |--------|-----|------------|
