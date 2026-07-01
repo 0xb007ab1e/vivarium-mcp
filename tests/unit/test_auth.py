@@ -34,7 +34,7 @@ from vivarium.server.auth import (
     Principal,
     ReverseProxyMtlsAuthenticator,
     _token_scopes,
-    _valid_proxy_identity,
+    _valid_principal_id,
     build_authenticator,
 )
 
@@ -392,6 +392,37 @@ def test_mtls_empty_cn_value_is_rejected() -> None:
         MtlsAuthenticator().authenticate(AuthContext(peer_certificate=_cert(subject=subject)))
         is None
     )
+
+
+@pytest.mark.parametrize(
+    "cn",
+    [
+        "x" * 257,  # over the 256-char principal-id ceiling
+        "alice\nbob",  # newline (control char)
+        "alice\x00",  # NUL
+        "alice\x7f",  # DEL
+    ],
+)
+def test_mtls_unsafe_cn_value_is_rejected(cn: str) -> None:
+    """A cert-derived CN that is over-long or control-char-bearing → fail closed (gap P9).
+
+    The CN is client-chosen within a CA-issued cert and becomes the session-owner key, so it is
+    bounded/sanitized the same way the reverse-proxy path bounds its forwarded identity — parity +
+    defense in depth (a hostile-but-CA-signed cert cannot inject an unbounded or log-poisoning id).
+    """
+    subject = ((("commonName", cn),),)
+    assert (
+        MtlsAuthenticator().authenticate(AuthContext(peer_certificate=_cert(subject=subject)))
+        is None
+    )
+
+
+def test_mtls_cn_at_length_ceiling_is_accepted() -> None:
+    """A 256-char CN is exactly at the ceiling → accepted (boundary is inclusive)."""
+    subject = ((("commonName", "x" * 256),),)
+    assert MtlsAuthenticator().authenticate(
+        AuthContext(peer_certificate=_cert(subject=subject))
+    ) == Principal(id="x" * 256)
 
 
 def test_mtls_dn_empty_subject_is_rejected() -> None:
@@ -1093,7 +1124,7 @@ def test_authcontext_default_headers_is_empty_mapping() -> None:
     assert AuthContext().headers == {}
 
 
-# --- _valid_proxy_identity: bounds + control-char rejection (fail closed) ----------------------
+# --- _valid_principal_id: bounds + control-char rejection (fail closed) ------------------------
 @pytest.mark.parametrize(
     "value",
     [
@@ -1102,8 +1133,8 @@ def test_authcontext_default_headers_is_empty_mapping() -> None:
         "x" * 256,  # at the length ceiling (boundary — accepted)
     ],
 )
-def test_valid_proxy_identity_accepts_safe_values(value: str) -> None:
-    assert _valid_proxy_identity(value) is True
+def test_valid_principal_id_accepts_safe_values(value: str) -> None:
+    assert _valid_principal_id(value) is True
 
 
 @pytest.mark.parametrize(
@@ -1117,9 +1148,9 @@ def test_valid_proxy_identity_accepts_safe_values(value: str) -> None:
         "alice\x1f",  # unit-separator (control < 0x20)
     ],
 )
-def test_valid_proxy_identity_rejects_unsafe_values(value: str) -> None:
+def test_valid_principal_id_rejects_unsafe_values(value: str) -> None:
     """Empty / over-long / any control or 0x7F char → not a safe principal id (fail closed)."""
-    assert _valid_proxy_identity(value) is False
+    assert _valid_principal_id(value) is False
 
 
 # --- authenticate: the happy path --------------------------------------------------------------
