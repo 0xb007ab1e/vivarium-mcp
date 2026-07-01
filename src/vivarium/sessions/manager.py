@@ -38,7 +38,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from vivarium import metrics
 from vivarium.core.errors import ErrorType
@@ -175,6 +175,23 @@ class _Session:
     #: the named composites in this set instead of blind-enumerating program-local types (which
     #: also include Ghidra auto-analysis structs). In-memory, wiped with the session on evict.
     composite_targets: set[str] = field(default_factory=set)
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingEviction:
+    """The deferrable I/O of an eviction — kill the worker + verified-wipe the store (gap P10).
+
+    Captured under ``_lock`` by :meth:`SessionManager._detach_for_eviction_locked` (which does the
+    in-memory state change) so the actual kill/wipe can run in
+    :meth:`SessionManager._run_eviction_io` **without holding the lock** — a slow kill/wipe then
+    cannot stall every request thread on ``_lock``. Carries only the fields the I/O needs; nothing
+    binary-derived.
+    """
+
+    session_id: str
+    store_path: str | None
+    worker_started: bool
+    reason: str
 
 
 class SessionManager:
@@ -930,6 +947,7 @@ class SessionManager:
         Returns:
             Number of sessions evicted.
         """
+        pending: list[_PendingEviction] = []
         try:
             with self._lock:
                 now = self._clock()
@@ -942,8 +960,17 @@ class SessionManager:
                 ]
                 for sid in expired:
                     reason = "ttl" if self._ttl_expired(self._sessions[sid], now) else "idle"
-                    self._evict_locked(sid, reason=reason)
-                return len(expired)
+                    # Detach IN-MEMORY under the lock; defer the kill+wipe I/O to below (gap P10).
+                    # ``sid`` was just filtered as live+present under this same lock hold, so detach
+                    # always returns work here (never None) — cast rather than a dead None-guard.
+                    work = self._detach_for_eviction_locked(sid, reason=reason)
+                    pending.append(cast("_PendingEviction", work))
+            # Lock released: perform the worker-kill + store-wipe OUTSIDE the lock so a slow kill or
+            # wipe on the timer cannot stall request threads waiting on ``_lock`` (gap P10). The
+            # sessions are already detached (unreachable), so no one can touch a worker/store here.
+            for work in pending:
+                self._run_eviction_io(work)
+            return len(pending)
         finally:
             self._flush_evicted()
 
@@ -989,50 +1016,71 @@ class SessionManager:
                 )
 
     # --- internals (caller holds the lock) --------------------------------------------------
-    def _evict_locked(self, session_id: str, *, reason: str) -> bool:
-        """Kill the worker then verified-wipe the store. Idempotent. Caller holds ``_lock``.
+    def _detach_for_eviction_locked(
+        self, session_id: str, *, reason: str
+    ) -> _PendingEviction | None:
+        """Mark a session evicted + drop it from the table (in-memory only). Caller holds ``_lock``.
+
+        Does **no I/O** — it captures the kill/wipe work into a :class:`_PendingEviction` for
+        :meth:`_run_eviction_io` to perform, so a slow worker-kill/store-wipe never runs while
+        ``_lock`` is held (gap P10). Idempotent: returns ``None`` for an already-gone id.
 
         Args:
-            session_id: The session to evict.
-            reason: Audit reason.
+            session_id: The session to detach.
+            reason: Audit reason (recorded on the metric + carried for the eviction log line).
+
+        Returns:
+            The deferred kill+wipe work, or ``None`` if the session was already gone.
+        """
+        sess = self._sessions.get(session_id)
+        if sess is None:
+            # Already gone / never existed: idempotent — nothing to detach or clean up.
+            return None
+        # In-memory only: mark evicted, drop from the table, record the metric, and queue the
+        # on-evict callback (run after the lock is released — lock-ordering safety). After this the
+        # id is unreachable (authorize fails), so no one can touch the worker/store before the wipe.
+        sess.state = STATE_EVICTED
+        self._sessions.pop(session_id, None)
+        metrics.record_session_evicted(reason)
+        if self._on_evict is not None:
+            self._pending_evicted.append(session_id)
+        return _PendingEviction(
+            session_id=session_id,
+            store_path=sess.store_path,
+            worker_started=sess.worker_started,
+            reason=reason,
+        )
+
+    def _run_eviction_io(self, work: _PendingEviction) -> bool:
+        """Kill the worker then verified-wipe the store for a detached session; log + return wiped.
+
+        Safe to call **without** ``_lock`` — it touches only the worker ``port``, the filesystem,
+        and the captured fields, never ``self._sessions`` (gap P10). Kill-before-wipe is preserved
+        so no process can touch the store during the wipe (ADR-002).
+
+        Args:
+            work: The captured eviction work from :meth:`_detach_for_eviction_locked`.
 
         Returns:
             ``True`` if the store was verified absent afterward; ``False`` on a wipe failure.
         """
-        sess = self._sessions.get(session_id)
-        if sess is None:
-            # Already gone / never existed: idempotent success (nothing to leak).
-            return True
-
         # 1) Kill the worker FIRST so no process can still touch the store during the wipe.
-        if sess.worker_started and self._port is not None:
+        if work.worker_started and self._port is not None:
             try:
-                self._port.kill_worker(session_id)
+                self._port.kill_worker(work.session_id)
             except Exception:
                 _LOG.error(
                     "session.evict.kill_failed",
-                    extra={"event": "worker_kill_failed", "session_id": session_id},
+                    extra={"event": "worker_kill_failed", "session_id": work.session_id},
                 )
-
         # 2) Verified wipe of the per-session store (confidentiality — ADR-002).
-        wiped = self._wipe_store(sess.store_path)
-
-        # 3) Mark evicted and drop from the table (idempotent: re-evict is a no-op success).
-        sess.state = STATE_EVICTED
-        self._sessions.pop(session_id, None)
-        metrics.record_session_evicted(reason)
-
-        # 4) Queue the on-evict callback to run AFTER the lock is released (lock-ordering safety —
-        #    the callback may take another lock; never call out while holding ``_lock``).
-        if self._on_evict is not None:
-            self._pending_evicted.append(session_id)
-
+        wiped = self._wipe_store(work.store_path)
         _LOG.info(
             "session.evict",
             extra={
                 "event": "session_evicted",
-                "session_id": session_id,
-                "reason": reason,
+                "session_id": work.session_id,
+                "reason": work.reason,
                 "store_wiped": wiped,
             },
         )
@@ -1042,11 +1090,33 @@ class SessionManager:
                 "session.evict.store_wipe_failed",
                 extra={
                     "event": "store_wipe_failed",
-                    "session_id": session_id,
-                    "reason": reason,
+                    "session_id": work.session_id,
+                    "reason": work.reason,
                 },
             )
         return wiped
+
+    def _evict_locked(self, session_id: str, *, reason: str) -> bool:
+        """Kill the worker then verified-wipe the store. Idempotent. Caller holds ``_lock``.
+
+        The synchronous eviction path (tool-initiated ``evict``, lazy expiry, ``shutdown``): it runs
+        the kill+wipe I/O **inline** so the ``wiped`` result is returned to the caller. The periodic
+        reaper instead splits these — :meth:`_detach_for_eviction_locked` under the lock, then
+        :meth:`_run_eviction_io` after releasing it (gap P10) — so a slow kill/wipe cannot stall
+        request threads waiting on ``_lock``.
+
+        Args:
+            session_id: The session to evict.
+            reason: Audit reason.
+
+        Returns:
+            ``True`` if the store was verified absent afterward; ``False`` on a wipe failure.
+        """
+        work = self._detach_for_eviction_locked(session_id, reason=reason)
+        if work is None:
+            # Already gone / never existed: idempotent success (nothing to leak).
+            return True
+        return self._run_eviction_io(work)
 
     @staticmethod
     def _wipe_store(store_path: str | None) -> bool:
