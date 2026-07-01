@@ -705,8 +705,16 @@ class StreamingJobManager:
                         ErrorType.LIMIT_EXCEEDED,
                         "session already has an active streaming job",
                     )
-                # The recorded job is gone or terminal: clear the slot so a new stream can start.
+                # Gone or terminal: clear the slot AND drop the old job from `_jobs` (gap round-4
+                # Q2). Starting a new stream (one-active-per-session) abandons the old one; keeping
+                # it would leak a `_StreamingJob` + its replay window (already-delivered, binary-
+                # derived chunks) every start→finish cycle for the session's whole lifetime —
+                # unbounded growth (CWE-400) + a confidentiality-lifetime concern (master §5).
+                # Eviction's `discard_session` was the ONLY prior pruning; GC-on-reuse now bounds
+                # `_jobs` to the live jobs (<= 1 per session). The CURRENT job's replay window is
+                # kept until eviction so cursor-resume still works (ADR-040 §D7).
                 self._active_by_session.pop(session_id, None)
+                self._jobs.pop(existing, None)
             job_id = secrets.token_urlsafe(_JOB_ID_BYTES)
             job = _StreamingJob(
                 job_id=job_id,
