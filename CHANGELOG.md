@@ -66,6 +66,10 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 - **Reaper/metrics daemon lifecycle serialized + restart-safe (#238 round-4 INFO-2, #242 round-5 R3).**
   `start()`/`stop()` are lock-guarded (no double-spawn/double-join) and `start()` clears the stop
   signal so a start-after-stop resumes instead of silently no-op'ing.
+- **`$/cancel` send no longer races a concurrent worker-kill (#249, round-5 R11).** `_send_cancel`
+  snapshots `sess.sock` once instead of re-reading it after the `None` guard, closing a TOCTOU
+  (`AttributeError` on a concurrent lock-free `kill_worker` nulling the socket); the send stays
+  best-effort.
 
 ### Security
 - **Signed-commit + admin enforcement on `main` (gap N7).** Branch protection now requires
@@ -104,6 +108,18 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 - **mTLS peer-cert→principal auth is gated in CI (#241, round-5 R2).** The mTLS bridge test (incl.
   ADR-019 untrusted-CA rejection at the handshake) now runs on every PR — previously it ran in no
   workflow, so an mTLS auth regression could pass every gate.
+- **OAuth JWKS URI scheme constrained (#248, round-5 R9, CWE-918).** `_load_http_config` now requires
+  an `https` JWKS URI (allowing `http` only to a loopback dev/test IdP) and refuses to boot on
+  `file://`/`ftp://`/internal-`http://`/schemeless — closing an SSRF / local-file-read surface via
+  `PyJWKClient`'s urllib fetch.
+- **Rate-limiter bucket update is lock-guarded (#247, round-5 R8, API4).** `RateLimitMiddleware._allow`'s
+  compound `OrderedDict` read-modify-write now runs under a lock, so a threaded server can't corrupt
+  the LRU or drop the wrong bucket (a limit bypass / victim over-limit) — the control no longer rests
+  on an undocumented single-thread assumption.
+- **Server image installs deps from the hash-pinned lock (#252, round-5 R12, SLSA).** `Containerfile.server`
+  now installs runtime deps with `--require-hashes -r requirements.lock` (rejecting any un-hashed /
+  tampered resolve at build time), matching the worker image — no floating build-time dependency
+  resolution.
 
 ### Internal / tooling
 - Renovate config for gated dependency-bump PRs (#199, N9 — inert until the GitHub App is enabled);
@@ -125,7 +141,11 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   notification decoders (#230, Q5) and the structural-DoS validators (#231, Q7) property-fuzzed; the
   streaming chunk-flood cap (#243, round-5 R4) covered; two never-wired integration skip-stubs
   removed (#227, Q14); two stale round-3 security docs corrected (#226, Q13); a `setup-python` pin
-  tag-comment aligned (#239, INFO-3).
+  tag-comment aligned (#239, INFO-3); threat-model TB4/TB6 deltas recorded for the #232/#234 authZ
+  fixes (#246, R7); the HTTP auth-fault fail-closed + resolver-raise paths covered (#250, R14); the
+  ADR-034/runbook proxy-header replace-not-append (first-value-wins, CWE-290) constraint documented
+  (#251, R10); and the streaming chunk-seq invariant extended to backward + duplicate vectors
+  (#253, R13).
 
 ## [0.12.0] — 2026-06-24
 
