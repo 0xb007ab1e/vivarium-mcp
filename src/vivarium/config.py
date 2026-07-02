@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from vivarium.security.limits import (
@@ -457,6 +458,35 @@ def _parse_bind(bind: str) -> tuple[bool, bool]:
     return False, host not in _LOOPBACK_HOSTS
 
 
+#: Hosts for which a plaintext ``http://`` JWKS URI is tolerated (a local dev/test IdP). Any other
+#: host must use ``https``; non-``http(s)`` schemes are always rejected — see the check function.
+_JWKS_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _require_safe_jwks_uri(jwks_uri: str) -> None:
+    """Reject a JWKS URI whose scheme could turn key retrieval into SSRF / a local-file read.
+
+    ``PyJWKClient`` fetches the URI with stdlib ``urllib``, which honors ``file://``, ``http://``,
+    ``ftp://``, etc. The URI is operator config (ADR-019 D3), but a misconfiguration — or an
+    env-injection foothold — pointing it at a local file or an internal ``http://`` endpoint is an
+    SSRF / CWE-918 surface. Require ``https``, allowing plaintext ``http`` ONLY to a loopback host
+    (a local dev/test IdP); fail closed on anything else (``file``/``ftp``/``http`` to a
+    non-loopback host, or a URL with no host).
+
+    Args:
+        jwks_uri: The configured OAuth JWKS endpoint (already confirmed non-empty).
+
+    Raises:
+        GhidraMcpError: a startup ``VALIDATION`` error if the scheme/host is not allowed.
+    """
+    parsed = urlparse(jwks_uri)
+    if parsed.scheme == "https":
+        return
+    if parsed.scheme == "http" and parsed.hostname in _JWKS_LOOPBACK_HOSTS:
+        return
+    raise _startup_error("oauth JWKS URI must be https (http is allowed only to localhost)")
+
+
 def _validate_principal_id(principal_id: str) -> str:
     """Validate a configured bearer principal id (ADR-017): bounded, control-free allow-list.
 
@@ -692,14 +722,17 @@ def _load_http_config(src: dict[str, str]) -> HttpConfig:  # noqa: C901
         # uvicorn silently ignores CERT_REQUIRED / ssl_ca_certs (is_ssl is False) — the handshake
         # gate would not exist (CWE-1188). Refuse to boot (fail closed; covers loopback + UDS).
         raise _startup_error("mTLS auth requires server TLS (set cert and key)")
-    if auth_mode == "oauth" and (
-        oauth_issuer is None or oauth_audience is None or oauth_jwks_uri is None
-    ):
-        # OAuth validates the JWT's iss/aud against the configured values and fetches the issuer's
-        # JWKS — without all three the authenticator cannot validate anything. Refuse to boot rather
-        # than fall back to an unverified posture (fail closed). (Network-bind TLS is enforced by
-        # the generic is_network rule above; oauth is a network-class auth like bearer.)
-        raise _startup_error("oauth auth requires an issuer, an audience, and a JWKS URI")
+    if auth_mode == "oauth":
+        if oauth_issuer is None or oauth_audience is None or oauth_jwks_uri is None:
+            # OAuth validates the JWT's iss/aud against the configured values and fetches the
+            # issuer's JWKS — without all three the authenticator cannot validate anything. Refuse
+            # to boot rather than fall back to an unverified posture (fail closed). (Network-bind
+            # TLS is enforced by the generic is_network rule above; oauth is network-class like
+            # bearer.)
+            raise _startup_error("oauth auth requires an issuer, an audience, and a JWKS URI")
+        # Constrain the JWKS scheme so key retrieval can't be pointed at a local file / internal
+        # endpoint (SSRF — CWE-918). `oauth_jwks_uri` is now narrowed to `str` by the check above.
+        _require_safe_jwks_uri(oauth_jwks_uri)
     if "*" in cors_origins:
         raise _startup_error("HTTP CORS origins must be explicit; '*' is not allowed")
 

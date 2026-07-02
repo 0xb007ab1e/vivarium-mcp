@@ -384,6 +384,45 @@ def test_oauth_full_valid_config_defaults() -> None:
     assert h.oauth_leeway_s == 30  # small default
 
 
+@pytest.mark.parametrize(
+    "bad_jwks",
+    [
+        "file:///etc/passwd",  # local-file read
+        "http://169.254.169.254/latest/meta-data/",  # cloud metadata SSRF via plaintext http
+        "http://internal-idp.corp/jwks",  # internal http endpoint (not loopback)
+        "ftp://idp.example/jwks",  # non-http(s) scheme
+        "/etc/passwd",  # schemeless
+    ],
+)
+def test_oauth_unsafe_jwks_uri_scheme_fails_closed(bad_jwks: str) -> None:
+    """R9: a non-https JWKS URI (file/ftp/internal-http/schemeless) refuses to boot (SSRF, CWE-918).
+
+    ``PyJWKClient`` fetches the URI with urllib (honors file://, http://, ftp://); constraining the
+    scheme at startup blocks pointing key retrieval at a local file or an internal endpoint.
+    """
+    with pytest.raises(GhidraMcpError, match="JWKS URI must be https"):
+        load_config(
+            _oauth_env(
+                VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+                VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+                VIVARIUM_HTTP_OAUTH_JWKS_URI=bad_jwks,
+            )
+        )
+
+
+def test_oauth_http_localhost_jwks_uri_is_allowed() -> None:
+    """A plaintext ``http://localhost`` JWKS URI is tolerated (a local dev/test IdP escape)."""
+    cfg = load_config(
+        _oauth_env(
+            VIVARIUM_HTTP_OAUTH_ISSUER=_ISS,
+            VIVARIUM_HTTP_OAUTH_AUDIENCE=_AUD,
+            VIVARIUM_HTTP_OAUTH_JWKS_URI="http://localhost:9000/jwks",
+        )
+    )
+    assert cfg.http is not None
+    assert cfg.http.oauth_jwks_uri == "http://localhost:9000/jwks"
+
+
 def test_oauth_without_issuer_fails_closed() -> None:
     with pytest.raises(GhidraMcpError, match="oauth auth requires an issuer"):
         load_config(
