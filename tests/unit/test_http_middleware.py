@@ -8,6 +8,7 @@ stashing) and that a rejected request never reaches the wrapped app.
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any
 
 import pytest
@@ -510,3 +511,33 @@ def test_high_byte_authorization_header_decodes_and_reaches_authenticator() -> N
     assert app.called is False
     # decoded via latin-1 (no crash), reached the authenticator intact:
     assert auth.seen == "Bearer \xff\xfe"
+
+
+def test_rate_limit_allow_is_thread_safe_under_contention(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R8: concurrent `_allow` keeps the bucket LRU consistent (the RMW is lock-guarded).
+
+    The bucket read-modify-write (get / refill / spend / move_to_end / popitem) is a compound
+    `OrderedDict` mutation. Under `_lock` it is atomic: a stampede across many keys never raises (no
+    interleaved `move_to_end`/`popitem` corruption) and the map stays bounded to the cap. Hermetic:
+    a frozen clock + a barrier to maximise contention, bounded joins.
+    """
+    monkeypatch.setattr(_mw, "_MAX_RATE_LIMIT_BUCKETS", 16)
+    mw = RateLimitMiddleware(_App(), rate_per_second=1000, burst=1000, clock=lambda: 1000.0)
+    errors: list[Exception] = []
+    barrier = threading.Barrier(8)
+
+    def _hammer(worker: int) -> None:
+        try:
+            barrier.wait()  # release all threads at once for maximum contention
+            for i in range(200):
+                mw._allow(f"client-{worker}-{i}")  # many distinct keys → constant eviction churn
+        except Exception as exc:  # capture any thread fault for the main-thread assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_hammer, args=(w,)) for w in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    assert not errors, f"concurrent _allow raised: {errors!r}"
+    assert len(mw._buckets) <= 16  # LRU stayed bounded despite the concurrent eviction churn
