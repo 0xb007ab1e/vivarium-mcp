@@ -6,6 +6,18 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+_Nothing yet — changes accumulate here until the next release._
+
+## [0.13.0] — 2026-07-02
+
+A **security-hardening / gap-remediation** release: it closes the round-2 → round-5 gap-analysis
+findings (#196–#253) with **no new tools and no contract changes** — the Tier-1 catalog stays **56**
+and the observable behavior is unchanged. The work spans a streaming cross-session availability fix,
+an OAuth JWKS-URI SSRF guard, owner-scoped session in-flight tracking, fail-closed auth-fault
+handling, the mTLS auth binding now gated in CI, the server image on the hash-pinned supply-chain
+install, plus operational observability, a background session reaper, and extensive test/CI/docs
+hardening. Grouped below by change type.
+
 ### Added
 - **Operational observability layer (#208, gap N3).** RED (per-tool request/error/duration),
   session-lifecycle (created/evicted), and auth-decision (allow/deny) counters accumulate in an
