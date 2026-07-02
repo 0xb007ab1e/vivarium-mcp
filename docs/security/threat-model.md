@@ -171,6 +171,16 @@ Likelihood × Impact → severity (master §7). "L/M/H".
 | **D** | Huge output payload exhausts client/server | M×M=**Med** | `max_response_bytes` + per-tool result caps; pagination on all lists (F7) |
 | **E** | **Indirect prompt injection** escalates the agent to take harmful actions | H×H=**Critical** | envelope + never-auto-execute; least agency (`std-owasp-llm` LLM08); the tools are **read-only** (no destructive action exists to trigger); WS4 injection suite |
 
+> **TB4-I delta — worker error message no longer forwarded to the client (#232, round-4 Q8; no new
+> boundary).** Tightens the **I** (information-disclosure) row for the error path. A worker
+> JSON-RPC *method* error (a healthy worker rejecting a call — distinct from a crash) previously let
+> the worker's free-form `message` reach the client `ErrorEnvelope.detail`. That message is
+> worker/binary-derived and hostile-influenced, so it could disclose internals or smuggle content
+> (CWE-209). Now each method error maps to a **fixed, per-`ErrorType` safe detail**; the worker's
+> message is logged **server-side only** (a non-reserved log key, redacted). The client sees a
+> stable, content-free detail — consistent with the "no stack traces/internals to the client"
+> contract (`topic-error-handling`). Unit-proven with a hostile bidi/BEL/oversized worker message.
+
 ### Cross-cutting: Per-session project store (confidentiality)
 | STRIDE | Threat | L×I | Mitigation |
 |--------|--------|-----|------------|
@@ -232,6 +242,16 @@ enforced — closing the BOLA gap that ADR-011 §6 deferred (TB6-I).
 > - **No new authenticated surface, no new data class crossing to the client** (status-only); the
 >   tool/worker layers (TB1–TB4) and the read-only catalog are unchanged. The periodic reaper
 >   (ADR-044 D3) is internal (no boundary). Net: a small, analyzed, accepted unauthenticated surface.
+
+> **TB6-I delta — session in-flight tracking is owner-scoped (#234, round-4 Q10; no new boundary).**
+> Completes the **I / BOLA** row for the session-lifecycle helpers. `begin_call`/`end_call` (the
+> ADR-025 in-flight markers that exempt an active call from idle-eviction) previously keyed on the
+> `session_id` alone. A foreign caller holding a *valid but non-owned* session id (e.g. a leaked
+> handle) could therefore call them and defer another principal's idle-eviction — a cross-principal
+> side effect outside the `_get_live_locked` owner chokepoint. They now take the server-derived
+> `caller` and **no-op on an owner mismatch** (dispatch always passes `caller=ctx.caller_id`), so
+> the owner check mediates this path too (complete mediation; `std-owasp-api` API1). `manager.py`
+> stays 100%-covered; a security-property test asserts a foreign `begin_call` cannot bump idle.
 
 ## 4. Supply chain (build-time)
 | Threat | L×I | Mitigation |
