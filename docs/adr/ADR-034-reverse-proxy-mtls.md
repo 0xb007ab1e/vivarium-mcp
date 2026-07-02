@@ -87,6 +87,15 @@ is a **secret**: never logged, excluded from `repr`, sourced from env/secret-man
   fully unit-testable (no live-verification dependency).
 - The residual risk is operator misconfiguration (exposing the server directly AND leaking the
   secret); both are required to forge identity, and both are documented mandatory constraints.
+- **Header precedence — the proxy MUST replace, not append (CWE-290).** The server reads the
+  **first** value of a repeated `proxy_secret_header` / `proxy_identity_header` (`_header_map` is
+  deterministic first-value-wins). So the trusted proxy MUST **strip any client-supplied** secret +
+  identity headers and **set** its own (replace semantics — nginx `proxy_set_header`, not
+  `add_header`); if it *appended* instead, a client that sends its own identity header first could
+  win the first-value selection. This only bites once the shared secret has already leaked (the
+  identity header is never consulted without a valid secret — D1), so it is defense-in-depth on top
+  of the anchor, not the primary control — but it is a **required deploy constraint**, mirrored in
+  `runbooks/http-exposure.md`.
 
 ## Decisions ratified by the human (2026-06-17)
 1. **D1 — required shared secret anchor** (mandatory; constant-time; + network-isolation doc). ✅
