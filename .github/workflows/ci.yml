@@ -108,6 +108,61 @@ jobs:
       - name: Unit tests + coverage (server runtime — Python 3.14)
         run: pytest -m "not integration"
 
+  # 4c. mTLS auth gate (round-5 R2). The mTLS peer-cert -> principal binding (server/auth.py mTLS
+  # path + server/_mtls_protocol.py `MtlsAwareProtocol`, otherwise `# pragma: no cover`) had its ONLY
+  # automated verification — tests/integration/test_mtls_bridge.py, incl. ADR-019 abuse case 70
+  # (untrusted-CA cert rejected at the TLS handshake) — running in NO workflow: `ci` runs
+  # `-m "not integration"`, `live-regression` runs a hardcoded FID/export/analyze list, `e2e` runs
+  # only `tests/e2e/*`. That test needs NO Ghidra worker (synthetic in-test certs + real TLS
+  # sockets), so it runs here as a fast, worker-free security gate. `VIVARIUM_INTEGRATION=1` makes
+  # the integration conftest RUN (not skip) it; a fail-loud guard rejects a false-green all-skip.
+  # NOTE: promote this to a REQUIRED branch-protection check (gated action) so it is merge-blocking.
+  mtls-auth-gate:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: src
+      MYPYPATH: src
+      VIVARIUM_INTEGRATION: "1"  # actually RUN the integration test (not skip); no worker needed
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # actions/checkout@v6.0.3
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # actions/setup-python@v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install (hash-pinned dev lockfile only — no unpinned fetch)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements-dev.lock
+      - name: mTLS peer-cert -> principal auth binding (ADR-019; no Ghidra worker)
+        run: |
+          # --no-cov: the repo pytest addopts add --cov-fail-under=90, which a single-file run can't
+          # meet; coverage of these paths is not this gate's job (it proves the auth binding works).
+          pytest -m integration tests/integration/test_mtls_bridge.py \
+            -v --no-cov -rs --junit-xml=mtls-junit.xml
+      - name: Fail loud if the mTLS gate did not actually run (no false-green skip)
+        if: always()
+        run: |
+          python - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          try:
+              root = ET.parse("mtls-junit.xml").getroot()
+          except (OSError, ET.ParseError) as exc:
+              print(f"::error::mTLS gate produced no JUnit report ({exc}); the gate is BROKEN")
+              sys.exit(1)
+          total = skipped = 0
+          for suite in root.iter("testsuite"):
+              total += int(suite.get("tests", "0"))
+              skipped += int(suite.get("skipped", "0"))
+          ran = total - skipped
+          print(f"mTLS gate: collected={total} skipped={skipped} ran={ran}")
+          if ran < 1:
+              print("::error::mTLS auth gate ran 0 tests (all skipped / none collected) — a DEAD gate")
+              sys.exit(1)
+          PY
+
   # 5. SAST — first-party static analysis.
   sast:
     runs-on: ubuntu-latest
