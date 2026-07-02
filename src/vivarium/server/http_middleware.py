@@ -243,7 +243,18 @@ class RequestSizeLimitMiddleware:
 
 
 class RateLimitMiddleware:
-    """Per-client token-bucket rate limiter; ``429`` when a client's bucket is empty (API4)."""
+    """Per-client token-bucket rate limiter; ``429`` when a client's bucket is empty (API4).
+
+    Thread-safety: the bucket read-modify-write in :meth:`_allow` (get → refill → spend →
+    ``move_to_end`` → ``popitem``) is a compound mutation of a shared ``OrderedDict``. In the
+    shipped deployment (uvicorn default ``workers=1``, single event loop, no ``await`` inside
+    ``_allow``) it runs single-threaded and is already race-free — but a rate limiter is a security
+    control, so its correctness must not silently rest on that. A ``_lock`` guards the critical
+    section so a threaded server (or a future thread-pool offload) cannot interleave two
+    ``move_to_end``/``popitem`` and corrupt the LRU or drop the wrong bucket (a limit bypass /
+    victim over-limit — API4). The lock is uncontended on the single event loop and is never held
+    across an ``await`` (topic-concurrency).
+    """
 
     def __init__(
         self,
@@ -260,23 +271,29 @@ class RateLimitMiddleware:
         self._clock = clock
         # client-key -> (tokens, last_refill_ts); LRU-ordered + size-bounded (see _allow).
         self._buckets: OrderedDict[str, tuple[float, float]] = OrderedDict()
+        # Guards the compound RMW on _buckets so the LRU can't be corrupted under a threaded server
+        # (uncontended on the single event loop; never held across an await — see class docstring).
+        self._lock = threading.Lock()
 
     def _allow(self, key: str) -> bool:
         """Token-bucket decision for ``key``: refill by elapsed time, spend a token if any.
 
         Maintains the bucket map as a bounded LRU: the touched key moves to the most-recent end,
         and once the map exceeds ``_MAX_RATE_LIMIT_BUCKETS`` the least-recently-seen client is
-        evicted, so the map cannot grow without bound under many-source traffic (CWE-400).
+        evicted, so the map cannot grow without bound under many-source traffic (CWE-400). The
+        whole read-modify-write runs under ``_lock`` so it is atomic (thread-safe — see the class
+        docstring); the lock is uncontended on the single event loop.
         """
-        now = self._clock()
-        tokens, last = self._buckets.get(key, (self.burst, now))
-        tokens = min(self.burst, tokens + (now - last) * self.rate)
-        allowed = tokens >= 1.0
-        self._buckets[key] = (tokens - 1.0 if allowed else tokens, now)
-        self._buckets.move_to_end(key)  # mark most-recently-used
-        if len(self._buckets) > _MAX_RATE_LIMIT_BUCKETS:
-            self._buckets.popitem(last=False)  # evict least-recently-used
-        return allowed
+        with self._lock:
+            now = self._clock()
+            tokens, last = self._buckets.get(key, (self.burst, now))
+            tokens = min(self.burst, tokens + (now - last) * self.rate)
+            allowed = tokens >= 1.0
+            self._buckets[key] = (tokens - 1.0 if allowed else tokens, now)
+            self._buckets.move_to_end(key)  # mark most-recently-used
+            if len(self._buckets) > _MAX_RATE_LIMIT_BUCKETS:
+                self._buckets.popitem(last=False)  # evict least-recently-used
+            return allowed
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Allow or ``429`` based on the per-client bucket (client host, or ``"local"`` for UDS)."""
