@@ -282,14 +282,19 @@ class _StreamingJob:
     """Internal per-job state: bounded buffer, gap-free seq, backpressure, terminal-error (ADR-040).
 
     Not part of the public surface; the manager owns instances and exposes them only through the
-    frozen result/status models. All mutation is serialized by the manager's lock (the manager holds
-    it across each operation), so this class assumes single-threaded access per call.
+    frozen result/status models. Concurrency: each instance carries its own :attr:`_lock`; the
+    manager holds THAT lock (not the manager-wide table lock) across each compound job operation
+    (pump/drain/replay/cancel/status), so this class's methods assume the caller holds ``_lock`` and
+    may block on the producer's I/O without stalling any OTHER job (ADR-040 concurrency;
+    topic-concurrency). ``session_id``/``owner``/``job_id`` are immutable after construction and
+    ``is_terminal`` is a single-attribute read, so they are read table-lock-only without ``_lock``.
     """
 
     __slots__ = (
         "_buffer",
         "_clock",
         "_error",
+        "_lock",
         "_max_buffer_bytes",
         "_max_buffer_chunks",
         "_max_replay_bytes",
@@ -360,6 +365,11 @@ class _StreamingJob:
         self.cursor = 0
         self._state = JobState.RUNNING
         self._error: ErrorEnvelope | None = None
+        #: Per-job lock. The manager holds THIS (not the manager-wide table lock) across a compound
+        #: job operation, so the blocking producer pump serializes only this job — one slow/hung
+        #: worker cannot head-of-line-stall other sessions' jobs (ADR-040 / R1 fix; topic-
+        #: concurrency).
+        self._lock = threading.Lock()
 
     @property
     def is_terminal(self) -> bool:
@@ -631,10 +641,14 @@ class StreamingJobManager:
     inversion) so this core has no import-time dependency on the concrete session manager — it is
     handed a callable that performs the BOLA-safe authorize for ``(session_id, caller)``.
 
-    Thread-safety: a re-entrant lock serializes all table + per-job mutation (a periodic reaper and
-    request threads must not corrupt state — topic-concurrency). No I/O is performed under the lock;
-    the producer is advanced under it but the producer for this increment is a pure in-memory
-    iterator (the real worker-streaming adapter will pump off-lock in a later increment).
+    Thread-safety (two-tier, R1): the manager-wide ``_lock`` serializes ONLY the fast, in-memory
+    table mutations (``_jobs`` / ``_active_by_session``) + the ownership authorize — it is held
+    briefly and performs **no I/O**. The blocking producer pump (which drives a worker socket
+    ``recv`` via the real adapter) runs under the target job's OWN :attr:`_StreamingJob._lock`, with
+    the manager lock already released. Strict ordering: a job lock is **never** acquired while
+    holding the manager lock (the two are never nested), so one job's slow/hung ``recv`` cannot
+    head-of-line-stall another session's job, and there is no lock-inversion/deadlock
+    (topic-concurrency). A periodic reaper and request threads share these paths safely.
     """
 
     def __init__(
@@ -728,18 +742,22 @@ class StreamingJobManager:
             )
             self._jobs[job_id] = job
             self._active_by_session[session_id] = job_id
+        # Manager lock released: pump the first batch under the JOB's own lock so a slow/hung worker
+        # recv cannot head-of-line-stall other sessions (R1). A concurrent cancel/discard on this
+        # fresh job takes the same job lock and is serialized; pump is a no-op once terminal.
+        with job._lock:
             job.pump()
-            _LOG.info(
-                "stream.job.start",
-                extra={
-                    "event": "stream_job_started",
-                    "job_id": job_id,
-                    "session_id": session_id,
-                    "principal_id": caller,
-                    "total": total,
-                },
-            )
-            return job_id
+        _LOG.info(
+            "stream.job.start",
+            extra={
+                "event": "stream_job_started",
+                "job_id": job_id,
+                "session_id": session_id,
+                "principal_id": caller,
+                "total": total,
+            },
+        )
+        return job_id
 
     def fetch(
         self,
@@ -794,6 +812,11 @@ class StreamingJobManager:
             )
         with self._lock:
             job = self._authorized_job(session_id, job_id, caller=caller)
+        # Manager lock released: all job-state access + the (possibly blocking) pump run under the
+        # job's OWN lock, so a slow/hung worker recv stalls only THIS job — never another session
+        # (R1). The job ref stays valid even if a concurrent eviction discards it (we operate on it
+        # under its lock; a cancelled job simply yields a terminal result for its owner).
+        with job._lock:
             if cursor is not None and cursor > job.cursor:
                 # The client claims to have consumed beyond what the server has delivered — a
                 # bookkeeping impossibility; fail closed rather than silently skipping chunks.
@@ -860,6 +883,7 @@ class StreamingJobManager:
         """
         with self._lock:
             job = self._authorized_job(session_id, job_id, caller=caller)
+        with job._lock:
             return job.status()
 
     def cancel(self, session_id: str, job_id: str, *, caller: str = "local") -> StreamJobStatus:
@@ -883,18 +907,23 @@ class StreamingJobManager:
         """
         with self._lock:
             job = self._authorized_job(session_id, job_id, caller=caller)
-            job.cancel()
+            # Clear the active-job slot under the table lock (fast, in-memory) so a new stream may
+            # start; the actual cancel runs under the job lock below (cancel does no I/O, but keep
+            # the same discipline so it serializes with any in-flight pump on this job).
             self._active_by_session.pop(session_id, None)
-            _LOG.info(
-                "stream.job.cancel",
-                extra={
-                    "event": "stream_job_cancelled",
-                    "job_id": job_id,
-                    "session_id": session_id,
-                    "principal_id": caller,
-                },
-            )
-            return job.status()
+        with job._lock:
+            job.cancel()
+            status = job.status()
+        _LOG.info(
+            "stream.job.cancel",
+            extra={
+                "event": "stream_job_cancelled",
+                "job_id": job_id,
+                "session_id": session_id,
+                "principal_id": caller,
+            },
+        )
+        return status
 
     def discard_session(self, session_id: str) -> None:
         """Drop every job bound to ``session_id`` (called on session eviction — lifetime bound).
@@ -909,19 +938,24 @@ class StreamingJobManager:
         """
         with self._lock:
             self._active_by_session.pop(session_id, None)
-            doomed = [jid for jid, job in self._jobs.items() if job.session_id == session_id]
-            for jid in doomed:
-                job = self._jobs.pop(jid)
+            doomed_ids = [jid for jid, job in self._jobs.items() if job.session_id == session_id]
+            doomed = [self._jobs.pop(jid) for jid in doomed_ids]
+        # Manager lock released: cancel each job under its OWN lock. cancel() does no I/O, but a
+        # job may be mid-pump (a fetch holding its lock, blocked in a worker recv); waiting on that
+        # job's lock here is bounded by the per-recv deadline and — crucially — does NOT hold the
+        # table lock, so a stuck pump on one evicted session can't stall other sessions' evictions.
+        for job in doomed:
+            with job._lock:
                 job.cancel()
-            if doomed:
-                _LOG.info(
-                    "stream.job.discard_session",
-                    extra={
-                        "event": "stream_jobs_discarded",
-                        "session_id": session_id,
-                        "count": len(doomed),
-                    },
-                )
+        if doomed:
+            _LOG.info(
+                "stream.job.discard_session",
+                extra={
+                    "event": "stream_jobs_discarded",
+                    "session_id": session_id,
+                    "count": len(doomed),
+                },
+            )
 
     def _authorized_job(self, session_id: str, job_id: str, *, caller: str) -> _StreamingJob:
         """Authorize the session (BOLA) and return the job IFF it belongs to that session.

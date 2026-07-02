@@ -16,6 +16,7 @@ randomness in assertions — the producer is a synthetic in-memory iterator and 
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Iterator
 
 import pytest
@@ -652,3 +653,47 @@ def test_decompile_stream_in_rejects_extra_fields() -> None:
 def test_decompile_stream_in_caps_limit() -> None:
     with pytest.raises(PydanticValidationError):
         DecompileStreamIn(session_id="s", limit=10_001)
+
+
+@pytest.mark.critical
+def test_slow_pump_on_one_session_does_not_stall_another_session() -> None:
+    """R1: a job blocked in its (worker) pump must NOT head-of-line-stall other sessions.
+
+    Before the two-tier lock, ``pump()`` ran under the manager-wide lock, so a slow/hung worker on
+    session A froze every other session's start/fetch/status/cancel — a cross-tenant DoS. Now pump
+    holds only the target job's OWN lock (manager table lock already released), so session B makes
+    progress while A is blocked. Deterministic + hermetic: Events (no sleeps), bounded joins.
+    """
+    mgr = _manager(limits=Limits(max_stream_buffer_chunks=10))
+    a_in_pump = threading.Event()  # set the instant A's producer is first advanced (inside pump)
+    release_a = threading.Event()  # A's pump stays blocked in that advance until we set this
+
+    def blocking_producer() -> Iterator[s.DecompiledFunction]:
+        a_in_pump.set()
+        assert release_a.wait(5), "test bug: session A was never released"
+        yield _fn(0)
+
+    a_thread = threading.Thread(
+        target=lambda: mgr.start_job("sess-A", producer=blocking_producer(), caller="A"),
+        name="r1-session-A",
+    )
+    a_thread.start()
+    assert a_in_pump.wait(2), "session A never entered the pump"
+    # A now holds ONLY job A's lock, blocked mid-pump; the manager table lock must be free.
+
+    b_done = threading.Event()
+
+    def start_b() -> None:
+        assert mgr.start_job("sess-B", producer=_producer(1), caller="B")
+        b_done.set()
+
+    b_thread = threading.Thread(target=start_b, name="r1-session-B")
+    b_thread.start()
+    # The crux: B completes while A is STILL blocked in its pump. Under the old single-lock design
+    # this wait would time out (B blocks on the manager lock A holds during its pump).
+    assert b_done.wait(2), "session B was head-of-line-stalled by session A's blocked pump (R1)"
+
+    release_a.set()  # let A finish and clean up
+    a_thread.join(2)
+    b_thread.join(2)
+    assert not a_thread.is_alive() and not b_thread.is_alive()
