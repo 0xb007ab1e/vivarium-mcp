@@ -194,6 +194,28 @@ def test_logger_concurrent_start_spawns_exactly_one_thread() -> None:
     assert logger._thread is None
 
 
+def test_logger_start_after_stop_resumes_emitting() -> None:
+    """R3: start() after stop() must RESUME real emitting (start() clears the stop signal).
+
+    stop() sets the stop Event and never clears it; ``_run`` loops on ``while not
+    self._stop.wait(...)``. Without ``self._stop.clear()`` in start(), a restarted daemon's first
+    wait() returns True immediately and it exits without ever emitting a snapshot (silent no-op
+    logger).
+    """
+    reg = _SignallingRegistry()
+    logger = PeriodicMetricsLogger(reg, interval_s=0.005)  # type: ignore[arg-type]
+    logger.start()
+    assert reg.first.wait(2), "logger never emitted before stop"
+    logger.stop()
+    # Thread is dead after stop()'s join; clear the progress event for a clean second round.
+    reg.first.clear()
+    logger.start()  # RESTART
+    try:
+        assert reg.first.wait(2), "logger did NOT resume emitting after stop()+start() (R3)"
+    finally:
+        logger.stop()
+
+
 def test_never_started_logger_stop_is_silent() -> None:
     """Stopping a logger that was never started emits nothing (no spurious snapshot)."""
     reg = _SignallingRegistry()
