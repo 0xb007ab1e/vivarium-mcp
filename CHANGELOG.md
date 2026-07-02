@@ -29,6 +29,9 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   verified store-wipe **outside** it — so a slow kill/wipe on the timer can no longer stall request
   threads (or `/readyz`) waiting on the lock. Kill-before-wipe ordering and the synchronous `evict()`
   contract are unchanged.
+- **Streaming eviction hook wired via a call-once seam (#236, round-4 Q11).** `build_app` binds the
+  session→streaming-job discard hook through a documented, call-once `set_evict_callback()` instead
+  of poking a private attribute (encapsulation; runtime wiring + behavior unchanged).
 
 ### Fixed
 - **Structural writes are now atomic (#182, CWE-460/ADR-021 §D2).** A failed `define_struct` /
@@ -47,6 +50,22 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 - **Metrics final-snapshot race on a timed-out join (#211, gap round-3 P6).** `PeriodicMetricsLogger.stop()`
   now emits the shutdown snapshot only after the daemon thread has actually exited, so it can no
   longer race a second concurrent emit with an in-flight one.
+- **Streaming producer pumps off the manager lock (#240, round-5 R1).** The blocking worker-socket
+  read now runs under a per-job lock instead of the shared streaming-manager lock, so one
+  slow/hung/dribbling worker can no longer head-of-line-stall every other session's stream
+  operations (cross-session availability/DoS).
+- **Streaming reuse GCs the prior terminal job (#228, round-4 Q2, CWE-400).** Starting a new stream on
+  a session now drops the old terminal job + its replay window, bounding `_jobs` to the live jobs.
+- **RPC connect-retry charged to one absolute per-call deadline (#229, round-4 Q4, CWE-400).** A single
+  call's lock/connect/send/read now share one deadline, so a stuck connect can no longer exceed it.
+- **`import_binary` fails closed on a rejected source ref (#235, round-4 Q12).** A confined resolver
+  raising `ValueError` (e.g. a path outside its allow-list) now maps to a fail-closed, content-free
+  `VALIDATION` error instead of an unclassified one; unexpected exception types still propagate.
+- **OAuth JWKS client lazy-init is thread-safe (#237, round-4 INFO-1).** A cold-start race could build
+  a redundant JWKS client; the build is now lock-guarded.
+- **Reaper/metrics daemon lifecycle serialized + restart-safe (#238 round-4 INFO-2, #242 round-5 R3).**
+  `start()`/`stop()` are lock-guarded (no double-spawn/double-join) and `start()` clears the stop
+  signal so a start-after-stop resumes instead of silently no-op'ing.
 
 ### Security
 - **Signed-commit + admin enforcement on `main` (gap N7).** Branch protection now requires
@@ -70,6 +89,21 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 - **FID real-worker gate fails fast if its sibling never runs (#220, gap round-3 P13).** The
   `fid-elf-match-gate` poll now fails loudly within a bounded grace if the `live-regression` job it
   depends on is renamed / never scheduled, instead of silently hanging to the 65-min timeout.
+- **Worker error text no longer reaches the client error envelope (#232, round-4 Q8).** A worker
+  method error maps to a fixed per-type safe detail; the worker's free-form message is logged
+  server-side only, so no binary-derived/hostile content is disclosed to the client (CWE-209).
+- **Session in-flight tracking is owner-scoped (#234, round-4 Q10, BOLA).** `begin_call`/`end_call`
+  no-op on an owner mismatch, so a foreign caller holding a valid but non-owned session id cannot
+  defer another principal's idle-eviction (complete mediation — `std-owasp-api` API1).
+- **Reverse-proxy rate-limit residual documented (#233, round-4 Q9).** The per-client limiter keys on
+  the TCP peer IP; behind a proxy it degrades to per-proxy — recorded as an accepted deployment
+  constraint (the proxy must rate-limit per client) in ADR-034 + the HTTP-exposure runbook + TB6.
+- **Authenticator faults fail closed at the auth chokepoint (#244, round-5 R5).** A raising
+  authenticator now yields a generic `500` with no internals (error type logged server-side only) and
+  never reaches the app, instead of relying on the ASGI server's default exception handling.
+- **mTLS peer-cert→principal auth is gated in CI (#241, round-5 R2).** The mTLS bridge test (incl.
+  ADR-019 untrusted-CA rejection at the handshake) now runs on every PR — previously it ran in no
+  workflow, so an mTLS auth regression could pass every gate.
 
 ### Internal / tooling
 - Renovate config for gated dependency-bump PRs (#199, N9 — inert until the GitHub App is enabled);
@@ -85,6 +119,13 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   P12/P16); corrected stale GitHub-Action version tag-comments (#213, P11); the mutation gate turned
   into a regression floor (`MUTATION_SCORE_MIN=65`, baseline 69.5%) + killed the error-envelope status
   survivors (#222, P7).
+- **Round-4/5 gap-remediation test + CI + docs:** the live abuse/containment e2e now runs on a
+  nightly schedule (#223, Q1); the critical-module 100%-coverage tripwire extended 5→7 with an
+  assertion that the ci.yml / pyproject / test lists stay in sync (#224, Q3); hostile-worker
+  notification decoders (#230, Q5) and the structural-DoS validators (#231, Q7) property-fuzzed; the
+  streaming chunk-flood cap (#243, round-5 R4) covered; two never-wired integration skip-stubs
+  removed (#227, Q14); two stale round-3 security docs corrected (#226, Q13); a `setup-python` pin
+  tag-comment aligned (#239, INFO-3).
 
 ## [0.12.0] — 2026-06-24
 
