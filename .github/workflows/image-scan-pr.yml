@@ -13,26 +13,25 @@
 # SCANS ONLY — never builds-to-push, signs, or publishes (detection, not publication). The build is
 # local (`load: true`) so Trivy can scan by image-ref.
 #
-# GATING SCOPE (deliberate, mirrors the N2 treatment): this runs + FAILS CLOSED on a HIGH/CRITICAL
-# as a VISIBLE per-PR check. It is NOT (yet) wired into branch protection as a required check — a
-# path-filtered workflow does not start on non-Containerfile PRs, so making it required needs the
-# always-run wrapper pattern (cf. fid-elf-match-gate). Promoting it is a one-line operator step
-# (add an always-run gate job + the context to required checks); until then a maintainer sees the
-# red check on the Containerfile PR. CI runners have no gVisor; the build/scan need none (no worker
-# is run here — only built + statically scanned).
+# GATING SCOPE (R16): the build+scan FAILS CLOSED on a HIGH/CRITICAL. The workflow now runs on EVERY
+# PR (no `on: paths:` filter) and posts an always-run `image-scan-gate` job (below) — the always-run
+# wrapper the header used to say was needed (cf. fid-elf-match-gate). The heavy build stays gated by
+# the `changes` detector (only image-relevant PRs build). REMAINING operator step to enforce it:
+# add the `image-scan-gate` context to the `main` branch-protection required checks (a gated action —
+# do it ONLY after confirming the gate is green on a normal non-image PR and red on a failing image
+# PR). CI runners have no gVisor; the build/scan need none (no worker is run here — only built +
+# statically scanned).
 
 name: image-scan-pr
 
 on:
+  # Runs on EVERY PR (no `paths:` filter) so the always-run `image-scan-gate` job below can be a
+  # branch-protection REQUIRED check without blocking non-image PRs (a path-filtered workflow never
+  # starts on other PRs, so a required context would hang forever — cf. fid-elf-match-gate, R16).
+  # The expensive image build stays gated: the `changes` detector below runs the heavy `image-scan`
+  # matrix ONLY when an image-relevant path changed; every other PR just runs the two cheap jobs
+  # (detector + gate) and passes fast.
   pull_request:
-    # Only PRs that can change the built image (or the scan policy itself). Keeps the expensive
-    # image build off every other PR.
-    paths:
-      - "Containerfile.worker"
-      - "Containerfile.server"
-      - "infra/trivy.yaml"
-      - ".trivyignore.yaml"
-      - ".github/workflows/image-scan-pr.yml"
 
 permissions:
   contents: read # least privilege; scan-only, nothing is pushed
@@ -42,10 +41,56 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Cheap detector: did this PR touch an image-relevant path? Gates the heavy build matrix below and
+  # feeds the always-run gate. FAIL-SAFE: if the diff cannot be computed, assume it DID (build runs).
+  changes:
+    name: detect image-path changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      image: ${{ steps.filter.outputs.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # actions/checkout@v6.0.3
+        with:
+          fetch-depth: 0 # need both base and head to diff
+      - name: Detect image-relevant path changes
+        id: filter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --quiet origin "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || true
+          # FAIL-SAFE: an uncomputable diff (missing object on a fork, etc.) assumes an image change,
+          # so the build+scan HAPPENS rather than being silently skipped (fail-safe, not fail-open).
+          if ! files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null)"; then
+            echo "::warning::could not diff $BASE_SHA..$HEAD_SHA — assuming an image change (fail-safe)"
+            echo "image=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "Changed files:"; echo "$files"
+          image=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              Containerfile.worker | Containerfile.server | infra/trivy.yaml | \
+              .trivyignore.yaml | .github/workflows/image-scan-pr.yml)
+                image=true ;;
+            esac
+          done <<< "$files"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "::notice::image-relevant change: $image"
+
   # Rebuild from the digest-pinned Containerfiles + Trivy-image-scan + emit an SBOM. Both images are
   # scanned (fail-fast: false) even when only one Containerfile changed, because a shared base bump
-  # or a trivy.yaml/.trivyignore edit affects both — surface every finding in one run.
+  # or a trivy.yaml/.trivyignore edit affects both — surface every finding in one run. Runs ONLY when
+  # the detector saw an image-relevant change (or failed → fail-safe true); skipped otherwise.
   image-scan:
+    needs: [changes]
+    if: ${{ needs.changes.outputs.image == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -108,3 +153,88 @@ jobs:
             image-scan-trivy-${{ matrix.name }}.sarif
             sbom-${{ matrix.name }}.cdx.json
           if-no-files-found: warn
+
+  # ===============================================================================================
+  # image-scan-gate — the ALWAYS-RUN required status check for branch protection (R16).
+  # ===============================================================================================
+  # Runs on EVERY PR (`if: always()`, keyed off the cheap `changes` detector) and posts a
+  # DETERMINISTIC status, so it is safe as the single required check for the per-PR image scan:
+  #   * no image-path change -> the image scan is N/A -> PASS (green) IMMEDIATELY; non-image PRs
+  #                             never block AND never build.
+  #   * image-path change     -> the sibling `image-scan` matrix (worker + server) MUST complete AND
+  #                             every leg succeed, else FAIL. Polled by name via the run-jobs API in
+  #                             THIS run (not a `needs:` dep, so the non-image path never waits).
+  # FAIL-SAFE: a broken `changes` detector (job-level failure) is treated as an image change — the
+  # gate errs toward REQUIRING the scan, never skipping. Branch protection evaluates required checks
+  # only on PRs, so this being pull_request-scoped is correct.
+  image-scan-gate:
+    name: image-scan-gate
+    needs: [changes]
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    # Poll the sibling image-scan matrix legs (image path only); cap just over the worker build's
+    # ~16-min build + scan, with headroom.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read # read the sibling image-scan jobs' status/conclusion in THIS run
+    steps:
+      - name: Decide the image-scan gate
+        env:
+          IMAGE_CHANGED: ${{ needs.changes.outputs.image }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The matrix legs are named "image-scan (<name>, <containerfile>)"; match that PREFIX (the
+          # trailing " (" excludes THIS job, "image-scan-gate"). EXPECTED = the two matrix legs.
+          PREFIX="image-scan ("
+          EXPECTED=2
+          # Non-image change (and the detector didn't fail) -> the image scan is N/A -> PASS FAST,
+          # without waiting on any build.
+          if [ "${CHANGES_RESULT}" != "failure" ] && [ "${IMAGE_CHANGED}" != "true" ]; then
+            echo "::notice::no image-relevant change — image scan N/A (pass); not waiting on a build"
+            exit 0
+          fi
+          echo "image-relevant change (or broken detector — fail-safe) — requiring the image-scan matrix"
+          deadline=$(( $(date +%s) + 2400 ))       # ~40 min, matching the matrix build+scan budget
+          # gap-P13-style: legs that were RENAMED / never scheduled would leave the name filter empty
+          # forever. Give them a bounded grace to REGISTER; if fewer than EXPECTED appear within it,
+          # fail FAST + LOUD (naming the likely cause) rather than hanging to the timeout.
+          appear_deadline=$(( $(date +%s) + 300 ))
+          while :; do
+            # One "<status> <conclusion>" line per matching matrix leg.
+            mapfile -t legs < <(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" --paginate \
+                  --jq ".jobs[] | select(.name | startswith(\"${PREFIX}\")) | \"\(.status) \(.conclusion // \"\")\"" \
+                2>/dev/null || true)
+            n=${#legs[@]}
+            if [ "${n}" -ge "${EXPECTED}" ]; then
+              all_done=true; all_ok=true
+              for l in "${legs[@]}"; do
+                st="${l%% *}"; cc="${l#* }"
+                [ "${st}" = "completed" ] || all_done=false
+                [ "${cc}" = "success" ] || all_ok=false
+              done
+              if [ "${all_done}" = "true" ]; then
+                if [ "${all_ok}" = "true" ]; then
+                  echo "::notice::all ${n} image-scan legs succeeded — image gate satisfied"
+                  exit 0
+                fi
+                echo "::error::image-scan did not pass — an image-scan leg failed" \
+                     "(legs=${n}). See the image-scan (worker/server) job logs."
+                exit 1
+              fi
+            elif [ "$(date +%s)" -ge "${appear_deadline}" ]; then
+              echo "::error::fewer than ${EXPECTED} 'image-scan (...)' legs appeared within 5 min" \
+                   "(saw ${n}) — the matrix job was likely RENAMED or not scheduled. This gate polls" \
+                   "by job-name prefix; fix the name/trigger. Failing fast (fail-closed)."
+              exit 1
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::timed out waiting for the image-scan matrix legs to complete"
+              exit 1
+            fi
+            sleep 30
+          done
