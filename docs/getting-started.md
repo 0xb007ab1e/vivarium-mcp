@@ -59,7 +59,7 @@ The build fails on purpose if the downloaded Ghidra zip does not match the check
 supply-chain check working.
 
 You can also use a prebuilt, signed release image instead of building — use the latest release tag
-(e.g. `ghcr.io/0xb007ab1e/vivarium-worker:v0.12.0`); match it to the server version you installed to
+(e.g. `ghcr.io/0xb007ab1e/vivarium-worker:v0.13.0`); match it to the server version you installed to
 avoid a tool/behavior skew. Building locally is fine for trying things out.
 
 ## Step 3: install the package

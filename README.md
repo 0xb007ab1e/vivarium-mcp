@@ -13,11 +13,13 @@ and marked as untrusted before it reaches the model.
 The name fits the design: a vivarium is a sealed enclosure where you can safely keep and observe a live
 specimen. Here the specimen is an untrusted binary.
 
-> Current release: **v0.12.0** (2026-06-24). This release makes `identify_functions` work on **ELF**:
-> the worker now bundles permissive-source Ghidra **FunctionID databases** (zlib, musl libc, OpenSSL 3.x,
-> Boost), so the tool labels Linux library code instead of returning ~0 matches (Phase 1 was MSVC-only).
-> Additive — no tool/contract change, catalog stays **56**. See the [CHANGELOG](./CHANGELOG.md) for details. Vivarium is pre-1.0, so the tool
-> set and internal contracts may still change before 1.0.
+> Current release: **v0.13.0** (2026-07-02). A **security-hardening / gap-remediation** release — it
+> closes the round-4 and round-5 gap-analysis findings with **no new tools or contract changes**
+> (catalog stays **56**). Highlights: a streaming cross-session availability fix (per-job locking), an
+> OAuth JWKS-URI SSRF guard, owner-scoped session in-flight tracking, fail-closed auth-fault handling,
+> the mTLS auth binding now gated in CI, and the server image on the hash-pinned supply-chain install.
+> See the [CHANGELOG](./CHANGELOG.md) for details. Vivarium is pre-1.0, so the tool set and internal
+> contracts may still change before 1.0.
 
 ## What it can do
 
