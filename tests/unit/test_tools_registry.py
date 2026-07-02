@@ -21,6 +21,7 @@ from vivarium.core.envelope import DataOrigin, Untrusted
 from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from vivarium.ghidra.port import GhidraPort
 from vivarium.security.limits import Limits
+from vivarium.server.app import _with_error_boundary
 from vivarium.server.auth import CAP_READ, CAP_WRITE, Principal
 from vivarium.sessions.manager import SessionManager
 from vivarium.tools import registry as reg
@@ -566,6 +567,79 @@ def test_handler_threads_resolved_principal_per_request() -> None:
 
 
 # --- ADR-025 / F4: the dispatch chokepoint wraps session-scoped calls in begin_call/end_call -----
+def _ctx_with_resolver(
+    resolver: Callable[[], Principal],
+) -> tuple[reg.ToolContext, FakeSessionManager]:
+    """A ToolContext (+ its fake session mgr) whose per-request resolver is ``resolver``."""
+    sessions = FakeSessionManager()
+    ctx = reg.ToolContext(
+        config=_config(),
+        sessions=cast(SessionManager, sessions),
+        port=cast(GhidraPort, FakePort()),
+        principal=Principal(id="ignored-static"),
+        resolve_principal=resolver,
+    )
+    return ctx, sessions
+
+
+def test_resolver_raise_surfaces_as_failclosed_envelope_not_leaked_exception() -> None:
+    """R14: a resolve_principal that raises (HTTP fail-closed) surfaces as a safe error envelope.
+
+    The real `_http_principal_resolver` raises `GhidraMcpError(INTERNAL)` when no server-derived
+    principal is on the request scope (fail closed — ADR-017 / master §2). When that raise happens
+    inside the capability check (`ctx.caller_capabilities`) / `caller_id` during dispatch, the tool
+    error boundary must map it to the frozen fail-closed envelope — never leak the exception to the
+    transport — and no in-flight mark may leak.
+    """
+
+    def _raising_resolver() -> Principal:
+        raise GhidraMcpError(
+            ErrorEnvelope(
+                type=ErrorType.INTERNAL,
+                title="Internal error",
+                detail="Authenticated principal missing from the request context.",
+                status=500,
+            )
+        )
+
+    ctx, sessions = _ctx_with_resolver(_raising_resolver)
+    handlers = reg.build_handlers(ctx)
+    wrapped = _with_error_boundary("decompile_function", handlers["decompile_function"])
+
+    result = wrapped(session_id=_VALID_SID, function="main")
+
+    assert isinstance(result, ErrorEnvelope)  # returned, NOT raised out to the transport
+    assert result.type is ErrorType.INTERNAL  # fail closed
+    assert result.correlation_id is not None  # boundary attached a correlation id
+    # caller_id raised before begin_call could run → no unbalanced in-flight mark leaked.
+    begins = sessions.events.count(f"begin:{_VALID_SID}")
+    ends = sessions.events.count(f"end:{_VALID_SID}")
+    assert begins == ends
+
+
+def test_resolver_unexpected_fault_maps_to_generic_internal_without_leak() -> None:
+    """R14: an UNEXPECTED resolver fault maps to a generic internal-error, leaking no text.
+
+    A GhidraMcpError forwards its (author-controlled, safe) envelope; a plain exception (a wiring
+    bug) must instead map to the generic `_internal_envelope` — its message (which could echo
+    sensitive context) is never forwarded to the client (master §5 / topic-error-handling).
+    """
+
+    def _buggy_resolver() -> Principal:
+        raise RuntimeError("resolver misconfigured: token=SUPERSECRET at /internal/path")
+
+    ctx, _sessions = _ctx_with_resolver(_buggy_resolver)
+    handlers = reg.build_handlers(ctx)
+    wrapped = _with_error_boundary("decompile_function", handlers["decompile_function"])
+
+    result = wrapped(session_id=_VALID_SID, function="main")
+
+    assert isinstance(result, ErrorEnvelope)
+    assert result.type is ErrorType.INTERNAL
+    for leak in ("SUPERSECRET", "misconfigured", "/internal/path", "RuntimeError"):
+        assert leak not in result.detail  # the raw exception text never crosses the boundary
+
+
 def test_session_scoped_call_is_wrapped_in_begin_and_end_call(ctx: reg.ToolContext) -> None:
     """A session-scoped tool marks the session in-flight around the handler (begin → … → end)."""
     handlers = reg.build_handlers(ctx)
