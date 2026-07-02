@@ -69,19 +69,19 @@ WORKDIR /build
 # Copy only what the build needs (better layer caching; smaller context).
 COPY pyproject.toml README.md LICENSE NOTICE ./
 COPY src ./src
-# COORDINATION: the hash-pinned lockfile (uv.lock / requirements.lock) is GATED to generate.
-# Once committed, uncomment the COPY + the --require-hashes install below (fail-closed: no floating
-# resolve in the image build). Until then this stage documents the intended supply-chain-safe path.
-# COPY requirements.lock ./
+# Hash-pinned runtime lock (std-supplychain): requirements.lock is `pip-compile --generate-hashes
+# pyproject.toml` — the runtime deps (mcp/pydantic/pyjwt[crypto]/cryptography/starlette + transitive)
+# pinned by version AND hash. It IS committed now, so the fail-closed install below is enabled (no
+# floating resolve in the image build). Regenerate it whenever the runtime deps change.
+COPY requirements.lock ./
 
 RUN set -eux; \
     python -m venv /venv; \
     /venv/bin/pip install --no-cache-dir --upgrade pip; \
-    # SUPPLY-CHAIN SAFE INSTALL (enable once the lockfile exists — GATED):
-    #   /venv/bin/pip install --no-cache-dir --require-hashes -r requirements.lock
-    # Then install the project itself (no deps; they came from the pinned lock):
-    #   /venv/bin/pip install --no-cache-dir --no-deps .
-    # Placeholder until the lock lands — documented, not a floating prod install path:
+    # SUPPLY-CHAIN SAFE INSTALL: deps come ONLY from the hash-pinned lock (--require-hashes rejects
+    # any package without a matching hash — no floating/tampered resolve at build time)...
+    /venv/bin/pip install --no-cache-dir --require-hashes -r requirements.lock; \
+    # ...then the project itself with --no-deps (its deps were just installed, pinned, above).
     /venv/bin/pip install --no-cache-dir --no-deps .; \
     # Bake the per-session socket-dir mount point with the runtime user's ownership: the runtime
     # stage is shell-free (cannot mkdir), and deploy/ tmpfs-mounts over this path at run time.
