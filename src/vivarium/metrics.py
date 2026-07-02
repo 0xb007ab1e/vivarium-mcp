@@ -222,6 +222,12 @@ class PeriodicMetricsLogger:
         with self._lock:
             if self._thread is not None:
                 return
+            # Reset the stop signal so a start() AFTER a prior stop() actually emits. stop() SETS
+            # the Event and never clears it, and _run loops on `while not self._stop.wait(...)`, so
+            # without this a restarted daemon's first wait() returns True immediately → the thread
+            # exits without ever emitting a snapshot (silent no-op logger). Cleared here (under the
+            # lock, only on a real (re)start), not in stop() (R3/round-5).
+            self._stop.clear()
             self._thread = threading.Thread(
                 target=self._run, name="vivarium-metrics-logger", daemon=True
             )

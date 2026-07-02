@@ -14,6 +14,7 @@ import pytest
 
 from vivarium.server import http_middleware as _mw
 from vivarium.server.auth import (
+    AuthContext,
     BearerAuthenticator,
     MtlsAuthenticator,
     NullAuthenticator,
@@ -449,3 +450,63 @@ def test_cached_readiness_boundary_is_exclusive() -> None:
     clock.advance(1.0)  # elapsed == ttl → NOT < ttl → recompute
     cached()
     assert pred.calls == 2
+
+
+class _FaultyAuthenticator:
+    """An authenticator that RAISES mid-authenticate (a dependency / wiring fault).
+
+    The exception message deliberately carries sensitive-looking text to prove it never reaches the
+    client (redaction — master §5).
+    """
+
+    def authenticate(self, ctx: AuthContext) -> Principal | None:
+        """Raise as if an auth dependency (e.g. a JWKS fetch) faulted."""
+        raise RuntimeError("boom: JWKS unreachable at /secret/path token=SUPERSECRET")
+
+
+class _RecordingAuthenticator:
+    """Captures the decoded ``authorization`` it was handed, then denies (returns ``None``)."""
+
+    def __init__(self) -> None:
+        self.seen: str | None = None
+
+    def authenticate(self, ctx: AuthContext) -> Principal | None:
+        """Record the authorization string and deny."""
+        self.seen = ctx.authorization
+        return None
+
+
+def test_auth_fault_fails_closed_500_without_reaching_app_or_leaking() -> None:
+    """R5: an authenticator that RAISES must fail closed — no app, no leak.
+
+    The auth boundary must not fall through to the app on a fault (master §2 fail-closed): the guard
+    records a deny, returns a generic 500, and surfaces NO exception message/traceback to the client
+    (topic-error-handling / master §5). The detail is logged server-side by TYPE only.
+    """
+    app = _App()
+    mw = AuthenticationMiddleware(app, authenticator=_FaultyAuthenticator(), mode="bearer")
+    status, body = _drive(mw, _scope(headers=[(b"authorization", b"Bearer x")]))
+    assert status == 500  # fail closed — NOT a 200 pass-through
+    assert app.called is False  # the inner app was never reached
+    text = body.decode()
+    assert "Authentication error" in text  # generic, safe-to-surface message
+    # The raising exception's text (incl. the fake secret + path) must NOT cross the boundary.
+    for leak in ("boom", "JWKS", "/secret/path", "SUPERSECRET"):
+        assert leak not in text
+
+
+def test_high_byte_authorization_header_decodes_and_reaches_authenticator() -> None:
+    """R5: a non-ASCII (high-byte) Authorization header does NOT crash the decode (latin-1 total).
+
+    `decode("latin-1")` maps all 256 byte values, so a malformed/binary header can't raise at the
+    middleware; the bytes reach the authenticator, which validates + denies them. Documents that the
+    'malformed-header decode' path is a safe no-crash, not an unhandled fault.
+    """
+    auth = _RecordingAuthenticator()
+    app = _App()
+    mw = AuthenticationMiddleware(app, authenticator=auth, mode="bearer")
+    status, _ = _drive(mw, _scope(headers=[(b"authorization", b"Bearer \xff\xfe")]))
+    assert status == 401  # the recorder denies -> generic 401
+    assert app.called is False
+    # decoded via latin-1 (no crash), reached the authenticator intact:
+    assert auth.seen == "Bearer \xff\xfe"
