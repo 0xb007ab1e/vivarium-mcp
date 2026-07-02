@@ -672,3 +672,40 @@ def test_decompile_stream_sets_and_clears_active_stream_id() -> None:
     t.join(timeout=3)
     assert adapter._sessions[_SID].active_stream_id is None
     wrk.close()
+
+
+def test_decompile_stream_raises_and_kills_on_chunk_flood(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """More than ``_MAX_STREAM_CHUNKS`` ``$/chunk`` frames is a hostile-worker DoS → kill.
+
+    Mirrors the progress-flood cap test: a flood of chunk frames trips the per-call cap, which the
+    universal kill handler maps to ``WORKER_UNAVAILABLE`` + SIGKILL. The cap is shrunk via
+    monkeypatch so the test stays fast/hermetic (the behavior under test is the bound, not the
+    literal 10_000). The seqs are gap-free so the FLOOD check trips first (not the seq invariant).
+    """
+    monkeypatch.setattr("vivarium.ghidra.rpc_client._MAX_STREAM_CHUNKS", 3)
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+
+    def _serve() -> None:
+        req = _read_request(wrk)
+        rid = req["id"]
+        # Emit cap+1 = 4 gap-free chunks; the 4th trips the flood cap (count 4 > 3) pre-yield.
+        for i in range(4):
+            _send_frame(wrk, f.build_chunk(rid, i, "function", _chunk_payload(i)))
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    it = adapter.decompile_stream(_SID, DecompileStreamIn(session_id=_SID, limit=100))
+    # The first cap (=3) chunks stream fine (seq 0,1,2 → their addresses).
+    assert [next(it).address for _ in range(3)] == [
+        f"0x{0x00401000 + i * 0x10:08x}" for i in range(3)
+    ]
+    with pytest.raises(GhidraMcpError) as ei:
+        next(it)  # the 4th chunk trips the per-call flood cap
+    t.join(timeout=3)
+    assert ei.value.envelope.type is ErrorType.WORKER_UNAVAILABLE
+    assert worker.killed == 1
+    wrk.close()

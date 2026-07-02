@@ -112,3 +112,25 @@ def test_concurrent_start_spawns_exactly_one_thread() -> None:
     assert len(live) == 1  # exactly one sweeper despite 8 concurrent start() calls
     reaper.stop()
     assert reaper._thread is None
+
+
+def test_start_after_stop_resumes_sweeping() -> None:
+    """R3: start() after stop() must RESUME real sweeping (start() clears the stop signal).
+
+    stop() sets the stop Event and never clears it; ``_run`` loops on ``while not
+    self._stop.wait(...)``. Without ``self._stop.clear()`` in start(), a restarted daemon's first
+    wait() returns True immediately and the thread exits without ever reaping — a silent no-op
+    reaper (the abandoned-session leak N5 the reaper exists to close).
+    """
+    mgr = _CountingManager()
+    reaper = PeriodicReaper(mgr, interval_s=0.005)
+    reaper.start()
+    assert mgr.first.wait(2), "reaper never swept before stop"
+    reaper.stop()
+    # Clean the progress event; the thread is dead after stop()'s join, so nothing sets it now.
+    mgr.first.clear()
+    reaper.start()  # RESTART
+    try:
+        assert mgr.first.wait(2), "reaper did NOT resume sweeping after stop()+start() (R3)"
+    finally:
+        reaper.stop()
