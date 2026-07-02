@@ -709,3 +709,45 @@ def test_decompile_stream_raises_and_kills_on_chunk_flood(
     assert ei.value.envelope.type is ErrorType.WORKER_UNAVAILABLE
     assert worker.killed == 1
     wrk.close()
+
+
+class _FlipSockSession:
+    """A session stand-in whose ``.sock`` returns the socket on the FIRST read, then ``None``.
+
+    Simulates a concurrent lock-free ``kill_worker`` nulling ``sess.sock`` between a check and a
+    use: if ``_send_cancel`` re-reads ``.sock`` (the old TOCTOU) the 2nd read is ``None`` →
+    ``AttributeError``; if it snapshots once (R11 fix) only one read happens and the send succeeds.
+    """
+
+    def __init__(self, sock: socket.socket) -> None:
+        self._sock = sock
+        self.sock_reads = 0
+        self.active_stream_id: str | None = "rid-flip"
+
+    @property
+    def sock(self) -> socket.socket | None:
+        self.sock_reads += 1
+        return self._sock if self.sock_reads == 1 else None
+
+
+def test_send_cancel_snapshots_sock_no_toctou() -> None:
+    """R11: ``_send_cancel`` snapshots ``sess.sock`` once, so a concurrent kill can't crash it.
+
+    A session whose ``.sock`` flips to ``None`` on the 2nd read models the race. With the snapshot
+    fix ``.sock`` is read exactly once and the ``$/cancel`` frame is sent on the captured socket;
+    the pre-fix double-read would have raised on ``None.sendall``.
+    """
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+    adapter._sessions[_SID] = _FlipSockSession(srv)  # type: ignore[assignment]
+
+    adapter._send_cancel(_SID)  # must NOT raise (snapshot), and must send on the captured socket
+
+    sess = adapter._sessions[_SID]
+    assert sess.sock_reads == 1  # type: ignore[attr-defined]  # snapshotted, not re-read (no TOCTOU)
+    wrk.settimeout(2.0)
+    frame = _read_request(wrk)
+    assert f.is_cancel_notification(frame)  # the cancel was sent on the captured socket
+    wrk.close()
+    srv.close()

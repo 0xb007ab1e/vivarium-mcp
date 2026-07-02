@@ -116,8 +116,11 @@ $ssl_client_s_dn;`). The server trusts the identity **only** when the secret mat
 >    secret can forge any identity.
 > 2. **Set a strong `VIVARIUM_HTTP_PROXY_SHARED_SECRET`** (≥16 chars, from your secret manager;
 >    the mode refuses to boot without one) and have the proxy **strip** any client-supplied
->    `x-proxy-auth`/`x-client-cert-subject` headers before injecting its own (so a client can't
->    smuggle them through). Rotate it via `runbooks/secret-rotation.md`.
+>    `x-proxy-auth`/`x-client-cert-subject` headers and **REPLACE** them with its own — use a *set*
+>    directive (nginx `proxy_set_header`), **never** an *append*/`add_header`. The server reads the
+>    **first** value of a repeated header (first-value-wins), so an appending proxy would let a
+>    client's forged identity header win if it arrives first (CWE-290). Rotate the secret via
+>    `runbooks/secret-rotation.md`.
 > 3. **Enforce per-client rate limiting AT THE PROXY** (gap round-4 Q9). The server's own limiter
 >    (`VIVARIUM_HTTP_RATE_PER_SECOND`) keys on the peer IP and does NOT trust `X-Forwarded-For`, so
 >    behind a proxy all principals share ONE bucket — a per-principal request-rate DoS isn't bounded
