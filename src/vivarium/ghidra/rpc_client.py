@@ -910,20 +910,27 @@ class RpcGhidraAdapter:
         the sole writer concurrent with that read (full-duplex-safe), and a plain ``_call``
         refuses the socket while the flag is set, so none is mid-transaction.
 
+        The mutable ``sess.sock`` is **snapshotted once** into a local: a concurrent lock-free
+        ``kill_worker`` → ``_close_socket`` may null it, and re-reading after the ``None`` guard was
+        a check-then-use TOCTOU (``AttributeError`` on ``None.sendall`` — R11/round-5). Operating on
+        the snapshot removes that window; the send is still best-effort (a send on a just-closed fd
+        is caught by the caller's suppression).
+
         Args:
             sid: The session id whose worker to signal.
         """
         sess = self._sessions.get(sid)
-        if sess is None or sess.sock is None:
-            return  # no live connection to signal on
+        if sess is None:
+            return  # no such session — nothing to signal
+        sock = sess.sock  # snapshot once (a concurrent kill may null sess.sock — see docstring)
         stream_id = sess.active_stream_id
-        if stream_id is None:
-            return  # no in-flight stream to cancel — nothing to target (a no-op)
+        if sock is None or stream_id is None:
+            return  # no live connection / no in-flight stream to target (a no-op)
         frame = rpc_framing.encode_frame(
             rpc_framing.build_cancel(stream_id),
             max_frame_bytes=self._max_response_bytes,
         )
-        sess.sock.sendall(frame)
+        sock.sendall(frame)
 
     def disassemble(self, sid: str, a: s.DisassembleIn) -> s.DisassembleOut:
         """Disassemble a bounded range or function."""
