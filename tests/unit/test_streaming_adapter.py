@@ -751,3 +751,45 @@ def test_send_cancel_snapshots_sock_no_toctou() -> None:
     assert f.is_cancel_notification(frame)  # the cancel was sent on the captured socket
     wrk.close()
     srv.close()
+
+
+@pytest.mark.parametrize(
+    ("seqs", "valid_prefix"),
+    [
+        ([0, 0], 1),  # DUPLICATE: seq 0 repeated (non-advancing) — expected 1
+        ([0, 1, 1], 2),  # DUPLICATE after advancing: 0,1 then 1 again — expected 2
+        ([0, 1, 0], 2),  # BACKWARD after advancing: 0,1 then back to 0 — expected 2
+    ],
+)
+def test_decompile_stream_raises_and_kills_on_backward_or_duplicate_seq(
+    seqs: list[int], valid_prefix: int
+) -> None:
+    """R13: a backward or duplicate chunk seq is a protocol violation → kill + worker-unavailable.
+
+    The gap-free monotonic invariant is that each chunk's seq equals the previous + 1. The existing
+    coverage only exercised a FORWARD gap (0 -> 2); a hostile/buggy worker sending a duplicate
+    (non-advancing) or backward seq must trip the same invariant. The valid prefix streams, then the
+    first violating chunk raises and the worker is killed + evicted.
+    """
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+
+    def _serve() -> None:
+        req = _read_request(wrk)
+        rid = req["id"]
+        for seq in seqs:
+            _send_frame(wrk, f.build_chunk(rid, seq, "function", _chunk_payload(seq)))
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    it = adapter.decompile_stream(_SID, DecompileStreamIn(session_id=_SID, limit=len(seqs)))
+    # The gap-free prefix streams fine (seq 0..valid_prefix-1).
+    for i in range(valid_prefix):
+        assert next(it).address == f"0x{0x00401000 + i * 0x10:08x}"
+    with pytest.raises(GhidraMcpError) as ei:
+        next(it)  # the backward/duplicate seq trips the invariant
+    t.join(timeout=3)
+    assert ei.value.envelope.type is ErrorType.WORKER_UNAVAILABLE
+    assert worker.killed == 1
+    wrk.close()
