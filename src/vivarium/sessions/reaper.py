@@ -56,6 +56,13 @@ class PeriodicReaper:
         with self._lock:
             if self._thread is not None:
                 return
+            # Reset the stop signal so a start() AFTER a prior stop() actually sweeps. stop() SETS
+            # the Event and never clears it, and _run loops on `while not self._stop.wait(...)`, so
+            # without this a restarted daemon's first wait() returns True immediately → the thread
+            # exits without ever reaping — a silent no-op reaper (the abandoned-session leak N5
+            # returns). Cleared here (under the lock, only on a real (re)start), not in stop() —
+            # clearing in stop() could let an in-flight _run miss the exit signal (R3/round-5).
+            self._stop.clear()
             self._thread = threading.Thread(
                 target=self._run, name="vivarium-session-reaper", daemon=True
             )

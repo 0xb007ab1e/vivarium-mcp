@@ -32,7 +32,10 @@ from typing import Any, cast
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from vivarium import metrics
+from vivarium.logging import get_logger
 from vivarium.server.auth import AuthContext, Authenticator
+
+_log = get_logger(__name__)
 
 #: ASGI ``scope["state"]`` key under which :class:`AuthenticationMiddleware` stashes the
 #: authenticated :class:`~vivarium.server.auth.Principal` for the per-request, server-side
@@ -313,16 +316,35 @@ class AuthenticationMiddleware:
             )  # preflight carries no credentials — let CORS handle
             return
         authorization = _header(scope, b"authorization")
-        principal = self.authenticator.authenticate(
-            AuthContext(
-                authorization=authorization.decode("latin-1") if authorization else None,
-                # The verified peer cert (mTLS — ADR-019 D2), or None for non-mTLS / no client cert.
-                peer_certificate=_peer_certificate(scope),
-                # Lowercased header map (ADR-034) — read only by the reverse-proxy authenticator's
-                # configured secret/identity headers; other authenticators ignore it.
-                headers=_header_map(scope),
+        try:
+            principal = self.authenticator.authenticate(
+                AuthContext(
+                    # latin-1 decode is total (maps all 256 byte values) — it never raises on a
+                    # malformed header; the bytes reach the authenticator, which validates them.
+                    authorization=authorization.decode("latin-1") if authorization else None,
+                    # The verified peer cert (mTLS — ADR-019 D2), or None for non-mTLS / no cert.
+                    peer_certificate=_peer_certificate(scope),
+                    # Lowercased header map (ADR-034) — read only by the reverse-proxy
+                    # authenticator's secret/identity headers; other authenticators ignore it.
+                    headers=_header_map(scope),
+                )
             )
-        )
+        except Exception as exc:
+            # An authenticator fault must NEVER fall through to the app (fail closed at this trust
+            # boundary — master §2). Record a deny, log the error TYPE server-side only (never the
+            # message/traceback — it could echo the token/headers; master §5 redaction), and return
+            # a generic 500 with no internals to the client (topic-error-handling).
+            metrics.record_auth_decision(self.mode, metrics.AUTH_DENY)
+            _log.error(
+                "http.auth.error",
+                extra={
+                    "event": "auth_fault",
+                    "auth_mode": self.mode,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            await _send_error(send, 500, "Internal Server Error", "Authentication error.")
+            return
         if principal is None:
             metrics.record_auth_decision(self.mode, metrics.AUTH_DENY)
             await _send_error(send, 401, "Unauthorized", "Authentication required.")
