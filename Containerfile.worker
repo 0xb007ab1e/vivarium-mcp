@@ -801,6 +801,12 @@ COPY --from=boost-fidgen --chown=root:root /out/boost.fidbf /opt/vivarium/fid/bo
 COPY --from=boost-fidgen --chown=root:root \
     /out/boost.fidbf.provenance.json /opt/vivarium/fid/boost.fidbf.provenance.json
 
+# DELIBERATE Trivy HIGH/CRITICAL trip — round-7 W4 image-scan-gate red-block validation ONLY.
+# DO NOT MERGE. Drops a pinned-vulnerable Python lockfile (PyYAML==5.3.1 → CVE-2020-14343, CRITICAL)
+# into the shipped image so Trivy's `vuln` (language) scanner fails the image-scan leg, proving the
+# required image-scan-gate red-blocks a merge. Throwaway branch/PR, closed unmerged.
+COPY deploy/_trivy_redblock_probe.requirements.txt /opt/vuln-probe/requirements.txt
+
 # The shipped worker runs as the runtime's non-root UID (inherited from `runtime`); state it
 # explicitly so the final image's USER is unambiguously non-root (topic-container-k8s; Trivy DS-0002).
 USER 65532:65532
