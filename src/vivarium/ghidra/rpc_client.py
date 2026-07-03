@@ -780,6 +780,11 @@ class RpcGhidraAdapter:
                 # _MAX_STREAM_CHUNKS (the flood cap above) and never fewer than the `next_seq`
                 # already produced → clamp to [next_seq, _MAX_STREAM_CHUNKS]; a non-numeric total
                 # falls back to the produced count (fail closed to a safe, honest value).
+                # W6 (round-7, accepted): this clamp lives in rpc_client — NOT one of the 7
+                # 100%-critical + mutation-scoped modules — BY DESIGN. It is a non-boundary ETA
+                # hint, not a security invariant (the streaming trust boundary — BOLA/replay/seq —
+                # is in the 100%-gated jobs/streaming.py). Unit-tested (test_streaming_adapter.py:
+                # huge + non-numeric cases); a helper in a mutated module would be over-engineering.
                 try:
                     reported_total = int(result.get("total", next_seq))
                 except (TypeError, ValueError):
