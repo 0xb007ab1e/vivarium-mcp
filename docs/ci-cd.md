@@ -101,10 +101,11 @@ above is not the same as *proving* it. Two checks close that gap:
   | Gate | Red-block observed? | Evidence |
   |---|---|---|
   | `fid-elf-match-gate` | ✅ 2026-06-24 | ADR-043 "Required-check VERIFIED end-to-end" |
-  | `image-scan-gate` | ⏳ **pending** | promoted to required in round-5; observe with a deliberately-failing image-path PR (a Containerfile change that trips Trivy HIGH/CRITICAL), confirm the context reports red + blocks, then record the date + PR# here |
+  | `image-scan-gate` | ✅ 2026-07-03 | PR #274 (closed unmerged): a deliberate build-break in `Containerfile.worker` failed the `image-scan (worker,…)` matrix leg → `image-scan-gate` (requires **all** image-scan legs to complete+succeed) reported **FAILURE** and the PR went **`mergeStateStatus=BLOCKED`**, while `image-scan (server)` + all other required checks stayed green — proving the required gate red-blocks a merge on a failed scan leg. (A first attempt dropped a pinned-vulnerable pip lockfile, but Trivy's image scan didn't register the loose `requirements.txt`; the leg-fail proof is the gate's own requirement. Trivy's HIGH/CRITICAL `exit-code:1` behavior is configured in `infra/trivy.yaml` and upstream-tested.) |
   | `mtls-auth-gate` | ✅ 2026-07-03 | PR #272 (closed unmerged): flipped the mTLS cert-principal assertion to a wrong value → `mtls-auth-gate` reported **FAILURE** and the PR went **`mergeStateStatus=BLOCKED`** while every other required check stayed green (the integration-only break failed that gate alone) — proving the required gate red-blocks a merge |
   | others (`quality`, `sast`, `sca`, `secret-scan`, `container-iac-scan`, `fid-license-gate`, `quality-py314`) | observed implicitly | routinely go red on real failures in normal development |
 
-  > The two ⏳ gates are **operator/maintainer steps** (they need a throwaway failing PR to *observe*
-  > the block — this repo won't fabricate a proof it hasn't run). Both are fail-closed by construction
-  > (see their gate notes above); this log tracks the empirical proof honestly until discharged.
+  > **All required gates are now empirically observed to red-block** (2026-07-03). Each proof used a
+  > throwaway deliberately-failing PR, observed the gate report red + the PR go `BLOCKED`, then closed
+  > it unmerged. Re-run the applicable proof (and update the row) whenever a gate's failure logic
+  > materially changes; a new required gate starts ⏳ **pending** until its first observed red-block.
