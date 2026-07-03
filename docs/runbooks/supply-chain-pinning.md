@@ -23,8 +23,10 @@
   ```bash
   export ENGINE=podman      # or: export ENGINE=docker
   ```
-- **Confirm the exact Ghidra 11.x patch with the SME first** (PLAN §9 open item) — do not guess a
-  version. The official releases live at `https://github.com/NationalSecurityAgency/ghidra/releases`.
+- **Ghidra version:** the project ships **Ghidra 12.1.2** (with **JDK 21**) — see `CLAUDE.md` Stack
+  and `docs/getting-started.md`. Pin to that unless deliberately upgrading; the official releases
+  live at `https://github.com/NationalSecurityAgency/ghidra/releases`. (Historical note: the original
+  PLAN §9 left the exact patch as an SME-confirm open item; it was resolved to 12.1.2.)
 
 > **Runnable companion:** `infra/pin-supply-chain.sh` automates Phases 1–4 (idempotent, fail-closed,
 > pinning-only — it does NOT install/build/commit). Run **that script**, not this `.md` (this file is
@@ -32,7 +34,7 @@
 > prompt, prefixed with `!`. Steps are ordered; do not skip the verify phase.
 >
 > ```bash
-> # base images + CI-action SHAs + lockfile now; add the GHIDRA_* env vars once the SME confirms 11.x:
+> # base images + CI-action SHAs + lockfile now; the GHIDRA_* env vars pin the shipped 12.1.2 release:
 > ENGINE=podman ./infra/pin-supply-chain.sh
 > ```
 
@@ -74,12 +76,12 @@ grep -n "REPLACE_WITH_DIGEST_FOR_cgr" Containerfile.* || echo "base images pinne
 
 ## Phase 2 — Pin the Ghidra release (4 ARGs) with verified integrity (ADR-003)
 
-Confirm the version with the SME, then capture the release zip URL + **publisher SHA-256** and
-verify the downloaded artifact before trusting it (fail-closed — supply-chain integrity).
+Capture the release zip URL + **publisher SHA-256** for the shipped version and verify the
+downloaded artifact before trusting it (fail-closed — supply-chain integrity).
 
 ```bash
-# 2a. Set the SME-confirmed values (EXAMPLE shape — replace with the confirmed 11.x release):
-GHIDRA_VERSION="11.x.y"                                   # e.g. 11.3.2  (SME-confirmed)
+# 2a. Set the shipped values (12.1.2 — replace only when deliberately upgrading; re-verify the SHA):
+GHIDRA_VERSION="12.1.2"                                   # the shipped release (CLAUDE.md Stack)
 GHIDRA_RELEASE_TAG="Ghidra_${GHIDRA_VERSION}_build"       # exact tag on the releases page
 GHIDRA_ZIP_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/${GHIDRA_RELEASE_TAG}/ghidra_${GHIDRA_VERSION}_PUBLIC_<DATE>.zip"
 
