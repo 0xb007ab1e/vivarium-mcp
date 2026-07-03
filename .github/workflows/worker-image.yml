@@ -241,6 +241,7 @@ jobs:
     permissions:
       contents: read           # the App token performs the writes; the job token only reads.
       actions: read            # download-artifact (same run).
+      packages: read           # V6: pull the GHCR signature for the pre-PR cosign verify.
     steps:
       - name: Repin App configured?
         id: cfg
@@ -274,6 +275,41 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # actions/download-artifact@v8.0.1
         with:
           name: worker-image-digest
+      - name: Install cosign
+        if: steps.cfg.outputs.ok == 'true'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # sigstore/cosign-installer@v4.1.2
+      - name: Log in to GHCR (read-only, for signature verify)
+        if: steps.cfg.outputs.ok == 'true'
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # docker/login-action@v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify the signed worker digest (cosign) before proposing the pin
+        # V6 defense-in-depth: verify the digest is THIS repo's worker-image.yml-signed image
+        # BEFORE opening the trust-pin PR, so a wrong/tampered digest never reaches a reviewer. Runs
+        # before the App token is minted (fail closed without acquiring write creds). Downstream
+        # consumers verify again at pull; this fails it earlier + louder, at proposal time.
+        if: steps.cfg.outputs.ok == 'true'
+        env:
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          DIGEST="$(grep -oiE 'sha256:[0-9a-f]{64}' worker-image.digest | head -n1 || true)"
+          if [ -z "${DIGEST}" ]; then
+            echo "::error::no sha256 digest found in the worker-image-digest artifact"; exit 1
+          fi
+          IMAGE="ghcr.io/${OWNER}/vivarium-worker@${DIGEST}"
+          if ! cosign verify \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --certificate-identity-regexp "^https://github.com/${REPO}/.github/workflows/worker-image.yml@" \
+              "${IMAGE}" >/dev/null; then
+            echo "::error::cosign verify FAILED for ${IMAGE} — refusing to propose an unverified" \
+                 "trust pin (possible supply-chain tampering)."
+            exit 1
+          fi
+          echo "::notice::cosign-verified ${IMAGE} — safe to propose the pin bump."
       - name: Mint the repin GitHub App token
         id: app
         if: steps.cfg.outputs.ok == 'true'
@@ -295,8 +331,18 @@ jobs:
           if [ -z "${DIGEST}" ]; then
             echo "::error::no sha256 digest found in the worker-image-digest artifact"; exit 1
           fi
-          # Read the current pin from the default branch via the API (need its blob sha to update it).
-          cur="$(gh api "repos/${REPO}/contents/${PIN_FILE}?ref=${DEFAULT_BRANCH}")"
+          BRANCH="ci/bump-worker-pin-${TAG}"
+          main_sha="$(gh api "repos/${REPO}/git/ref/heads/${DEFAULT_BRANCH}" --jq .object.sha)"
+          # Create the bump branch off the default-branch head FIRST (reset it if a prior attempt left
+          # one), THEN read + write the pin file relative to THAT branch. Reading the blob sha from the
+          # branch we just created — not from the default branch before creating it — makes the sha
+          # used for the Contents PUT always consistent with the branch head, eliminating the 409 race
+          # where `main` advanced between reading the sha and the PUT (O5). `concurrency:
+          # cancel-in-progress` serializes runs per ref, so the branch head is stable across these calls.
+          gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/heads/${BRANCH}" -f sha="${main_sha}" >/dev/null 2>&1 \
+            || gh api -X PATCH "repos/${REPO}/git/refs/heads/${BRANCH}" -f sha="${main_sha}" -F force=true >/dev/null
+          # Read the current pin FROM THE BUMP BRANCH (need its blob sha to update it).
+          cur="$(gh api "repos/${REPO}/contents/${PIN_FILE}?ref=${BRANCH}")"
           cur_sha="$(printf '%s' "${cur}" | jq -r .sha)"
           cur_txt="$(printf '%s' "${cur}" | jq -r .content | base64 -d)"
           CURRENT="$(printf '%s' "${cur_txt}" | grep -oiE 'sha256:[0-9a-f]{64}' | head -n1 || true)"
@@ -307,11 +353,6 @@ jobs:
           # Delegated to the extracted, unit-tested transform (V2 — tests/unit/test_bump_pin.py) so
           # this trust-anchor rewrite is not untested inline shell; it fails closed on a bad digest.
           new_txt="$(printf '%s' "${cur_txt}" | ./scripts/bump_pin.sh "${DIGEST}")"
-          BRANCH="ci/bump-worker-pin-${TAG}"
-          main_sha="$(gh api "repos/${REPO}/git/ref/heads/${DEFAULT_BRANCH}" --jq .object.sha)"
-          # Create the bump branch off the default-branch head (reset it if a prior attempt left one).
-          gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/heads/${BRANCH}" -f sha="${main_sha}" >/dev/null 2>&1 \
-            || gh api -X PATCH "repos/${REPO}/git/refs/heads/${BRANCH}" -f sha="${main_sha}" -F force=true >/dev/null
           # Commit via the Contents API → GitHub SIGNS the resulting commit (verified → satisfies the
           # required-signatures branch rule, which a local bot `git commit` cannot).
           gh api -X PUT "repos/${REPO}/contents/${PIN_FILE}" \
