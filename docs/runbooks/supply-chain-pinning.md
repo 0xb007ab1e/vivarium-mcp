@@ -218,6 +218,34 @@ Renovate GitHub App on the repo (or add a self-hosted Renovate workflow), confir
 `renovate.json`, and verify its first PRs pass all required checks + preserve digest pinning. Then this
 section becomes "Renovate opens bump PRs; a human reviews + merges."
 
+## Repin GitHub App (one-time — enables the auto-repin PR to actually merge)
+
+`worker-image.yml`'s `propose-pin-bump` job opens the PR that advances the worker-image trust pin
+(`.github/worker-image.pin`) on each release tag. It uses a **GitHub App token**, not the built-in
+`GITHUB_TOKEN`, because a bot-token PR is doubly blocked on `main` (round-6 fix): its commit would be
+**unsigned** (fails `required_signatures` + `enforce_admins`) and its `pull_request` CI would be
+**held** (GitHub loop-prevention → required contexts never report). The App token fixes both: the pin
+commit is created via the **Contents API** (GitHub web-flow-signs it → verified) and the App-opened PR
+**triggers** `pull_request` CI, so all required checks run and the PR reaches green + mergeable with no
+manual reopen or re-commit. **The human still reviews the digest and merges** (advancing trust stays a
+gated decision).
+
+**Provision it (once):**
+1. **Create a GitHub App** (Settings → Developer settings → GitHub Apps → New): repository permissions
+   **Contents: Read and write** + **Pull requests: Read and write** (nothing else). No webhook needed.
+2. **Install it** on `0xb007ab1e/vivarium-mcp` (this repo only — least privilege).
+3. Generate a **private key** (.pem) for the App and note its **App ID**.
+4. Add two repo secrets (Settings → Secrets and variables → Actions):
+   - `REPIN_APP_ID` = the App's numeric ID.
+   - `REPIN_APP_PRIVATE_KEY` = the full contents of the .pem.
+5. **Until these secrets exist** the job SKIPS with a warning — bump `.github/worker-image.pin`
+   manually with a **signed** commit (a plain bot/unsigned commit cannot merge under branch
+   protection). Rotate the App key on the normal cadence (`docs/runbooks/secret-rotation.md`).
+
+**Verify:** on the next release tag (or a test tag), confirm the auto-opened `ci: bump worker-image
+trust pin …` PR (a) has a **verified** commit and (b) runs the full required-check set and reaches
+mergeable without a manual reopen.
+
 ## Rollback / abort
 - Any phase: `git checkout -- Containerfile.* infra/Makefile .github/workflows/*.yml .env.example deploy/*.sh`
   restores the placeholders; `rm -f uv.lock requirements*.lock` undoes the lock. Pins are immutable —

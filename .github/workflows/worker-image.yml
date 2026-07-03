@@ -213,33 +213,67 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Propose advancing the live-regression trust pin to the freshly signed worker digest.
-  # Runs only on release-tag pushes (not workflow_dispatch). Opens a REVIEWED PR that bumps
-  # .github/worker-image.pin — the human merge is the gate (changing what CI trusts is a
-  # supply-chain decision, never auto-applied; workflow-gated-actions). Uses GITHUB_TOKEN only
-  # (contents:write + pull-requests:write) — no long-lived PAT. No-op if the pin is unchanged.
+  # Runs only on release-tag pushes. Opens a REVIEWED PR that bumps .github/worker-image.pin — the
+  # human merge is the gate (changing what CI trusts is a supply-chain decision, never auto-applied;
+  # workflow-gated-actions). No-op if the pin is unchanged.
+  #
+  # Uses a GitHub App token (NOT the built-in GITHUB_TOKEN) — this fixes the two problems that made
+  # the old bot-authored PR permanently unmergeable (round-6 repin-flow fix):
+  #   1. SIGNED commit: the pin commit is created via the GitHub Contents API, so GitHub web-flow-
+  #      SIGNS it (verified) — satisfying main's required-signatures rule (enforce_admins on). A
+  #      local `git commit` here is authored by github-actions[bot] and UNSIGNED, so the merge is
+  #      prohibited ("base branch policy prohibits the merge") even with every check green.
+  #   2. Checks actually RUN: a PR opened with an App (or PAT) token triggers `pull_request` CI
+  #      normally; a GITHUB_TOKEN-opened PR does NOT (GitHub loop-prevention), so the required
+  #      contexts never report → permanent BLOCKED. A `workflow_dispatch` fallback can't fix it
+  #      because fid-elf-match-gate / image-scan-gate are `if: event == pull_request`-only and skip
+  #      on dispatch.
+  #
+  # SETUP (one-time, maintainer): create a GitHub App with repo permissions Contents: write +
+  # Pull requests: write, install it on this repo, and store its credentials as repo secrets
+  # REPIN_APP_ID + REPIN_APP_PRIVATE_KEY. Until those secrets exist this job SKIPS with a warning
+  # (bump .github/worker-image.pin manually with a SIGNED commit). Setup: docs/runbooks/supply-chain-pinning.md.
   # ---------------------------------------------------------------------------
   propose-pin-bump:
     needs: build-scan-sign
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     permissions:
-      contents: write          # push the bump branch.
-      pull-requests: write     # open the PR.
-      actions: write           # workflow_dispatch ci.yml to run required checks on the bot PR.
+      contents: read           # the App token performs the writes; the job token only reads.
+      actions: read            # download-artifact (same run).
     steps:
-      - name: Checkout (default branch)
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # actions/checkout@v6.0.3
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          fetch-depth: 0
+      - name: Repin App configured?
+        id: cfg
+        env:
+          APP_ID: ${{ secrets.REPIN_APP_ID }}
+        run: |
+          if [ -n "${APP_ID}" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::REPIN_APP_ID / REPIN_APP_PRIVATE_KEY not set — skipping the auto-repin" \
+                 "PR. Bump .github/worker-image.pin manually with a SIGNED commit, or provision the" \
+                 "repin GitHub App (see this job's header comment)."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Download signed worker digest
+        if: steps.cfg.outputs.ok == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # actions/download-artifact@v8.0.1
         with:
           name: worker-image-digest
-      - name: Open PR to bump the trust pin (if changed)
+      - name: Mint the repin GitHub App token
+        id: app
+        if: steps.cfg.outputs.ok == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # actions/create-github-app-token@v3.2.0
+        with:
+          app-id: ${{ secrets.REPIN_APP_ID }}
+          private-key: ${{ secrets.REPIN_APP_PRIVATE_KEY }}
+      - name: Open a SIGNED trust-pin bump PR (Contents API commit + App-token PR)
+        if: steps.cfg.outputs.ok == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
           TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           PIN_FILE=".github/worker-image.pin"
@@ -247,24 +281,32 @@ jobs:
           if [ -z "${DIGEST}" ]; then
             echo "::error::no sha256 digest found in the worker-image-digest artifact"; exit 1
           fi
-          CURRENT="$(grep -oiE 'sha256:[0-9a-f]{64}' "${PIN_FILE}" | head -n1 || true)"
+          # Read the current pin from the default branch via the API (need its blob sha to update it).
+          cur="$(gh api "repos/${REPO}/contents/${PIN_FILE}?ref=${DEFAULT_BRANCH}")"
+          cur_sha="$(printf '%s' "${cur}" | jq -r .sha)"
+          cur_txt="$(printf '%s' "${cur}" | jq -r .content | base64 -d)"
+          CURRENT="$(printf '%s' "${cur_txt}" | grep -oiE 'sha256:[0-9a-f]{64}' | head -n1 || true)"
           if [ "${DIGEST}" = "${CURRENT}" ]; then
             echo "::notice::worker-image pin already at ${DIGEST} — no bump needed"; exit 0
           fi
+          # New content: preserve the header, replace the digest line (single trailing newline).
+          new_txt="$( { printf '%s' "${cur_txt}" | grep -vE '^sha256:'; printf '%s\n' "${DIGEST}"; } )"
           BRANCH="ci/bump-worker-pin-${TAG}"
-          # Rewrite the digest line, preserving the documentation header.
-          grep -vE '^sha256:' "${PIN_FILE}" > "${PIN_FILE}.tmp"
-          printf '%s\n' "${DIGEST}" >> "${PIN_FILE}.tmp"
-          mv "${PIN_FILE}.tmp" "${PIN_FILE}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "${BRANCH}"
-          git add "${PIN_FILE}"
-          git commit -m "ci(supply-chain): bump worker-image trust pin to ${TAG} (${DIGEST})"
-          git push -u origin "${BRANCH}" --force-with-lease
-          gh pr create --base "${{ github.event.repository.default_branch }}" --head "${BRANCH}" \
+          main_sha="$(gh api "repos/${REPO}/git/ref/heads/${DEFAULT_BRANCH}" --jq .object.sha)"
+          # Create the bump branch off the default-branch head (reset it if a prior attempt left one).
+          gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/heads/${BRANCH}" -f sha="${main_sha}" >/dev/null 2>&1 \
+            || gh api -X PATCH "repos/${REPO}/git/refs/heads/${BRANCH}" -f sha="${main_sha}" -F force=true >/dev/null
+          # Commit via the Contents API → GitHub SIGNS the resulting commit (verified → satisfies the
+          # required-signatures branch rule, which a local bot `git commit` cannot).
+          gh api -X PUT "repos/${REPO}/contents/${PIN_FILE}" \
+            -f message="ci(supply-chain): bump worker-image trust pin to ${TAG} (${DIGEST})" \
+            -f branch="${BRANCH}" \
+            -f sha="${cur_sha}" \
+            -f content="$(printf '%s\n' "${new_txt}" | base64 -w0)" >/dev/null
+          # Open the PR with the APP token → pull_request CI runs (App/PAT events trigger workflows).
+          gh pr create --base "${DEFAULT_BRANCH}" --head "${BRANCH}" \
             --title "ci: bump worker-image trust pin to ${TAG}" \
-            --body "Automated by worker-image.yml on release \`${TAG}\`.
+            --body "Automated by worker-image.yml on release \`${TAG}\` (signed via the repin GitHub App).
 
           Advances the live-regression trust pin (\`.github/worker-image.pin\`) to the freshly
           built+signed worker image digest \`${DIGEST}\`.
@@ -273,12 +315,5 @@ jobs:
           cosign-signed worker image from this release's worker-image run. Merging advances what
           live-regression's default verify-and-pull path trusts.
 
-          Required checks are auto-triggered on this branch via \`workflow_dispatch\` (a
-          \`GITHUB_TOKEN\`-opened PR does not auto-run \`pull_request\` CI), so no maintainer reopen
-          is needed — just review the digest and merge once green."
-          # A PR opened with GITHUB_TOKEN does NOT auto-run pull_request CI (GitHub loop-prevention),
-          # so trigger the required checks on the branch via workflow_dispatch — which DOES fire even
-          # under GITHUB_TOKEN (the documented exception). The dispatched ci.yml run posts the same
-          # named check-runs onto the branch head SHA, satisfying branch-protection required checks
-          # without a manual close+reopen. Needs the job's actions:write permission (above).
-          gh workflow run ci.yml --ref "${BRANCH}"
+          The commit is GitHub-signed (Contents API) and this PR runs the full required-check set
+          under the App actor, so it reaches green + mergeable with no manual reopen or re-commit."
