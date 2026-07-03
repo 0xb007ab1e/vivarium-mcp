@@ -247,7 +247,10 @@ def test_mtls_bridge_authenticates_as_cert_derived_principal(tmp_path: Path) -> 
 
     # The authenticated principal is the cert's CN — proves the verified cert traversed the bridge.
     assert resp.status == 200
-    assert body == "alice"
+    # DELIBERATE FAILURE — round-7 W4 gate-red-block validation ONLY. DO NOT MERGE.
+    # Asserts a wrong principal so mtls-auth-gate goes red, proving the required gate blocks a
+    # merge. This branch/PR is a throwaway and will be closed unmerged; revert this one line.
+    assert body == "mallory"  # (real value is "alice")
 
 
 def test_mtls_untrusted_ca_cert_rejected_at_handshake_live(tmp_path: Path) -> None:
