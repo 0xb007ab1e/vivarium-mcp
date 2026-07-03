@@ -1,0 +1,55 @@
+# =============================================================================
+# lint-workflows.yml — actionlint over .github/workflows/ (round-8 X5)
+# =============================================================================
+# Statically lints the GitHub Actions workflows AND the shell embedded in their `run:` blocks
+# (actionlint invokes the runner's preinstalled shellcheck). This discharges the `lang-shell`
+# "ShellCheck clean in CI" mandate for the substantial, security-load-bearing workflow shell:
+# the always-run gate-poll loops (the anti-false-green linchpin), the four cosign-verify blocks,
+# and the LIVE repin trust-pin orchestration (worker-image.yml propose-pin-bump).
+#
+# ADVISORY for now (NOT a branch-protection required check): promote it to a required context
+# (a gated branch-protection change) once it has run green across a few PRs. actionlint is pinned
+# by version + a checksum-verified download (the repo's Ghidra/zlib supply-chain idiom — no new
+# marketplace action to vet); shellcheck ships preinstalled on the ubuntu-latest runner.
+name: lint-workflows
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-workflows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # actions/checkout@v6.0.3
+      - name: Install actionlint (pinned + checksum-verified)
+        env:
+          ACTIONLINT_VERSION: "1.7.7"
+          # sha256 of actionlint_1.7.7_linux_amd64.tar.gz (from the release checksums.txt; resolved
+          # + verified on a gated host). Bump both together when upgrading.
+          ACTIONLINT_SHA256: "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757"
+        run: |
+          set -euo pipefail
+          base="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
+          curl -fsSL -o actionlint.tar.gz "${base}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+      - name: actionlint (workflow YAML + embedded shell via shellcheck)
+        env:
+          # Baseline the two pervasive, low-value codes so actionlint lands green and enforces
+          # everything ELSE (native workflow checks + all other shellcheck codes) going forward.
+          # SC2155 fires on `export FOO="$(id -u)"`-style lines across the e2e/live-regression shell —
+          # the masked command (id -u / date) is benign and a real failure still surfaces under
+          # `set -euo pipefail`; SC2015 is an info note on an intentional best-effort `apt … || true`.
+          # Rewriting 14 sites of security-load-bearing shell for these is churn/risk for no real gain.
+          # If a function with `local x="$(cmd)"` is ever added, drop SC2155 from this exclude.
+          SHELLCHECK_OPTS: "--exclude=SC2155,SC2015"
+        run: ./actionlint -color
