@@ -895,6 +895,15 @@ class RpcGhidraAdapter:
         if sid in self._sessions:
             with contextlib.suppress(Exception):
                 self._send_cancel(sid)
+            # V1: the cancelled job's producer is otherwise abandoned mid-stream — its generator
+            # never resumes, so its finally (the sole clearer of active_stream_id) never runs and
+            # the session stays "session busy" for every plain call until eviction. Drain it now
+            # (AFTER $/cancel so the worker stops promptly): this consumes the worker's residual
+            # chunks + terminal frame — leaving the socket byte-clean so the next call does not
+            # desync — and runs the generator finally, which clears the flag and frees the session.
+            # Best-effort: the server-side cancel above is already authoritative.
+            with contextlib.suppress(Exception):
+                jobs.reap_cancelled(sid, a.job_id, caller=caller)
         return status
 
     def _send_cancel(self, sid: str) -> None:
