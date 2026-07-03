@@ -945,6 +945,38 @@ def test_decompile_stream_raises_and_kills_on_chunk_flood(
     wrk.close()
 
 
+def test_decompile_stream_raises_and_kills_on_progress_flood(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """X9 (round-8): more than ``_MAX_PROGRESS_FRAMES`` ``$/progress`` frames on a stream is a
+    hostile-worker DoS → kill (symmetric with the ``$/chunk`` flood cap and the analyze path).
+
+    The stream read-loop previously capped ``$/chunk`` but not ``$/progress``, so a worker could
+    emit endless progress frames to spin the loop to the deadline. The cap is shrunk via monkeypatch
+    so the test is fast/hermetic; the ``_MAX_PROGRESS_FRAMES``-th+1 frame trips it, mapped by the
+    universal kill handler to ``WORKER_UNAVAILABLE`` + SIGKILL.
+    """
+    monkeypatch.setattr("vivarium.ghidra.rpc_client._MAX_PROGRESS_FRAMES", 3)
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+
+    def _serve() -> None:
+        rid = _read_request(wrk)["id"]
+        for i in range(4):  # cap+1 progress frames; the 4th trips the flood cap (count 4 > 3)
+            _send_frame(wrk, f.build_progress(rid, i * 10, "analyzing"))
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    it = adapter.decompile_stream(_SID, DecompileStreamIn(session_id=_SID, limit=100))
+    with pytest.raises(GhidraMcpError) as ei:
+        next(it)  # the loop consumes 3 progress frames (continue), the 4th trips the per-call cap
+    t.join(timeout=3)
+    assert ei.value.envelope.type is ErrorType.WORKER_UNAVAILABLE
+    assert worker.killed == 1
+    wrk.close()
+
+
 class _FlipSockSession:
     """A session stand-in whose ``.sock`` returns the socket on the FIRST read, then ``None``.
 
