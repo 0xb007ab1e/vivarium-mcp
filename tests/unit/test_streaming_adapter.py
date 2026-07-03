@@ -273,6 +273,82 @@ def test_decompile_stream_refuses_when_a_stream_is_already_active() -> None:
     wrk.close()
 
 
+def test_w1_guard_refuses_start_during_the_cancel_drain_window() -> None:
+    """W1 (round-8 X1): a start is refused during the real concurrent cancel-DRAIN window.
+
+    The window W1 guards is timing-dependent: `cancel_job` calls `jobs.cancel` (frees the
+    one-active-per-session slot) and only THEN `reap_cancelled` drains the producer (whose generator
+    `finally` is the sole clearer of `active_stream_id`). Between those, the slot is free but the
+    flag is still set — a concurrent `start_decompile_stream` passes the job-manager cap and must be
+    stopped by the adapter guard. Drives that interleave with real threads + Events (no sleeps): a
+    worker that holds the drain open (blocks before streamA's terminal) parks `cancel_job` in the
+    drain while a second thread attempts a start, which must be refused (WORKER_UNAVAILABLE).
+    """
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    mgr = StreamingJobManager(
+        authorize=lambda _s, _c: None, limits=Limits(max_stream_buffer_chunks=2)
+    )
+    adapter = _ConnectedAdapter(
+        server_sock=srv,
+        launcher=lambda sid, path: worker,
+        socket_dir="/tmp/vivarium-test",  # noqa: S108  # test-only path; no real socket bound
+        tool_timeout_s=5.0,
+        analysis_timeout_s=5.0,
+        max_response_bytes=_CAP,
+        stream_jobs=mgr,
+    )
+    adapter.start_worker(_SID)
+
+    cancel_seen = threading.Event()  # set once the worker reads $/cancel (cancel_job now draining)
+    release_terminal = threading.Event()  # main sets this to let streamA finish draining
+
+    def _serve() -> None:
+        rid = _read_request(wrk)["id"]  # startA RPC
+        for i in range(2):  # 2 chunks fill the cap → the first pump pauses, streamA suspended
+            _send_frame(wrk, f.build_chunk(rid, i, "function", _chunk_payload(i)))
+        _read_request(wrk)  # the $/cancel from cancel_job's _send_cancel
+        cancel_seen.set()  # cancel_job is past jobs.cancel (slot freed); now blocking in drain recv
+        release_terminal.wait(5)  # hold the drain window open
+        _send_frame(wrk, {"jsonrpc": "2.0", "id": rid, "result": {"total": 2, "done": True}})
+
+    server = threading.Thread(target=_serve, daemon=True)
+    server.start()
+
+    job_a = adapter.start_decompile_stream(
+        _SID, DecompileStreamIn(session_id=_SID, limit=10), caller=_CALLER
+    )
+    assert adapter._sessions[_SID].active_stream_id is not None  # streamA owns the socket
+
+    cancel_err: list[BaseException] = []
+
+    def _cancel() -> None:
+        try:
+            adapter.cancel_job(_SID, JobHandleIn(session_id=_SID, job_id=job_a), caller=_CALLER)
+        except Exception as exc:  # record; assert on the main thread
+            cancel_err.append(exc)
+
+    canceller = threading.Thread(target=_cancel, daemon=True)
+    canceller.start()
+
+    assert cancel_seen.wait(5), "cancel_job never reached the drain window"
+    # In the window: jobs.cancel freed the manager slot, but active_stream_id is still set (the
+    # drain — the sole clearer — is parked in recv). A concurrent start must hit the W1 guard.
+    assert adapter._sessions[_SID].active_stream_id is not None
+    it_b = adapter.decompile_stream(_SID, DecompileStreamIn(session_id=_SID, limit=3))
+    with pytest.raises(GhidraMcpError) as ei:
+        next(it_b)
+    assert ei.value.envelope.type is ErrorType.WORKER_UNAVAILABLE
+
+    release_terminal.set()  # let streamA's drain complete → generator finally clears the flag
+    canceller.join(5)
+    server.join(5)
+    assert not cancel_err, f"cancel_job raised: {cancel_err}"
+    assert adapter._sessions[_SID].active_stream_id is None  # drain cleared it — session freed
+    assert worker.killed == 0  # clean drain, no timeout-kill
+    wrk.close()
+
+
 def test_decompile_stream_clamps_a_hostile_worker_total() -> None:
     """V9: the untrusted worker `total` is clamped to [produced, _MAX_STREAM_CHUNKS].
 
