@@ -246,13 +246,18 @@ jobs:
         id: cfg
         env:
           APP_ID: ${{ secrets.REPIN_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.REPIN_APP_PRIVATE_KEY }}
         run: |
-          if [ -n "${APP_ID}" ]; then
+          # V3: require BOTH secrets to enable the auto-repin. Guarding on APP_ID alone let an
+          # APP_ID-set-but-key-missing (or empty/malformed key) config bypass this clean skip and
+          # HARD-FAIL the downstream `create-github-app-token` step — defeating the intended
+          # graceful degradation. Gate on both so a partial config skips (with the warning) instead.
+          if [ -n "${APP_ID}" ] && [ -n "${APP_PRIVATE_KEY}" ]; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::REPIN_APP_ID / REPIN_APP_PRIVATE_KEY not set — skipping the auto-repin" \
-                 "PR. Bump .github/worker-image.pin manually with a SIGNED commit, or provision the" \
-                 "repin GitHub App (see this job's header comment)."
+            echo "::warning::REPIN_APP_ID / REPIN_APP_PRIVATE_KEY not both set — skipping the" \
+                 "auto-repin PR. Bump .github/worker-image.pin manually with a SIGNED commit, or" \
+                 "provision the repin GitHub App (see this job's header comment)."
             echo "ok=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Download signed worker digest
