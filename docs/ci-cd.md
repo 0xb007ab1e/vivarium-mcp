@@ -102,7 +102,7 @@ above is not the same as *proving* it. Two checks close that gap:
   |---|---|---|
   | `fid-elf-match-gate` | ✅ 2026-06-24 | ADR-043 "Required-check VERIFIED end-to-end" |
   | `image-scan-gate` | ⏳ **pending** | promoted to required in round-5; observe with a deliberately-failing image-path PR (a Containerfile change that trips Trivy HIGH/CRITICAL), confirm the context reports red + blocks, then record the date + PR# here |
-  | `mtls-auth-gate` | ⏳ **pending** | promoted to required in round-5; observe with a deliberately-failing mTLS-auth PR (break the cert-principal binding assertion), confirm red + blocks, then record here |
+  | `mtls-auth-gate` | ✅ 2026-07-03 | PR #272 (closed unmerged): flipped the mTLS cert-principal assertion to a wrong value → `mtls-auth-gate` reported **FAILURE** and the PR went **`mergeStateStatus=BLOCKED`** while every other required check stayed green (the integration-only break failed that gate alone) — proving the required gate red-blocks a merge |
   | others (`quality`, `sast`, `sca`, `secret-scan`, `container-iac-scan`, `fid-license-gate`, `quality-py314`) | observed implicitly | routinely go red on real failures in normal development |
 
   > The two ⏳ gates are **operator/maintainer steps** (they need a throwaway failing PR to *observe*
