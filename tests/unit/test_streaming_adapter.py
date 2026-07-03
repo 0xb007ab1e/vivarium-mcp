@@ -24,7 +24,7 @@ from tests.conftest import FrozenClock
 from vivarium.core.envelope import DataOrigin, Untrusted
 from vivarium.core.errors import ErrorType, GhidraMcpError
 from vivarium.ghidra import rpc_framing as f
-from vivarium.ghidra.rpc_client import RpcGhidraAdapter
+from vivarium.ghidra.rpc_client import _MAX_STREAM_CHUNKS, RpcGhidraAdapter
 from vivarium.jobs.streaming import (
     DecompileStreamIn,
     FetchJobResultsIn,
@@ -241,6 +241,64 @@ def test_decompile_stream_yields_chunks_in_seq_order() -> None:
     assert terminal.total == 3
     assert terminal.truncated is False
     assert worker.killed == 0  # a clean chunk+response stream never kills
+    wrk.close()
+
+
+def test_decompile_stream_clamps_a_hostile_worker_total() -> None:
+    """V9: the untrusted worker `total` is clamped to [produced, _MAX_STREAM_CHUNKS].
+
+    `total` feeds only the server-side ETA (TB2 untrusted output, LLM02). An absurd value must not
+    yield a nonsensical ETA — it is bounded by the flood cap (the most a stream can emit).
+    """
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+
+    def _serve() -> None:
+        rid = _read_request(wrk)["id"]
+        _send_frame(wrk, f.build_chunk(rid, 0, "function", _chunk_payload(0)))
+        _send_frame(wrk, {"jsonrpc": "2.0", "id": rid, "result": {"total": 10**9, "done": True}})
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    terminal = StreamTerminal()
+    produced = list(
+        adapter.decompile_stream(
+            _SID, DecompileStreamIn(session_id=_SID, limit=1), terminal=terminal
+        )
+    )
+    t.join(timeout=3)
+    assert len(produced) == 1
+    assert terminal.total == _MAX_STREAM_CHUNKS  # clamped down from 10**9
+    assert worker.killed == 0
+    wrk.close()
+
+
+def test_decompile_stream_falls_back_on_a_non_numeric_total() -> None:
+    """V9: a non-numeric worker `total` never crashes the read path — falls back to produced."""
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+
+    def _serve() -> None:
+        rid = _read_request(wrk)["id"]
+        _send_frame(wrk, f.build_chunk(rid, 0, "function", _chunk_payload(0)))
+        _send_frame(
+            wrk, {"jsonrpc": "2.0", "id": rid, "result": {"total": "not-a-number", "done": True}}
+        )
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    terminal = StreamTerminal()
+    produced = list(
+        adapter.decompile_stream(
+            _SID, DecompileStreamIn(session_id=_SID, limit=1), terminal=terminal
+        )
+    )
+    t.join(timeout=3)
+    assert len(produced) == 1
+    assert terminal.total == 1  # fell back to the produced count (next_seq); no crash, no kill
+    assert worker.killed == 0
     wrk.close()
 
 
