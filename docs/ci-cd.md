@@ -27,13 +27,13 @@ ELF FunctionID-match assertion (ADR-043). Path-filtered to **run per-PR on FID-p
 gated to same-repo PRs (fork-PR hardening — threat-model §4 delta).
 
 **Critical paths (100% — master §4):** `core.validation`, `core.envelope`, `core.errors`,
-`sessions.manager`, `security.limits`, `server.auth` — the input-validation, untrusted/error
-envelopes, session isolation, DoS-limit, and authN/authZ code (the trust boundaries). Designated in
-`pyproject.toml`.
+`sessions.manager`, `security.limits`, `server.auth`, `jobs.streaming` — the input-validation,
+untrusted/error envelopes, session isolation, DoS-limit, authN/authZ, and streaming-job (BOLA +
+bounded replay) code (the trust boundaries). Designated in `pyproject.toml`.
 
 **Mutation testing (test quality — master §4):** coverage proves the critical-path tests *execute*
 every line; mutation testing proves they *catch faults*. [`mutation.yml`](../.github/workflows/mutation.yml)
-runs `mutmut` over the same six critical modules (config: `pyproject [tool.mutmut]`) on a **weekly
+runs `mutmut` over the same seven critical modules (config: `pyproject [tool.mutmut]`) on a **weekly
 schedule + manual dispatch** — never per-PR (it re-runs the suite per mutant). It is **advisory**
 (reports the score to the run summary + uploads a stats artifact); set `MUTATION_SCORE_MIN` > 0 to
 turn it into a regression gate once the baseline is confirmed. Baseline at introduction: ~71%
@@ -68,8 +68,11 @@ When the GitHub remote is set up, protect `main` with:
 - **Require a pull request** before merging; **≥1 approving review**; security-relevant changes get
   a security-focused review (`workflow-code-review`). Dismiss stale approvals on new commits.
 - **Require status checks to pass:** the **required** contexts are `quality`, `quality-py314`,
-  `sast`, `sca`, `secret-scan`, `container-iac-scan`, `fid-license-gate`, and `fid-elf-match-gate`;
-  require branches up to date.
+  `sast`, `sca`, `secret-scan`, `container-iac-scan`, `fid-license-gate`, `fid-elf-match-gate`,
+  `image-scan-gate`, and `mtls-auth-gate` (ten total); require branches up to date. (`image-scan-gate`
+  and `mtls-auth-gate` are always-run gates that internally verify their diff-gated matrix legs /
+  integration suite — see the gate notes above; a `test_coverage_markers` tripwire asserts this list
+  stays in sync with the gate set.)
 - **Require signed commits** (CI verifies signatures); require **linear history** (squash/rebase
   merge only — no merge bubbles).
 - **No force-push / no deletion** of `main`; include administrators.
