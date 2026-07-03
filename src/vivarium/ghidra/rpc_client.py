@@ -746,6 +746,7 @@ class RpcGhidraAdapter:
         """
         next_seq = 0
         chunk_count = 0
+        progress_count = 0
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -754,6 +755,12 @@ class RpcGhidraAdapter:
             # recv (slow-loris hardening), so the whole frame is bounded by the same deadline.
             frame = self._read_frame(sock, deadline)
             if rpc_framing.is_progress_notification(frame):
+                # X9 (round-8): cap $/progress like $/chunk (and like the analyze path). The
+                # deadline already bounds wall-clock, but a hostile worker emitting endless progress
+                # frames is a protocol violation → fail closed (kill+evict), not spin to deadline.
+                progress_count += 1
+                if progress_count > _MAX_PROGRESS_FRAMES:
+                    raise RpcProtocolError("stream progress-frame flood exceeded the per-call cap")
                 progress = rpc_framing.parse_progress(frame, expected_id=expected_id)
                 _log.info("stream.progress", extra=_progress_log_payload(progress))
                 continue
