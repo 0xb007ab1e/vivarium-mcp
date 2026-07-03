@@ -674,6 +674,77 @@ def test_decompile_stream_sets_and_clears_active_stream_id() -> None:
     wrk.close()
 
 
+def test_cancel_job_drains_producer_and_frees_the_session_for_reuse() -> None:
+    """V1: cancelling a stream must free the session immediately — not wedge it until eviction.
+
+    The bug: cancel marks the job terminal and stops pumping, so the (real) producer generator is
+    left suspended mid-stream and its ``finally`` — the sole clearer of ``active_stream_id`` — never
+    runs. Every subsequent plain call then fails ``WORKER_UNAVAILABLE "session busy (a stream is in
+    progress)"`` until the session is evicted (up to the TTL). This drives the REAL generator (via
+    ``start_decompile_stream``) so the drain actually exercises that ``finally``, then proves a
+    plain call on the same session succeeds afterwards (flag cleared AND socket byte-clean — no
+    stale terminal frame to desync the next call).
+    """
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    mgr = StreamingJobManager(
+        authorize=lambda _s, _c: None, limits=Limits(max_stream_buffer_chunks=2)
+    )
+    adapter = _ConnectedAdapter(
+        server_sock=srv,
+        launcher=lambda sid, path: worker,
+        socket_dir="/tmp/vivarium-test",  # noqa: S108  # test-only path; no real socket bound
+        tool_timeout_s=2.0,
+        analysis_timeout_s=2.0,
+        max_response_bytes=_CAP,
+        stream_jobs=mgr,
+    )
+    adapter.start_worker(_SID)
+
+    def _serve() -> None:
+        # 1) start_decompile_stream RPC → emit 2 chunks: the buffer cap (2) fills so the first pump
+        #    pauses, leaving the producer suspended mid-stream with active_stream_id set (the wedge
+        #    precondition).
+        rid = _read_request(wrk)["id"]
+        for i in range(2):
+            _send_frame(wrk, f.build_chunk(rid, i, "function", _chunk_payload(i)))
+        # 2) cancel_job sends $/cancel; end the stream with a terminal frame so the drain consumes
+        #    it and leaves the socket byte-clean.
+        _read_request(wrk)  # the $/cancel notification
+        _send_frame(
+            wrk,
+            {"jsonrpc": "2.0", "id": rid, "result": {"total": 2, "truncated": True, "done": True}},
+        )
+        # 3) A subsequent PLAIN tool call must now round-trip on the same (freed, clean) socket.
+        follow_id = _read_request(wrk)["id"]
+        _send_frame(wrk, {"jsonrpc": "2.0", "id": follow_id, "result": {"ok": True}})
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+
+    job_id = adapter.start_decompile_stream(
+        _SID, DecompileStreamIn(session_id=_SID, limit=10), caller=_CALLER
+    )
+    # Precondition: the first pump set the in-flight flag — the session is "busy" to plain calls.
+    assert adapter._sessions[_SID].active_stream_id is not None
+
+    cancelled = adapter.cancel_job(
+        _SID, JobHandleIn(session_id=_SID, job_id=job_id), caller=_CALLER
+    )
+    assert cancelled.state is JobState.CANCELLED
+    # V1 fix: the drain ran the generator finally → the flag is cleared → the session is not wedged.
+    assert adapter._sessions[_SID].active_stream_id is None
+
+    # Prove reuse: a plain call on the SAME session now succeeds (was WORKER_UNAVAILABLE "session
+    # busy" until eviction before the fix; a stale terminal frame would instead desync → kill here).
+    assert adapter._call(_SID, "program_metadata", {}, timeout_s=2.0) == {"ok": True}
+    assert worker.killed == 0  # clean socket: no protocol-desync kill on the follow-up call
+
+    t.join(timeout=3)
+    wrk.close()
+    srv.close()
+
+
 def test_decompile_stream_raises_and_kills_on_chunk_flood(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

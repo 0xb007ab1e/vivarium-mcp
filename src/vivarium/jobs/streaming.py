@@ -36,6 +36,7 @@ clock is **injected** so elapsed/ETA are deterministic (topic-numeric-correctnes
 
 from __future__ import annotations
 
+import contextlib
 import secrets
 import threading
 import time
@@ -587,6 +588,30 @@ class _StreamingJob:
         self._replay.clear()
         self._replay_bytes = 0
 
+    def drain_producer(self) -> None:
+        """Exhaust the cancelled producer to drain the worker's residual stream (frees the session).
+
+        The V1 fix. Marking a job cancelled stops pumping, so its producer generator is left
+        suspended mid-stream: the adapter's ``decompile_stream`` generator never resumes, and its
+        ``finally`` — the **sole** clearer of the session's ``active_stream_id`` flag — never runs.
+        The session then rejects every plain (non-streaming) tool call with "session busy" until it
+        is evicted (up to the session TTL). Called AFTER the worker has been signalled
+        (``$/cancel``), this resumes the producer to completion, discarding chunks (the job is
+        already terminal): it consumes the worker's remaining in-flight chunks and its terminal
+        frame — leaving the socket byte-clean so the session's next call does not desync — and
+        drives the generator's ``finally``, which clears the flag and frees the session for reuse.
+
+        Bounded by the stream's analysis deadline (kill-on-expiry, ADR-002): a worker that ignores
+        ``$/cancel`` still hits the deadline, whereupon the generator raises (timeout/transport) —
+        which kills the worker and still runs its ``finally``. Best-effort teardown: any producer
+        exception is expected here and swallowed (the flag-clear lives in the generator ``finally``,
+        which runs on every exit including error/close). A no-op for a non-generator (synthetic)
+        producer with no such ``finally`` — those carry no adapter flag to clear.
+        """
+        with contextlib.suppress(Exception):
+            for _ in self._producer:  # exhaust: consume residual chunks + terminal, run the finally
+                pass
+
     def status(self) -> StreamJobStatus:
         """Snapshot the server-authored status (no binary content), with an injected-clock ETA.
 
@@ -924,6 +949,32 @@ class StreamingJobManager:
             },
         )
         return status
+
+    def reap_cancelled(self, session_id: str, job_id: str, *, caller: str) -> None:
+        """Drain a just-cancelled job's producer to free the session (V1) — call AFTER ``$/cancel``.
+
+        Separate from :meth:`cancel` because the worker must be signalled (``$/cancel`` sent by the
+        adapter) FIRST so the producer drain is short (the worker stops at the next boundary); the
+        adapter therefore calls :meth:`cancel` → sends ``$/cancel`` → then :meth:`reap_cancelled`.
+        Re-authorizes the owning session (BOLA — same chokepoint as cancel; complete mediation) and
+        runs the drain under the job lock so it serializes with any in-flight pump. See
+        :meth:`_StreamingJob.drain_producer` for why draining (not merely closing) the producer is
+        required (socket-clean + the flag-clearing ``finally``). Idempotent / best-effort at the
+        call site (the adapter suppresses failures — a session evicted between cancel and reap has
+        already had its jobs discarded and its worker killed).
+
+        Args:
+            session_id: The owning session id.
+            job_id: The opaque job handle (already cancelled).
+            caller: The authenticated, server-derived calling-principal id (ADR-017).
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` (BOLA-safe) if the session/job is no longer owned.
+        """
+        with self._lock:
+            job = self._authorized_job(session_id, job_id, caller=caller)
+        with job._lock:
+            job.drain_producer()
 
     def discard_session(self, session_id: str) -> None:
         """Drop every job bound to ``session_id`` (called on session eviction — lifetime bound).
