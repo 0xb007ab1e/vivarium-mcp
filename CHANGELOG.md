@@ -6,7 +6,44 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
-_Nothing yet — changes accumulate here until the next release._
+Continued **security-hardening / gap-remediation** (round-6 → round-7 findings, #258–#269) — **no
+new tools, no contract changes** (Tier-1 catalog stays **56**, observable behavior unchanged). A
+streaming cancel-availability fix and a concurrency guard, a hostile-worker output clamp, a daemon
+restart-race fix, and the worker-image auto-repin trust-anchor flow made signed + CI-triggering +
+verified, plus CI/docs/threat-model currency.
+
+### Fixed
+- **Cancelling a stream frees the session at once (#260, gap V1).** `cancel_job` now drains the
+  cancelled producer so the adapter's in-flight flag is cleared and the socket left clean —
+  previously a cancelled stream left the session rejecting every plain call with "session busy"
+  until eviction (up to the TTL).
+- **Starting a stream while one is already active is refused (#269, gap W1).** The stream-start path
+  now fails closed with a retryable "session busy" (symmetric with plain calls) — closing a
+  concurrent cancel+start window (exposed by #260) that could desync two read loops on one session's
+  socket and kill the worker.
+- **Reaper + metrics daemons use a per-run stop signal (#267, gap V8).** Each start mints its own
+  `Event`, removing a latent start/stop restart race in the periodic session-reaper and
+  metrics-logger.
+
+### Security
+- **Untrusted worker-reported stream `total` is clamped (#268, gap V9).** The terminal `total`
+  (which feeds only the server-side ETA) is bounded to `[produced, max-stream-chunks]` with a
+  safe fallback on a non-numeric value — defense-in-depth against a hostile worker (LLM02).
+
+### Internal / CI / supply-chain / docs
+- **Worker-image auto-repin PR is signed, CI-triggering, and pre-verified (#258, #259, #261, #265).**
+  The per-release trust-pin bump PR is now opened via a GitHub App (GitHub-signed commit + real
+  `pull_request` checks so it can actually merge), gated on both `REPIN_APP_*` secrets (fail-safe
+  skip), cosign-verifies the digest before proposing, and reads the pin blob sha from the freshly
+  created bump branch (409-race fix).
+- **Trust-pin rewrite extracted + unit-tested (#264, gap V2).** `scripts/bump_pin.sh` (fail-closed
+  digest validation) replaces the untested inline rewrite.
+- **`image-scan-gate` poll budget de-magicked (#266, gap V10).** Named constants; deadline kept below
+  the job `timeout-minutes` so the gate fails via its own message.
+- **CI/threat-model/docs currency (#262, #263, #266).** `docs/ci-cd.md` lists all ten required
+  checks + seven critical modules with a `test_coverage_markers` doc-drift tripwire; threat-model §4
+  delta + secret-rotation entry for the `REPIN_APP_*` App key; branch-protection enforcement-
+  verification record.
 
 ## [0.13.0] — 2026-07-02
 

@@ -95,3 +95,16 @@ above is not the same as *proving* it. Two checks close that gap:
 - **Each gate is proven to actually block:** when a check is first promoted to *required*, verify it
   **red-blocks** a merge with a deliberately-failing PR (not just that it runs). A gate that has
   never been observed failing a merge is unverified enforcement.
+
+  **Red-block observation log** (W4 — discharge this per gate; a gate not listed as *observed* is
+  structurally-fail-closed-by-inspection but not yet empirically proven to block):
+  | Gate | Red-block observed? | Evidence |
+  |---|---|---|
+  | `fid-elf-match-gate` | ✅ 2026-06-24 | ADR-043 "Required-check VERIFIED end-to-end" |
+  | `image-scan-gate` | ⏳ **pending** | promoted to required in round-5; observe with a deliberately-failing image-path PR (a Containerfile change that trips Trivy HIGH/CRITICAL), confirm the context reports red + blocks, then record the date + PR# here |
+  | `mtls-auth-gate` | ⏳ **pending** | promoted to required in round-5; observe with a deliberately-failing mTLS-auth PR (break the cert-principal binding assertion), confirm red + blocks, then record here |
+  | others (`quality`, `sast`, `sca`, `secret-scan`, `container-iac-scan`, `fid-license-gate`, `quality-py314`) | observed implicitly | routinely go red on real failures in normal development |
+
+  > The two ⏳ gates are **operator/maintainer steps** (they need a throwaway failing PR to *observe*
+  > the block — this repo won't fabricate a proof it hasn't run). Both are fail-closed by construction
+  > (see their gate notes above); this log tracks the empirical proof honestly until discharged.
