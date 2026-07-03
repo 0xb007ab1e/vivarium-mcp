@@ -222,6 +222,12 @@ section becomes "Renovate opens bump PRs; a human reviews + merges."
 
 ## Repin GitHub App (one-time — enables the auto-repin PR to actually merge)
 
+> **Status: PROVISIONED 2026-07-03.** The App (`vivarium-repin-0xb007ab1e`, App ID 4208211) is
+> installed on this repo and both secrets (`REPIN_APP_ID`, `REPIN_APP_PRIVATE_KEY`) are set, so
+> `propose-pin-bump` now **runs** on each release tag (no longer fail-safe-skips). The steps below
+> are retained as the setup/re-provision procedure (and apply after a key rotation —
+> `secret-rotation.md`). End-to-end verification still pending its first real release tag.
+
 `worker-image.yml`'s `propose-pin-bump` job opens the PR that advances the worker-image trust pin
 (`.github/worker-image.pin`) on each release tag. It uses a **GitHub App token**, not the built-in
 `GITHUB_TOKEN`, because a bot-token PR is doubly blocked on `main` (round-6 fix): its commit would be
