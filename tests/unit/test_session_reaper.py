@@ -134,3 +134,26 @@ def test_start_after_stop_resumes_sweeping() -> None:
         assert mgr.first.wait(2), "reaper did NOT resume sweeping after stop()+start() (R3)"
     finally:
         reaper.stop()
+
+
+def test_each_run_has_its_own_stop_event() -> None:
+    """V8: each start() gets a FRESH stop Event and stop() sets only THAT run's own.
+
+    The prior design shared one Event that start() ``clear()``d and stop() ``set()`` — a restart's
+    clear could wipe a still-running prior thread's exit signal (or a concurrent stop set the just-
+    started thread's). Per-run Events remove that race. Assert the invariant deterministically: a
+    restart yields a distinct, unset Event, and stopping a run sets exactly its own.
+    """
+    reaper = PeriodicReaper(_CountingManager(), interval_s=3600)  # long → won't fire in-test
+    reaper.start()
+    ev1 = reaper._stop
+    assert isinstance(ev1, threading.Event) and not ev1.is_set()
+    reaper.stop()
+    after_stop = reaper._stop  # into a local → asserting None here won't narrow the attribute
+    assert after_stop is None  # no current run → no signal
+    assert ev1.is_set()  # the first run's OWN Event was set by its stop()
+    reaper.start()  # RESTART
+    ev2 = reaper._stop
+    assert isinstance(ev2, threading.Event) and not ev2.is_set()  # fresh, unset
+    assert ev2 is not ev1  # distinct per-run Event
+    reaper.stop()
