@@ -82,3 +82,16 @@ When the GitHub remote is set up, protect `main` with:
 
 > These are documented here for the human to apply when the remote exists — WS0 does **not** create,
 > push, or configure any remote (gated).
+
+**Enforcement verification (V7 — a guard you've never seen go red is unproven).** Applying the
+above is not the same as *proving* it. Two checks close that gap:
+- **State is confirmed on the remote**, not just documented: query
+  `gh api repos/<owner>/<repo>/branches/main/protection` and confirm `required_status_checks.strict:
+  true` with **exactly** the ten contexts above, plus `required_signatures.enabled:
+  true`, `enforce_admins.enabled: true`, and `required_linear_history.enabled: true`. Record the
+  confirmation (date + the returned set) when the set changes — as ADR-043 did for
+  `fid-elf-match-gate`. Last confirmed present: **2026-07-03** (round-6; all ten required,
+  `strict:true`, signatures + admins + linear history on).
+- **Each gate is proven to actually block:** when a check is first promoted to *required*, verify it
+  **red-blocks** a merge with a deliberately-failing PR (not just that it runs). A gate that has
+  never been observed failing a merge is unverified enforcement.

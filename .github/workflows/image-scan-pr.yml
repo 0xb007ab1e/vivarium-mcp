@@ -186,12 +186,21 @@ jobs:
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           GH_TOKEN: ${{ github.token }}
+          # V10: the poll budget as named constants (no magic numbers). GATE_DEADLINE_S must stay
+          # BELOW this job's `timeout-minutes: 45` (2700s) with margin, so the gate fails via its own
+          # LOUD message rather than the raw job timeout; 2580s (43 min) leaves ~2 min headroom. It
+          # is the ceiling the gate waits for the matrix build+scan — widen it (and the job timeout)
+          # together if the image build ever grows past it (else a slow-but-fine build → spurious red).
+          GATE_DEADLINE_S: "2580"
+          APPEAR_GRACE_S: "300"     # bounded grace for the matrix legs to REGISTER (name-filter).
+          POLL_INTERVAL_S: "30"
+          EXPECTED_LEGS: "2"        # the two matrix legs (worker, server).
         run: |
           set -euo pipefail
           # The matrix legs are named "image-scan (<name>, <containerfile>)"; match that PREFIX (the
           # trailing " (" excludes THIS job, "image-scan-gate"). EXPECTED = the two matrix legs.
           PREFIX="image-scan ("
-          EXPECTED=2
+          EXPECTED="${EXPECTED_LEGS}"
           # Non-image change (and the detector didn't fail) -> the image scan is N/A -> PASS FAST,
           # without waiting on any build.
           if [ "${CHANGES_RESULT}" != "failure" ] && [ "${IMAGE_CHANGED}" != "true" ]; then
@@ -199,11 +208,11 @@ jobs:
             exit 0
           fi
           echo "image-relevant change (or broken detector — fail-safe) — requiring the image-scan matrix"
-          deadline=$(( $(date +%s) + 2400 ))       # ~40 min, matching the matrix build+scan budget
+          deadline=$(( $(date +%s) + GATE_DEADLINE_S ))
           # gap-P13-style: legs that were RENAMED / never scheduled would leave the name filter empty
           # forever. Give them a bounded grace to REGISTER; if fewer than EXPECTED appear within it,
           # fail FAST + LOUD (naming the likely cause) rather than hanging to the timeout.
-          appear_deadline=$(( $(date +%s) + 300 ))
+          appear_deadline=$(( $(date +%s) + APPEAR_GRACE_S ))
           while :; do
             # One "<status> <conclusion>" line per matching matrix leg.
             mapfile -t legs < <(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" --paginate \
@@ -227,14 +236,16 @@ jobs:
                 exit 1
               fi
             elif [ "$(date +%s)" -ge "${appear_deadline}" ]; then
-              echo "::error::fewer than ${EXPECTED} 'image-scan (...)' legs appeared within 5 min" \
-                   "(saw ${n}) — the matrix job was likely RENAMED or not scheduled. This gate polls" \
-                   "by job-name prefix; fix the name/trigger. Failing fast (fail-closed)."
+              echo "::error::fewer than ${EXPECTED} 'image-scan (...)' legs appeared within" \
+                   "${APPEAR_GRACE_S}s (saw ${n}) — the matrix job was likely RENAMED or not" \
+                   "scheduled. This gate polls by job-name prefix; fix the name/trigger. Failing" \
+                   "fast (fail-closed)."
               exit 1
             fi
             if [ "$(date +%s)" -ge "${deadline}" ]; then
-              echo "::error::timed out waiting for the image-scan matrix legs to complete"
+              echo "::error::timed out after ${GATE_DEADLINE_S}s waiting for the image-scan matrix" \
+                   "legs to complete (raise GATE_DEADLINE_S and this job's timeout-minutes together)"
               exit 1
             fi
-            sleep 30
+            sleep "${POLL_INTERVAL_S}"
           done
