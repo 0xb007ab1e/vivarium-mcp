@@ -20,6 +20,7 @@ this one fails loudly if the designation is broken).
 from __future__ import annotations
 
 import importlib
+import re
 import tomllib
 from pathlib import Path
 
@@ -235,3 +236,50 @@ def test_ci_cd_doc_lists_all_critical_modules() -> None:
     doc = _ci_cd_doc_text()
     missing = [m for m in _CRITICAL_MODULES if f"`{m.removeprefix('vivarium.')}`" not in doc]
     assert not missing, f"docs/ci-cd.md omits critical module(s) from its list: {missing}"
+
+
+def _workflow_files() -> list[Path]:
+    """Return every ``.github/workflows/*.yml`` file (the CI definition set)."""
+    return sorted((_repo_root() / ".github" / "workflows").glob("*.yml"))
+
+
+def test_cosign_identity_regexp_is_tail_anchored_to_refs_tags() -> None:
+    """Every worker-image cosign verify anchors the identity to ``@refs/tags/`` (round-8 X7).
+
+    W5 (#271) tail-anchored the cosign ``--certificate-identity-regexp`` at all verify sites so only
+    a TAG-built signature verifies (3 of 4 were loose before). Those copies are hand-maintained with
+    nothing asserting they stay anchored — the drift the doc/coverage tripwires kill elsewhere.
+    Assert any workflow verifying the worker-image identity uses the ``@refs/tags/`` form and NONE
+    uses the loose bare-``@`` form (``worker-image.yml@"``).
+    """
+    anchored = "worker-image.yml@refs/tags/"
+    loose = 'worker-image.yml@"'  # bare @ immediately followed by the closing quote (pre-W5 form)
+    checked = 0
+    offenders: list[str] = []
+    for wf in _workflow_files():
+        text = wf.read_text(encoding="utf-8")
+        if "worker-image.yml@" not in text:  # not a worker-image cosign-verify workflow
+            continue
+        checked += 1
+        if anchored not in text or loose in text:
+            offenders.append(wf.name)
+    assert not offenders, f"worker-image cosign identity not @refs/tags/-anchored in: {offenders}"
+    assert checked >= 4, f"expected >=4 worker-image cosign verify sites, got {checked} (deleted?)"
+
+
+def test_required_checks_map_to_workflow_jobs() -> None:
+    """Every required status check is emitted by a real workflow job (round-8 X8 tripwire).
+
+    The doc-drift tripwire checks the required-check tuple against ``docs/ci-cd.md``, but nothing
+    asserts each required context is actually PRODUCED by a job. A renamed job → branch protection
+    waits forever for the old context (fail-closed hang) and no test flags it (doc + tuple can stay
+    mutually consistent yet both stale). Assert each name appears as a ``^  <name>:`` job key in a
+    workflow file.
+    """
+    texts = [wf.read_text(encoding="utf-8") for wf in _workflow_files()]
+    missing = [
+        ctx
+        for ctx in _REQUIRED_STATUS_CHECKS
+        if not any(re.search(rf"^  {re.escape(ctx)}:", t, re.MULTILINE) for t in texts)
+    ]
+    assert not missing, f"required status check(s) with no matching workflow job: {missing}"
