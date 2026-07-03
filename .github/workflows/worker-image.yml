@@ -296,7 +296,7 @@ jobs:
           OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
-          DIGEST="$(grep -oiE 'sha256:[0-9a-f]{64}' worker-image.digest | head -n1 || true)"
+          DIGEST="$(./scripts/extract_digest.sh < worker-image.digest || true)"
           if [ -z "${DIGEST}" ]; then
             echo "::error::no sha256 digest found in the worker-image-digest artifact"; exit 1
           fi
@@ -327,7 +327,7 @@ jobs:
         run: |
           set -euo pipefail
           PIN_FILE=".github/worker-image.pin"
-          DIGEST="$(grep -oiE 'sha256:[0-9a-f]{64}' worker-image.digest | head -n1 || true)"
+          DIGEST="$(./scripts/extract_digest.sh < worker-image.digest || true)"
           if [ -z "${DIGEST}" ]; then
             echo "::error::no sha256 digest found in the worker-image-digest artifact"; exit 1
           fi
@@ -345,7 +345,7 @@ jobs:
           cur="$(gh api "repos/${REPO}/contents/${PIN_FILE}?ref=${BRANCH}")"
           cur_sha="$(printf '%s' "${cur}" | jq -r .sha)"
           cur_txt="$(printf '%s' "${cur}" | jq -r .content | base64 -d)"
-          CURRENT="$(printf '%s' "${cur_txt}" | grep -oiE 'sha256:[0-9a-f]{64}' | head -n1 || true)"
+          CURRENT="$(printf '%s' "${cur_txt}" | ./scripts/extract_digest.sh || true)"
           if [ "${DIGEST}" = "${CURRENT}" ]; then
             echo "::notice::worker-image pin already at ${DIGEST} — no bump needed"; exit 0
           fi
