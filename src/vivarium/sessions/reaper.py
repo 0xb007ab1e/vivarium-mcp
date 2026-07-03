@@ -44,7 +44,13 @@ class PeriodicReaper:
             raise ValueError("reaper interval_s must be positive")
         self._manager = manager
         self._interval_s = interval_s
-        self._stop = threading.Event()
+        #: The CURRENT run's stop signal (``None`` when not running). Each start() creates a FRESH
+        #: Event owned by exactly that thread — NOT one shared Event that is cleared/reset across
+        #: runs (round-6 V8). A shared, cleared Event had a race: a restart's ``clear()`` could wipe
+        #: a still-running prior thread's exit signal (or a concurrent stop() could set the just-
+        #: started thread's). A per-run Event has no shared mutable signal → no such race, while
+        #: still giving R3 its property (a restart resumes: the new thread's Event starts unset).
+        self._stop: threading.Event | None = None
         self._thread: threading.Thread | None = None
         #: Serializes the start()/stop() lifecycle transitions so concurrent callers can't both
         #: pass the idempotency check (double-start) or both swap out `_thread` (double-join). The
@@ -56,32 +62,37 @@ class PeriodicReaper:
         with self._lock:
             if self._thread is not None:
                 return
-            # Reset the stop signal so a start() AFTER a prior stop() actually sweeps. stop() SETS
-            # the Event and never clears it, and _run loops on `while not self._stop.wait(...)`, so
-            # without this a restarted daemon's first wait() returns True immediately → the thread
-            # exits without ever reaping — a silent no-op reaper (the abandoned-session leak N5
-            # returns). Cleared here (under the lock, only on a real (re)start), not in stop() —
-            # clearing in stop() could let an in-flight _run miss the exit signal (R3/round-5).
-            self._stop.clear()
+            # A FRESH Event per run (see `_stop` note): the new thread loops on ITS OWN signal, so a
+            # later start() or a concurrent stop() cannot clear/set the wrong thread's Event. A
+            # restart naturally resumes (the new Event starts unset → the first wait() blocks the
+            # interval, not returns-true-immediately — the R3 property, without a shared clear()).
+            stop = threading.Event()
+            self._stop = stop
             self._thread = threading.Thread(
-                target=self._run, name="vivarium-session-reaper", daemon=True
+                target=self._run, args=(stop,), name="vivarium-session-reaper", daemon=True
             )
             self._thread.start()
 
     def stop(self, *, timeout_s: float = 5.0) -> None:
         """Signal the sweeper to exit and join it (idempotent; bounded by ``timeout_s``)."""
-        self._stop.set()
         with self._lock:
             thread, self._thread = self._thread, None
+            stop, self._stop = self._stop, None
+        # Set THIS run's own Event (captured under the lock) — never a shared one a concurrent
+        # start() may have replaced — then join outside the lock (a slow join can't block a
+        # transition). Idempotent: a second stop() finds both None and no-ops.
+        if stop is not None:
+            stop.set()
         if thread is not None:
             thread.join(timeout_s)
 
-    def _run(self) -> None:
+    def _run(self, stop: threading.Event) -> None:
         """Sweep loop: wait the interval (interruptibly), then reap; exit when ``stop`` is set."""
-        # Event.wait returns True the moment stop() fires (→ exit immediately, no interval wait), or
-        # False on timeout (→ time to sweep). A reap exception must NEVER kill the daemon — that
-        # would silently halt all future sweeps — so it is logged and the loop continues.
-        while not self._stop.wait(self._interval_s):
+        # `stop` is THIS thread's own Event (passed at spawn). wait() returns True the moment stop()
+        # fires (→ exit now, no interval wait), or False on timeout (→ time to sweep). A reap
+        # exception must NEVER kill the daemon — that would silently halt all future sweeps — so it
+        # is logged and the loop continues.
+        while not stop.wait(self._interval_s):
             try:
                 evicted = self._manager.reap_expired()
                 if evicted:

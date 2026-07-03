@@ -209,7 +209,12 @@ class PeriodicMetricsLogger:
         self._registry = registry
         self._interval_s = interval_s
         self._active_sessions = active_sessions
-        self._stop = threading.Event()
+        #: The CURRENT run's stop signal (``None`` when not running). Each start() creates a FRESH
+        #: Event owned by exactly that thread — NOT one shared Event cleared/reset across runs
+        #: (round-6 V8): a shared, cleared Event let a restart's ``clear()`` wipe a still-running
+        #: prior thread's exit signal (or a concurrent stop() set the just-started thread's). A
+        #: per-run Event removes that race; R3 still holds (a restart's new Event starts unset).
+        self._stop: threading.Event | None = None
         self._thread: threading.Thread | None = None
         #: Serializes the start()/stop() lifecycle transitions so concurrent callers can't both
         #: pass the idempotency check (double-start) or both swap out `_thread` (double-join). The
@@ -222,14 +227,14 @@ class PeriodicMetricsLogger:
         with self._lock:
             if self._thread is not None:
                 return
-            # Reset the stop signal so a start() AFTER a prior stop() actually emits. stop() SETS
-            # the Event and never clears it, and _run loops on `while not self._stop.wait(...)`, so
-            # without this a restarted daemon's first wait() returns True immediately → the thread
-            # exits without ever emitting a snapshot (silent no-op logger). Cleared here (under the
-            # lock, only on a real (re)start), not in stop() (R3/round-5).
-            self._stop.clear()
+            # A FRESH Event per run (see `_stop` note): the new thread loops on ITS OWN signal, so a
+            # later start() or a concurrent stop() cannot clear/set the wrong thread's Event. A
+            # restart resumes because the new Event starts unset (the R3 property, without a shared
+            # clear()).
+            stop = threading.Event()
+            self._stop = stop
             self._thread = threading.Thread(
-                target=self._run, name="vivarium-metrics-logger", daemon=True
+                target=self._run, args=(stop,), name="vivarium-metrics-logger", daemon=True
             )
             self._thread.start()
 
@@ -244,9 +249,13 @@ class PeriodicMetricsLogger:
         contract was subtly unsound on a slow emit; this makes it strict. A never-started logger
         (thread is ``None``) stays silent.
         """
-        self._stop.set()
         with self._lock:
             thread, self._thread = self._thread, None
+            stop, self._stop = self._stop, None
+        # Set THIS run's own Event (captured under the lock) — never a shared one a concurrent
+        # start() may have replaced. Idempotent: a second stop() finds both None and no-ops.
+        if stop is not None:
+            stop.set()
         if thread is not None:
             thread.join(timeout_s)
             # Final snapshot captures the last interval's activity — but only if the daemon truly
@@ -262,7 +271,8 @@ class PeriodicMetricsLogger:
         except Exception:
             _log.exception("metrics.snapshot.error")
 
-    def _run(self) -> None:
+    def _run(self, stop: threading.Event) -> None:
         """Snapshot loop: wait the interval (interruptibly) then emit; exit when ``stop`` is set."""
-        while not self._stop.wait(self._interval_s):
+        # `stop` is THIS thread's own Event (passed at spawn) — see the `_stop` note.
+        while not stop.wait(self._interval_s):
             self._emit()

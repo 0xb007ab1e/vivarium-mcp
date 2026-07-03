@@ -216,6 +216,28 @@ def test_logger_start_after_stop_resumes_emitting() -> None:
         logger.stop()
 
 
+def test_logger_each_run_has_its_own_stop_event() -> None:
+    """V8: each start() gets a FRESH stop Event and stop() sets only THAT run's own.
+
+    Mirrors the reaper invariant — per-run Events remove the shared-Event clear/reset race (a
+    restart can't wipe a prior run's still-live signal). Deterministic: a restart yields a distinct,
+    unset Event, and stopping a run sets exactly its own.
+    """
+    logger = PeriodicMetricsLogger(Metrics(), interval_s=3600)  # long → won't fire in-test
+    logger.start()
+    ev1 = logger._stop
+    assert isinstance(ev1, threading.Event) and not ev1.is_set()
+    logger.stop()
+    after_stop = logger._stop  # into a local → asserting None here won't narrow the attribute
+    assert after_stop is None  # no current run → no signal
+    assert ev1.is_set()  # the first run's OWN Event was set by its stop()
+    logger.start()  # RESTART
+    ev2 = logger._stop
+    assert isinstance(ev2, threading.Event) and not ev2.is_set()  # fresh, unset
+    assert ev2 is not ev1  # distinct per-run Event
+    logger.stop()
+
+
 def test_never_started_logger_stop_is_silent() -> None:
     """Stopping a logger that was never started emits nothing (no spurious snapshot)."""
     reg = _SignallingRegistry()
