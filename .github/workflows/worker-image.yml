@@ -260,6 +260,15 @@ jobs:
                  "provision the repin GitHub App (see this job's header comment)."
             echo "ok=false" >> "$GITHUB_OUTPUT"
           fi
+      - name: Check out the pin-rewrite script
+        # Needed so scripts/bump_pin.sh (the tested trust-anchor transform, V2) is on disk. BEFORE
+        # download-artifact so checkout's `git clean` cannot wipe the (untracked) digest artifact.
+        # persist-credentials: false — this job pushes nothing via git; all writes go through the
+        # App token over the Contents API (least privilege — no lingering GITHUB_TOKEN in .git).
+        if: steps.cfg.outputs.ok == 'true'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # actions/checkout@v6.0.3
+        with:
+          persist-credentials: false
       - name: Download signed worker digest
         if: steps.cfg.outputs.ok == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # actions/download-artifact@v8.0.1
@@ -295,7 +304,9 @@ jobs:
             echo "::notice::worker-image pin already at ${DIGEST} — no bump needed"; exit 0
           fi
           # New content: preserve the header, replace the digest line (single trailing newline).
-          new_txt="$( { printf '%s' "${cur_txt}" | grep -vE '^sha256:'; printf '%s\n' "${DIGEST}"; } )"
+          # Delegated to the extracted, unit-tested transform (V2 — tests/unit/test_bump_pin.py) so
+          # this trust-anchor rewrite is not untested inline shell; it fails closed on a bad digest.
+          new_txt="$(printf '%s' "${cur_txt}" | ./scripts/bump_pin.sh "${DIGEST}")"
           BRANCH="ci/bump-worker-pin-${TAG}"
           main_sha="$(gh api "repos/${REPO}/git/ref/heads/${DEFAULT_BRANCH}" --jq .object.sha)"
           # Create the bump branch off the default-branch head (reset it if a prior attempt left one).
