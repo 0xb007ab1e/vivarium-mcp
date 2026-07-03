@@ -639,6 +639,17 @@ class RpcGhidraAdapter:
         # concurrent with our read (full-duplex). The flag is cleared in the finally.
         try:
             with sess.lock:
+                # W1 (round-7): refuse if a stream already owns this session's socket — symmetric
+                # with the plain-_call guard (gap N1). The flag stays set for a just-cancelled
+                # stream's *drain* window too (V1 reap_cancelled; the producer finally is its only
+                # clearer). Without this guard a concurrent cancel+start on one session (HTTP
+                # thread pool) could open a 2nd stream on the same UDS while the old drain still
+                # reads → the two read loops steal each other's frames → desync → kill_worker.
+                # Checked under sess.lock: atomic vs a concurrent _call or another stream-start.
+                if sess.active_stream_id is not None:
+                    raise _errors.make_error(
+                        ErrorType.WORKER_UNAVAILABLE, "session busy (a stream is in progress)"
+                    )
                 # Q4: connect + send share the stream's absolute analysis deadline (connect gives up
                 # at the earlier of connect_timeout_s or the deadline), so warm-up can't overrun it.
                 sock = self._ensure_connected(sess, deadline=deadline)

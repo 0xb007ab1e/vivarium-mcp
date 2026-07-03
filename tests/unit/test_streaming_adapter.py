@@ -244,6 +244,35 @@ def test_decompile_stream_yields_chunks_in_seq_order() -> None:
     wrk.close()
 
 
+def test_decompile_stream_refuses_when_a_stream_is_already_active() -> None:
+    """W1: stream-start refuses (like plain _call) when active_stream_id is already set.
+
+    The flag is set for the whole life of a stream INCLUDING its post-cancel drain (V1) — its
+    producer's finally clears it only after the drain exhausts. So a concurrent cancel+start on the
+    same session must NOT start a 2nd stream on the same socket (the two read loops would steal each
+    other's frames → desync → kill_worker). Assert the guard deterministically: with the flag set,
+    the first pull fails closed (retryable WORKER_UNAVAILABLE) before any start RPC hits the wire,
+    and the prior stream's flag is left intact (the guard raises before it is overwritten).
+    """
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+    # Simulate a stream (or its still-running post-cancel drain) already owning the socket.
+    adapter._sessions[_SID].active_stream_id = "prior-stream"
+    it = adapter.decompile_stream(_SID, DecompileStreamIn(session_id=_SID, limit=3))
+    with pytest.raises(GhidraMcpError) as ei:
+        next(it)  # first pull sends the start RPC — must refuse first
+    assert ei.value.envelope.type is ErrorType.WORKER_UNAVAILABLE
+    # The prior stream's flag is untouched (the guard raised before overwriting it).
+    assert adapter._sessions[_SID].active_stream_id == "prior-stream"
+    # No start RPC reached the worker (guard fired before connect/send).
+    wrk.setblocking(False)
+    with pytest.raises(BlockingIOError):
+        wrk.recv(64)
+    assert worker.killed == 0
+    wrk.close()
+
+
 def test_decompile_stream_clamps_a_hostile_worker_total() -> None:
     """V9: the untrusted worker `total` is clamped to [produced, _MAX_STREAM_CHUNKS].
 
