@@ -6,11 +6,12 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
-Continued **security-hardening / gap-remediation** (round-6 → round-7 findings, #258–#269) — **no
+Continued **security-hardening / gap-remediation** (round-6 → round-8 findings, #258–#276) — **no
 new tools, no contract changes** (Tier-1 catalog stays **56**, observable behavior unchanged). A
 streaming cancel-availability fix and a concurrency guard, a hostile-worker output clamp, a daemon
-restart-race fix, and the worker-image auto-repin trust-anchor flow made signed + CI-triggering +
-verified, plus CI/docs/threat-model currency.
+restart-race fix, the worker-image auto-repin trust-anchor flow made signed + CI-triggering +
+verified with the cosign trust identity tightened to tag builds, plus CI-drift tripwires and
+CI/docs/threat-model currency.
 
 ### Fixed
 - **Cancelling a stream frees the session at once (#260, gap V1).** `cancel_job` now drains the
@@ -29,6 +30,10 @@ verified, plus CI/docs/threat-model currency.
 - **Untrusted worker-reported stream `total` is clamped (#268, gap V9).** The terminal `total`
   (which feeds only the server-side ETA) is bounded to `[produced, max-stream-chunks]` with a
   safe fallback on a non-numeric value — defense-in-depth against a hostile worker (LLM02).
+- **cosign worker-image trust identity tightened to tag builds (#271, gap W5).** The
+  `--certificate-identity-regexp` at all four verify sites (worker-image/live-regression/
+  e2e-groundtruth/gvisor-isolation) is tail-anchored to `worker-image.yml@refs/tags/`, so only a
+  signature minted by a release-tag build verifies — the pinned image is always tag-built.
 
 ### Internal / CI / supply-chain / docs
 - **Worker-image auto-repin PR is signed, CI-triggering, and pre-verified (#258, #259, #261, #265).**
@@ -40,10 +45,16 @@ verified, plus CI/docs/threat-model currency.
   digest validation) replaces the untested inline rewrite.
 - **`image-scan-gate` poll budget de-magicked (#266, gap V10).** Named constants; deadline kept below
   the job `timeout-minutes` so the gate fails via its own message.
-- **CI/threat-model/docs currency (#262, #263, #266).** `docs/ci-cd.md` lists all ten required
+- **CI/threat-model/docs currency (#262, #263, #266, #270).** `docs/ci-cd.md` lists all ten required
   checks + seven critical modules with a `test_coverage_markers` doc-drift tripwire; threat-model §4
   delta + secret-rotation entry for the `REPIN_APP_*` App key; branch-protection enforcement-
-  verification record.
+  verification record; CHANGELOG backfill + supply-chain-pinning runbook updated to Ghidra 12.1.2.
+- **Both round-5-promoted required gates empirically proven to red-block (#273, #275).** Recorded in
+  the `docs/ci-cd.md` red-block observation log: `mtls-auth-gate` (PR #272) and `image-scan-gate`
+  (PR #274) each observed reporting FAILURE + blocking a merge via a throwaway deliberately-failing PR.
+- **CI-drift tripwires added (#276, gaps X7/X8).** `test_coverage_markers` now asserts the cosign
+  identity stays tail-anchored at all four verify sites, and that every required status check maps to
+  a real workflow job (a renamed job → fail-closed hang would otherwise pass silently).
 
 ## [0.13.0] — 2026-07-02
 
