@@ -763,7 +763,17 @@ class RpcGhidraAdapter:
             # honest {total, truncated} for the server and end the stream (StopIteration → done).
             result = rpc_framing.parse_response(frame, expected_id=expected_id)
             if terminal is not None:
-                terminal.total = int(result.get("total", next_seq))
+                # V9 (defense-in-depth, LLM02): the worker-reported `total` is untrusted (TB2) and
+                # feeds ONLY the server-side ETA. Bound it so a hostile/garbage value can't yield a
+                # nonsensical ETA (or crash the read path via a non-int). A stream emits at most
+                # _MAX_STREAM_CHUNKS (the flood cap above) and never fewer than the `next_seq`
+                # already produced → clamp to [next_seq, _MAX_STREAM_CHUNKS]; a non-numeric total
+                # falls back to the produced count (fail closed to a safe, honest value).
+                try:
+                    reported_total = int(result.get("total", next_seq))
+                except (TypeError, ValueError):
+                    reported_total = next_seq
+                terminal.total = max(next_seq, min(reported_total, _MAX_STREAM_CHUNKS))
                 terminal.truncated = bool(result.get("truncated", False))
             return
 
