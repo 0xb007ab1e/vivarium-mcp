@@ -29,6 +29,25 @@
 4. Revoke the old credential: remove its pair from `VIVARIUM_HTTP_BEARER_TOKENS` (or drop the old CA)
    and restart. **For a confirmed compromise, revoke FIRST** (accept the brief auth outage).
 
+## Build-time / CI credential — the repin GitHub App key (`REPIN_APP_PRIVATE_KEY`)
+- **What / where:** a GitHub App private key (repo perms Contents + Pull requests: write) stored as
+  the repo secret `REPIN_APP_PRIVATE_KEY` (with the non-secret `REPIN_APP_ID`). It lets
+  `worker-image.yml` open the **signed, mergeable** worker-image trust-pin bump PR on each release
+  tag (round-6 #259). **CI-only** — not a runtime/product credential (threat-model §4 delta).
+- **Rotate (regenerate-then-replace — GitHub App keys are single-valued, no dual-valid window):**
+  1. In the App's settings (Settings → Developer settings → GitHub Apps → *the repin App* → Private
+     keys) **generate a new key** (`.pem`) and, once the secret is updated, **delete the old key**
+     (revocation — an App may hold several keys during the swap, so add-new-then-remove-old is
+     possible if you want zero-gap).
+  2. Update the repo secret `REPIN_APP_PRIVATE_KEY` with the full new `.pem` contents (never commit
+     it). `REPIN_APP_ID` is unchanged unless the App itself is replaced.
+  3. Verify on the next release tag (or a dispatch) that `propose-pin-bump` mints a token and opens
+     the PR; if the key is missing/partial the job **fail-safe-skips** (V3) — bump the pin manually
+     with a signed commit meanwhile.
+- **On confirmed exposure:** delete the leaked key FIRST (App settings) — the auto-repin degrades to
+  the manual signed-bump path, which is safe. A leaked key that could forge a trust-pin PR is an
+  incident (still human-merge-gated + cosign-verified downstream, but treat as `incident-response.md`).
+
 ## Verification
 - Consumers authenticate with the new secret; the old is rejected; no auth-error spike.
 

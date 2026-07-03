@@ -259,6 +259,7 @@ enforced — closing the BOLA gap that ADR-011 §6 deferred (TB6-I).
 | Compromised/typosquatted Python dep | M×H=**High** | pin + hash lockfile; vet new deps; SCA (pip-audit) gate (`std-supplychain`, `workflow-cve-management`) |
 | Tag-mutated / poisoned Ghidra/JDK image | M×H=**High** | pin **by digest** (ADR-003); SBOM; gated image pulls; CVE tracking + digest-bump runbook |
 | Compromised CI action | L×H=**Med** | pin CI actions **by digest**; least-privilege OIDC; ephemeral runners (`workflow-cicd`) |
+| Compromised **repin GitHub App key** (`REPIN_APP_PRIVATE_KEY`) opens a PR advancing the worker trust pin | L×H=**Med** | **human-merge gate** (the auto-opened pin bump is a *reviewed* PR — no autonomous advance); downstream **cosign identity-verify** of the pinned digest at every pull (a wrong/forged digest fails closed at use); least-privilege App perms (Contents+PR write only) + repo-secret storage; fail-safe skip if the key is absent/partial (V3); rotate per `runbooks/secret-rotation.md` (§4 delta below) |
 
 > **§4 delta — live-regression CI auto-trigger (#160/#161; CI trigger-surface, no new TB).** The
 > deterministic FID real-worker gate (`live-regression.yml`) now **auto-runs per-PR on FID-path
@@ -288,6 +289,26 @@ enforced — closing the BOLA gap that ADR-011 §6 deferred (TB6-I).
 > **Complementary platform control (operator action):** set Actions → "Require approval for all
 > outside collaborators" as a backstop. Same-repo PRs gain **no new exposure** (same trust as a
 > maintainer-labeled run).
+
+> **§4 delta — auto-repin GitHub App (round-6 #259; a new CI credential, no new product TB).** The
+> `worker-image.yml propose-pin-bump` job (release-tag only) now opens the worker-image trust-pin
+> bump as a **GitHub-App-signed, App-token PR** so it can actually merge (a `GITHUB_TOKEN`-opened PR
+> has its checks withheld and its commit is unsigned — both block merge under branch protection).
+> This introduces a new privileged, long-lived secret: `REPIN_APP_PRIVATE_KEY` (a GitHub App key
+> with **Contents: write + Pull requests: write**, repo-scoped), stored as a repo secret. It touches
+> only the **CI trust anchor** (`.github/worker-image.pin`), not the running product (TB1–TB8
+> unchanged). **(S/T) Forged trust advance:** a leaked App key could open a PR bumping the pin to an
+> attacker digest — but the pin advances **only via a reviewed, human-merged PR** (no autonomous
+> merge), and every consumer (`live-regression`/`e2e-groundtruth`/`gvisor-isolation`) **cosign-verifies
+> the pinned digest against the repo identity before pulling**, so a forged digest fails closed *at
+> use* regardless; **L×H=Med**. **(E) Privilege scope:** the App holds only Contents+PR write (no
+> admin, no secrets, no Actions write); the job's own token is `contents:read`+`actions:read` and all
+> writes go through the App token (a dropped `GH_TOKEN` fails, never silently falls back to a
+> writable token). **(D) Availability:** the job **fail-safe-skips** when the key is absent or partial
+> (V3 — both `REPIN_APP_ID` and `REPIN_APP_PRIVATE_KEY` required), degrading to a manual signed bump.
+> **Rotation:** regenerate the App key + replace the secret per `runbooks/secret-rotation.md`
+> (build-time credentials); a leaked key is an incident (`runbooks/incident-response.md`). Setup:
+> `runbooks/supply-chain-pinning.md` (§ Repin GitHub App).
 
 ## 5. Residual risk & assumptions
 
