@@ -47,6 +47,26 @@ _CRITICAL_GLOBS = frozenset(f"*/{m.replace('.', '/')}.py" for m in _CRITICAL_MOD
 
 _REQUIRED_MARKERS = ("critical", "abuse", "integration")
 
+#: The branch-protection **required status checks** on ``main`` (ten total). This is the canonical
+#: in-repo record of the merge-blocking gate set: branch protection itself lives in the GitHub API
+#: (off-repo), so ``docs/ci-cd.md`` is the human-facing source of truth for what an operator must
+#: mark required — and it had silently drifted (round-6 V4: it still listed eight, omitting the two
+#: always-run gates added in round-5). The doc-drift tripwire below asserts every one of these
+#: appears in ``docs/ci-cd.md``, so adding/removing a required gate without updating the doc fails
+#: loudly here rather than leaving an operator to under-protect ``main`` by following a stale list.
+_REQUIRED_STATUS_CHECKS = (
+    "quality",
+    "quality-py314",
+    "sast",
+    "sca",
+    "secret-scan",
+    "container-iac-scan",
+    "fid-license-gate",
+    "fid-elf-match-gate",
+    "image-scan-gate",
+    "mtls-auth-gate",
+)
+
 
 def _repo_root() -> Path:
     """Return the repository root (two levels up from this test file: tests/unit → repo)."""
@@ -183,3 +203,35 @@ def test_critical_module_lists_are_in_sync() -> None:
         f"  only in mutmut: {sorted(mutmut - _CRITICAL_GLOBS)}\n"
         f"  missing from mutmut: {sorted(_CRITICAL_GLOBS - mutmut)}"
     )
+
+
+def _ci_cd_doc_text() -> str:
+    """Return ``docs/ci-cd.md`` text (the operator-facing CI/branch-protection reference)."""
+    return (_repo_root() / "docs" / "ci-cd.md").read_text(encoding="utf-8")
+
+
+def test_ci_cd_doc_lists_all_required_status_checks() -> None:
+    """``docs/ci-cd.md`` names every required status check (round-6 V4 doc-drift tripwire).
+
+    Branch protection lives in the GitHub API (off-repo), so this doc is the source of truth an
+    operator follows to mark contexts required. It had drifted — listing eight while ``main``
+    actually requires ten (the round-5 ``image-scan-gate`` + ``mtls-auth-gate`` were omitted), so an
+    operator applying protection from the doc would leave two gates non-required. Assert each
+    canonical required check appears in the doc so this can't silently recur.
+    """
+    doc = _ci_cd_doc_text()
+    missing = [c for c in _REQUIRED_STATUS_CHECKS if f"`{c}`" not in doc]
+    assert not missing, f"docs/ci-cd.md omits required status check(s) from its list: {missing}"
+
+
+def test_ci_cd_doc_lists_all_critical_modules() -> None:
+    """``docs/ci-cd.md`` names every 100%-critical module (round-6 V4 doc-drift tripwire).
+
+    The doc's "Critical paths (100%)" line is the human-facing record of the designated set; it had
+    dropped ``jobs.streaming`` (and said "six" not "seven"). Assert each critical module's dotted
+    name (sans the ``vivarium.`` package prefix, the form the doc uses) appears, so the doc stays in
+    sync with the SSOT tuple that the coverage/mutation gates enforce.
+    """
+    doc = _ci_cd_doc_text()
+    missing = [m for m in _CRITICAL_MODULES if f"`{m.removeprefix('vivarium.')}`" not in doc]
+    assert not missing, f"docs/ci-cd.md omits critical module(s) from its list: {missing}"
