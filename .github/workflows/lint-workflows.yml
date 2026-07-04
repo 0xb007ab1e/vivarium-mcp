@@ -7,10 +7,13 @@
 # the always-run gate-poll loops (the anti-false-green linchpin), the four cosign-verify blocks,
 # and the LIVE repin trust-pin orchestration (worker-image.yml propose-pin-bump).
 #
-# ADVISORY for now (NOT a branch-protection required check): promote it to a required context
-# (a gated branch-protection change) once it has run green across a few PRs. actionlint is pinned
-# by version + a checksum-verified download (the repo's Ghidra/zlib supply-chain idiom — no new
-# marketplace action to vet); shellcheck ships preinstalled on the ubuntu-latest runner.
+# REQUIRED merge check (round-9 Y2 — promoted from advisory after running green since introduction;
+# the repin trust-pin flow is now live, so a regression in this shell must block). The `actionlint`
+# context is in the branch-protection required set + the `test_coverage_markers` required-check
+# tripwire. actionlint is pinned by version + a checksum-verified download (the repo's Ghidra/zlib
+# supply-chain idiom — no new marketplace action to vet); shellcheck ships preinstalled on the
+# ubuntu-latest runner. NOTE: as a required gate this couples merges to a CI-time github-release
+# download — low risk (same github as checkout; pinned + integrity-checked; fail-closed on error).
 name: lint-workflows
 
 on:

@@ -48,7 +48,7 @@ _CRITICAL_GLOBS = frozenset(f"*/{m.replace('.', '/')}.py" for m in _CRITICAL_MOD
 
 _REQUIRED_MARKERS = ("critical", "abuse", "integration")
 
-#: The branch-protection **required status checks** on ``main`` (ten total). This is the canonical
+#: The branch-protection **required status checks** on ``main`` (eleven). This is the canonical
 #: in-repo record of the merge-blocking gate set: branch protection itself lives in the GitHub API
 #: (off-repo), so ``docs/ci-cd.md`` is the human-facing source of truth for what an operator must
 #: mark required — and it had silently drifted (round-6 V4: it still listed eight, omitting the two
@@ -66,6 +66,7 @@ _REQUIRED_STATUS_CHECKS = (
     "fid-elf-match-gate",
     "image-scan-gate",
     "mtls-auth-gate",
+    "actionlint",  # round-9 Y2: promoted from advisory to required (lint-workflows.yml)
 )
 
 

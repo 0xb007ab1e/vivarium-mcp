@@ -48,6 +48,18 @@ manual dispatch** (gated, not a per-PR merge gate — stock runners need a one-t
 performs). A failed scheduled run alerts the repo owner. The per-PR gated real-worker e2e
 (`e2e-groundtruth` / `live-regression`) runs under `crun`; this job is the strong-tier (gVisor) check.
 
+**Workflow lint (`lint-workflows.yml` → `actionlint`).** Statically lints the GitHub Actions
+workflows AND the shell embedded in their `run:` blocks (actionlint invokes the runner's preinstalled
+shellcheck) — covering the security-load-bearing workflow shell: the always-run gate-poll loops (the
+anti-false-green linchpin), the four cosign-verify blocks, and the live repin trust-pin orchestration.
+Runs on every PR; **promoted from advisory to a REQUIRED merge check in round-9** (Y2 — it had run
+green since introduction and the repin flow is now live, so its regressions must block). actionlint is
+pinned by version + a checksum-verified download (the repo's Ghidra/zlib supply-chain idiom, no new
+marketplace action); `SHELLCHECK_OPTS` baselines only the pervasive SC2155 (`export FOO="$(id -u)"`,
+benign) + SC2015 (intentional `… || true`) so it enforces every other code. Trade-off: as a required
+gate it adds a CI-time github-release download dependency — low risk (same github as `checkout`,
+pinned + integrity-checked, fail-closed on any download/checksum error).
+
 **Fail closed:** an errored or skipped security stage counts as a failure, not a pass.
 
 ## Supply-chain integrity (std-supplychain)
@@ -69,10 +81,11 @@ When the GitHub remote is set up, protect `main` with:
   a security-focused review (`workflow-code-review`). Dismiss stale approvals on new commits.
 - **Require status checks to pass:** the **required** contexts are `quality`, `quality-py314`,
   `sast`, `sca`, `secret-scan`, `container-iac-scan`, `fid-license-gate`, `fid-elf-match-gate`,
-  `image-scan-gate`, and `mtls-auth-gate` (ten total); require branches up to date. (`image-scan-gate`
-  and `mtls-auth-gate` are always-run gates that internally verify their diff-gated matrix legs /
-  integration suite — see the gate notes above; a `test_coverage_markers` tripwire asserts this list
-  stays in sync with the gate set.)
+  `image-scan-gate`, `mtls-auth-gate`, and `actionlint` (eleven total); require branches up to date.
+  (`image-scan-gate` and `mtls-auth-gate` are always-run gates that internally verify their diff-gated
+  matrix legs / integration suite; `actionlint` was promoted from advisory to required in round-9 —
+  see the gate notes above; a `test_coverage_markers` tripwire asserts this list stays in sync with
+  the gate set — matching each required context to the job's emitted `name:`/key.)
 - **Require signed commits** (CI verifies signatures); require **linear history** (squash/rebase
   merge only — no merge bubbles).
 - **No force-push / no deletion** of `main`; include administrators.
