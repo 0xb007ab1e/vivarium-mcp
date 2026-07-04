@@ -72,6 +72,14 @@ linting promoted to a required gate, and CI/docs/threat-model currency.
 - **CHANGELOG drift guard + backfill (this change, gap Y3).** Backfilled `[Unreleased]` through #284
   and added an advisory `changelog-check` job that flags a code/workflow PR missing a CHANGELOG entry
   (skippable via a `no-changelog` label) — to end the recurring `[Unreleased]` drift.
+- **Stream `$/progress` log relays are coalesced (gap Y7).** The decompile-stream read-loop now logs a
+  progress frame only once per `_MIN_PROGRESS_INTERVAL_S` (symmetric with the analyze path), so a
+  chatty worker can't flood the log — the unconditional `_MAX_PROGRESS_FRAMES` count/cap (#281) is
+  untouched, so this bounds only log volume, never the flood defense. No observable tool behavior change.
+- **Gate sibling-name coupling tripwire (gap Y8).** `test_coverage_markers` now asserts the
+  `fid-elf-match-gate` / `image-scan-gate` sibling job names + expected matrix leg count against the
+  real workflows, so a rename that would silently break the always-run "never appeared" gate guards
+  fails a unit test instead.
 
 ## [0.13.0] — 2026-07-02
 
