@@ -100,7 +100,7 @@ jobs:
           PIN_FILE=".github/worker-image.pin"
           DIGEST=""
           if [ -f "${PIN_FILE}" ]; then
-            DIGEST="$(grep -oiE 'sha256:[0-9a-f]{64}' "${PIN_FILE}" | head -n1 || true)"
+            DIGEST="$(grep -oE 'sha256:[0-9a-f]{64}' "${PIN_FILE}" | head -n1 || true)"
           fi
           [ -z "${DIGEST}" ] && DIGEST="${WORKER_IMAGE_DIGEST_VAR:-}"
           if [ -z "${DIGEST}" ]; then
