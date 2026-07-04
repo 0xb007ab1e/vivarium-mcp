@@ -12,6 +12,7 @@ surface a terminal worker error as the producer raising. The job machinery itsel
 
 from __future__ import annotations
 
+import logging
 import socket
 import struct
 import threading
@@ -974,6 +975,48 @@ def test_decompile_stream_raises_and_kills_on_progress_flood(
     t.join(timeout=3)
     assert ei.value.envelope.type is ErrorType.WORKER_UNAVAILABLE
     assert worker.killed == 1
+    wrk.close()
+
+
+def test_decompile_stream_coalesces_progress_log(caplog: pytest.LogCaptureFixture) -> None:
+    """Y7 (round-9): a burst of ``$/progress`` frames arriving within ``_MIN_PROGRESS_INTERVAL_S``
+    is logged FEWER times than it is received (coalesced, like the analyze path).
+
+    The stream read-loop previously relayed every progress frame to the log; a chatty (or hostile)
+    worker could flood the log with up to ``_MAX_PROGRESS_FRAMES`` lines per call. The count/cap
+    (X9) stays unconditional — coalescing bounds only log volume, never the flood defense. Five
+    frames sent back-to-back over a local socketpair land well inside the 0.5s window, so at least
+    one relays and the burst collapses to fewer than five (pre-Y7 all five relayed).
+    """
+    srv, wrk = socket.socketpair(socket.AF_UNIX)
+    worker = _FakeWorker()
+    adapter = _make_adapter(srv, worker)
+
+    burst = 5
+
+    def _serve() -> None:
+        rid = _read_request(wrk)["id"]
+        for i in range(burst):  # a rapid burst — all within the coalesce window
+            _send_frame(wrk, f.build_progress(rid, i * 10, "analyzing"))
+        _send_frame(wrk, {"jsonrpc": "2.0", "id": rid, "result": {"total": 0, "done": True}})
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    with caplog.at_level(logging.INFO):
+        produced = list(adapter.decompile_stream(_SID, DecompileStreamIn(session_id=_SID, limit=5)))
+    t.join(timeout=3)
+
+    assert produced == []  # progress relays to the log, never yields; clean terminal, no chunks
+    assert worker.killed == 0  # a clean progress+terminal stream never kills
+    relayed = [r for r in caplog.records if r.message == "stream.progress"]
+    assert relayed, "expected at least one relayed progress frame"
+    assert len(relayed) < burst, "expected the burst to coalesce to fewer log lines than frames"
+    # Each relay carries ONLY the safe percent + closed-vocab phase (master §5 redaction).
+    for rec in relayed:
+        assert rec.phase in f.PROGRESS_PHASES  # type: ignore[attr-defined]
+        pct = rec.percent  # type: ignore[attr-defined]
+        assert isinstance(pct, int) and 0 <= pct <= 100
+        assert not hasattr(rec, "message_text") and not hasattr(rec, "detail")
     wrk.close()
 
 

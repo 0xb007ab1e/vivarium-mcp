@@ -713,6 +713,34 @@ class RpcGhidraAdapter:
             if live is sess and live.active_stream_id == request_id:
                 live.active_stream_id = None
 
+    def _relay_stream_progress(
+        self,
+        frame: dict[str, Any],
+        *,
+        expected_id: str,
+        progress_count: int,
+        last_relayed_at: float | None,
+    ) -> float | None:
+        """Enforce the ``$/progress`` flood cap and coalesce the relay log for one stream frame.
+
+        X9 (round-8): ``progress_count`` (already incremented) over :data:`_MAX_PROGRESS_FRAMES`
+        is a hostile-worker flood → raise (mapped to kill+evict); the deadline bounds wall-clock
+        but a worker emitting endless progress frames is a protocol violation, not a slow one.
+
+        Y7 (round-9): the relay LOG is coalesced to :data:`_MIN_PROGRESS_INTERVAL_S` (symmetric
+        with the analyze path) so a chatty worker can't flood the log — the cap above stays
+        UNCONDITIONAL, so coalescing never weakens the flood bound. Returns the new
+        ``last_relayed_at``.
+        """
+        if progress_count > _MAX_PROGRESS_FRAMES:
+            raise RpcProtocolError("stream progress-frame flood exceeded the per-call cap")
+        progress = rpc_framing.parse_progress(frame, expected_id=expected_id)
+        now = time.monotonic()
+        if _should_relay_progress(last_relayed_at, now, _MIN_PROGRESS_INTERVAL_S):
+            _log.info("stream.progress", extra=_progress_log_payload(progress))
+            return now
+        return last_relayed_at
+
     def _read_stream_chunks(
         self,
         sock: socket.socket,
@@ -747,6 +775,7 @@ class RpcGhidraAdapter:
         next_seq = 0
         chunk_count = 0
         progress_count = 0
+        last_relayed_at: float | None = None  # Y7: coalesce the progress LOG (not the count/cap)
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -755,14 +784,13 @@ class RpcGhidraAdapter:
             # recv (slow-loris hardening), so the whole frame is bounded by the same deadline.
             frame = self._read_frame(sock, deadline)
             if rpc_framing.is_progress_notification(frame):
-                # X9 (round-8): cap $/progress like $/chunk (and like the analyze path). The
-                # deadline already bounds wall-clock, but a hostile worker emitting endless progress
-                # frames is a protocol violation → fail closed (kill+evict), not spin to deadline.
                 progress_count += 1
-                if progress_count > _MAX_PROGRESS_FRAMES:
-                    raise RpcProtocolError("stream progress-frame flood exceeded the per-call cap")
-                progress = rpc_framing.parse_progress(frame, expected_id=expected_id)
-                _log.info("stream.progress", extra=_progress_log_payload(progress))
+                last_relayed_at = self._relay_stream_progress(
+                    frame,
+                    expected_id=expected_id,
+                    progress_count=progress_count,
+                    last_relayed_at=last_relayed_at,
+                )
                 continue
             if rpc_framing.is_chunk_notification(frame):
                 chunk_count += 1

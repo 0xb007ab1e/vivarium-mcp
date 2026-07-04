@@ -325,3 +325,68 @@ def test_required_checks_map_to_workflow_jobs() -> None:
     contexts = _emitted_check_contexts()
     missing = [c for c in _REQUIRED_STATUS_CHECKS if c not in contexts]
     assert not missing, f"required status check(s) with no matching emitted job context: {missing}"
+
+
+def _load_workflow(name: str) -> dict[str, object]:
+    """Parse a single ``.github/workflows/<name>`` file to a dict."""
+    text = (_repo_root() / ".github" / "workflows" / name).read_text(encoding="utf-8")
+    data = yaml.safe_load(text)
+    assert isinstance(data, dict), f"{name} did not parse to a mapping"
+    return data
+
+
+def _shell_var(text: str, var: str) -> str:
+    """Extract a ``VAR="value"`` (or ``VAR: "value"``) literal from workflow shell/env text."""
+    import re
+
+    m = re.search(rf'{re.escape(var)}\s*[:=]\s*"([^"]+)"', text)
+    assert m, f"could not find {var} in the workflow"
+    return m.group(1)
+
+
+def test_gate_sibling_name_couplings_match_real_jobs() -> None:
+    """Y8 (round-9): the always-run gates poll sibling jobs BY NAME — pin those couplings.
+
+    ``fid-elf-match-gate`` (``live-regression.yml``) and ``image-scan-gate`` (``image-scan-pr.yml``)
+    each carry a bounded "the sibling never appeared → fail LOUD" guard keyed on a hard-coded job
+    name/prefix + expected leg count. That is fail-closed (not a false-green), but the coupling
+    itself is unchecked: renaming the polled job (or adding/removing a matrix leg) without the
+    gate's ``SIBLING``/``PREFIX``/``EXPECTED_LEGS`` turns the fast-fail into a 5-minute "never
+    appeared" abort on every gated PR. Assert the constants still match the real jobs.
+    """
+    # --- fid-elf-match-gate → sibling `live-regression` (by emitted name) ---
+    lr_text = (_repo_root() / ".github" / "workflows" / "live-regression.yml").read_text(
+        encoding="utf-8"
+    )
+    sibling = _shell_var(lr_text, "SIBLING")
+    lr_contexts = _job_contexts_from_text(lr_text)
+    assert sibling in lr_contexts, (
+        f"fid-elf-match-gate polls a sibling named {sibling!r}, but no job in live-regression.yml "
+        f"emits that context (emitted: {sorted(lr_contexts)})"
+    )
+
+    # --- image-scan-gate → matrix legs of the `image-scan` job (name prefix + leg count) ---
+    isc = _load_workflow("image-scan-pr.yml")
+    isc_text = (_repo_root() / ".github" / "workflows" / "image-scan-pr.yml").read_text(
+        encoding="utf-8"
+    )
+    prefix = _shell_var(isc_text, "PREFIX")  # e.g. "image-scan ("
+    expected_legs = int(_shell_var(isc_text, "EXPECTED_LEGS"))
+    jobs = isc.get("jobs")
+    assert isinstance(jobs, dict) and "image-scan" in jobs, "image-scan job missing"
+    scan_job = jobs["image-scan"]
+    assert isinstance(scan_job, dict)
+    # GitHub auto-names matrix legs "<emitted job name> (<matrix values>)"; the gate matches that
+    # prefix. The emitted name is the job's `name:` if set, else the key.
+    emitted = str(scan_job.get("name") or "image-scan")
+    want_prefix = f"{emitted} ("
+    assert prefix == want_prefix, (
+        f"image-scan-gate matches leg prefix {prefix!r}, but image-scan emits legs {want_prefix!r}"
+    )
+    strategy = scan_job.get("strategy")
+    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+    include = matrix.get("include") if isinstance(matrix, dict) else None
+    assert isinstance(include, list) and len(include) == expected_legs, (
+        f"image-scan-gate expects {expected_legs} matrix legs, but the image-scan matrix has "
+        f"{len(include) if isinstance(include, list) else '?'}"
+    )
