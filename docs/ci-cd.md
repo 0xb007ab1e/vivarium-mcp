@@ -34,11 +34,13 @@ bounded replay) code (the trust boundaries). Designated in `pyproject.toml`.
 **Mutation testing (test quality — master §4):** coverage proves the critical-path tests *execute*
 every line; mutation testing proves they *catch faults*. [`mutation.yml`](../.github/workflows/mutation.yml)
 runs `mutmut` over the same seven critical modules (config: `pyproject [tool.mutmut]`) on a **weekly
-schedule + manual dispatch** — never per-PR (it re-runs the suite per mutant). It is **advisory**
-(reports the score to the run summary + uploads a stats artifact); set `MUTATION_SCORE_MIN` > 0 to
-turn it into a regression gate once the baseline is confirmed. Baseline at introduction: ~71%
-(895 killed / 366 survived / 1261). A failed scheduled run alerts the repo owner (like
-`scheduled-rescan.yml`).
+schedule + manual dispatch** — never per-PR (it re-runs the suite per mutant). It reports the score
+to the run summary + uploads a stats artifact **and is a live regression floor**: `MUTATION_SCORE_MIN`
+is set to **65** (gap round-3 P7 / #222), so a run scoring below it **FAILS** — the score cannot
+silently drop. The floor sits conservatively ~4.5pt under the measured baseline **69.5%**
+(1183 killed / 518 survived / 1701; 2026-07-01, all seven modules) to absorb mutmut nondeterminism;
+tighten it toward the baseline as CI runs confirm their own score. A failed scheduled run alerts the
+repo owner (like `scheduled-rescan.yml`).
 
 **gVisor isolation verification (`gvisor-isolation.yml`).** The ADR-004 worker-isolation drill
 (`deploy/verify-isolation.sh`) runs in CI under **real gVisor/runsc** against the pinned,
