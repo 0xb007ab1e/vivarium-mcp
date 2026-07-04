@@ -20,11 +20,11 @@ this one fails loudly if the designation is broken).
 from __future__ import annotations
 
 import importlib
-import re
 import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 # The SEVEN modules designated 100%-critical (master §4). This tuple is the single source of truth
 # the sync tripwire below enforces against the two config copies (CI `--include` + mutmut
@@ -267,19 +267,60 @@ def test_cosign_identity_regexp_is_tail_anchored_to_refs_tags() -> None:
     assert checked >= 4, f"expected >=4 worker-image cosign verify sites, got {checked} (deleted?)"
 
 
+def _job_contexts_from_text(text: str) -> set[str]:
+    """The status-check contexts one workflow emits: each job's ``name:`` if set, else its job key.
+
+    GitHub reports a job's ``name`` as the check context when present, falling back to the key — so
+    the required-check ↔ job mapping must resolve the EMITTED context, not just the key.
+    """
+    data = yaml.safe_load(text)
+    jobs = (data or {}).get("jobs") or {}
+    contexts: set[str] = set()
+    for key, job in jobs.items():
+        name = job.get("name") if isinstance(job, dict) else None
+        contexts.add(str(name) if name else str(key))
+    return contexts
+
+
+def _emitted_check_contexts() -> set[str]:
+    """Union of the status-check contexts emitted across all workflow files."""
+    contexts: set[str] = set()
+    for wf in _workflow_files():
+        contexts |= _job_contexts_from_text(wf.read_text(encoding="utf-8"))
+    return contexts
+
+
+def test_job_context_resolution_prefers_name_over_key() -> None:
+    """Y1 regression: a job's EMITTED context is its ``name:`` (not its key) when ``name:`` is set.
+
+    This is the exact resolution the round-8 X8 tripwire got wrong (it grepped the key only), so a
+    job overriding ``name:`` could drift its emitted context past the check. Pin the resolution.
+    """
+    text = (
+        "jobs:\n"
+        "  mykey:\n"
+        "    name: my-emitted-name\n"
+        "    runs-on: ubuntu-latest\n"
+        "  plainkey:\n"
+        "    runs-on: ubuntu-latest\n"
+    )
+    ctxs = _job_contexts_from_text(text)
+    assert "my-emitted-name" in ctxs  # name wins
+    assert "mykey" not in ctxs  # the KEY is NOT the emitted context when name is set (the Y1 gap)
+    assert "plainkey" in ctxs  # no name → the key is the context
+
+
 def test_required_checks_map_to_workflow_jobs() -> None:
-    """Every required status check is emitted by a real workflow job (round-8 X8 tripwire).
+    """Every required status check is EMITTED by a real workflow job (round-8 X8; round-9 Y1 fix).
 
     The doc-drift tripwire checks the required-check tuple against ``docs/ci-cd.md``, but nothing
     asserts each required context is actually PRODUCED by a job. A renamed job → branch protection
     waits forever for the old context (fail-closed hang) and no test flags it (doc + tuple can stay
-    mutually consistent yet both stale). Assert each name appears as a ``^  <name>:`` job key in a
-    workflow file.
+    mutually consistent yet both stale). Y1: the check now resolves each job's EMITTED context
+    (``name:`` if set, else key) rather than only the key — ``image-scan-gate`` and
+    ``fid-elf-match-gate`` both set ``name:`` (== key today), so a future ``name:`` change without a
+    key rename would otherwise slip through (branch protection hangs while this stays green).
     """
-    texts = [wf.read_text(encoding="utf-8") for wf in _workflow_files()]
-    missing = [
-        ctx
-        for ctx in _REQUIRED_STATUS_CHECKS
-        if not any(re.search(rf"^  {re.escape(ctx)}:", t, re.MULTILINE) for t in texts)
-    ]
-    assert not missing, f"required status check(s) with no matching workflow job: {missing}"
+    contexts = _emitted_check_contexts()
+    missing = [c for c in _REQUIRED_STATUS_CHECKS if c not in contexts]
+    assert not missing, f"required status check(s) with no matching emitted job context: {missing}"

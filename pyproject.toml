@@ -181,6 +181,12 @@ ignore_missing_imports = true
 module = ["pyghidra.*", "jpype.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# PyYAML ships no bundled type stubs (types-PyYAML not vendored); the coverage-marker tripwire
+# (tests/) parses workflow YAML to resolve required-check ↔ job-name contexts. Allow until stubs land.
+module = ["yaml"]
+ignore_missing_imports = true
+
 # ---------------------------------------------------------------------------
 # Pytest + coverage. Coverage gate is enforced here AND in CI (workflow-cicd).
 # ---------------------------------------------------------------------------
