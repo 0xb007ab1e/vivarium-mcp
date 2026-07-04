@@ -1,0 +1,60 @@
+# =============================================================================
+# changelog-check.yml — guard against CHANGELOG [Unreleased] drift (round-9 Y3)
+# =============================================================================
+# The `[Unreleased]` section repeatedly drifted stale (a backfill closes the window up to itself,
+# then later PRs re-drift). This job flags a PR that changes shipping code or CI workflows but does
+# NOT touch CHANGELOG.md — nudging the entry into the SAME PR that introduces the change.
+#
+# ADVISORY (not a branch-protection required check): a strong, visible red nudge, not a hard block.
+# Skip it for a genuinely no-user-impact change by applying the `no-changelog` label to the PR.
+# Fail-OPEN on an uncomputable diff (a changelog nudge must never wedge CI).
+name: changelog-check
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: changelog-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changelog:
+    # Skip entirely when the author opts out via the label.
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # actions/checkout@v6.0.3
+        with:
+          fetch-depth: 0 # need base + head to diff
+      - name: Require a CHANGELOG entry for code/workflow changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --quiet origin "${BASE_SHA}" "${HEAD_SHA}" 2>/dev/null || true
+          if ! files="$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" 2>/dev/null)"; then
+            echo "::warning::could not diff ${BASE_SHA}..${HEAD_SHA} — skipping (fail-open)"
+            exit 0
+          fi
+          # Substantive = shipping code or CI workflows; docs/tests-only PRs need no entry.
+          substantive="$(printf '%s\n' "${files}" | grep -E '^(src/|worker/|\.github/workflows/)' || true)"
+          if [ -z "${substantive}" ]; then
+            echo "::notice::no shipping code/workflow change — CHANGELOG entry not required"
+            exit 0
+          fi
+          if printf '%s\n' "${files}" | grep -qxF 'CHANGELOG.md'; then
+            echo "::notice::CHANGELOG.md updated — OK"
+            exit 0
+          fi
+          echo "::error::This PR changes code/workflows but does not update CHANGELOG.md. Add an" \
+               "entry under [Unreleased] (Security/Fixed/Changed/Added/Internal), or apply the" \
+               "'no-changelog' label if truly no-user-impact."
+          echo "Substantive files changed:"
+          printf '%s\n' "${substantive}"
+          exit 1

@@ -6,12 +6,12 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
-Continued **security-hardening / gap-remediation** (round-6 → round-8 findings, #258–#276) — **no
+Continued **security-hardening / gap-remediation** (round-6 → round-9 findings, #258–#284) — **no
 new tools, no contract changes** (Tier-1 catalog stays **56**, observable behavior unchanged). A
-streaming cancel-availability fix and a concurrency guard, a hostile-worker output clamp, a daemon
-restart-race fix, the worker-image auto-repin trust-anchor flow made signed + CI-triggering +
-verified with the cosign trust identity tightened to tag builds, plus CI-drift tripwires and
-CI/docs/threat-model currency.
+streaming cancel-availability fix and a concurrency guard, hostile-worker output/flood clamps, a
+daemon restart-race fix, the worker-image auto-repin trust-anchor flow made signed + CI-triggering +
+verified with the cosign trust identity tightened to tag builds, plus CI-drift tripwires, workflow
+linting promoted to a required gate, and CI/docs/threat-model currency.
 
 ### Fixed
 - **Cancelling a stream frees the session at once (#260, gap V1).** `cancel_job` now drains the
@@ -34,6 +34,10 @@ CI/docs/threat-model currency.
   `--certificate-identity-regexp` at all four verify sites (worker-image/live-regression/
   e2e-groundtruth/gvisor-isolation) is tail-anchored to `worker-image.yml@refs/tags/`, so only a
   signature minted by a release-tag build verifies — the pinned image is always tag-built.
+- **Streaming `$/progress` frames are flood-capped (#281, gap X9).** The decompile-stream read-loop
+  now bounds `$/progress` frames by `_MAX_PROGRESS_FRAMES` (symmetric with the `$/chunk` cap and the
+  analyze path) — a hostile worker can no longer spin the loop with endless progress frames
+  (fail-closed kill+evict; LLM02 / CWE-400).
 
 ### Internal / CI / supply-chain / docs
 - **Worker-image auto-repin PR is signed, CI-triggering, and pre-verified (#258, #259, #261, #265).**
@@ -55,6 +59,19 @@ CI/docs/threat-model currency.
 - **CI-drift tripwires added (#276, gaps X7/X8).** `test_coverage_markers` now asserts the cosign
   identity stays tail-anchored at all four verify sites, and that every required status check maps to
   a real workflow job (a renamed job → fail-closed hang would otherwise pass silently).
+- **Repin digest-extraction extracted + unit-tested (#279, gap X3).** `scripts/extract_digest.sh`
+  (strict-lowercase, fail-closed) replaces the inline `grep` at the three propose-pin-bump sites;
+  the consumer pin reads (live-regression/e2e-groundtruth/gvisor-isolation) were unified to the same
+  strict-lowercase grammar (#283, gap Y6).
+- **X8 required-check tripwire hardened (#282, gap Y1).** It now resolves each job's EMITTED context
+  (`name:` if set, else key) so a `name:`-override drift can't slip past branch protection unnoticed.
+- **`actionlint` promoted to a REQUIRED workflow-lint gate (#280 advisory → #284 required, gaps X5/Y2/Y4).**
+  Statically lints the workflows + their embedded shell (shellcheck) — the always-run gate-poll loops,
+  the cosign-verify blocks, and the live repin trust-pin orchestration; now the 11th required check on
+  `main`. Documented in `docs/ci-cd.md`.
+- **CHANGELOG drift guard + backfill (this change, gap Y3).** Backfilled `[Unreleased]` through #284
+  and added an advisory `changelog-check` job that flags a code/workflow PR missing a CHANGELOG entry
+  (skippable via a `no-changelog` label) — to end the recurring `[Unreleased]` drift.
 
 ## [0.13.0] — 2026-07-02
 
