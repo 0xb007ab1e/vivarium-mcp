@@ -28,6 +28,11 @@ specimen. Here the specimen is an untrusted binary.
   bytes or strings. Every read tool takes size and count limits so a response cannot grow without bound.
 - **Summarize and measure.** Report cyclomatic complexity, code and data coverage, a call-graph summary,
   scan for indicators of compromise and common crypto constants, and produce a whole-program summary.
+- **Identify library code.** Match functions against bundled Function ID databases (`identify_functions`)
+  to label statically-linked library code (libc, OpenSSL, zlib, …) so you can focus on the program's own
+  logic instead of re-reversing the standard library.
+- **Trade depth for speed.** `session_analyze` takes an analysis `profile` (`light`, `default`, `deep`)
+  so you can run a fast first pass on a large binary and a fuller pass when you need it.
 - **Stream results as they're produced.** Start a bulk decompile as a job and pull partial results by
   cursor while extraction continues — so an LLM can begin reasoning over early functions — and cancel the
   run mid-stream when you have enough.
@@ -99,7 +104,8 @@ The full design rationale is in the decision records under [`docs/adr/`](./docs/
   the original source.
 - [`docs/runbooks/`](./docs/runbooks/): operational procedures (deploy, rollback, incident response, and
   more), including [HTTP exposure](./docs/runbooks/http-exposure.md).
-- [`docs/adr/`](./docs/adr/): the numbered design decisions (ADR-001 through ADR-043).
+- [`docs/adr/`](./docs/adr/): the numbered design decisions (ADR-001 through ADR-044); see the
+  [ADR index](./docs/adr/README.md) for a map and suggested reading order.
 - [`SECURITY.md`](./SECURITY.md): how to report a vulnerability.
 - [`CHANGELOG.md`](./CHANGELOG.md): release history.
 - [`PLAN.md`](./PLAN.md): the delivery plan and locked decisions.

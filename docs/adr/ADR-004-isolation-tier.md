@@ -1,5 +1,10 @@
 # ADR-004: Worker isolation tier — rootless OCI baseline + gVisor
 
+> **Naming note (post-ADR-038):** environment variables in this record predate the rename to Vivarium
+> and appear under their original `GHIDRA_MCP_*` names — they are now `VIVARIUM_*` (e.g.
+> `GHIDRA_MCP_WORKER_RUNTIME` → `VIVARIUM_WORKER_RUNTIME`). The authoritative config reference is
+> [`docs/getting-started.md`](../getting-started.md) and `src/vivarium/config.py`.
+
 - **Status:** Accepted (locked by PLAN.md v2 / red-team F8); concrete runtime args owned by WS3
 - **Date:** 2026-06-03
 - **Deciders:** Human + red-team + PM; recorded by Software Architect (WS0)

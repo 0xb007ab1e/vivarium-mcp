@@ -136,13 +136,76 @@ the tool names and the flow are fixed:
 3. `session_analyze` runs Ghidra's analysis. For a large binary, pass `profile: light` to trade some
    depth for speed and memory.
 4. `list_functions` shows what was found.
-5. `decompile` returns the decompiled C for a function.
+5. `decompile_function` returns the decompiled C for one function (by address or name).
 
 Everything the binary produces comes back wrapped as untrusted data. Treat decompiled code and strings
 as text to read, never as something to run.
 
 When you are done, `session_close` ends the session. The server kills the worker and wipes its scratch
 storage.
+
+This is the minimum flow; [`docs/examples/simple-first-look.md`](./examples/simple-first-look.md) shows
+it end to end with the exact tool inputs and the shape of each response. The next section maps the
+common reverse-engineering tasks to the tools and worked examples that cover them.
+
+## Reverse-engineering workflows
+
+Vivarium's 56 tools cover the usual reverse-engineering arc: **triage** (what is this and is it
+dangerous?), **deep analysis** (understand and document a specific area), **bulk extraction** (read a
+lot of code efficiently), and **persistence** (keep and share what you learned). Pick the workflow that
+matches your task — each links a worked, copy-pasteable example.
+
+### Fast triage — "what is this binary?"
+
+The quickest read on an unknown or suspicious file, before you commit to reading code:
+
+1. `session_create` → `session_import` → `session_analyze`.
+2. `program_metadata` and `program_summary` for the high-level facts (format, arch, entry point,
+   function/string counts, a one-shot aggregate report).
+3. `identify_functions` to label statically-linked **library code** (libc, OpenSSL, zlib, …) via the
+   bundled Function ID databases — so you can ignore the standard library and focus on the program's own
+   logic. This is usually the single biggest time-saver on a real binary.
+4. `list_strings` / `search_strings`, then `ioc_scan` (URLs, IPs, paths) and `crypto_constant_scan`
+   (crypto magic values) for leads.
+
+Treat the scan tools as **heuristic leads, not verdicts** — confirm by reading the code. The full triage
+walkthrough is [`docs/examples/medium-triage.md`](./examples/medium-triage.md), and
+[`docs/examples/blind-analysis-sqlite.md`](./examples/blind-analysis-sqlite.md) works a real stripped
+2.6 MiB binary end to end (and shows an honest crypto-scan caveat).
+
+### Deep analysis — "understand and document this area"
+
+Once triage points you at interesting functions, read and annotate them. Annotations require consent:
+call `session_enable_writes` first (add `allow_structural: true` for type/signature edits).
+
+1. `decompile_function` / `disassemble` to read; `xrefs_to` / `xrefs_from`, `callers` / `callees`, and
+   `function_context` to follow the call graph; `analysis_order` for a leaf-first reading order.
+2. Rename and comment as you learn: `rename_function`, `rename_symbol`, `rename_local_variable`,
+   `rename_parameter`, `set_comment`.
+3. Recover types: `define_struct` / `define_union` / `define_types`, then `apply_data_type` and
+   `set_function_signature` so the decompiler output reads cleanly. `session_undo` reverts the last
+   change; `delete_type` removes a composite you defined.
+
+[`docs/examples/large-annotate-and-recover.md`](./examples/large-annotate-and-recover.md) shows this
+recover-and-document loop on a cluster of related functions.
+
+### Bulk extraction — "read a lot of code without waiting"
+
+For a large function set, don't decompile one call at a time. Start a streaming job and read results as
+they are produced:
+
+1. `start_decompile_stream` over a function set returns a **job handle**.
+2. `fetch_job_results` pulls buffered chunks by cursor while extraction continues (so an LLM can begin
+   reasoning over early functions); `job_status` reports progress.
+3. `cancel_job` aborts the run and discards the buffer once you have enough.
+
+### Persistence — "keep and share my work"
+
+Annotations are session-scoped and vanish when the session is evicted (the server is stateless by
+design). To keep them, `session_export_annotations` produces a portable JSON document **bound to the
+binary's hash**; `session_import_annotations` replays it into a fresh session on the same binary. Store
+the document with your client — persistence is client-owned. This also transfers work between
+machines/analysts: export from one session, import into another.
 
 ## Configuration reference
 
@@ -214,6 +277,13 @@ The authoritative procedure, including the isolation acceptance check, is in
 
 ## Where to go next
 
+- [`docs/examples/`](./examples/README.md): tiered, hands-on reverse-engineering walkthroughs with the
+  actual tool calls — [first look](./examples/simple-first-look.md),
+  [triage an unknown ELF](./examples/medium-triage.md),
+  [recover & document a cluster](./examples/large-annotate-and-recover.md), and a
+  [blind analysis of a stripped SQLite binary](./examples/blind-analysis-sqlite.md).
+- [`docs/faq.md`](./faq.md): quick answers on safety, read-vs-write, persistence, accuracy, and limits.
 - [`docs/contracts/tool-catalog.md`](./contracts/tool-catalog.md): every tool and its inputs and outputs.
 - [`docs/architecture.md`](./architecture.md): the full design.
+- [`docs/observability.md`](./observability.md): metrics, health probes, and SLOs (HTTP deployments).
 - [`README.md`](../README.md): the project overview and safety model.

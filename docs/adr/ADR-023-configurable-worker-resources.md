@@ -1,5 +1,10 @@
 # ADR-023: Configurable worker resources + distinct OOM/exit error
 
+> **Naming note (post-ADR-038):** the worker-resource environment variables in this record predate the
+> rename to Vivarium and appear under their original `GHIDRA_MCP_*` names — they are now `VIVARIUM_*`
+> (e.g. `GHIDRA_MCP_WORKER_MEM_MIB` → `VIVARIUM_WORKER_MEM_MIB`). The authoritative config reference is
+> [`docs/getting-started.md`](../getting-started.md) and `src/vivarium/config.py`.
+
 - **Status:** Accepted (v1.3; human-ratified 2026-06-15). Ratified: **D1** bounds configurable via
   MiB-integer env (defaults = current values; ceilings ~32 GiB mem / 16 CPU / 32 GiB project-tmpfs);
   **D2** a **new `ErrorType` `resource-exhausted`** (HTTP 503, `retryable=False`) for worker OOM/exit;

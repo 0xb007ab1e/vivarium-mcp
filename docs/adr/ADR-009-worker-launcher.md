@@ -1,5 +1,11 @@
 # ADR-009 — Concrete worker launcher, import-root mount, per-session socket subdir
 
+> **Naming note (post-ADR-038):** environment variables and paths in this record predate the rename to
+> Vivarium and appear under their original `GHIDRA_MCP_*` / `ghidra-mcp` names — they are now
+> `VIVARIUM_*` and `/run/vivarium` (e.g. `GHIDRA_MCP_IMPORT_ROOT` → `VIVARIUM_IMPORT_ROOT`). The
+> authoritative config reference is [`docs/getting-started.md`](../getting-started.md) and
+> `src/vivarium/config.py`.
+
 - **Status:** Accepted (2026-06-10)
 - **Context:** WS2/WS3 seam. Surfaced by the ground-truth e2e (`tests/e2e/test_groundtruth_oss.py`),
   the first thing to drive the *real* `server → worker` chain end-to-end.

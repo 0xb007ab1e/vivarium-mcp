@@ -45,8 +45,9 @@ analysis output. Server-computed scalars (addresses, counts, sizes, the sha256) 
 
 ## Is it read-only?
 
-**Read-by-default.** Most tools are read-only. There are **14 gated mutation/write tools** (rename,
-comment, set signature, apply/define/delete types, annotation import) — but a session mutates *nothing*
+**Read-by-default.** Most tools are read-only — 41 of the 56. There are **15 gated mutation/write
+tools** (write-consent toggles + undo, rename, comment, set signature, apply/define/delete types,
+annotation import) — but a session mutates *nothing*
 until you call `session_enable_writes` (the single human-in-the-loop consent gate), and structural
 edits additionally require `allow_structural: true`. Writes change the in-worker Ghidra project only —
 the original file on disk is never touched. See [Example 3](examples/large-annotate-and-recover.md).
