@@ -2,7 +2,7 @@
 
 > Pydantic source of truth: [`src/vivarium/tools/schemas.py`](../../src/vivarium/tools/schemas.py).
 > Allow-list registry: [`src/vivarium/tools/registry.py`](../../src/vivarium/tools/registry.py).
-> **Read-by-default.** Most tools are read-only; the **14 mutation/write tools** below are
+> **Read-by-default.** 41 of the 56 tools are read-only; the **15 mutation/write tools** below are
 > **default-deny**, gated by per-session write-consent (`session_enable_writes`) — structural writes
 > additionally by `allow_structural`. **`runScript`/arbitrary script execution is permanently out of
 > scope** (PLAN §2), and the tool surface is a **fixed allow-list** (no dynamic registration).
@@ -18,9 +18,12 @@
   `define_types` + ADR-031 `delete_type`)** + **4 v1.x streaming-extraction tools (ADR-040:
   `start_decompile_stream` + the generic `fetch_job_results`/`job_status`/`cancel_job`;
   read-only, output-only)** + **2 v1.2 annotation-persistence tools (ADR-018:
-  `session_export_annotations` read-only + `session_import_annotations` GATED)** — the 14 mutation
-  tools GATED by per-session write-consent (structural additionally by `allow_structural`); import is
-  GATED identically (and additionally by `allow_structural` when any imported entry is structural).
+  `session_export_annotations` read-only + `session_import_annotations` GATED)**. That is **41
+  read-only + 15 mutation/write** (the 15 = the 6 ADR-012 write tools + the 8 structural-write tools
+  + the gated `session_import_annotations`; it matches the `WRITE_TOOLS` frozenset in `registry.py`).
+  Every write tool is GATED by per-session write-consent (structural additionally by
+  `allow_structural`); import is GATED identically (and additionally by `allow_structural` when any
+  imported entry is structural).
 - **Session-scoped:** every tool except `session_create` takes an opaque `session_id`, authorized
   server-side (BOLA defense). Inputs are `frozen` and reject unknown fields (`extra="forbid"`).
 - **Bounded by default:** list/search/read tools take `offset` + `limit` (or `length`) with hard

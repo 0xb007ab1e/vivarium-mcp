@@ -1,5 +1,10 @@
 # ADR-033 — OAuth scopes → fine-grained per-tool authorization
 
+> **Naming note (post-ADR-038):** environment variables in this record predate the rename to Vivarium
+> and appear under their original `GHIDRA_MCP_*` names — they are now `VIVARIUM_*` (e.g.
+> `GHIDRA_MCP_HTTP_OAUTH_WRITE_SCOPE` → `VIVARIUM_HTTP_OAUTH_WRITE_SCOPE`). The authoritative config
+> reference is [`docs/getting-started.md`](../getting-started.md) and `src/vivarium/config.py`.
+
 - **Status:** Accepted (v1.4; human-ratified 2026-06-17). Implements roadmap-v1.4 item #5 — the
   ADR-019 deferred "OAuth scopes → fine-grained per-tool authZ". Hardens **TB6** (the HTTP network
   boundary); no new trust boundary, no JVM edge. Ratified: **(1) two capabilities `read`/`write`**

@@ -81,6 +81,18 @@ linting promoted to a required gate, and CI/docs/threat-model currency.
   real workflows, so a rename that would silently break the always-run "never appeared" gate guards
   fails a unit test instead.
 
+### Documentation
+- **Documentation currency pass + reverse-engineering usage guide.** Audited all docs against the
+  shipped functionality and fixed the drift found: the write-tool count is now **15** (matching the
+  `WRITE_TOOLS` frozenset — `session_import_annotations` was uncounted) in `tool-catalog.md` and
+  `faq.md`; `ci-cd.md` now says **eleven** required checks (was "ten", pre-`actionlint`); the README
+  ADR range is **ADR-001…ADR-044**; and `getting-started.md` corrected a `decompile` → `decompile_function`
+  tool name. Added a **"Reverse-engineering workflows"** section to `getting-started.md` (fast triage,
+  deep analysis, bulk streaming extraction, and annotation persistence — each mapped to a worked
+  example), surfaced `identify_functions` (FID) and analysis `profile`s in the README capability list,
+  added an **ADR index** (`docs/adr/README.md`) with suggested reading order, and added post-rename
+  naming notes to ADR-004/009/023/033 (their `GHIDRA_MCP_*` env vars are now `VIVARIUM_*`).
+
 ## [0.13.0] — 2026-07-02
 
 A **security-hardening / gap-remediation** release: it closes the round-2 → round-5 gap-analysis
