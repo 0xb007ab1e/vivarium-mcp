@@ -82,6 +82,12 @@ linting promoted to a required gate, and CI/docs/threat-model currency.
   fails a unit test instead.
 
 ### Documentation
+- **Published a rendered documentation site (MkDocs + Material → GitHub Pages).** `docs/` now renders
+  to a browsable, searchable site at `https://0xb007ab1e.github.io/vivarium-mcp/` via a new
+  `docs-pages.yml` workflow (SHA-pinned actions; docs deps from a hash-pinned `requirements-docs.lock`).
+  It validates the build on PRs (least-privilege, no deploy) and publishes only on push to `main`. Adds
+  a landing page (`docs/index.md`) and satisfies the master §1 "browsable, cross-linked rendered pages"
+  documentation mandate. The Markdown remains the source-linked view on GitHub.
 - **Documentation currency pass + reverse-engineering usage guide.** Audited all docs against the
   shipped functionality and fixed the drift found: the write-tool count is now **15** (matching the
   `WRITE_TOOLS` frozenset — `session_import_annotations` was uncounted) in `tool-catalog.md` and

@@ -62,6 +62,16 @@ benign) + SC2015 (intentional `… || true`) so it enforces every other code. Tr
 gate it adds a CI-time github-release download dependency — low risk (same github as `checkout`,
 pinned + integrity-checked, fail-closed on any download/checksum error).
 
+**Docs site (`docs-pages.yml`).** Renders `docs/` into the GitHub Pages site (MkDocs + Material) and
+publishes it to `https://0xb007ab1e.github.io/vivarium-mcp/`. **Not a merge gate:** it builds the site
+on PRs (validation only, least-privilege `contents: read`, no deploy) and **deploys only on push to
+`main` / manual dispatch** (a separate job with `pages: write` + `id-token: write`). Docs dependencies
+install from the hash-pinned `requirements-docs.lock` (regenerate with `pip-compile --generate-hashes
+-r requirements-docs.in`); all actions are pinned by commit SHA. The rendered site is public docs only
+— no secrets, reads only the already-public repo. The build is intentionally **non-strict**: docs
+cross-link to source/root files outside `docs_dir` (resolved on GitHub), so those links warn rather
+than fail.
+
 **Fail closed:** an errored or skipped security stage counts as a failure, not a pass.
 
 ## Supply-chain integrity (std-supplychain)

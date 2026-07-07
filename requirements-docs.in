@@ -1,0 +1,5 @@
+# Documentation-site build dependencies (MkDocs + Material theme).
+# Used ONLY by the docs-pages CI workflow to render docs/ into the GitHub Pages site.
+# Regenerate the hash-pinned lock with:
+#   pip-compile --generate-hashes --output-file=requirements-docs.lock requirements-docs.in
+mkdocs-material

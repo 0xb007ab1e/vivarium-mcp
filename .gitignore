@@ -29,6 +29,7 @@ htmlcov/
 !requirements-groundtruth.lock
 !requirements-mutation.lock
 !requirements-sast.lock
+!requirements-docs.lock
 !uv.lock
 ghidra_projects/
 # mutmut working tree + caches (mutation.yml regenerates them; never committed)
