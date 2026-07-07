@@ -1,0 +1,112 @@
+site_name: Vivarium
+site_description: >-
+  Secure MCP server exposing headless, out-of-process Ghidra to LLM clients as
+  read + consent-gated write reverse-engineering tools.
+site_author: "0xb007ab1e"
+# Project (GitHub Pages) site — served under /vivarium-mcp/.
+site_url: https://0xb007ab1e.github.io/vivarium-mcp/
+repo_url: https://github.com/0xb007ab1e/vivarium-mcp
+repo_name: 0xb007ab1e/vivarium-mcp
+# "Edit this page" points back at the Markdown on main (docs live under docs/).
+edit_uri: edit/main/docs/
+copyright: Apache-2.0. Ghidra is a National Security Agency project.
+
+docs_dir: docs
+
+# The docs are engineering docs that cross-link to source files (../../src/…) and
+# root files (../README.md, ../CHANGELOG.md) that live OUTSIDE docs_dir. On GitHub
+# those links resolve; on the rendered site they cannot, so keep link validation at
+# "warn" (never "error") — the site is the reading view, GitHub is the source-linked
+# view. Orphan pages (individual ADRs/roadmaps reachable via their index) are info-only.
+validation:
+  nav:
+    omitted_files: info
+  links:
+    not_found: warn
+    absolute_links: info
+    unrecognized_links: info
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - navigation.tracking
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - FAQ: faq.md
+  - Architecture: architecture.md
+  - Observability: observability.md
+  - Examples:
+      - Overview: examples/README.md
+      - First look (simple): examples/simple-first-look.md
+      - Triage an unknown ELF (medium): examples/medium-triage.md
+      - Recover & document a cluster (large): examples/large-annotate-and-recover.md
+      - Blind analysis — stripped SQLite: examples/blind-analysis-sqlite.md
+  - Contracts:
+      - Overview: contracts/README.md
+      - Tool catalog: contracts/tool-catalog.md
+      - RPC protocol: contracts/rpc-protocol.md
+      - Error envelope: contracts/error-envelope.md
+      - Untrusted-data envelope: contracts/untrusted-envelope.md
+  - Design notes:
+      - HTTP transport: design/http-transport.md
+      - Semantic naming: design/semantic-naming.md
+      - Streaming & progress: design/streaming-partial-results-and-progress.md
+      - Tier-2 metrics: design/tier2-metrics.md
+  - Security:
+      - Threat model: security/threat-model.md
+      - FID database licensing: security/fid-database-licensing.md
+  - Operations (runbooks):
+      - Overview: runbooks/README.md
+      - Deploy: runbooks/deploy.md
+      - Rollback: runbooks/rollback.md
+      - HTTP exposure: runbooks/http-exposure.md
+      - Evict a poisoned worker: runbooks/evict-poisoned-worker.md
+      - Supply-chain pinning: runbooks/supply-chain-pinning.md
+      - Secret rotation: runbooks/secret-rotation.md
+      - Dependency / CVE patch: runbooks/dependency-patch.md
+      - Backup & restore: runbooks/backup-restore.md
+      - Scaling: runbooks/scaling.md
+      - On-call: runbooks/on-call.md
+      - Incident response: runbooks/incident-response.md
+  - Decision records (ADRs): adr/README.md
