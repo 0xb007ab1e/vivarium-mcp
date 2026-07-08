@@ -395,6 +395,22 @@ enforced — closing the BOLA gap that ADR-011 §6 deferred (TB6-I).
 > (build-time credentials); a leaked key is an incident (`runbooks/incident-response.md`). Setup:
 > `runbooks/supply-chain-pinning.md` (§ Repin GitHub App).
 
+> **§4 delta — GitHub Pages docs-site publish (round-9 #289; a new CI publishing surface, no new
+> product TB).** The `docs-pages.yml` workflow renders the `docs/` tree via hash-pinned MkDocs and
+> publishes it to GitHub Pages (`https://0xb007ab1e.github.io/vivarium-mcp/`). It is **non-gating** and
+> touches nothing in the running product (TB1–TB8 unchanged); the site is static HTML built from an
+> already-public repository. **(I) Information disclosure:** the site renders only the already-public
+> `docs/` tree (and root files it links to on GitHub) — no new content is exposed, and the docs are
+> verified free of secrets/PII (round-10 leak audit). **(T) Tampering / poisoned publish:** all actions
+> are pinned by commit SHA and docs deps install from the hash-pinned `requirements-docs.lock` (now also
+> pip-audited on the scheduled rescan, gap Z1); the privileged **`deploy` job (`pages: write` +
+> `id-token: write`) runs only on push to `main` / manual dispatch — never on a `pull_request`** — so a
+> fork/branch PR can at most build a *preview* (build job, `contents: read` only, no deploy), never
+> publish or reach the OIDC identity. **(D) Availability:** build+deploy are non-gating and bounded by
+> Actions resource limits + a 10-minute job timeout. **Residual:** the `id-token` OIDC identity is a
+> new, short-lived CI credential (minted per run, not a stored secret); the Pages deployment is
+> revertible by redeploying a prior commit. **L×L=Low.**
+
 ## 5. Residual risk & assumptions
 
 - **Prompt injection is not fully preventable** — the envelope + never-auto-execute **limit blast
