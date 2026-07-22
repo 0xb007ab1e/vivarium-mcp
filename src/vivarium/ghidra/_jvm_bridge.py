@@ -3691,8 +3691,15 @@ class PyGhidraBackend:
                 ``invalid-params`` for an unknown convention; ``analysis-failed`` on a rolled-back
                 write.
         """
-        from ghidra.program.model.listing import Function, ParameterImpl
+        import jpype
+        from ghidra.program.model.listing import (
+            Function,
+            ParameterImpl,
+            ReturnParameterImpl,
+            Variable,
+        )
         from ghidra.program.model.symbol import SourceType
+        from java.lang import String as JavaString  # type: ignore[import-not-found]
         from worker.dispatch import CODE_INVALID_PARAMS, WorkerError
 
         program = self._require_program()
@@ -3712,14 +3719,29 @@ class PyGhidraBackend:
             if calling_convention != "default" and calling_convention not in known:
                 raise WorkerError(CODE_INVALID_PARAMS, "calling convention not known for program")
 
+        # ``updateFunction`` is overloaded; JPype needs JAVA-TYPED arguments to select the
+        # ``(String, Variable, FunctionUpdateType, boolean, SourceType, Variable[])`` overload.
+        # A bare Python ``None`` (calling_convention unchanged) is ``NoneType`` — it matches no
+        # overload's ``String`` slot — so pass a String-typed Java null; and pass an explicit
+        # ``Variable[]`` rather than Python varargs so the array overload is unambiguous.
+        cc_arg = (
+            calling_convention
+            if calling_convention is not None
+            else jpype.JObject(None, JavaString)
+        )
+        # ``updateFunction`` takes the return as a ``Variable`` (a return parameter), NOT a raw
+        # ``DataType`` — wrap the resolved return type in a ``ReturnParameterImpl``.
+        return_var = ReturnParameterImpl(resolved_return, program)
+        param_array = jpype.JArray(Variable)(params)
+
         def _write() -> None:
             func.updateFunction(
-                None if calling_convention is None else calling_convention,
-                resolved_return,
+                cc_arg,
+                return_var,
                 Function.FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS,
                 True,
                 SourceType.USER_DEFINED,
-                *params,
+                param_array,
             )
 
         self._in_transaction("set_function_signature", _write)
