@@ -166,7 +166,8 @@ an in-flight `start_decompile_stream` promptly (on client `cancel_job`), the ser
 ### RPC methods (worker-facing; one per Ghidra-touching operation)
 `import_binary`, `analyze`, `decompile_function`, `disassemble`, `list_functions`, `get_function`,
 `xrefs_to`, `xrefs_from`, `list_strings`, `list_symbols`, `get_symbol`, `list_data`,
-`get_data_type`, `get_comments`, `memory_map`, `read_bytes`, `search_bytes`, `search_strings`,
+`get_data_type`, `get_comments`, `memory_map`, `read_bytes`, `emulate` (ADR-049 p-code emulation —
+bounded, read-effect-only; interpreter, no native exec/syscalls/IO), `search_bytes`, `search_strings`,
 `program_metadata`, the v1.1 semantic-naming extraction primitives `call_graph` and
 `referenced_strings` (ADR-007), the v1.1 Tier-2 extraction primitives `function_cfg`, `imports`,
 `exports`, and `coverage` (ADR-008), the **Function ID library-match primitive**

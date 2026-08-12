@@ -434,6 +434,24 @@ class FakeGhidraPort:
             address=a.address, data=_u("deadbeef", encoding="hex"), length=4, truncated=False
         )
 
+    def emulate(self, sid: str, a: s.EmulateIn) -> s.EmulateOut:
+        """Return a deterministic bounded emulation result (values untrusted, ADR-049)."""
+        self._maybe_fail()
+        return s.EmulateOut(
+            steps_executed=3,
+            stop_reason="stop-address" if a.stop_at else "max-steps",
+            registers=[
+                s.RegisterValue(name=n, value=_u("08", encoding="hex"))
+                for n in (a.read_registers or [])
+            ],
+            memory=[
+                s.MemoryRegion(
+                    address=r.address, data=_u("00" * r.length, encoding="hex"), length=r.length
+                )
+                for r in (a.read_memory or [])
+            ],
+        )
+
     def search_bytes(self, sid: str, a: s.SearchBytesIn) -> s.SearchBytesOut:
         """Return deterministic bounded byte-search matches (untrusted context)."""
         self._maybe_fail()

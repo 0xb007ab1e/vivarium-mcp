@@ -80,6 +80,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     # memory / bytes / search
     "memory_map",
     "read_bytes",
+    "emulate",
     "search_bytes",
     "search_strings",
     # metadata
@@ -586,6 +587,26 @@ def _handle_read_bytes(ctx: ToolContext, args: s.ReadBytesIn) -> s.ReadBytesOut:
     offset = v.parse_address(args.address)
     v.validate_byte_range(offset, args.length)
     return ctx.port.read_bytes(args.session_id, args)
+
+
+def _handle_emulate(ctx: ToolContext, args: s.EmulateIn) -> s.EmulateOut:
+    """Bounded p-code emulation (ADR-049) — read-effect-only; addresses validated pre-worker.
+
+    The schema already bounds step/region/size caps; here we authorize the session (BOLA) and
+    parse-check every address the client supplied (start/stop_at/write+read memory) so a malformed
+    address fails closed as VALIDATION before the worker. The emulator runs a HOSTILE program in a
+    p-code interpreter (no native exec / no I/O) bounded by max_steps + the wall-clock kill; the
+    output register/memory values are wrapped UNTRUSTED by the adapter (ADR-005).
+    """
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    v.parse_address(args.start)
+    if args.stop_at is not None:
+        v.parse_address(args.stop_at)
+    for write in args.write_memory or ():
+        v.parse_address(write.address)
+    for read in args.read_memory or ():
+        v.parse_address(read.address)
+    return ctx.port.emulate(args.session_id, args)
 
 
 def _handle_search_bytes(ctx: ToolContext, args: s.SearchBytesIn) -> s.SearchBytesOut:
@@ -1626,6 +1647,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "get_comments": (_handle_get_comments, s.GetCommentsIn),
     "memory_map": (_handle_memory_map, s.MemoryMapIn),
     "read_bytes": (_handle_read_bytes, s.ReadBytesIn),
+    "emulate": (_handle_emulate, s.EmulateIn),
     "search_bytes": (_handle_search_bytes, s.SearchBytesIn),
     "search_strings": (_handle_search_strings, s.SearchStringsIn),
     "program_metadata": (_handle_program_metadata, s.ProgramMetadataIn),

@@ -179,6 +179,10 @@ class GhidraPort(Protocol):
         """Bounded raw byte read."""
         ...
 
+    def emulate(self, sid: str, a: s.EmulateIn) -> s.EmulateOut:
+        """Bounded p-code emulation (ADR-049)."""
+        ...
+
     def search_bytes(self, sid: str, a: s.SearchBytesIn) -> s.SearchBytesOut:
         """Bounded byte-pattern search."""
         ...

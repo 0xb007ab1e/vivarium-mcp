@@ -1158,6 +1158,29 @@ class RpcGhidraAdapter:
             self._tool_call(sid, "read_bytes", {"address": a.address, "length": a.length})
         )
 
+    def emulate(self, sid: str, a: s.EmulateIn) -> s.EmulateOut:
+        """Bounded p-code emulation (ADR-049)."""
+        return _build_emulate(
+            self._tool_call(
+                sid,
+                "emulate",
+                {
+                    "start": a.start,
+                    "set_registers": a.set_registers,
+                    "write_memory": [
+                        {"address": w.address, "data_hex": w.data_hex}
+                        for w in (a.write_memory or [])
+                    ],
+                    "max_steps": a.max_steps,
+                    "stop_at": a.stop_at,
+                    "read_registers": a.read_registers,
+                    "read_memory": [
+                        {"address": r.address, "length": r.length} for r in (a.read_memory or [])
+                    ],
+                },
+            )
+        )
+
     def search_bytes(self, sid: str, a: s.SearchBytesIn) -> s.SearchBytesOut:
         """Bounded byte-pattern search."""
         return _build_search_bytes(
@@ -2511,6 +2534,33 @@ def _build_read_bytes(r: dict[str, Any]) -> s.ReadBytesOut:
         data=_w(r["data"], DataOrigin.BINARY, encoding="hex"),
         length=int(r["length"]),
         truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
+def _build_emulate(r: dict[str, Any]) -> s.EmulateOut:
+    """Build :class:`EmulateOut` (ADR-049): register/memory VALUES are BINARY (emulation output)."""
+    sr = str(r["stop_reason"])
+    if sr not in ("stop-address", "max-steps", "halted", "fault"):
+        sr = "fault"  # fail closed on an unexpected worker stop_reason
+    stop_reason = cast('Literal["stop-address", "max-steps", "halted", "fault"]', sr)
+    return s.EmulateOut(
+        steps_executed=int(r["steps_executed"]),
+        stop_reason=stop_reason,
+        registers=[
+            s.RegisterValue(
+                name=str(x["name"]), value=_w(x["value"], DataOrigin.BINARY, encoding="hex")
+            )
+            for x in r.get("registers", [])
+        ],
+        memory=[
+            s.MemoryRegion(
+                address=str(x["address"]),
+                data=_w(x["data"], DataOrigin.BINARY, encoding="hex"),
+                length=int(x["length"]),
+            )
+            for x in r.get("memory", [])
+        ],
     )
 
 

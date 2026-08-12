@@ -2,23 +2,24 @@
 
 > Pydantic source of truth: [`src/vivarium/tools/schemas.py`](../../src/vivarium/tools/schemas.py).
 > Allow-list registry: [`src/vivarium/tools/registry.py`](../../src/vivarium/tools/registry.py).
-> **Read-by-default.** 41 of the 56 tools are read-only; the **15 mutation/write tools** below are
+> **Read-by-default.** 42 of the 57 tools are read-only; the **15 mutation/write tools** below are
 > **default-deny**, gated by per-session write-consent (`session_enable_writes`) — structural writes
 > additionally by `allow_structural`. **`runScript`/arbitrary script execution is permanently out of
 > scope** (PLAN §2), and the tool surface is a **fixed allow-list** (no dynamic registration).
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **56** tools (asserted in tests by
-  `len(TIER1_TOOL_NAMES) == 56`). The breakdown:
-  22 Tier-1 read-only (v1) + 5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
+- **Allow-list only:** the catalog is fixed; there are exactly **57** tools (asserted in tests by
+  `len(TIER1_TOOL_NAMES) == 57`). The breakdown:
+  22 Tier-1 read-only (v1) + **1 p-code emulation tool (ADR-049: `emulate`; read-effect-only)** +
+  5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
   reporting/metrics tools (ADR-008; all read-only) + **1 Function ID library-match tool (ADR-042
   Phase 1: `identify_functions`; read-only)** + **6 v1.1 mutation/write tools (ADR-012) + 8
   structural-write tools (ADR-013 Phase A + ADR-014 Phase B + ADR-015 Phase C + ADR-021 batch
   `define_types` + ADR-031 `delete_type`)** + **4 v1.x streaming-extraction tools (ADR-040:
   `start_decompile_stream` + the generic `fetch_job_results`/`job_status`/`cancel_job`;
   read-only, output-only)** + **2 v1.2 annotation-persistence tools (ADR-018:
-  `session_export_annotations` read-only + `session_import_annotations` GATED)**. That is **41
+  `session_export_annotations` read-only + `session_import_annotations` GATED)**. That is **42
   read-only + 15 mutation/write** (the 15 = the 6 ADR-012 write tools + the 8 structural-write tools
   + the gated `session_import_annotations`; it matches the `WRITE_TOOLS` frozenset in `registry.py`).
   Every write tool is GATED by per-session write-consent (structural additionally by
@@ -91,7 +92,7 @@
 |------|-------|--------|
 | `memory_map` | `MemoryMapIn{session_id}` | `MemoryMapOut{blocks[]}` |
 | `read_bytes` | `ReadBytesIn{address, length≤1 MiB}` | `ReadBytesOut{address, data* (hex), length, truncated}` |
-| `search_bytes` | `SearchBytesIn{pattern_hex, offset, limit}` | `SearchBytesOut{matches[], total, truncated}` |
+| `emulate` | `EmulateIn{start, set_registers?, write_memory?, max_steps≤1M, stop_at?, read_registers?, read_memory?}` | `EmulateOut{steps_executed, stop_reason, registers[]{name, value*}, memory[]{address, data*, length}}` | **ADR-049 p-code emulation** (read-effect-only). Ghidra's p-code **interpreter** — NO native execution / syscalls / I/O; program DB not mutated. Bounded by `max_steps` (server-clamped, default 100k) + the per-call wall-clock kill + worker memory cap. Register/memory readback VALUES are `*`=UNTRUSTED (attacker-influenced). All parsing/emulation stays in the ephemeral worker container |
 | `search_strings` | `SearchStringsIn{query, offset, limit}` | `SearchStringsOut{strings[], total, truncated}` |
 
 ### Metadata

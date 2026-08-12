@@ -93,6 +93,7 @@ RPC_METHODS = frozenset(
         "get_comments",
         "memory_map",
         "read_bytes",
+        "emulate",
         "search_bytes",
         "search_strings",
         "program_metadata",
@@ -249,6 +250,10 @@ class GhidraBackend(Protocol):
 
     def read_bytes(self, params: dict[str, Any]) -> dict[str, Any]:
         """Bounded raw byte read."""
+        ...
+
+    def emulate(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Bounded p-code emulation (ADR-049)."""
         ...
 
     def search_bytes(self, params: dict[str, Any]) -> dict[str, Any]:

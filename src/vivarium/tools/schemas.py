@@ -42,6 +42,14 @@ _MAX_PARAMS = 64  # a function with >64 params is pathological; bounds construct
 _MAX_POINTER_DEPTH = 8  # sane ``****…`` cap on a TypeRef's pointer modifiers
 _MAX_ARRAY_LEN = 65_536  # bounds an array element-count; the worker confines its byte footprint too
 
+# --- p-code emulation bounds (ADR-049; hostile-code DoS guards — CWE-400) ---
+_MAX_EMULATE_STEPS = 1_000_000  # hard per-call p-code step cap (operator-ratified); wall-clock too
+_DEFAULT_EMULATE_STEPS = 100_000  # default step budget when the client omits max_steps
+_MAX_EMULATE_REGISTERS = 64  # cap on set_registers / read_registers list length
+_MAX_EMULATE_MEM_WRITE = 65_536  # cap on total pre-run memory-write bytes
+_MAX_EMULATE_MEM_REGIONS = 16  # cap on write_memory / read_memory region count
+_MAX_EMULATE_MEM_READ = 65_536  # cap on a single read_memory region length
+
 
 class _In(BaseModel):
     """Base for tool *input* models: immutable, reject unknown fields."""
@@ -734,6 +742,124 @@ class ReadBytesOut(_Out):
     data: Untrusted[str]
     length: int
     truncated: bool = False
+
+
+class MemWrite(_In):
+    """One pre-run memory write for ``emulate`` — stage an argument/buffer (ADR-049).
+
+    Attributes:
+        address: Destination address (hex).
+        data_hex: The bytes to write, hex-encoded (bounded; the batch total is capped too).
+    """
+
+    address: str = Field(min_length=1, max_length=_MAX_NAME)
+    data_hex: str = Field(
+        min_length=2, max_length=2 * _MAX_EMULATE_MEM_WRITE, pattern=r"^[0-9a-fA-F]+$"
+    )
+
+
+class MemRead(_In):
+    """One post-run memory range to read back for ``emulate`` (ADR-049).
+
+    Attributes:
+        address: Start address (hex).
+        length: Number of bytes to read (1..``_MAX_EMULATE_MEM_READ``).
+    """
+
+    address: str = Field(min_length=1, max_length=_MAX_NAME)
+    length: int = Field(ge=1, le=_MAX_EMULATE_MEM_READ)
+
+
+class EmulateIn(_SessionScopedIn):
+    """Arguments for ``emulate`` — bounded Ghidra p-code emulation (ADR-049).
+
+    Runs the (HOSTILE) program in Ghidra's p-code interpreter — no native execution, no syscalls, no
+    I/O; the program DB is not mutated. Bounded by ``max_steps`` (the hard step cap), the per-call
+    wall-clock kill (ADR-002), and the worker memory cap.
+
+    Attributes:
+        start: Address (hex) to begin execution (the initial PC).
+        set_registers: Optional ``{register_name: value}`` presets (e.g. args, a stack pointer).
+        write_memory: Optional pre-run memory writes (stage args/buffers); batch-total bounded.
+        max_steps: P-code step budget, clamped to ``[1, _MAX_EMULATE_STEPS]`` (default 100k).
+        stop_at: Optional address (hex); execution stops when the PC reaches it.
+        read_registers: Optional register names to return after the run.
+        read_memory: Optional memory ranges to return after the run.
+    """
+
+    start: str = Field(min_length=1, max_length=_MAX_NAME)
+    set_registers: dict[str, int] | None = None
+    write_memory: list[MemWrite] | None = None
+    max_steps: int = Field(default=_DEFAULT_EMULATE_STEPS, ge=1, le=_MAX_EMULATE_STEPS)
+    stop_at: str | None = Field(default=None, max_length=_MAX_NAME)
+    read_registers: list[str] | None = None
+    read_memory: list[MemRead] | None = None
+
+    @model_validator(mode="after")
+    def _bound_emulate(self) -> EmulateIn:
+        """Cap list lengths + the total memory-write size (CWE-400; fail closed).
+
+        Returns:
+            ``self`` when within bounds.
+
+        Raises:
+            ValueError: If any register/region list or the memory-write total exceeds its cap.
+        """
+        if self.set_registers is not None and len(self.set_registers) > _MAX_EMULATE_REGISTERS:
+            raise ValueError(f"set_registers exceeds the {_MAX_EMULATE_REGISTERS}-register cap")
+        if self.read_registers is not None and len(self.read_registers) > _MAX_EMULATE_REGISTERS:
+            raise ValueError(f"read_registers exceeds the {_MAX_EMULATE_REGISTERS}-register cap")
+        _region_lists = (("write_memory", self.write_memory), ("read_memory", self.read_memory))
+        for label, regions in _region_lists:
+            if regions is not None and len(regions) > _MAX_EMULATE_MEM_REGIONS:
+                raise ValueError(f"{label} exceeds the {_MAX_EMULATE_MEM_REGIONS}-region cap")
+        if self.write_memory is not None:
+            total = sum(len(w.data_hex) // 2 for w in self.write_memory)
+            if total > _MAX_EMULATE_MEM_WRITE:
+                raise ValueError(f"write_memory total exceeds {_MAX_EMULATE_MEM_WRITE} bytes")
+        return self
+
+
+class RegisterValue(_Out):
+    """One emulated register value (``name`` safe; ``value`` UNTRUSTED — binary-derived).
+
+    Attributes:
+        name: The register name — safe (client-supplied / program register id).
+        value: The register value, hex-encoded — UNTRUSTED (attacker-influenced emulation output).
+    """
+
+    name: str
+    value: Untrusted[str]
+
+
+class MemoryRegion(_Out):
+    """One emulated memory readback (``address`` safe; ``data`` UNTRUSTED — binary-derived).
+
+    Attributes:
+        address: Start address (hex) — safe.
+        data: The bytes, hex-encoded — UNTRUSTED (emulation output).
+        length: Number of bytes returned — safe.
+    """
+
+    address: str
+    data: Untrusted[str]
+    length: int
+
+
+class EmulateOut(_Out):
+    """Result of ``emulate`` (ADR-049).
+
+    Attributes:
+        steps_executed: Number of p-code steps run (bounded by ``max_steps``) — safe.
+        stop_reason: Why emulation stopped (closed vocabulary) — safe.
+        registers: Requested register values (each ``value`` UNTRUSTED).
+        memory: Requested memory ranges (each ``data`` UNTRUSTED).
+    """
+
+    steps_executed: int
+    stop_reason: Literal["stop-address", "max-steps", "halted", "fault"]
+    registers: list[RegisterValue]
+    memory: list[MemoryRegion]
 
 
 class SearchBytesIn(_Page):

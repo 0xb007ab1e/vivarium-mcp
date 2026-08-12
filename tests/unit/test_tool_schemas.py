@@ -104,7 +104,7 @@ def test_catalog_count_matches_registry() -> None:
     # (ADR-040: start_decompile_stream + fetch_job_results/job_status/cancel_job) + 1 Function ID
     # library-match tool (ADR-042 Phase 1: identify_functions). The registry list is the source.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 56
+    assert len(TIER1_TOOL_NAMES) == 57
 
 
 @pytest.mark.critical
@@ -164,3 +164,56 @@ def test_fetch_job_results_in_bounds() -> None:
     assert s.FetchJobResultsIn(session_id="x", job="j").limit == 32  # default 32
     with pytest.raises(ValidationError):
         s.FetchJobResultsIn(session_id="x", job="j", limit=257)  # > max 256
+
+
+@pytest.mark.critical
+def test_emulate_defaults_and_step_cap() -> None:
+    """emulate defaults to a 100k step budget; rejects a request above the 1M cap (ADR-049)."""
+    a = s.EmulateIn(session_id="s", start="0x1000")
+    assert a.max_steps == 100_000  # conservative default budget
+    with pytest.raises(ValidationError):
+        s.EmulateIn(session_id="s", start="0x1000", max_steps=1_000_001)  # > 1M hard cap
+    with pytest.raises(ValidationError):
+        s.EmulateIn(session_id="s", start="0x1000", max_steps=0)  # ge=1
+
+
+@pytest.mark.critical
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"set_registers": {f"r{i}": 0 for i in range(65)}},  # > 64-register cap
+        {"read_registers": [f"r{i}" for i in range(65)]},  # > 64-register cap
+        {"write_memory": [{"address": "0x0", "data_hex": "90"}] * 17},  # > 16-region cap
+        {"read_memory": [{"address": "0x0", "length": 1}] * 17},  # > 16-region cap
+        # two per-region-legal writes whose batch total exceeds the 64 KiB cap
+        {"write_memory": [{"address": "0x0", "data_hex": "00" * 40_000}] * 2},
+    ],
+)
+def test_emulate_rejects_over_cap(kwargs: dict[str, object]) -> None:
+    # Every emulate list/size cap fails closed (hostile-code DoS guards — ADR-049 / CWE-400).
+    with pytest.raises(ValidationError):
+        s.EmulateIn(session_id="s", start="0x1000", **kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.critical
+def test_emulate_output_wraps_binary_values_untrusted() -> None:
+    # Register/memory VALUES are binary-derived emulation output — wrapped, not bare (ADR-005/049).
+    from vivarium.core.envelope import DataOrigin, Untrusted
+
+    out = s.EmulateOut(
+        steps_executed=4,
+        stop_reason="stop-address",
+        registers=[
+            s.RegisterValue(name="RAX", value=Untrusted(value="08", origin=DataOrigin.BINARY))
+        ],
+        memory=[
+            s.MemoryRegion(
+                address="0x402000",
+                data=Untrusted(value="00", origin=DataOrigin.BINARY),
+                length=1,
+            )
+        ],
+    )
+    assert isinstance(out.registers[0].value, Untrusted)
+    assert isinstance(out.memory[0].data, Untrusted)
+    assert out.registers[0].name == "RAX"  # server-known scalar stays bare

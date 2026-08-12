@@ -386,6 +386,18 @@ class PyGhidraBackend:
         length = _clamp_read(int(_require(params, "length")))
         return self._gh_read_bytes(str(_require(params, "address")), length)
 
+    def emulate(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Bounded p-code emulation (ADR-049). The server has bounded step/region/size caps."""
+        return self._gh_emulate(
+            start=str(_require(params, "start")),
+            set_registers=dict(params.get("set_registers") or {}),
+            write_memory=list(params.get("write_memory") or []),
+            max_steps=int(params.get("max_steps", 100_000)),
+            stop_at=(None if params.get("stop_at") is None else str(params["stop_at"])),
+            read_registers=list(params.get("read_registers") or []),
+            read_memory=list(params.get("read_memory") or []),
+        )
+
     def search_bytes(self, params: dict[str, Any]) -> dict[str, Any]:
         """Bounded byte-pattern search."""
         offset, limit = _page(params)
@@ -3475,6 +3487,113 @@ class PyGhidraBackend:
         if addr is None:
             raise WorkerError(CODE_INVALID_PARAMS, "could not parse address")
         return addr
+
+    def _gh_emulate(  # noqa: C901 — one bounded emulator loop over the p-code edge
+        self,
+        *,
+        start: str,
+        set_registers: dict[str, Any],
+        write_memory: list[dict[str, Any]],
+        max_steps: int,
+        stop_at: str | None,
+        read_registers: list[Any],
+        read_memory: list[dict[str, Any]],
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Run bounded Ghidra p-code emulation and return register/memory readbacks (ADR-049).
+
+        Ghidra's ``EmulatorHelper`` INTERPRETS lifted p-code — no native execution, no syscalls,
+        no I/O — a hostile program cannot escape; the program DB is not mutated. Seeds the PC (and
+        ``set_registers``/``write_memory``), steps up to ``max_steps`` (stopping at ``stop_at``, a
+        halt, or a fault), then reads back the requested registers/memory. The emulator is always
+        disposed. Register/memory VALUES are binary-derived — the server wraps them untrusted.
+
+        Args:
+            start: Start address (hex) — the initial PC.
+            set_registers: ``{register_name: int}`` presets.
+            write_memory: ``[{"address": hex, "data_hex": str}]`` pre-run writes.
+            max_steps: Hard p-code step cap (already server-clamped).
+            stop_at: Optional stop address (hex).
+            read_registers: Register names to read back.
+            read_memory: ``[{"address": hex, "length": int}]`` ranges to read back.
+
+        Returns:
+            ``{"steps_executed", "stop_reason", "registers": [...], "memory": [...]}``.
+
+        Raises:
+            WorkerError: ``not-found`` if a named register does not exist.
+        """
+        from ghidra.app.emulator import EmulatorHelper  # type: ignore[import-not-found]
+        from ghidra.util.task import TaskMonitor
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        program = self._require_program()
+        emu = EmulatorHelper(program)
+        try:
+            emu.writeRegister(emu.getPCRegister(), self._parse_address(start).getOffset())
+            for name, value in set_registers.items():
+                try:
+                    emu.writeRegister(str(name), int(value))
+                except Exception as exc:
+                    raise WorkerError(CODE_NOT_FOUND, f"unknown register: {name}") from exc
+            for write in write_memory:
+                emu.writeMemory(
+                    self._parse_address(str(write["address"])),
+                    bytes.fromhex(str(write["data_hex"])),
+                )
+
+            stop_addr = self._parse_address(stop_at) if stop_at is not None else None
+            steps = 0
+            stop_reason = "max-steps"
+            while steps < max_steps:
+                try:
+                    stepped = bool(emu.step(TaskMonitor.DUMMY))
+                except Exception:  # p-code fault (bad access, unimplemented op) — stop, no leak
+                    stop_reason = "fault"
+                    break
+                steps += 1
+                if not stepped:
+                    stop_reason = "halted"
+                    break
+                if stop_addr is not None and emu.getExecutionAddress() == stop_addr:
+                    stop_reason = "stop-address"
+                    break
+
+            regs: list[dict[str, Any]] = []
+            for name in read_registers:
+                try:
+                    raw = int(str(emu.readRegister(str(name))))
+                except Exception as exc:
+                    raise WorkerError(CODE_NOT_FOUND, f"unknown register: {name}") from exc
+                regs.append({"name": str(name), "value": format(raw & ((1 << 512) - 1), "x")})
+
+            mems: list[dict[str, Any]] = []
+            for read in read_memory:
+                addr = self._parse_address(str(read["address"]))
+                length = int(read["length"])
+                data, count = self._get_bytes_via(emu, addr, length)
+                mems.append({"address": str(addr), "data": data.hex(), "length": count})
+
+            return {
+                "steps_executed": steps,
+                "stop_reason": stop_reason,
+                "registers": regs,
+                "memory": mems,
+            }
+        finally:
+            emu.dispose()
+
+    def _get_bytes_via(self, emu: Any, address: Any, length: int) -> tuple[bytes, int]:
+        # pragma: no cover - JVM edge
+        """Read ``length`` bytes from the emulator state as unsigned bytes (jpype-correct, #292).
+
+        ``EmulatorHelper.readMemory(Address, int)`` returns a Java ``byte[]``; convert its signed
+        bytes to unsigned Python bytes. On a memory fault return what was read (honest short read).
+        """
+        try:
+            buf = emu.readMemory(address, length)
+            return bytes(int(buf[i]) & 0xFF for i in range(len(buf))), len(buf)
+        except Exception:
+            return b"", 0
 
     def _try_parse_address(self, value: str) -> Any | None:  # pragma: no cover - JVM edge
         """Parse a hex address, returning ``None`` instead of raising on failure.
