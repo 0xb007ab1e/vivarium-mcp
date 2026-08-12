@@ -231,6 +231,9 @@ class PyGhidraBackend:
             return self._gh_import(
                 str(source_ref), loader=str(loader), processor=str(_require(params, "processor"))
             )
+        if loader in ("dex", "macho"):
+            # ADR-047: self-describing — force the loader; the format supplies processor + layout.
+            return self._gh_import(str(source_ref), loader=str(loader))
         return self._gh_import(str(source_ref))
 
     def analyze(
@@ -758,6 +761,9 @@ class PyGhidraBackend:
             )
         elif loader in ("intel-hex", "motorola-hex"):
             self._open_named_loader(source_ref, project_dir, str(loader), str(processor))
+        elif loader in ("dex", "macho"):
+            # Self-describing (ADR-047): force the loader, no language (the format carries it).
+            self._open_named_loader(source_ref, project_dir, str(loader), None)
         else:
             # AUTO path — byte-for-byte the pre-ADR-045 call (opinion/container loaders).
             ctx = pyghidra.open_program(
@@ -831,50 +837,57 @@ class PyGhidraBackend:
 
         self._in_transaction("session_import (raw layout)", _rebase)
 
-    #: ADR-046: client loader hint -> Ghidra loader class for the address-bearing hex formats.
+    #: Client loader hint -> Ghidra loader class. Hex formats (ADR-046) take a ``processor``;
+    #: self-describing container formats (ADR-047) take none (the format carries it).
     _NAMED_LOADERS: ClassVar[dict[str, str]] = {
         "intel-hex": "ghidra.app.util.opinion.IntelHexLoader",
         "motorola-hex": "ghidra.app.util.opinion.MotorolaHexLoader",
+        "dex": "ghidra.app.util.opinion.DexLoader",
+        "macho": "ghidra.app.util.opinion.MachoLoader",
     }
 
     def _open_named_loader(
-        self, source_ref: str, project_dir: str, loader: str, processor: str
+        self, source_ref: str, project_dir: str, loader: str, processor: str | None
     ) -> None:  # pragma: no cover - JVM edge
-        """Open a hex-format image via a named Ghidra loader (ADR-046).
+        """Open via an explicitly-named Ghidra loader (ADR-046 hex / ADR-047 self-describing).
 
-        Drives PyGhidra's ``IntelHexLoader`` / ``MotorolaHexLoader`` with the allow-listed
-        ``processor`` ``LanguageID``. Unlike the raw ``BinaryLoader`` path there is **no rebase**:
-        Intel-HEX / SREC records carry their own absolute load addresses, so the loader lays memory
-        out itself. Retains the program/context on ``self`` exactly like the other paths.
+        Drives the mapped loader class (:data:`_NAMED_LOADERS`). When ``processor`` is given (hex
+        loaders — Intel-HEX / SREC carry addresses but no arch) it is passed as ``language``; when
+        ``None`` (self-describing — DEX / Mach-O carry their own processor + layout) no language is
+        passed. There is **no rebase**: the loader lays memory out itself. Retains the program/
+        context on ``self`` exactly like the other paths.
 
         Args:
             source_ref: The server-resolved, confined input path.
             project_dir: The writable per-session project location.
-            loader: The client loader token (``"intel-hex"`` / ``"motorola-hex"``) — mapped to the
-                Ghidra loader class via :data:`_NAMED_LOADERS`.
-            processor: The allow-listed ``LanguageID`` (hex has no embedded processor).
+            loader: The client loader token (mapped via :data:`_NAMED_LOADERS`).
+            processor: The allow-listed ``LanguageID`` for the hex loaders, or ``None`` for the
+                self-describing loaders.
 
         Raises:
-            WorkerError: ``not-found`` if the language is not installed or the file cannot load.
+            WorkerError: ``not-found`` if the (given) language is not installed or the file cannot
+                be loaded by the selected loader.
         """
         import pyghidra
         from worker.dispatch import CODE_NOT_FOUND, WorkerError
 
         loader_class = self._NAMED_LOADERS[loader]
+        open_kwargs: dict[str, Any] = {
+            "project_location": project_dir,
+            "project_name": "session",
+            "analyze": False,
+            "loader": loader_class,
+        }
+        if processor is not None:
+            open_kwargs["language"] = processor
         try:
-            ctx = pyghidra.open_program(
-                source_ref,
-                project_location=project_dir,
-                project_name="session",
-                analyze=False,
-                language=processor,
-                loader=loader_class,
-            )
+            ctx = pyghidra.open_program(source_ref, **open_kwargs)
             program = ctx.__enter__()
         except Exception as exc:
             raise WorkerError(
                 CODE_NOT_FOUND,
-                "processor language not installed or the hex image could not be loaded",
+                f"loader='{loader}' could not load the image (unsupported/absent language, "
+                "or the file did not match the format)",
             ) from exc
 
         self._project = ctx  # retain the ctx manager for the launcher to close on evict

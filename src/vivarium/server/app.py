@@ -75,9 +75,11 @@ import root**, the `VIVARIUM_IMPORT_ROOT` directory. Anything outside it is refu
   **malformed**. Over the size cap is `limit-exceeded`. (`expected_sha256` optionally pins the
   bytes.)
 
-## Container binaries (ELF / PE) — the default
-Omit every loader hint. `loader` defaults to `auto`; Ghidra detects the format, processor, and
-layout.
+## Container binaries (ELF / PE / Mach-O / DEX) — the default
+Omit every loader hint. `loader` defaults to `auto`; Ghidra's opinion loaders detect the format
+(ELF, PE, **Mach-O**, Android **DEX/APK**, …), processor, and layout from the header. To *force* a
+self-describing loader (e.g. when detection is ambiguous), pass `loader="macho"` or `loader="dex"`
+with no other hints (ADR-047).
 
 ## Headerless raw / firmware images (ADR-045)
 A bare-metal MCU dump has no header, so you must supply the processor and load address:

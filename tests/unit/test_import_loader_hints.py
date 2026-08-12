@@ -200,6 +200,29 @@ def test_hex_loader_unsupported_processor_rejected(loader: str) -> None:
         s.SessionImportIn.model_validate(_hex(loader, processor="Nope:LE:32:x"))
 
 
+# --- 2c. self-describing loaders (ADR-047: dex / macho) ------------------------------------------
+
+
+@pytest.mark.parametrize("loader", ["dex", "macho"])
+def test_self_describing_loader_takes_no_hints(loader: str) -> None:
+    """dex/macho force the loader; the format supplies processor + layout → no hints, valid."""
+    m = s.SessionImportIn.model_validate({"session_id": "s", "source_ref": "app", "loader": loader})
+    assert m.loader == loader
+    assert m.processor is None and m.base_addr is None and m.entry is None
+
+
+@pytest.mark.parametrize("loader", ["dex", "macho"])
+@pytest.mark.parametrize(
+    "hint", [{"processor": "ARM:LE:32:Cortex"}, {"base_addr": 0x1000}, {"entry": 0x1000}]
+)
+def test_self_describing_loader_forbids_hints(loader: str, hint: dict[str, object]) -> None:
+    """A processor/base_addr/entry with dex/macho is rejected (self-describing → ambiguous)."""
+    with pytest.raises(ValidationError):
+        s.SessionImportIn.model_validate(
+            {"session_id": "s", "source_ref": "app", "loader": loader, **hint}
+        )
+
+
 # --- 3. rpc_client param construction (byte-for-byte no-op + hint threading) ----------------------
 
 
@@ -292,3 +315,14 @@ def test_hex_import_params_thread_only_loader_and_processor(loader: str) -> None
             "processor": "ARM:LE:32:Cortex",
         }
     ]
+
+
+@pytest.mark.parametrize("loader", ["dex", "macho"])
+def test_self_describing_import_params_thread_only_loader(loader: str) -> None:
+    """ADR-047: a self-describing loader sends ONLY {source_ref, expected_sha256, loader}."""
+    adapter, captured = _adapter_capturing_call()
+    args = s.SessionImportIn.model_validate(
+        {"session_id": "s", "source_ref": "app", "loader": loader}
+    )
+    adapter.import_binary("s", args)  # type: ignore[attr-defined]
+    assert captured == [{"source_ref": "app", "expected_sha256": None, "loader": loader}]

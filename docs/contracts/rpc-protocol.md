@@ -269,7 +269,9 @@ loader hint is requested the params are byte-for-byte identical to today's `{ "s
 rebases the raw image to `base_addr`, and optionally seeds `entry` — for **headerless raw/firmware
 images**. When `loader` is `"intel-hex"` or `"motorola-hex"` (ADR-046) the worker drives
 `IntelHexLoader`/`MotorolaHexLoader` with `processor` only — the hex records carry their own load
-addresses, so `base_addr`/`entry` are not sent. The server validates the hint combination + the
+addresses, so `base_addr`/`entry` are not sent. When `loader` is `"dex"` or `"macho"` (ADR-047) the
+worker forces `DexLoader`/`MachoLoader` with no `processor` at all — the self-describing format
+supplies the language + layout (`auto` also detects these; the forced value pins the loader). The server validates the hint combination + the
 `processor` allow-list + address-width bounds **before** the worker (CWE-20); the worker
 **re-validates** the language against the installed set and fails closed `not-found` if absent
 (defense in depth). **Additive, opt-in, no new capability/agency** — read-only import, no script
