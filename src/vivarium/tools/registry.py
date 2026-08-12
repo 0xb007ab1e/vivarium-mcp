@@ -312,7 +312,19 @@ def _handle_session_create(ctx: ToolContext, args: s.SessionCreateIn) -> s.Sessi
 
 
 def _handle_session_import(ctx: ToolContext, args: s.SessionImportIn) -> s.SessionInfo:
-    """Import a (size-checked) binary into the session's worker.
+    """Import a binary into the session's worker for analysis.
+
+    ``source_ref`` must be a path to a file **under the server's import root**
+    (``VIVARIUM_IMPORT_ROOT``) — NOT arbitrary bytes and NOT any host path. Example: with the root
+    at ``/srv/imports``, pass ``source_ref="/srv/imports/firmware.bin"`` (or a path relative to it).
+    It is rejected (``validation``) when it is outside the import root, not found, or malformed, and
+    (``limit-exceeded``) when it is over the size cap.
+
+    **Headerless raw/firmware images** (no ELF/PE header — e.g. bare-metal MCU dumps) need loader
+    hints (ADR-045): set ``loader="binary"`` with ``processor`` (a supported Ghidra ``LanguageID``
+    such as ``ARM:LE:32:Cortex`` or ``RISCV:LE:32:RV32GC``) and ``base_addr`` (the image load
+    address), plus optional ``entry``. For normal ELF/PE files omit all hints (``loader`` defaults
+    to ``auto``). See the ``vivarium://docs/importing`` resource for the full how-to.
 
     The size cap is enforced BEFORE any byte reaches Ghidra (DoS — PLAN §3 F7). The actual byte
     resolution + path confinement of ``source_ref`` is the adapter's responsibility (CWE-22),

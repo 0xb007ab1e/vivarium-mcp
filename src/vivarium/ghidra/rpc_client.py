@@ -110,6 +110,41 @@ WorkerLauncher = Callable[[str, str], WorkerProcess]
 SourceResolver = Callable[[str], int]
 
 
+class SourceRefError(OSError):
+    """A ``source_ref`` the resolver rejected, tagged with a category-safe ``reason`` (F4).
+
+    Subclasses :class:`OSError` so the existing ``except (OSError, ValueError)`` in
+    :meth:`RpcGhidraAdapter.import_binary` still catches it; the ``reason`` selects a specific,
+    content-free ``VALIDATION`` detail (see :data:`_SOURCE_REF_DETAILS`) so the client can tell
+    *outside-the-root* from *not-found* from *malformed* — actionable without leaking the resolved
+    root path or the ``source_ref`` value (master §5, ADR-005).
+    """
+
+    def __init__(self, reason: str, message: str) -> None:
+        """Initialize with a category ``reason`` and a server-side (log-only) ``message``.
+
+        Args:
+            reason: One of ``escapes-root`` / ``not-found`` / ``malformed`` — selects the safe
+                client detail; an unknown reason falls back to the generic detail.
+            message: The server-side exception text (chained, never forwarded to the client).
+        """
+        super().__init__(message)
+        self.reason = reason
+
+
+#: Category-safe ``VALIDATION`` detail per resolver reject reason. Deliberately references only the
+#: documented env-var name (safe operator guidance), NEVER the resolved root path or the client's
+#: ``source_ref`` value (master §5 redaction). An unknown reason falls back to the generic detail.
+_SOURCE_REF_DETAILS: dict[str, str] = {
+    "escapes-root": "source_ref must be a path under the import root (VIVARIUM_IMPORT_ROOT)",
+    "not-found": "source_ref was not found under the import root (VIVARIUM_IMPORT_ROOT)",
+    "malformed": "source_ref is not a valid path",
+}
+#: Fallback when the resolver signalled a reject without a recognized reason (e.g. the default
+#: built-in resolver's bare stat failure) — the original pre-F4 content-free detail.
+_DEFAULT_SOURCE_REF_DETAIL = "input reference could not be resolved"
+
+
 # --- Tier-2 internal scan budgets (ADR-008; bounded BEFORE the worker — std-cwe CWE-400) -----
 #: How many defined strings ``ioc_scan`` pulls in one bounded page before scanning (the worker also
 #: clamps; ``truncated`` is honest when more exist). Sized to a generous-but-bounded triage window.
@@ -435,13 +470,20 @@ class RpcGhidraAdapter:
         except (OSError, ValueError) as exc:
             # Fail closed: the resolver signalled an unresolvable/rejected ref (OSError from a
             # stat, or ValueError from a confined resolver rejecting a path outside its allow-list
-            # root). Map to VALIDATION with a fixed, content-free detail; the underlying exception
-            # is chained SERVER-SIDE only (never forwarded to the client — master §5). Any other
-            # exception type is a wiring/programmer bug and propagates unmasked (fail fast —
-            # topic-error-handling).
-            raise _errors.make_error(
-                ErrorType.VALIDATION, "input reference could not be resolved"
-            ) from exc
+            # root). Map to VALIDATION with a category-SAFE detail naming the specific reason (F4:
+            # outside-root vs not-found vs malformed) so the client can self-correct — WITHOUT the
+            # resolved root path or the source_ref value (master §5). The underlying exception is
+            # chained SERVER-SIDE only. Any other exception type is a wiring/programmer bug and
+            # propagates unmasked (fail fast — topic-error-handling).
+            raw_reason = getattr(exc, "reason", None)
+            if isinstance(raw_reason, str):
+                reason = raw_reason
+            elif isinstance(exc, FileNotFoundError):
+                reason = "not-found"  # the built-in resolver's bare stat miss
+            else:
+                reason = ""
+            detail = _SOURCE_REF_DETAILS.get(reason, _DEFAULT_SOURCE_REF_DETAIL)
+            raise _errors.make_error(ErrorType.VALIDATION, detail) from exc
         # Fail closed BEFORE the worker: an over-cap binary is rejected pre-Ghidra (TB3 DoS).
         check_binary_size(size_bytes, self._limits)
         # OOM pre-flight (ADR-023 D3 + ADR-029 C): may warn, reject, or be skipped per the mode.

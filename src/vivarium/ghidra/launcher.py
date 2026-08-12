@@ -28,7 +28,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from vivarium.ghidra.rpc_client import WorkerProcess
+from vivarium.ghidra.rpc_client import SourceRefError, WorkerProcess
 from vivarium.logging import get_logger
 
 _log = get_logger(__name__)
@@ -299,12 +299,16 @@ def make_confined_resolver(import_root: str) -> Callable[[str], int]:
             candidate = Path(source_ref).resolve()
         except ValueError as exc:
             # A malformed path (e.g. an embedded NUL byte makes ``Path.resolve()`` raise
-            # ``ValueError``) — fail closed as ``OSError`` so the adapter maps it to ``VALIDATION``
-            # (the documented contract), not a leaky ``internal-error`` (CWE-20; G11 finding).
-            raise OSError("source_ref is not a valid path") from exc
+            # ``ValueError``) — fail closed as a reason-tagged ``SourceRefError`` (an ``OSError``
+            # subclass) so the adapter maps it to a specific ``VALIDATION`` detail (F4), not a leaky
+            # ``internal-error`` (CWE-20; G11 finding).
+            raise SourceRefError("malformed", "source_ref is not a valid path") from exc
         if not candidate.is_relative_to(root):
-            msg = "source_ref escapes the import root"
-            raise OSError(msg)
-        return candidate.stat().st_size
+            raise SourceRefError("escapes-root", "source_ref escapes the import root")
+        try:
+            return candidate.stat().st_size
+        except FileNotFoundError as exc:
+            # Resolved under the root but no such file — distinct, actionable reason (F4).
+            raise SourceRefError("not-found", "source_ref not found under the import root") from exc
 
     return resolve
