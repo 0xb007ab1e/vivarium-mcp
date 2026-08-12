@@ -59,12 +59,18 @@ the schema rejects the incomplete combination (fail closed). `processor`/`base_a
 
 ### D2 — Server-side **curated static** LanguageID allow-list; worker re-validates (defense in depth)
 
-Because the server can't ask Ghidra (D-constraint 1), it ships a **curated constant allow-list** of
-supported `LanguageID`s (`vivarium/core/languages.py`). **v1.8 scope = embedded-focused** (operator
-decision 2026-08-12): ARM/Thumb **LE+BE** Cortex, AARCH64, RISC-V **RV32/RV64** — the firmware cases
-the finding hit. Desktop arches (x86/MIPS/PPC) are a later additive extension, not in this increment.
-The server validates `processor` against this allow-list **before** spawning/calling the worker
-(positive allow-list, CWE-20; unknown → `validation` reject naming the category).
+Because the server can't ask Ghidra (D-constraint 1), it ships a static allow-list of supported
+`LanguageID`s (`vivarium/core/languages.py`). **Scope = the FULL set of languages installed in the
+pinned worker's Ghidra** (generated from the install, not hand-curated): every ARM/AARCH64/RISC-V
+variant plus x86, MIPS, PowerPC, AVR, 8051/PIC, MSP430, Xtensa, SuperH, tricore, 68k, Z80, 6502, …
+(~175 ids). Generating the list from the install (rather than a hand-picked subset) both maximizes
+raw-import coverage and keeps the ids **correct** — the initial hand-picked v1.8 set used
+`RISCV:LE:32:RV32GC`/`RV64GC`, which are **not** the ids this Ghidra ships (`RISCV:LE:32:default`,
+etc.), so raw RISC-V would have failed worker re-validation. The list is regenerated on a Ghidra
+version bump (enumerate `getLanguageDescriptions`), with a drift check asserting it equals the
+installed set. The server still validates `processor` against this allow-list **before** the worker
+(positive allow-list, CWE-20; unknown → `validation` reject), and the worker re-validates against the
+actually-installed languages (defense in depth).
 
 The **worker re-validates** the (already allow-listed) `processor` against the *actually installed*
 `LanguageService.getLanguageDescriptions()` and fails closed with a category-safe slug

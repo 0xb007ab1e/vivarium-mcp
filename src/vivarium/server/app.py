@@ -83,9 +83,11 @@ layout.
 A bare-metal MCU dump has no header, so you must supply the processor and load address:
 
 - `loader="binary"` (required to select the raw path)
-- `processor` — a supported Ghidra `LanguageID`. Supported set: `ARM:LE:32:Cortex`,
-  `ARM:BE:32:Cortex`, `AARCH64:LE:64:v8A`, `AARCH64:BE:64:v8A`, `RISCV:LE:32:RV32GC`,
-  `RISCV:LE:64:RV64GC`.
+- `processor` — a supported Ghidra `LanguageID`. Any `LanguageID` installed in the worker's Ghidra
+  is accepted (the full set — ARM/AARCH64/RISC-V, x86, MIPS, PowerPC, AVR, 8051/PIC, MSP430, Xtensa,
+  SuperH, tricore, 68k, and more). Examples: `ARM:LE:32:Cortex`, `AARCH64:LE:64:v8A`,
+  `x86:LE:64:default`, `MIPS:BE:32:default`, `PowerPC:BE:32:default`, `RISCV:LE:32:default`,
+  `Xtensa:LE:32:default`. An unknown id is rejected with `validation`.
 - `base_addr` — the image base / load address (integer), e.g. `0x10000000`.
 - `entry` — optional entry-point offset (must be ≥ `base_addr`).
 

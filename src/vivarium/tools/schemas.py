@@ -201,8 +201,12 @@ class SessionImportIn(_SessionScopedIn):
         if self.processor is None or self.base_addr is None:
             raise ValueError("loader='binary' requires both `processor` and `base_addr`")
         if not languages.is_supported_language(self.processor):
-            allowed = ", ".join(languages.SUPPORTED_LANGUAGE_IDS)
-            raise ValueError(f"unsupported processor; allowed LanguageIDs: {allowed}")
+            raise ValueError(
+                "unsupported processor: must be one of the "
+                f"{len(languages.SUPPORTED_LANGUAGE_IDS)} installed Ghidra LanguageIDs "
+                "(e.g. ARM:LE:32:Cortex, x86:LE:64:default, MIPS:BE:32:default, "
+                "RISCV:LE:32:default) — see the vivarium://docs/importing resource"
+            )
 
         max_addr = 1 << languages.address_bits(self.processor)
         if self.base_addr >= max_addr:

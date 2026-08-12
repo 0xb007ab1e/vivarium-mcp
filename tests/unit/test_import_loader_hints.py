@@ -23,13 +23,19 @@ from vivarium.tools import schemas as s
 
 
 def test_supported_language_ids_are_sorted_and_nonempty() -> None:
-    """The public id tuple mirrors the mapping, is sorted, and covers the v1.8 embedded set."""
+    """The public id tuple mirrors the mapping, is sorted, and covers the full installed set."""
     assert languages.SUPPORTED_LANGUAGE_IDS
     assert list(languages.SUPPORTED_LANGUAGE_IDS) == sorted(languages.SUPPORTED_LANGUAGE_IDS)
-    # The embedded-focused v1.8 scope (operator decision): ARM/Thumb LE+BE, AArch64 LE+BE, RISC-V.
-    assert {"ARM:LE:32:Cortex", "ARM:BE:32:Cortex"} <= set(languages.SUPPORTED_LANGUAGE_IDS)
-    assert {"AARCH64:LE:64:v8A", "AARCH64:BE:64:v8A"} <= set(languages.SUPPORTED_LANGUAGE_IDS)
-    assert {"RISCV:LE:32:RV32GC", "RISCV:LE:64:RV64GC"} <= set(languages.SUPPORTED_LANGUAGE_IDS)
+    # The full installed set is broad (>100 languages) — spanning embedded + desktop families.
+    assert len(languages.SUPPORTED_LANGUAGE_IDS) > 100
+    ids = set(languages.SUPPORTED_LANGUAGE_IDS)
+    # Real installed LanguageIDs across families (grounded against the pinned Ghidra).
+    assert {"ARM:LE:32:Cortex", "ARM:BE:32:Cortex"} <= ids  # embedded ARM
+    assert {"AARCH64:LE:64:v8A", "AARCH64:BE:64:v8A"} <= ids  # 64-bit ARM
+    assert {"RISCV:LE:32:default", "RISCV:LE:64:default"} <= ids  # RISC-V (real ids, not RV32GC)
+    assert {"x86:LE:32:default", "x86:LE:64:default"} <= ids  # desktop x86
+    assert {"MIPS:BE:32:default", "PowerPC:BE:32:default"} <= ids  # router/embedded
+    assert "Xtensa:LE:32:default" in ids  # ESP32/IoT
 
 
 def test_is_supported_language_is_exact_match_only() -> None:
@@ -37,7 +43,8 @@ def test_is_supported_language_is_exact_match_only() -> None:
     assert languages.is_supported_language("ARM:LE:32:Cortex")
     assert not languages.is_supported_language("arm:le:32:cortex")  # case matters
     assert not languages.is_supported_language("ARM:LE:32:Cortex ")  # trailing space
-    assert not languages.is_supported_language("X86:LE:64:default")  # out of v1.8 scope
+    assert not languages.is_supported_language("X86:LE:64:default")  # wrong case (real id is `x86`)
+    assert not languages.is_supported_language("TotallyMadeUp:LE:32:nope")  # not a real LanguageID
     assert not languages.is_supported_language("")
 
 
@@ -46,8 +53,10 @@ def test_is_supported_language_is_exact_match_only() -> None:
     [
         ("ARM:LE:32:Cortex", 32),
         ("AARCH64:LE:64:v8A", 64),
-        ("RISCV:LE:32:RV32GC", 32),
-        ("RISCV:LE:64:RV64GC", 64),
+        ("RISCV:LE:32:default", 32),
+        ("x86:LE:64:default", 64),
+        ("z80:LE:16:default", 16),
+        ("dsPIC30F:LE:24:default", 24),
     ],
 )
 def test_address_bits(language_id: str, bits: int) -> None:
@@ -58,7 +67,7 @@ def test_address_bits(language_id: str, bits: int) -> None:
 def test_address_bits_rejects_unlisted() -> None:
     """Asking the width of a non-allow-listed id is a programmer error (KeyError)."""
     with pytest.raises(KeyError):
-        languages.address_bits("X86:LE:64:default")
+        languages.address_bits("TotallyMadeUp:LE:32:nope")
 
 
 # --- 2. SessionImportIn validation boundary ------------------------------------------------------
@@ -186,7 +195,7 @@ def test_binary_import_params_thread_the_hints() -> None:
         session_id="s",
         source_ref="fw.bin",
         loader="binary",
-        processor="RISCV:LE:32:RV32GC",
+        processor="RISCV:LE:32:default",
         base_addr=0x0,
         entry=0x80,
     )
@@ -196,7 +205,7 @@ def test_binary_import_params_thread_the_hints() -> None:
             "source_ref": "fw.bin",
             "expected_sha256": None,
             "loader": "binary",
-            "processor": "RISCV:LE:32:RV32GC",
+            "processor": "RISCV:LE:32:default",
             "base_addr": 0x0,
             "entry": 0x80,
         }
