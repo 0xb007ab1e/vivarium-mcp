@@ -231,7 +231,7 @@ class PyGhidraBackend:
             return self._gh_import(
                 str(source_ref), loader=str(loader), processor=str(_require(params, "processor"))
             )
-        if loader in ("dex", "macho"):
+        if loader in ("dex", "macho", "apk"):
             # ADR-047: self-describing — force the loader; the format supplies processor + layout.
             return self._gh_import(str(source_ref), loader=str(loader))
         return self._gh_import(str(source_ref))
@@ -761,7 +761,7 @@ class PyGhidraBackend:
             )
         elif loader in ("intel-hex", "motorola-hex"):
             self._open_named_loader(source_ref, project_dir, str(loader), str(processor))
-        elif loader in ("dex", "macho"):
+        elif loader in ("dex", "macho", "apk"):
             # Self-describing (ADR-047): force the loader, no language (the format carries it).
             self._open_named_loader(source_ref, project_dir, str(loader), None)
         else:
@@ -844,6 +844,7 @@ class PyGhidraBackend:
         "motorola-hex": "ghidra.app.util.opinion.MotorolaHexLoader",
         "dex": "ghidra.app.util.opinion.DexLoader",
         "macho": "ghidra.app.util.opinion.MachoLoader",
+        "apk": "ghidra.app.util.opinion.ApkLoader",
     }
 
     def _open_named_loader(

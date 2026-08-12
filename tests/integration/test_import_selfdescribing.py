@@ -1,13 +1,13 @@
-"""Integration: self-describing container formats — Mach-O + DEX (ADR-047).
+"""Integration: self-describing container formats — Mach-O + DEX + APK (ADR-047).
 
-The existing `auto` (opinion) path already detects Mach-O and Android DEX from their headers;
-ADR-047 adds explicit `loader="macho"`/`loader="dex"` to *force* the loader. This gate proves BOTH
+The existing `auto` (opinion) path already detects Mach-O, Android DEX, and APK from their headers;
+ADR-047 adds explicit `loader="macho"`/`"dex"`/`"apk"` to *force* the loader. This gate proves BOTH
 paths on a real worker (auto-detect and forced) — the capability shipped untested (the F1 docs
 wrongly said "auto = ELF/PE only"), and this pins it.
 
 Gating mirrors the other import gates: `integration`-marked, real worker image + engine. The inputs
-are tiny synthetic, benign Mach-O / DEX files the driver builds in-container (master §5) — no real
-app bytes.
+are tiny synthetic, benign Mach-O / DEX / APK files the driver builds in-container (master §5) — no
+real app bytes.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ _MARKER = "VIVARIUM_INTEGRATION_RESULT:"
 # In-container driver: build a minimal ARM64 Mach-O + an empty DEX, then load each via BOTH the auto
 # path (no loader hint) and the forced loader, reporting the detected format + architecture.
 _DRIVER = r"""
-import hashlib, json, os, struct, sys, traceback, zlib
+import hashlib, io, json, os, struct, sys, traceback, zipfile, zlib
 
 MARKER = "VIVARIUM_INTEGRATION_RESULT:"
 
@@ -57,6 +57,14 @@ def dex_empty():
     return b"dex\n035\0" + struct.pack("<I", cksum) + after
 
 
+def apk_zip():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("classes.dex", dex_empty())
+        z.writestr("AndroidManifest.xml", b"\x03\x00\x08\x00")
+    return buf.getvalue()
+
+
 def _load(path, loader=None):
     from vivarium.ghidra._jvm_bridge import PyGhidraBackend
 
@@ -73,15 +81,20 @@ def main():
     project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
     macho_path = os.path.join(project_dir, "t.macho")
     dex_path = os.path.join(project_dir, "t.dex")
+    apk_path = os.path.join(project_dir, "t.apk")
     with open(macho_path, "wb") as f:
         f.write(macho_arm64())
     with open(dex_path, "wb") as f:
         f.write(dex_empty())
+    with open(apk_path, "wb") as f:
+        f.write(apk_zip())
     return {
         "macho_auto": _load(macho_path),
         "macho_forced": _load(macho_path, "macho"),
         "dex_auto": _load(dex_path),
         "dex_forced": _load(dex_path, "dex"),
+        "apk_auto": _load(apk_path),
+        "apk_forced": _load(apk_path, "apk"),
     }
 
 
@@ -150,9 +163,9 @@ def _parse_marker_json(stdout: str) -> dict[str, Any]:
 
 
 def test_selfdescribing_macho_and_dex_on_real_worker(worker_image: str) -> None:
-    """Mach-O + DEX must load via BOTH the auto path and the forced loader (ADR-047).
+    """Mach-O + DEX + APK must load via BOTH the auto path and the forced loader (ADR-047).
 
-    Asserts each of the four loads (macho/dex, each auto + forced) is recognized as the right
+    Asserts each of the six loads (macho/dex/apk, each auto + forced) is recognized as the right
     format, with the expected architecture family.
 
     Args:
@@ -192,4 +205,7 @@ def test_selfdescribing_macho_and_dex_on_real_worker(worker_image: str) -> None:
         assert str(data[key]["architecture"]).startswith("AARCH64"), f"{key}: {data[key]!r}"
     for key in ("dex_auto", "dex_forced"):
         assert "DEX" in str(data[key]["format"]), f"{key}: not DEX: {data[key]!r}"
+        assert str(data[key]["architecture"]).startswith("Dalvik"), f"{key}: {data[key]!r}"
+    for key in ("apk_auto", "apk_forced"):
+        assert "APK" in str(data[key]["format"]), f"{key}: not APK: {data[key]!r}"
         assert str(data[key]["architecture"]).startswith("Dalvik"), f"{key}: {data[key]!r}"

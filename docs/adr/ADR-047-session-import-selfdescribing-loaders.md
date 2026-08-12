@@ -1,7 +1,8 @@
 # ADR-047: `session_import` self-describing loaders — DEX / Mach-O
 
-- **Status:** **Accepted** (2026-08-12). Third increment of the "expose more Ghidra loaders" program
-  (after ADR-045 raw, ADR-046 hex).
+- **Status:** **Accepted** (2026-08-12; amended same day to add `apk` and record the fat-slice /
+  DYLD deferral). Third + fourth increments of the "expose more Ghidra loaders" program (after
+  ADR-045 raw, ADR-046 hex).
 - **Date:** 2026-08-12
 - **Deciders:** Human operator (directed "all" Ghidra-coverage gaps); assistant implemented.
 - **Context source:** Enumerated the pinned worker's loaders + **verified live** that both the `auto`
@@ -21,12 +22,15 @@ own processor and memory layout. So the hint shape is "force the loader, supply 
 
 ## Decision
 
-### D1 — Add `dex` / `macho` to the `loader` enum; they take **no** hints
+### D1 — Add `dex` / `macho` / `apk` to the `loader` enum; they take **no** hints
 
-`SessionImportIn.loader` becomes `Literal["auto","binary","intel-hex","motorola-hex","dex","macho"]`.
-For `dex`/`macho` the server **forbids** `processor`/`base_addr`/`entry` (the format supplies them;
-passing any is ambiguous → fail closed, not silently ignored) — the same rule as `auto`, except the
-worker **forces** the named loader instead of letting opinion choose.
+`SessionImportIn.loader` becomes
+`Literal["auto","binary","intel-hex","motorola-hex","dex","macho","apk"]`. For these self-describing
+loaders the server **forbids** `processor`/`base_addr`/`entry` (the format supplies them; passing any
+is ambiguous → fail closed, not silently ignored) — the same rule as `auto`, except the worker
+**forces** the named loader instead of letting opinion choose. (`apk` was added in the amendment; an
+APK is a zip whose `classes.dex` is loaded — verified live, auto + forced, both → `Android APK` /
+`Dalvik`.)
 
 ### D2 — Worker forces the loader with no language
 
@@ -48,10 +52,14 @@ the analyzed bytes are parsed only inside the hardened, ephemeral, network-isola
 - **Do nothing (rely on `auto`)** — rejected in part: `auto` *does* load these, but (a) it was
   untested/undocumented (the real gap this ADR closes) and (b) there's no way to force a loader when
   opinion is ambiguous. Adding the explicit values + the gate fixes both; `auto` remains the default.
-- **APK / DYLD-cache / fat-Mach-O slice selection now** — deferred: APK is a zip container
-  (`ApkLoader`) and fat/DYLD need slice/component **options** (a richer hint shape). Add them as a
-  follow-on once the option-passing design is settled; this ADR covers the single-slice self-
-  describing case.
+- **APK** — **added** in the amendment: `ApkLoader` is self-describing (no options), so it fits the
+  same hint-free mechanism as `dex`/`macho`.
+- **DYLD-cache / fat-Mach-O slice selection** — **deferred (grounded):** `pyghidra.open_program` has
+  **no loader-options / LoadSpec-selection parameter** (confirmed from its signature), so choosing a
+  specific fat slice or a DYLD-cache component is not reachable through the current open path. A
+  fat/universal Mach-O still loads its *default* slice via `loader="macho"` (verified). Selecting a
+  slice/component needs a lower-level `LoaderService` + `LoadSpec` + options mechanism and a new
+  hint field — a separate future increment, not this one.
 
 ## Consequences
 
@@ -64,10 +72,10 @@ the analyzed bytes are parsed only inside the hardened, ephemeral, network-isola
 
 - **Unit:** schema — `dex`/`macho` validate with no hints; reject `processor`/`base_addr`/`entry`; rpc
   threads only `{loader}`.
-- **Integration (gated real worker):** `test_import_selfdescribing.py` builds a minimal ARM64 Mach-O
-  and an empty DEX in-container and loads **each via both `auto` and the forced loader**, asserting
-  the detected format + architecture family — PASSED live 8.4s; added to the live-regression hard-gate
-  list (floor 10→11 / 12→13).
+- **Integration (gated real worker):** `test_import_selfdescribing.py` builds a minimal ARM64 Mach-O,
+  an empty DEX, and an APK (zip + `classes.dex`) in-container and loads **each via both `auto` and the
+  forced loader** (six loads), asserting the detected format + architecture family — PASSED live ~8s;
+  added to the live-regression hard-gate list (floor 10→11 / 12→13).
 
 ## Rollout
 

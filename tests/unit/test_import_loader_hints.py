@@ -203,7 +203,7 @@ def test_hex_loader_unsupported_processor_rejected(loader: str) -> None:
 # --- 2c. self-describing loaders (ADR-047: dex / macho) ------------------------------------------
 
 
-@pytest.mark.parametrize("loader", ["dex", "macho"])
+@pytest.mark.parametrize("loader", ["dex", "macho", "apk"])
 def test_self_describing_loader_takes_no_hints(loader: str) -> None:
     """dex/macho force the loader; the format supplies processor + layout → no hints, valid."""
     m = s.SessionImportIn.model_validate({"session_id": "s", "source_ref": "app", "loader": loader})
@@ -211,7 +211,7 @@ def test_self_describing_loader_takes_no_hints(loader: str) -> None:
     assert m.processor is None and m.base_addr is None and m.entry is None
 
 
-@pytest.mark.parametrize("loader", ["dex", "macho"])
+@pytest.mark.parametrize("loader", ["dex", "macho", "apk"])
 @pytest.mark.parametrize(
     "hint", [{"processor": "ARM:LE:32:Cortex"}, {"base_addr": 0x1000}, {"entry": 0x1000}]
 )
@@ -317,7 +317,7 @@ def test_hex_import_params_thread_only_loader_and_processor(loader: str) -> None
     ]
 
 
-@pytest.mark.parametrize("loader", ["dex", "macho"])
+@pytest.mark.parametrize("loader", ["dex", "macho", "apk"])
 def test_self_describing_import_params_thread_only_loader(loader: str) -> None:
     """ADR-047: a self-describing loader sends ONLY {source_ref, expected_sha256, loader}."""
     adapter, captured = _adapter_capturing_call()

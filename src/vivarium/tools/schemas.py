@@ -158,9 +158,11 @@ class SessionImportIn(_SessionScopedIn):
             * ``"intel-hex"`` / ``"motorola-hex"`` — ``IntelHexLoader`` / ``MotorolaHexLoader`` for
               hex-delivered firmware (ADR-046); REQUIRE ``processor`` only — the load addresses come
               from the hex records, so ``base_addr``/``entry`` are NOT allowed.
-            * ``"dex"`` / ``"macho"`` — force ``DexLoader`` / ``MachoLoader`` for a self-describing
-              Android DEX / Mach-O (ADR-047); the format carries its own processor + layout, so NO
-              hints are allowed (``auto`` also loads these — the forced value pins the loader).
+            * ``"dex"`` / ``"macho"`` / ``"apk"`` — force ``DexLoader`` / ``MachoLoader`` /
+              ``ApkLoader`` for a self-describing Android DEX / Mach-O / APK (ADR-047); the format
+              carries its own processor + layout, so NO hints are allowed (``auto`` also loads these
+              — the forced value pins the loader). A fat/universal Mach-O loads its *default* slice;
+              selecting a specific slice or a DYLD-cache component is not yet supported (deferred).
         processor: A Ghidra ``LanguageID`` (e.g. ``"ARM:LE:32:Cortex"``, ``"x86:LE:64:default"``);
             required by ``binary``/``intel-hex``/``motorola-hex``. Must be in the allow-list
             (:data:`vivarium.core.languages.SUPPORTED_LANGUAGE_IDS`).
@@ -172,7 +174,7 @@ class SessionImportIn(_SessionScopedIn):
 
     source_ref: str = Field(min_length=1, max_length=512)
     expected_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
-    loader: Literal["auto", "binary", "intel-hex", "motorola-hex", "dex", "macho"] = "auto"
+    loader: Literal["auto", "binary", "intel-hex", "motorola-hex", "dex", "macho", "apk"] = "auto"
     processor: str | None = Field(default=None, min_length=1, max_length=128)
     base_addr: int | None = Field(default=None, ge=0)
     entry: int | None = Field(default=None, ge=0)
@@ -212,7 +214,7 @@ class SessionImportIn(_SessionScopedIn):
         # `auto` and the self-describing container loaders (ADR-047: dex/macho — the format carries
         # its own processor + layout) take NO hints; auto lets opinion pick the loader, the named
         # ones force it. A hint here is ambiguous → rejected, not silently ignored.
-        if self.loader in ("auto", "dex", "macho"):
+        if self.loader in ("auto", "dex", "macho", "apk"):
             if self.processor is not None or self.base_addr is not None or self.entry is not None:
                 raise ValueError(
                     f"loader='{self.loader}' is self-describing; "
