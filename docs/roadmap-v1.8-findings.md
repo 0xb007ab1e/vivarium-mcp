@@ -58,3 +58,27 @@ Evidence staged under the import root (`~/vivarium-imports/`): `t19_{app,recover
 - F2–F4 are cheap, high-leverage discoverability/observability fixes independent of F1.
 - This run did **not** exercise a naming/quality regression (the firmware analysis itself succeeded
   out-of-band); all findings are **ingestion/UX/observability**, not analysis quality.
+
+## Resolution status (2026-08-12)
+
+- **F1 — DONE** (ADR-045; `feat/session-import-loader-hints`). Additive opt-in loader hints
+  (`loader`/`processor`/`base_addr`/`entry`); curated embedded LanguageID allow-list validated
+  server-side; worker drives `BinaryLoader` + rebase. Live-proven; gated integration test added.
+- **F2 — DONE.** `session_import` handler docstring (the client-facing tool description) now names
+  `VIVARIUM_IMPORT_ROOT`, gives an example, lists reject reasons, and covers the loader hints.
+- **F3 — DONE.** New MCP resource `vivarium://docs/importing` (static how-to).
+- **F4 — DONE.** Resolver reject reason is now distinguished (outside-root / not-found / malformed)
+  and mapped to a specific, category-safe `validation` detail naming `VIVARIUM_IMPORT_ROOT` (no path
+  leak). Over-cap already surfaced distinctly as `limit-exceeded`. Worker-side: the exception CLASS
+  was already logged via the ADR-024 redacted `data.detail` channel (raw JVM text is deliberately
+  scrubbed — master §5), so no change there is correct.
+- **F5 — INVESTIGATED; could not reproduce; regression-gated.** Post-F4 the worker exception is now
+  diagnosable (the original "no surfaced cause" blocker is gone). A **readelf-clean, section-bearing
+  32-bit ARM ET_EXEC** (new fixture `tests/_fixtures/binaries.synthetic_arm32_elf`) **imports and
+  analyzes correctly on current HEAD** — architecture recognized as ARM, a function recovered — so
+  the reported failure does not reproduce for the primary case (it was likely specific to the T19
+  firmware bytes, or already fixed). Locked in as a **positive live-regression gate**
+  (`tests/integration/test_import_synthetic_elf.py`) so a future regression in the 32-bit ARM
+  container path (the original symptom) fails CI. F1's raw loader covers the headerless case; a
+  relocatable `ET_REL` object was not conclusively tested (very slow analysis — out of scope, and
+  not the firmware/ET_EXEC case). No wrapper bug found.
