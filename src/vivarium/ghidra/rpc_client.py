@@ -492,16 +492,20 @@ class RpcGhidraAdapter:
             "source_ref": args.source_ref,
             "expected_sha256": args.expected_sha256,
         }
-        # ADR-045 loader hints: only attach when explicitly opted in (loader='binary'). When
-        # loader='auto' (the default) NO extra key crosses the wire — the params are byte-for-byte
-        # identical to the pre-ADR-045 auto path (the ADR-029/030 no-op guarantee). The schema has
-        # already validated the hint combination + the processor allow-list server-side.
+        # Loader hints: only attach when explicitly opted in (loader != 'auto'). When loader='auto'
+        # (the default) NO extra key crosses the wire — params are byte-for-byte identical to the
+        # pre-ADR-045 auto path (the ADR-029/030 no-op guarantee). The schema has already validated
+        # the hint combination + the processor allow-list server-side.
         if args.loader == "binary":
             params["loader"] = args.loader
             params["processor"] = args.processor
             params["base_addr"] = args.base_addr
             if args.entry is not None:
                 params["entry"] = args.entry
+        elif args.loader in ("intel-hex", "motorola-hex"):
+            # ADR-046: hex loaders take addresses from the records — only loader + processor cross.
+            params["loader"] = args.loader
+            params["processor"] = args.processor
         result = self._call(
             session_id,
             "import_binary",

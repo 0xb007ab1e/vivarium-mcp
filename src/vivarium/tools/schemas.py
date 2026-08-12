@@ -150,27 +150,32 @@ class SessionImportIn(_SessionScopedIn):
             import root, is missing, or exceeds the size cap.
         expected_sha256: Optional client-asserted digest; the server verifies the actual bytes
             match (integrity / wrong-file guard).
-        loader: ``"auto"`` (default) drives Ghidra's opinion/container loaders (ELF/PE) exactly as
-            before; ``"binary"`` drives ``BinaryLoader`` for a headerless image and REQUIRES
-            ``processor`` + ``base_addr``. Closed set; an unknown value is rejected (fail closed).
-        processor: A Ghidra ``LanguageID`` (e.g. ``"ARM:LE:32:Cortex"``, ``"RISCV:LE:32:RV32GC"``).
-            Only meaningful with ``loader="binary"``; must be in the allow-list
+        loader: Which Ghidra loader to drive (closed set; unknown → rejected):
+            * ``"auto"`` (default) — opinion/container loaders (ELF/PE/Mach-O/DEX/…) exactly as
+              before; forbids all hints.
+            * ``"binary"`` — ``BinaryLoader`` for a headerless raw image; REQUIRES ``processor`` +
+              ``base_addr`` (ADR-045 F1).
+            * ``"intel-hex"`` / ``"motorola-hex"`` — ``IntelHexLoader`` / ``MotorolaHexLoader`` for
+              hex-delivered firmware (ADR-046); REQUIRE ``processor`` only — the load addresses come
+              from the hex records, so ``base_addr``/``entry`` are NOT allowed.
+        processor: A Ghidra ``LanguageID`` (e.g. ``"ARM:LE:32:Cortex"``, ``"x86:LE:64:default"``);
+            required by ``binary``/``intel-hex``/``motorola-hex``. Must be in the allow-list
             (:data:`vivarium.core.languages.SUPPORTED_LANGUAGE_IDS`).
-        base_addr: Image base / load address for a raw image (raw images carry no header to supply
-            it). Required with ``loader="binary"``; bounded to the processor's address width.
-        entry: Optional entry-point hint (a disassembly seed). If given, must be ``>= base_addr``
-            and within the processor's address width.
+        base_addr: Image base / load address for a raw image (``binary`` only — raw images carry no
+            header to supply it); bounded to the processor's address width.
+        entry: Optional entry-point hint (``binary`` only; a disassembly seed). If given, must be
+            ``>= base_addr`` and within the processor's address width.
     """
 
     source_ref: str = Field(min_length=1, max_length=512)
     expected_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
-    loader: Literal["auto", "binary"] = "auto"
+    loader: Literal["auto", "binary", "intel-hex", "motorola-hex"] = "auto"
     processor: str | None = Field(default=None, min_length=1, max_length=128)
     base_addr: int | None = Field(default=None, ge=0)
     entry: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
-    def _validate_loader_hints(self) -> SessionImportIn:
+    def _validate_loader_hints(self) -> SessionImportIn:  # noqa: C901 — one branch per loader kind
         """Enforce the ADR-045 loader-hint rules server-side, before the worker (fail closed).
 
         Rules:
@@ -192,22 +197,37 @@ class SessionImportIn(_SessionScopedIn):
         # Import locally to keep the schema module import-light and the dependency one-directional.
         from vivarium.core import languages
 
+        def _require_supported_processor() -> None:
+            if self.processor is None or not languages.is_supported_language(self.processor):
+                raise ValueError(
+                    "unsupported/absent processor: must be one of the "
+                    f"{len(languages.SUPPORTED_LANGUAGE_IDS)} installed Ghidra LanguageIDs "
+                    "(e.g. ARM:LE:32:Cortex, x86:LE:64:default, MIPS:BE:32:default, "
+                    "RISCV:LE:32:default) — see the vivarium://docs/importing resource"
+                )
+
         if self.loader == "auto":
             if self.processor is not None or self.base_addr is not None or self.entry is not None:
-                raise ValueError("loader hints (processor/base_addr/entry) require loader='binary'")
+                raise ValueError(
+                    "loader hints (processor/base_addr/entry) require a non-auto loader"
+                )
+            return self
+
+        if self.loader in ("intel-hex", "motorola-hex"):
+            # Hex formats carry their own load addresses in the records, so they need only the
+            # processor; base_addr/entry are meaningless here and rejected (no silent ignoring).
+            _require_supported_processor()
+            if self.base_addr is not None or self.entry is not None:
+                raise ValueError(
+                    f"loader='{self.loader}' takes addresses from the hex records; "
+                    "base_addr/entry are not allowed"
+                )
             return self
 
         # loader == "binary"
         if self.processor is None or self.base_addr is None:
             raise ValueError("loader='binary' requires both `processor` and `base_addr`")
-        if not languages.is_supported_language(self.processor):
-            raise ValueError(
-                "unsupported processor: must be one of the "
-                f"{len(languages.SUPPORTED_LANGUAGE_IDS)} installed Ghidra LanguageIDs "
-                "(e.g. ARM:LE:32:Cortex, x86:LE:64:default, MIPS:BE:32:default, "
-                "RISCV:LE:32:default) — see the vivarium://docs/importing resource"
-            )
-
+        _require_supported_processor()
         max_addr = 1 << languages.address_bits(self.processor)
         if self.base_addr >= max_addr:
             raise ValueError("base_addr exceeds the processor's address width")

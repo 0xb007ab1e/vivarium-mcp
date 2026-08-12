@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import Any, ClassVar
 
 # Bounds the bridge enforces itself (defense-in-depth; the server also caps before calling).
 _MAX_RESULT_COUNT = 10_000
@@ -225,6 +225,11 @@ class PyGhidraBackend:
                 processor=str(_require(params, "processor")),
                 base_addr=int(_require(params, "base_addr")),
                 entry=None if params.get("entry") is None else int(params["entry"]),
+            )
+        if loader in ("intel-hex", "motorola-hex"):
+            # ADR-046: hex loaders need only a processor; addresses come from the records.
+            return self._gh_import(
+                str(source_ref), loader=str(loader), processor=str(_require(params, "processor"))
             )
         return self._gh_import(str(source_ref))
 
@@ -751,6 +756,8 @@ class PyGhidraBackend:
             self._open_raw_binary(
                 source_ref, project_dir, str(processor), int(base_addr or 0), entry
             )
+        elif loader in ("intel-hex", "motorola-hex"):
+            self._open_named_loader(source_ref, project_dir, str(loader), str(processor))
         else:
             # AUTO path — byte-for-byte the pre-ADR-045 call (opinion/container loaders).
             ctx = pyghidra.open_program(
@@ -823,6 +830,55 @@ class PyGhidraBackend:
                 prog.getSymbolTable().addExternalEntryPoint(space.getAddress(entry))
 
         self._in_transaction("session_import (raw layout)", _rebase)
+
+    #: ADR-046: client loader hint -> Ghidra loader class for the address-bearing hex formats.
+    _NAMED_LOADERS: ClassVar[dict[str, str]] = {
+        "intel-hex": "ghidra.app.util.opinion.IntelHexLoader",
+        "motorola-hex": "ghidra.app.util.opinion.MotorolaHexLoader",
+    }
+
+    def _open_named_loader(
+        self, source_ref: str, project_dir: str, loader: str, processor: str
+    ) -> None:  # pragma: no cover - JVM edge
+        """Open a hex-format image via a named Ghidra loader (ADR-046).
+
+        Drives PyGhidra's ``IntelHexLoader`` / ``MotorolaHexLoader`` with the allow-listed
+        ``processor`` ``LanguageID``. Unlike the raw ``BinaryLoader`` path there is **no rebase**:
+        Intel-HEX / SREC records carry their own absolute load addresses, so the loader lays memory
+        out itself. Retains the program/context on ``self`` exactly like the other paths.
+
+        Args:
+            source_ref: The server-resolved, confined input path.
+            project_dir: The writable per-session project location.
+            loader: The client loader token (``"intel-hex"`` / ``"motorola-hex"``) — mapped to the
+                Ghidra loader class via :data:`_NAMED_LOADERS`.
+            processor: The allow-listed ``LanguageID`` (hex has no embedded processor).
+
+        Raises:
+            WorkerError: ``not-found`` if the language is not installed or the file cannot load.
+        """
+        import pyghidra
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        loader_class = self._NAMED_LOADERS[loader]
+        try:
+            ctx = pyghidra.open_program(
+                source_ref,
+                project_location=project_dir,
+                project_name="session",
+                analyze=False,
+                language=processor,
+                loader=loader_class,
+            )
+            program = ctx.__enter__()
+        except Exception as exc:
+            raise WorkerError(
+                CODE_NOT_FOUND,
+                "processor language not installed or the hex image could not be loaded",
+            ) from exc
+
+        self._project = ctx  # retain the ctx manager for the launcher to close on evict
+        self._program = getattr(program, "getCurrentProgram", lambda: program)()
 
     def _gh_analyze(
         self,

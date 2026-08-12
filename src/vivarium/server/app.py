@@ -96,6 +96,15 @@ processor="ARM:LE:32:Cortex", base_addr=0x10000000)`.
 
 An unsupported `processor`, an out-of-range `base_addr`/`entry`, or `loader="binary"` without
 `processor`+`base_addr` is refused with `validation` before the worker is contacted.
+
+## Hex-delivered firmware (Intel-HEX / Motorola SREC) — ADR-046
+Vendor MCU firmware often ships as an Intel-HEX or Motorola S-record file, which carries its **own**
+load addresses in the records. Use `loader="intel-hex"` or `loader="motorola-hex"` with just a
+`processor` (a supported `LanguageID`) — do NOT pass `base_addr`/`entry` (the addresses come from
+the file; supplying them is rejected).
+
+Example: `session_import(session_id=…, source_ref="/srv/imports/fw.hex", loader="intel-hex",
+processor="ARM:LE:32:Cortex")`.
 """
 
 

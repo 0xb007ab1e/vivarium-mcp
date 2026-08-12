@@ -149,6 +149,57 @@ def test_negative_base_addr_rejected_by_field() -> None:
         s.SessionImportIn.model_validate(_binary(base_addr=-1))
 
 
+# --- 2b. hex loaders (ADR-046: intel-hex / motorola-hex) -----------------------------------------
+
+
+def _hex(loader: str, **over: object) -> dict[str, object]:
+    """A loader='<hex>' kwargs baseline (source_ref + processor); override per test.
+
+    Uses a dict + ``model_validate`` (not the typed constructor) so a parametrized ``str`` loader
+    doesn't trip mypy's ``Literal`` arg-type check — same pattern as ``_binary``.
+    """
+    base: dict[str, object] = {
+        "session_id": "s",
+        "source_ref": "fw.hex",
+        "loader": loader,
+        "processor": "ARM:LE:32:Cortex",
+    }
+    base.update(over)
+    return base
+
+
+@pytest.mark.parametrize("loader", ["intel-hex", "motorola-hex"])
+def test_hex_loader_requires_processor_only(loader: str) -> None:
+    """A hex loader with just a supported processor validates (addresses come from the records)."""
+    m = s.SessionImportIn.model_validate(_hex(loader))
+    assert m.loader == loader
+    assert m.processor == "ARM:LE:32:Cortex"
+    assert m.base_addr is None and m.entry is None
+
+
+@pytest.mark.parametrize("loader", ["intel-hex", "motorola-hex"])
+def test_hex_loader_missing_processor_rejected(loader: str) -> None:
+    """A hex loader without a processor is rejected (hex carries no arch)."""
+    with pytest.raises(ValidationError):
+        s.SessionImportIn.model_validate(_hex(loader, processor=None))
+
+
+@pytest.mark.parametrize("loader", ["intel-hex", "motorola-hex"])
+def test_hex_loader_forbids_base_addr_and_entry(loader: str) -> None:
+    """base_addr/entry are meaningless for hex (records are absolute) → rejected, not ignored."""
+    with pytest.raises(ValidationError):
+        s.SessionImportIn.model_validate(_hex(loader, base_addr=0x1000))
+    with pytest.raises(ValidationError):
+        s.SessionImportIn.model_validate(_hex(loader, entry=0x1000))
+
+
+@pytest.mark.parametrize("loader", ["intel-hex", "motorola-hex"])
+def test_hex_loader_unsupported_processor_rejected(loader: str) -> None:
+    """A hex loader with an unknown processor fails closed."""
+    with pytest.raises(ValidationError):
+        s.SessionImportIn.model_validate(_hex(loader, processor="Nope:LE:32:x"))
+
+
 # --- 3. rpc_client param construction (byte-for-byte no-op + hint threading) ----------------------
 
 
@@ -225,3 +276,19 @@ def test_binary_import_omits_entry_when_absent() -> None:
     adapter.import_binary("s", args)  # type: ignore[attr-defined]
     assert "entry" not in captured[0]
     assert captured[0]["loader"] == "binary"
+
+
+@pytest.mark.parametrize("loader", ["intel-hex", "motorola-hex"])
+def test_hex_import_params_thread_only_loader_and_processor(loader: str) -> None:
+    """ADR-046: a hex loader sends ONLY {source_ref, expected_sha256, loader, processor}."""
+    adapter, captured = _adapter_capturing_call()
+    args = s.SessionImportIn.model_validate(_hex(loader))
+    adapter.import_binary("s", args)  # type: ignore[attr-defined]
+    assert captured == [
+        {
+            "source_ref": "fw.hex",
+            "expected_sha256": None,
+            "loader": loader,
+            "processor": "ARM:LE:32:Cortex",
+        }
+    ]
