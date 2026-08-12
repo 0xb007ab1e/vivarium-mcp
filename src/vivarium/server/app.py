@@ -79,8 +79,9 @@ import root**, the `VIVARIUM_IMPORT_ROOT` directory. Anything outside it is refu
 Omit every loader hint. `loader` defaults to `auto`; Ghidra's opinion loaders detect the format
 (ELF, PE, **Mach-O**, Android **DEX/APK**, …), processor, and layout from the header. To *force* a
 self-describing loader (e.g. when detection is ambiguous), pass `loader="macho"`, `loader="dex"`, or
-`loader="apk"` with no other hints (ADR-047). A fat/universal Mach-O loads its **default slice**;
-selecting a specific slice or a DYLD-cache component is not yet supported.
+`loader="apk"` with no other hints (ADR-047). For a **fat/universal Mach-O**, an optional
+allow-listed `processor` on `loader="macho"` selects that arch **slice** (ADR-048); omit it for the
+default slice. DYLD-cache component selection is not yet supported.
 
 ## Headerless raw / firmware images (ADR-045)
 A bare-metal MCU dump has no header, so you must supply the processor and load address:

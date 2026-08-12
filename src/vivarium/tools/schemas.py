@@ -158,11 +158,12 @@ class SessionImportIn(_SessionScopedIn):
             * ``"intel-hex"`` / ``"motorola-hex"`` — ``IntelHexLoader`` / ``MotorolaHexLoader`` for
               hex-delivered firmware (ADR-046); REQUIRE ``processor`` only — the load addresses come
               from the hex records, so ``base_addr``/``entry`` are NOT allowed.
-            * ``"dex"`` / ``"macho"`` / ``"apk"`` — force ``DexLoader`` / ``MachoLoader`` /
-              ``ApkLoader`` for a self-describing Android DEX / Mach-O / APK (ADR-047); the format
-              carries its own processor + layout, so NO hints are allowed (``auto`` also loads these
-              — the forced value pins the loader). A fat/universal Mach-O loads its *default* slice;
-              selecting a specific slice or a DYLD-cache component is not yet supported (deferred).
+            * ``"dex"`` / ``"apk"`` — force ``DexLoader`` / ``ApkLoader`` for a self-describing
+              Android DEX / APK (ADR-047); the format carries its own processor + layout, so NO
+              hints are allowed (``auto`` also loads these — the forced value pins the loader).
+            * ``"macho"`` — force ``MachoLoader`` (ADR-047); no ``base_addr``/``entry``. For a
+              **fat/universal** Mach-O, an optional allow-listed ``processor`` selects that arch
+              **slice** (ADR-048); omit it to load the default slice.
         processor: A Ghidra ``LanguageID`` (e.g. ``"ARM:LE:32:Cortex"``, ``"x86:LE:64:default"``);
             required by ``binary``/``intel-hex``/``motorola-hex``. Must be in the allow-list
             (:data:`vivarium.core.languages.SUPPORTED_LANGUAGE_IDS`).
@@ -211,15 +212,25 @@ class SessionImportIn(_SessionScopedIn):
                     "RISCV:LE:32:default) — see the vivarium://docs/importing resource"
                 )
 
-        # `auto` and the self-describing container loaders (ADR-047: dex/macho — the format carries
+        # `auto` and the self-describing container loaders (ADR-047: dex/apk — the format carries
         # its own processor + layout) take NO hints; auto lets opinion pick the loader, the named
         # ones force it. A hint here is ambiguous → rejected, not silently ignored.
-        if self.loader in ("auto", "dex", "macho", "apk"):
+        if self.loader in ("auto", "dex", "apk"):
             if self.processor is not None or self.base_addr is not None or self.entry is not None:
                 raise ValueError(
                     f"loader='{self.loader}' is self-describing; "
                     "processor/base_addr/entry are not allowed"
                 )
+            return self
+
+        if self.loader == "macho":
+            # Self-describing, but `processor` is OPTIONAL and selects a **fat/universal slice**
+            # (ADR-048): absent → the default slice; present → the slice with that LanguageID.
+            # base_addr/entry never apply (Mach-O carries its own layout).
+            if self.base_addr is not None or self.entry is not None:
+                raise ValueError("loader='macho' does not take base_addr/entry")
+            if self.processor is not None:
+                _require_supported_processor()
             return self
 
         if self.loader in ("intel-hex", "motorola-hex"):

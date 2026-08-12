@@ -200,26 +200,57 @@ def test_hex_loader_unsupported_processor_rejected(loader: str) -> None:
         s.SessionImportIn.model_validate(_hex(loader, processor="Nope:LE:32:x"))
 
 
-# --- 2c. self-describing loaders (ADR-047: dex / macho) ------------------------------------------
+# --- 2c. self-describing loaders (ADR-047: dex/macho/apk; ADR-048: macho fat-slice) --------------
 
 
 @pytest.mark.parametrize("loader", ["dex", "macho", "apk"])
 def test_self_describing_loader_takes_no_hints(loader: str) -> None:
-    """dex/macho force the loader; the format supplies processor + layout → no hints, valid."""
+    """dex/macho/apk force the loader; hint-free is valid (default slice for a fat macho)."""
     m = s.SessionImportIn.model_validate({"session_id": "s", "source_ref": "app", "loader": loader})
     assert m.loader == loader
     assert m.processor is None and m.base_addr is None and m.entry is None
 
 
-@pytest.mark.parametrize("loader", ["dex", "macho", "apk"])
+@pytest.mark.parametrize("loader", ["dex", "apk"])
 @pytest.mark.parametrize(
     "hint", [{"processor": "ARM:LE:32:Cortex"}, {"base_addr": 0x1000}, {"entry": 0x1000}]
 )
-def test_self_describing_loader_forbids_hints(loader: str, hint: dict[str, object]) -> None:
-    """A processor/base_addr/entry with dex/macho is rejected (self-describing → ambiguous)."""
+def test_dex_apk_forbid_all_hints(loader: str, hint: dict[str, object]) -> None:
+    """dex/apk are fully self-describing → any processor/base_addr/entry is rejected."""
     with pytest.raises(ValidationError):
         s.SessionImportIn.model_validate(
             {"session_id": "s", "source_ref": "app", "loader": loader, **hint}
+        )
+
+
+def test_macho_accepts_processor_as_slice_selector() -> None:
+    """ADR-048: loader='macho' with an allow-listed processor selects a fat slice (valid)."""
+    m = s.SessionImportIn.model_validate(
+        {
+            "session_id": "s",
+            "source_ref": "u.macho",
+            "loader": "macho",
+            "processor": "x86:LE:64:default",
+        }
+    )
+    assert m.loader == "macho"
+    assert m.processor == "x86:LE:64:default"
+
+
+def test_macho_rejects_unsupported_slice_processor_and_addr_hints() -> None:
+    """macho slice `processor` must be allow-listed; base_addr/entry never apply."""
+    with pytest.raises(ValidationError):  # not an installed LanguageID
+        s.SessionImportIn.model_validate(
+            {
+                "session_id": "s",
+                "source_ref": "u.macho",
+                "loader": "macho",
+                "processor": "Nope:LE:32:x",
+            }
+        )
+    with pytest.raises(ValidationError):  # base_addr not allowed
+        s.SessionImportIn.model_validate(
+            {"session_id": "s", "source_ref": "u.macho", "loader": "macho", "base_addr": 0x1000}
         )
 
 
@@ -326,3 +357,25 @@ def test_self_describing_import_params_thread_only_loader(loader: str) -> None:
     )
     adapter.import_binary("s", args)  # type: ignore[attr-defined]
     assert captured == [{"source_ref": "app", "expected_sha256": None, "loader": loader}]
+
+
+def test_macho_slice_import_params_thread_loader_and_processor() -> None:
+    """ADR-048: loader='macho' with a slice processor threads {loader, processor}."""
+    adapter, captured = _adapter_capturing_call()
+    args = s.SessionImportIn.model_validate(
+        {
+            "session_id": "s",
+            "source_ref": "u.macho",
+            "loader": "macho",
+            "processor": "x86:LE:64:default",
+        }
+    )
+    adapter.import_binary("s", args)  # type: ignore[attr-defined]
+    assert captured == [
+        {
+            "source_ref": "u.macho",
+            "expected_sha256": None,
+            "loader": "macho",
+            "processor": "x86:LE:64:default",
+        }
+    ]

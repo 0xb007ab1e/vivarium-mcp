@@ -272,7 +272,7 @@ images**. When `loader` is `"intel-hex"` or `"motorola-hex"` (ADR-046) the worke
 addresses, so `base_addr`/`entry` are not sent. When `loader` is `"dex"`, `"macho"`, or `"apk"` (ADR-047) the
 worker forces `DexLoader`/`MachoLoader`/`ApkLoader` with no `processor` at all — the self-describing
 format supplies the language + layout (`auto` also detects these; the forced value pins the loader).
-A fat/universal Mach-O loads its default slice; slice / DYLD-component selection is deferred. The server validates the hint combination + the
+A fat/universal Mach-O loads its default slice, or the slice named by an optional `processor` on `loader="macho"` (ADR-048, via the `program_loader` builder); DYLD-component selection is deferred (fixture-blocked). The server validates the hint combination + the
 `processor` allow-list + address-width bounds **before** the worker (CWE-20); the worker
 **re-validates** the language against the installed set and fails closed `not-found` if absent
 (defense in depth). **Additive, opt-in, no new capability/agency** — read-only import, no script

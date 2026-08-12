@@ -506,9 +506,14 @@ class RpcGhidraAdapter:
             # ADR-046: hex loaders take addresses from the records — only loader + processor cross.
             params["loader"] = args.loader
             params["processor"] = args.processor
-        elif args.loader in ("dex", "macho", "apk"):
+        elif args.loader in ("dex", "apk"):
             # ADR-047: self-describing formats — force the loader; the format supplies everything.
             params["loader"] = args.loader
+        elif args.loader == "macho":
+            # ADR-047 force + ADR-048 optional fat-slice selection via `processor`.
+            params["loader"] = args.loader
+            if args.processor is not None:
+                params["processor"] = args.processor
         result = self._call(
             session_id,
             "import_binary",

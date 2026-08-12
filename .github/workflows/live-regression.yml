@@ -408,6 +408,7 @@ jobs:
             tests/integration/test_import_synthetic_elf.py \
             tests/integration/test_import_hex.py \
             tests/integration/test_import_selfdescribing.py \
+            tests/integration/test_import_macho_slice.py \
             ${DETERMINISTIC}
 
       # --- FAIL-LOUD ON SKIP: a skipped hard gate is a FAILURE, not a silent pass ------------------
@@ -439,12 +440,13 @@ jobs:
           # Always-on hard gates: F2 (export-after-rename, 1) + F7 (known-count, 1) + analyzer-profile
           # params (default/light/deep, 3) + FID well-formed (1) + FID self-match (1) + ADR-045 raw
           # binary import (1) + v1.8-F5 synthetic-ELF import (1) + ADR-046 intel-hex import (1) +
-          # ADR-047 self-describing macho/dex import (1) = 11. The deterministic same-toolchain FID
-          # gate (zlib + musl, 2) is SELF-ACTIVATING: included only when the worker image ships the
-          # bundled DBs (FID_DETERMINISTIC_GATE=1), so the expected floor is 13 then, 11 otherwise.
-          # When inactive the test is omitted (not skipped), so the zero-skip rule below still holds.
+          # ADR-047 self-describing macho/dex import (1) + ADR-048 fat-Mach-O slice select (1) = 12.
+          # The deterministic same-toolchain FID gate (zlib + musl, 2) is SELF-ACTIVATING: included
+          # only when the worker image ships the bundled DBs (FID_DETERMINISTIC_GATE=1), so the
+          # expected floor is 14 then, 12 otherwise. When inactive the test is omitted (not skipped),
+          # so the zero-skip rule below still holds.
           import os
-          expected = 13 if os.environ.get("FID_DETERMINISTIC_GATE", "0") == "1" else 11
+          expected = 14 if os.environ.get("FID_DETERMINISTIC_GATE", "0") == "1" else 12
           if tests < expected:
               problems.append(f"expected >={expected} hard-gate tests to run, collected {tests}")
           if skipped:

@@ -195,6 +195,9 @@ class PyGhidraBackend:
         """Initialize an empty backend (no program loaded until ``import_binary``)."""
         self._program: Any | None = None
         self._project: Any | None = None
+        #: ADR-048: retained ``LoadResults`` from the ProgramLoader builder (fat-slice path) so its
+        #: consumer keeps the program alive; ``None`` for the open_program paths.
+        self._loaded: Any | None = None
         #: Hex SHA-256 of the imported binary (server-computed digest of input — safe scalar).
         self._sha256: str | None = None
         #: Whether Ghidra auto-analysis has completed for the open program.
@@ -231,9 +234,15 @@ class PyGhidraBackend:
             return self._gh_import(
                 str(source_ref), loader=str(loader), processor=str(_require(params, "processor"))
             )
-        if loader in ("dex", "macho", "apk"):
+        if loader in ("dex", "apk"):
             # ADR-047: self-describing — force the loader; the format supplies processor + layout.
             return self._gh_import(str(source_ref), loader=str(loader))
+        if loader == "macho":
+            # ADR-047 force + ADR-048 optional fat-slice `processor`.
+            proc = params.get("processor")
+            return self._gh_import(
+                str(source_ref), loader="macho", processor=None if proc is None else str(proc)
+            )
         return self._gh_import(str(source_ref))
 
     def analyze(
@@ -761,6 +770,10 @@ class PyGhidraBackend:
             )
         elif loader in ("intel-hex", "motorola-hex"):
             self._open_named_loader(source_ref, project_dir, str(loader), str(processor))
+        elif loader == "macho" and processor is not None:
+            # ADR-048: select a fat/universal Mach-O slice by LanguageID (needs the ProgramLoader
+            # builder — open_program ignores `language` for slice selection).
+            self._open_macho_slice(source_ref, project_dir, str(processor))
         elif loader in ("dex", "macho", "apk"):
             # Self-describing (ADR-047): force the loader, no language (the format carries it).
             self._open_named_loader(source_ref, project_dir, str(loader), None)
@@ -893,6 +906,58 @@ class PyGhidraBackend:
 
         self._project = ctx  # retain the ctx manager for the launcher to close on evict
         self._program = getattr(program, "getCurrentProgram", lambda: program)()
+
+    def _open_macho_slice(
+        self, source_ref: str, project_dir: str, processor: str
+    ) -> None:  # pragma: no cover - JVM edge
+        """Load a specific fat/universal Mach-O **slice** by ``LanguageID`` (ADR-048).
+
+        ``open_program`` ignores its ``language`` arg for Mach-O slice selection (it always takes
+        the default slice), so this uses the lower-level ``pyghidra.program_loader()`` builder,
+        which DOES honor ``language`` to pick the matching ``LoadSpec`` (verified). The project is
+        opened
+        under ``project_dir`` — the per-session store the server verified-wipes on eviction
+        (ADR-002) — so this path inherits the same teardown guarantee as the others (eviction = kill
+        worker + wipe the store dir, independent of the loader API). Retains the project ctx + the
+        loaded program + the ``LoadResults`` on ``self`` (the last so its consumer keeps the program
+        alive).
+
+        Args:
+            source_ref: The server-resolved, confined input path.
+            project_dir: The writable per-session project location (the wiped store).
+            processor: The allow-listed ``LanguageID`` naming the desired slice.
+
+        Raises:
+            WorkerError: ``not-found`` if no slice matches the language or the file cannot load.
+        """
+        import jpype
+        import pyghidra
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        # Unlike open_program (self-starts the JVM), the program_loader() builder needs the JVM
+        # running first. start() is idempotent (a no-op once started).
+        pyghidra.start()
+        try:
+            project_ctx = pyghidra.open_project(project_dir, "session", create=True)
+            project = project_ctx.__enter__()
+            loaded = (
+                pyghidra.program_loader()
+                .source(source_ref)
+                .project(project)
+                .loaders(jpype.JClass("ghidra.app.util.opinion.MachoLoader"))
+                .language(processor)
+                .load()
+            )
+            program = loaded.getPrimaryDomainObject()
+        except Exception as exc:
+            raise WorkerError(
+                CODE_NOT_FOUND,
+                "no Mach-O slice matched the requested processor, or the file could not be loaded",
+            ) from exc
+
+        self._project = project_ctx  # retain (server kills+wipes on evict; process death frees it)
+        self._loaded = loaded  # keep the LoadResults' consumer alive so the program is not released
+        self._program = program
 
     def _gh_analyze(
         self,
