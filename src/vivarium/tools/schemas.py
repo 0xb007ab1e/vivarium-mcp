@@ -136,15 +136,83 @@ class SessionImportIn(_SessionScopedIn):
     and enforces the size cap BEFORE handing it to the worker). The client never streams arbitrary
     bytes that bypass the cap.
 
+    Loader hints (ADR-045, F1) enable importing **headerless raw/firmware images** (no ELF/PE
+    header) — the bare-metal embedded-RE case. They are **additive and opt-in**: when ``loader`` is
+    ``"auto"`` and no hint is set, the RPC params and the worker call are BYTE-FOR-BYTE identical to
+    the pre-ADR-045 auto path (the ADR-029/030 no-op guarantee). ``processor`` is validated against
+    a curated allow-list server-side (``vivarium.core.languages``) BEFORE the worker is touched
+    (CWE-20); the worker independently re-validates against the installed languages (defense in
+    depth). All hints are plain config values, not bytes.
+
     Attributes:
-        source_ref: Server-resolved reference to the input (e.g. a pre-registered upload id or an
-            allow-listed mount path). Resolution + path confinement happen server-side (CWE-22).
+        source_ref: Server-resolved reference to the input — a path under ``VIVARIUM_IMPORT_ROOT``.
+            Resolution + path confinement happen server-side (CWE-22). Rejected when it escapes the
+            import root, is missing, or exceeds the size cap.
         expected_sha256: Optional client-asserted digest; the server verifies the actual bytes
             match (integrity / wrong-file guard).
+        loader: ``"auto"`` (default) drives Ghidra's opinion/container loaders (ELF/PE) exactly as
+            before; ``"binary"`` drives ``BinaryLoader`` for a headerless image and REQUIRES
+            ``processor`` + ``base_addr``. Closed set; an unknown value is rejected (fail closed).
+        processor: A Ghidra ``LanguageID`` (e.g. ``"ARM:LE:32:Cortex"``, ``"RISCV:LE:32:RV32GC"``).
+            Only meaningful with ``loader="binary"``; must be in the allow-list
+            (:data:`vivarium.core.languages.SUPPORTED_LANGUAGE_IDS`).
+        base_addr: Image base / load address for a raw image (raw images carry no header to supply
+            it). Required with ``loader="binary"``; bounded to the processor's address width.
+        entry: Optional entry-point hint (a disassembly seed). If given, must be ``>= base_addr``
+            and within the processor's address width.
     """
 
     source_ref: str = Field(min_length=1, max_length=512)
     expected_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
+    loader: Literal["auto", "binary"] = "auto"
+    processor: str | None = Field(default=None, min_length=1, max_length=128)
+    base_addr: int | None = Field(default=None, ge=0)
+    entry: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_loader_hints(self) -> SessionImportIn:
+        """Enforce the ADR-045 loader-hint rules server-side, before the worker (fail closed).
+
+        Rules:
+            * ``loader="binary"`` REQUIRES ``processor`` and ``base_addr`` (a raw image is
+              meaningless without them).
+            * ``loader="auto"`` FORBIDS any of ``processor``/``base_addr``/``entry`` — the client's
+              intent is otherwise ambiguous; no silent ignoring.
+            * ``processor`` must be in the curated allow-list (``vivarium.core.languages``).
+            * ``base_addr``/``entry`` must fit the processor's address width; ``entry`` >=
+              ``base_addr``.
+
+        Returns:
+            ``self`` when the hint combination is valid.
+
+        Raises:
+            ValueError: On any violation (the server boundary maps a pydantic ``ValidationError`` to
+                a ``VALIDATION`` envelope — content-free, fail closed).
+        """
+        # Import locally to keep the schema module import-light and the dependency one-directional.
+        from vivarium.core import languages
+
+        if self.loader == "auto":
+            if self.processor is not None or self.base_addr is not None or self.entry is not None:
+                raise ValueError("loader hints (processor/base_addr/entry) require loader='binary'")
+            return self
+
+        # loader == "binary"
+        if self.processor is None or self.base_addr is None:
+            raise ValueError("loader='binary' requires both `processor` and `base_addr`")
+        if not languages.is_supported_language(self.processor):
+            allowed = ", ".join(languages.SUPPORTED_LANGUAGE_IDS)
+            raise ValueError(f"unsupported processor; allowed LanguageIDs: {allowed}")
+
+        max_addr = 1 << languages.address_bits(self.processor)
+        if self.base_addr >= max_addr:
+            raise ValueError("base_addr exceeds the processor's address width")
+        if self.entry is not None:
+            if self.entry >= max_addr:
+                raise ValueError("entry exceeds the processor's address width")
+            if self.entry < self.base_addr:
+                raise ValueError("entry must be >= base_addr")
+        return self
 
 
 class SessionAnalyzeIn(_SessionScopedIn):

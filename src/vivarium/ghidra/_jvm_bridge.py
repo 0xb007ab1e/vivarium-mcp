@@ -205,13 +205,27 @@ class PyGhidraBackend:
         """Import the binary referenced by the (server-confined) source ref into the project.
 
         Args:
-            params: ``{"source_ref": str, "expected_sha256": str | None}``. The server has already
-                resolved/confined the path and enforced the size cap BEFORE this call.
+            params: ``{"source_ref": str, "expected_sha256": str | None}`` for the auto path, plus
+                the optional ADR-045 loader hints ``{"loader": "binary", "processor": str,
+                "base_addr": int, "entry": int | None}`` when the client requested a raw import. The
+                server has already resolved/confined the path, enforced the size cap, and validated
+                the hint combination + the processor allow-list BEFORE this call; the worker
+                re-validates the language against the installed set (defense in depth, ADR-045 §D2).
+                When no ``loader`` key is present the call is byte-for-byte the pre-ADR-045 path.
 
         Returns:
             A plain ``SessionInfo``-shaped dict.
         """
         source_ref = _require(params, "source_ref")
+        loader = params.get("loader")
+        if loader == "binary":
+            return self._gh_import(
+                str(source_ref),
+                loader="binary",
+                processor=str(_require(params, "processor")),
+                base_addr=int(_require(params, "base_addr")),
+                entry=None if params.get("entry") is None else int(params["entry"]),
+            )
         return self._gh_import(str(source_ref))
 
     def analyze(
@@ -676,7 +690,15 @@ class PyGhidraBackend:
     # Each helper converts every Ghidra object to a plain str/int/bool before returning (no Java
     # object leaks the boundary); addresses render via ``str(addr)`` (Ghidra's canonical hex form).
 
-    def _gh_import(self, source_ref: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
+    def _gh_import(
+        self,
+        source_ref: str,
+        *,
+        loader: str | None = None,
+        processor: str | None = None,
+        base_addr: int | None = None,
+        entry: int | None = None,
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Import a binary file into a transient Ghidra project (PyGhidra).
 
         Opens the (server-confined, size-checked) file with PyGhidra and retains the program/
@@ -684,11 +706,28 @@ class PyGhidraBackend:
         dict contributing ``state`` + ``binary_sha256``; the server overlays the authoritative
         ids/timestamps (placeholders here satisfy the model's required scalars).
 
+        When ``loader`` is ``None`` (the default auto path) the ``open_program`` call is
+        byte-for-byte the pre-ADR-045 behavior — Ghidra's opinion/container loaders detect an
+        ELF/PE. When ``loader == "binary"`` (ADR-045, F1) the ``BinaryLoader`` is driven with the
+        allow-listed ``processor`` ``LanguageID`` and the raw image is rebased to ``base_addr``
+        (optionally seeding an entry point). The server has already validated the hints; the worker
+        re-validates the language implicitly — an uninstalled ``LanguageID`` makes ``open_program``
+        raise, which is translated to a category-safe ``not-found`` (defense in depth, ADR-045 §D2).
+
         Args:
             source_ref: The server-resolved, confined input path.
+            loader: ``None``/``"auto"`` for the container path; ``"binary"`` for a raw image.
+            processor: The allow-listed Ghidra ``LanguageID`` (required when ``loader`` is binary).
+            base_addr: The image base to rebase the raw image to (required when ``loader ==
+                "binary"``).
+            entry: Optional entry-point offset to seed as an external entry point.
 
         Returns:
             A plain ``SessionInfo``-shaped dict.
+
+        Raises:
+            WorkerError: ``not-found`` if a raw import names a ``LanguageID`` not installed in this
+                Ghidra build, or the ``BinaryLoader`` could not load the image.
         """
         import hashlib  # stdlib — digest the bytes the worker actually opened
 
@@ -707,16 +746,83 @@ class PyGhidraBackend:
         # per-session worker store (writable tmpfs mounted by deploy/; created in the image).
         # Found via the in-worker analyze smoke against a real ELF.
         project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
-        ctx = pyghidra.open_program(
-            source_ref,
-            project_location=project_dir,
-            project_name="session",
-            analyze=False,
-        )
-        program = ctx.__enter__()
-        self._project = ctx  # retain the context manager for the worker launcher to close on evict
-        self._program = getattr(program, "getCurrentProgram", lambda: program)()
+
+        if loader == "binary":
+            self._open_raw_binary(
+                source_ref, project_dir, str(processor), int(base_addr or 0), entry
+            )
+        else:
+            # AUTO path — byte-for-byte the pre-ADR-045 call (opinion/container loaders).
+            ctx = pyghidra.open_program(
+                source_ref,
+                project_location=project_dir,
+                project_name="session",
+                analyze=False,
+            )
+            program = ctx.__enter__()
+            self._project = ctx  # retain the ctx manager for the launcher to close on evict
+            self._program = getattr(program, "getCurrentProgram", lambda: program)()
         return _session_info_dict("importing", self._sha256, analysis_complete=False)
+
+    def _open_raw_binary(
+        self,
+        source_ref: str,
+        project_dir: str,
+        processor: str,
+        base_addr: int,
+        entry: int | None,
+    ) -> None:  # pragma: no cover - JVM edge
+        """Open a headerless raw image via ``BinaryLoader`` and rebase it (ADR-045, F1).
+
+        Drives PyGhidra's ``BinaryLoader`` with the allow-listed ``processor`` ``LanguageID`` (an
+        uninstalled id makes ``open_program`` raise → translated to ``not-found``), retains the
+        program/context on ``self`` exactly like the auto path, then rebases the loaded image to
+        ``base_addr`` (BinaryLoader maps at 0 by default) and optionally marks ``entry`` as an
+        external entry point — both inside one Ghidra transaction (ADR-012 §4).
+
+        Args:
+            source_ref: The server-resolved, confined input path.
+            project_dir: The writable per-session project location.
+            processor: The allow-listed ``LanguageID``.
+            base_addr: The image base to rebase to.
+            entry: Optional entry-point offset to seed.
+
+        Raises:
+            WorkerError: ``not-found`` if the language is not installed or the image cannot load.
+        """
+        import pyghidra
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        try:
+            ctx = pyghidra.open_program(
+                source_ref,
+                project_location=project_dir,
+                project_name="session",
+                analyze=False,
+                language=processor,
+                loader="ghidra.app.util.opinion.BinaryLoader",
+            )
+            program = ctx.__enter__()
+        except Exception as exc:
+            # The server already allow-listed `processor`; a failure here means the LanguageID is
+            # not installed in this pinned build OR BinaryLoader rejected the raw image. Fail closed
+            # with a category-safe slug (the original exception is chained server-side only).
+            raise WorkerError(
+                CODE_NOT_FOUND, "processor language not installed or raw image could not be loaded"
+            ) from exc
+
+        self._project = ctx  # retain the ctx manager for the launcher to close on evict
+        prog = getattr(program, "getCurrentProgram", lambda: program)()
+        self._program = prog
+
+        space = prog.getAddressFactory().getDefaultAddressSpace()
+
+        def _rebase() -> None:
+            prog.setImageBase(space.getAddress(base_addr), True)
+            if entry is not None:
+                prog.getSymbolTable().addExternalEntryPoint(space.getAddress(entry))
+
+        self._in_transaction("session_import (raw layout)", _rebase)
 
     def _gh_analyze(
         self,

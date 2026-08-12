@@ -260,6 +260,18 @@ surface gains only this additive optional field, and the **tool count is unchang
 no capability/agency — it only emits progress (ADR-001 intact); the analysis deadline is unchanged
 (§6).
 
+**`import_binary` — additive loader hints (v1.8 — ADR-045, F1; server → worker, OPTIONAL):** the
+`import_binary` RPC params MAY carry `loader` (`"binary"`) with `processor` (a Ghidra `LanguageID`),
+`base_addr` (int), and optional `entry` (int). **The default (auto) omits every key** — when no
+loader hint is requested the params are byte-for-byte identical to today's `{ "source_ref": …,
+"expected_sha256": … }` and the worker takes the unchanged opinion/container-loader path. When
+`loader = "binary"` the worker drives `BinaryLoader` with the (server-allow-listed) `processor`,
+rebases the raw image to `base_addr`, and optionally seeds `entry` — for **headerless raw/firmware
+images**. The server validates the hint combination + the `processor` allow-list + address-width
+bounds **before** the worker (CWE-20); the worker **re-validates** the language against the installed
+set and fails closed `not-found` if absent (defense in depth). **Additive, opt-in, no new
+capability/agency** — read-only import, no script execution, tool count unchanged (ADR-001 intact).
+
 ## 5. Error model (worker → server)
 
 The worker returns JSON-RPC errors with a `data.type` slug that the server maps to the public
