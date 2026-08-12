@@ -50,6 +50,9 @@ _MAX_EMULATE_MEM_WRITE = 65_536  # cap on total pre-run memory-write bytes
 _MAX_EMULATE_MEM_REGIONS = 16  # cap on write_memory / read_memory region count
 _MAX_EMULATE_MEM_READ = 65_536  # cap on a single read_memory region length
 
+# --- demangler bound (ADR-050; a hostile mangled name is untrusted input — CWE-400/CWE-20) ---
+_MAX_MANGLED_LEN = 8_192  # cap on a mangled symbol string (heavy templates are long; bound DoS)
+
 
 class _In(BaseModel):
     """Base for tool *input* models: immutable, reject unknown fields."""
@@ -860,6 +863,36 @@ class EmulateOut(_Out):
     stop_reason: Literal["stop-address", "max-steps", "halted", "fault"]
     registers: list[RegisterValue]
     memory: list[MemoryRegion]
+
+
+class DemangleIn(_SessionScopedIn):
+    """Arguments for ``demangle`` — resolve a mangled C++ symbol to a readable name (ADR-050).
+
+    The mangled string is binary-derived (a symbol lifted from the analyzed program) and therefore
+    HOSTILE input — it is bounded (``max_length``) so a crafted, deeply-nested name cannot make the
+    demangler do unbounded work; the worker wall-clock kill backs that bound. Read-only: the program
+    DB is never touched.
+
+    Attributes:
+        mangled: The mangled symbol string (bounded; treated as untrusted).
+        scheme: Which demangler to use — ``auto`` (try GNU/Itanium then MSVC), ``gnu``, or ``msvc``.
+    """
+
+    mangled: str = Field(min_length=1, max_length=_MAX_MANGLED_LEN)
+    scheme: Literal["auto", "gnu", "msvc"] = "auto"
+
+
+class DemangleOut(_Out):
+    """Result of ``demangle`` (ADR-050): ``demangled`` is UNTRUSTED — binary-derived.
+
+    Attributes:
+        demangled: The demangled signature — UNTRUSTED; ``None`` if the string is not a mangled name
+            in any tried scheme (a non-mangled input is not an error).
+        scheme: Which demangler matched (``gnu``/``msvc``), or ``None`` if nothing matched — safe.
+    """
+
+    demangled: Untrusted[str] | None = None
+    scheme: Literal["gnu", "msvc"] | None = None
 
 
 class SearchBytesIn(_Page):

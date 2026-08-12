@@ -398,6 +398,13 @@ class PyGhidraBackend:
             read_memory=list(params.get("read_memory") or []),
         )
 
+    def demangle(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Resolve a mangled C++ symbol to a readable name (ADR-050). Program-independent."""
+        return self._gh_demangle(
+            mangled=str(_require(params, "mangled")),
+            scheme=str(params.get("scheme", "auto")),
+        )
+
     def search_bytes(self, params: dict[str, Any]) -> dict[str, Any]:
         """Bounded byte-pattern search."""
         offset, limit = _page(params)
@@ -3581,6 +3588,53 @@ class PyGhidraBackend:
             }
         finally:
             emu.dispose()
+
+    def _gh_demangle(
+        self, mangled: str, scheme: str
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Demangle a C++ symbol with Ghidra's concrete demanglers (ADR-050). Program-independent.
+
+        Tries the requested ``scheme`` (``auto`` = GNU/Itanium then MSVC). Each demangler is a pure
+        string transform — no program is loaded or mutated (read-only). A string that is not a
+        mangled name in a tried scheme yields ``demangled=None`` (not an error). The JVM is started
+        idempotently since this can be the first worker call.
+
+        Args:
+            mangled: The mangled symbol string (already length-bounded by the server).
+            scheme: ``auto`` | ``gnu`` | ``msvc``.
+
+        Returns:
+            ``{"demangled": str | None, "scheme": "gnu" | "msvc" | None}``.
+        """
+        import pyghidra
+
+        pyghidra.start()  # idempotent; the demanglers need the JVM but no program.
+        from ghidra.app.util.demangler.gnu import GnuDemangler  # type: ignore[import-not-found]
+        from ghidra.app.util.demangler.microsoft import (  # type: ignore[import-not-found]
+            MicrosoftDemangler,
+        )
+
+        def _try(demangler: Any) -> str | None:
+            try:
+                result = demangler.demangle(mangled)
+            except Exception:  # a name the demangler rejects is simply "not this scheme".
+                return None
+            if result is None:
+                return None
+            signature = result.getSignature()
+            return None if signature is None else str(signature).strip()
+
+        order: list[tuple[str, Any]] = []
+        if scheme in ("auto", "gnu"):
+            order.append(("gnu", GnuDemangler()))
+        if scheme in ("auto", "msvc"):
+            order.append(("msvc", MicrosoftDemangler()))
+
+        for name, demangler in order:
+            demangled = _try(demangler)
+            if demangled:
+                return {"demangled": demangled, "scheme": name}
+        return {"demangled": None, "scheme": None}
 
     def _get_bytes_via(self, emu: Any, address: Any, length: int) -> tuple[bytes, int]:
         # pragma: no cover - JVM edge

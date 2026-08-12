@@ -183,6 +183,10 @@ class GhidraPort(Protocol):
         """Bounded p-code emulation (ADR-049)."""
         ...
 
+    def demangle(self, sid: str, a: s.DemangleIn) -> s.DemangleOut:
+        """Resolve a mangled C++ symbol to a readable name (ADR-050)."""
+        ...
+
     def search_bytes(self, sid: str, a: s.SearchBytesIn) -> s.SearchBytesOut:
         """Bounded byte-pattern search."""
         ...

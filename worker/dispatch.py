@@ -94,6 +94,7 @@ RPC_METHODS = frozenset(
         "memory_map",
         "read_bytes",
         "emulate",
+        "demangle",
         "search_bytes",
         "search_strings",
         "program_metadata",
@@ -254,6 +255,10 @@ class GhidraBackend(Protocol):
 
     def emulate(self, params: dict[str, Any]) -> dict[str, Any]:
         """Bounded p-code emulation (ADR-049)."""
+        ...
+
+    def demangle(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Resolve a mangled C++ symbol to a readable name (ADR-050)."""
         ...
 
     def search_bytes(self, params: dict[str, Any]) -> dict[str, Any]:

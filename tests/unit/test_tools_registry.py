@@ -249,6 +249,10 @@ class FakePort:
         self._rec("emulate", sid)
         return s.EmulateOut(steps_executed=1, stop_reason="halted", registers=[], memory=[])
 
+    def demangle(self, sid: str, a: s.DemangleIn) -> s.DemangleOut:
+        self._rec("demangle", sid)
+        return s.DemangleOut(demangled=_u("ns::fn(int)"), scheme="gnu")
+
     def search_bytes(self, sid: str, a: s.SearchBytesIn) -> s.SearchBytesOut:
         self._rec("search_bytes", sid)
         return s.SearchBytesOut(matches=[], total=0)
@@ -417,7 +421,7 @@ def ctx() -> reg.ToolContext:
     )
 
 
-def test_catalog_is_exactly_57_unique_tools() -> None:
+def test_catalog_is_exactly_58_unique_tools() -> None:
     # 22 Tier-1 + 5 v1.1 semantic-naming (ADR-007) + 8 v1.1 Tier-2 metrics (ADR-008; READ-ONLY)
     # + 1 Function ID library-match (ADR-042 Phase 1: identify_functions; READ-ONLY)
     # + 6 v1.1 mutation/write (ADR-012) + 2 v1.1 structural mutation (ADR-013 Phase A) + 2 v1.1
@@ -427,11 +431,12 @@ def test_catalog_is_exactly_57_unique_tools() -> None:
     # composite deletion (ADR-031: delete_type, session-authored only, GATED by allow_structural)
     # + 4 v1.x streaming-extraction tools (ADR-040: start_decompile_stream + fetch_job_results /
     # job_status / cancel_job; READ-ONLY, output-only) + 1 v1.8 p-code emulation (ADR-049: emulate;
-    # READ-ONLY, program DB not mutated) — the 14 mutation tools GATED by per-session write-consent
-    # (the structural 8 additionally by allow_structural); import is GATED identically (+
-    # allow_structural for structural entries).
-    assert len(reg.TIER1_TOOL_NAMES) == 57
-    assert len(set(reg.TIER1_TOOL_NAMES)) == 57
+    # READ-ONLY, program DB not mutated) + 1 v1.8 C++ demangler (ADR-050: demangle; READ-ONLY,
+    # program-independent) — the 14 mutation tools GATED by per-session write-consent (structural
+    # 8 additionally by allow_structural); import is GATED identically (+ allow_structural for
+    # structural entries).
+    assert len(reg.TIER1_TOOL_NAMES) == 58
+    assert len(set(reg.TIER1_TOOL_NAMES)) == 58
 
 
 def test_handler_table_matches_frozen_allow_list() -> None:
@@ -559,6 +564,14 @@ def test_emulate_rejects_malformed_start_address(ctx: reg.ToolContext) -> None:
     with pytest.raises(GhidraMcpError) as ei:
         handlers["emulate"](session_id=_VALID_SID, start="not-an-address")
     assert ei.value.envelope.type is ErrorType.VALIDATION
+
+
+def test_demangle_authorizes_then_dispatches(ctx: reg.ToolContext) -> None:
+    """demangle authorizes the session (BOLA) and dispatches, returning a DemangleOut (ADR-050)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["demangle"](session_id=_VALID_SID, mangled="_ZN3foo3barEi")
+    assert isinstance(out, s.DemangleOut)
+    assert out.scheme in ("gnu", "msvc")
 
 
 def test_caller_id_uses_static_principal_by_default() -> None:

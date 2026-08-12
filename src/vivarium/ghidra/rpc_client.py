@@ -1181,6 +1181,12 @@ class RpcGhidraAdapter:
             )
         )
 
+    def demangle(self, sid: str, a: s.DemangleIn) -> s.DemangleOut:
+        """Resolve a mangled C++ symbol to a readable name (ADR-050)."""
+        return _build_demangle(
+            self._tool_call(sid, "demangle", {"mangled": a.mangled, "scheme": a.scheme})
+        )
+
     def search_bytes(self, sid: str, a: s.SearchBytesIn) -> s.SearchBytesOut:
         """Bounded byte-pattern search."""
         return _build_search_bytes(
@@ -2561,6 +2567,19 @@ def _build_emulate(r: dict[str, Any]) -> s.EmulateOut:
             )
             for x in r.get("memory", [])
         ],
+    )
+
+
+@_fail_closed
+def _build_demangle(r: dict[str, Any]) -> s.DemangleOut:
+    """Build :class:`DemangleOut` (ADR-050): the demangled name is BINARY-derived → UNTRUSTED."""
+    demangled = r.get("demangled")
+    scheme = r.get("scheme")
+    if scheme not in ("gnu", "msvc", None):
+        scheme = None  # fail closed on an unexpected worker scheme
+    return s.DemangleOut(
+        demangled=(None if demangled is None else _w(str(demangled), DataOrigin.BINARY)),
+        scheme=cast('Literal["gnu", "msvc"] | None', scheme),
     )
 
 

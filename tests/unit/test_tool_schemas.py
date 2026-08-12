@@ -104,7 +104,7 @@ def test_catalog_count_matches_registry() -> None:
     # (ADR-040: start_decompile_stream + fetch_job_results/job_status/cancel_job) + 1 Function ID
     # library-match tool (ADR-042 Phase 1: identify_functions). The registry list is the source.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 57
+    assert len(TIER1_TOOL_NAMES) == 58
 
 
 @pytest.mark.critical
@@ -217,3 +217,32 @@ def test_emulate_output_wraps_binary_values_untrusted() -> None:
     assert isinstance(out.registers[0].value, Untrusted)
     assert isinstance(out.memory[0].data, Untrusted)
     assert out.registers[0].name == "RAX"  # server-known scalar stays bare
+
+
+@pytest.mark.critical
+def test_demangle_defaults_and_bounds() -> None:
+    """demangle defaults to the ``auto`` scheme and bounds the mangled string length (ADR-050)."""
+    a = s.DemangleIn(session_id="s", mangled="_ZN3foo3barEi")
+    assert a.scheme == "auto"  # try GNU then MSVC by default
+    with pytest.raises(ValidationError):
+        s.DemangleIn(session_id="s", mangled="")  # min_length=1
+    with pytest.raises(ValidationError):
+        s.DemangleIn(session_id="s", mangled="a" * 8_193)  # > 8 KiB cap
+    with pytest.raises(ValidationError):
+        s.DemangleIn(session_id="s", mangled="x", scheme="rust")  # type: ignore[arg-type]
+
+
+@pytest.mark.critical
+def test_demangle_output_wraps_name_untrusted_and_allows_no_match() -> None:
+    # The demangled name is binary-derived and wrapped; a non-mangled input yields None (not error).
+    from vivarium.core.envelope import DataOrigin, Untrusted
+
+    matched = s.DemangleOut(
+        demangled=Untrusted(value="foo::bar(int)", origin=DataOrigin.BINARY), scheme="gnu"
+    )
+    assert isinstance(matched.demangled, Untrusted)
+    assert matched.scheme == "gnu"
+
+    unmatched = s.DemangleOut()  # nothing matched — both fields default to None
+    assert unmatched.demangled is None
+    assert unmatched.scheme is None

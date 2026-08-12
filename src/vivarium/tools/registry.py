@@ -81,6 +81,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "memory_map",
     "read_bytes",
     "emulate",
+    "demangle",
     "search_bytes",
     "search_strings",
     # metadata
@@ -607,6 +608,18 @@ def _handle_emulate(ctx: ToolContext, args: s.EmulateIn) -> s.EmulateOut:
     for read in args.read_memory or ():
         v.parse_address(read.address)
     return ctx.port.emulate(args.session_id, args)
+
+
+def _handle_demangle(ctx: ToolContext, args: s.DemangleIn) -> s.DemangleOut:
+    """Demangle a C++ symbol (ADR-050) — read-only, program-independent, session-authorized.
+
+    The mangled string is HOSTILE binary-derived input; the schema length-bounds it (DoS guard) and
+    the worker wall-clock kill backs that. No program is touched; the demangled name is wrapped
+    UNTRUSTED by the adapter (ADR-005). Authorization (BOLA) still applies — the caller must own the
+    session the mangled symbol came from.
+    """
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    return ctx.port.demangle(args.session_id, args)
 
 
 def _handle_search_bytes(ctx: ToolContext, args: s.SearchBytesIn) -> s.SearchBytesOut:
@@ -1648,6 +1661,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "memory_map": (_handle_memory_map, s.MemoryMapIn),
     "read_bytes": (_handle_read_bytes, s.ReadBytesIn),
     "emulate": (_handle_emulate, s.EmulateIn),
+    "demangle": (_handle_demangle, s.DemangleIn),
     "search_bytes": (_handle_search_bytes, s.SearchBytesIn),
     "search_strings": (_handle_search_strings, s.SearchStringsIn),
     "program_metadata": (_handle_program_metadata, s.ProgramMetadataIn),
