@@ -1600,6 +1600,44 @@ class PyGhidraBackend:
             )
         return {"blocks": blocks}
 
+    def _get_bytes(
+        self, memory: Any, address: Any, length: int
+    ) -> tuple[bytes, int]:  # pragma: no cover - JVM edge
+        """Read up to ``length`` bytes at ``address``, returning ``(data, count_read)``.
+
+        **jpype correctness (#292):** ``Memory.getBytes(Address, byte[])`` fills the array **in
+        place**, so it MUST be a real Java ``byte[]`` (``jpype.JArray(JByte)``). Passing a Python
+        ``bytearray`` makes jpype marshal a **copy** for the call — ``getBytes`` fills the copy and
+        returns the count, but the fill never propagates back, so the Python buffer stays all-zero
+        (the caller sees the right length but zero data). That silent zero-fill is exactly the
+        correctness trap ADR-005 warns against. Java bytes are signed; mask to unsigned on the way
+        out. On ``MemoryAccessException`` (reading past initialized memory) fall back to a
+        byte-by-byte read so ``count_read < length`` is honest (drives ``truncated``).
+
+        Args:
+            memory: The program ``Memory``.
+            address: The start ``Address``.
+            length: Number of bytes to attempt (already clamped by the caller).
+
+        Returns:
+            A ``(data, count_read)`` tuple; ``data`` is exactly ``count_read`` bytes.
+        """
+        import jpype
+
+        buffer = jpype.JArray(jpype.JByte)(length)
+        try:
+            read = int(memory.getBytes(address, buffer))
+            return bytes(int(buffer[i]) & 0xFF for i in range(read)), read
+        except Exception:
+            # Past initialized memory / a block gap — read what is actually there, honestly.
+            out = bytearray()
+            for index in range(length):
+                try:
+                    out.append(int(memory.getByte(address.add(index))) & 0xFF)
+                except Exception:
+                    break
+            return bytes(out), len(out)
+
     def _gh_read_bytes(self, address: str, length: int) -> dict[str, Any]:  # pragma: no cover
         """Read a bounded byte range via Memory.getBytes (confined to the map).
 
@@ -1613,21 +1651,7 @@ class PyGhidraBackend:
         """
         program = self._require_program()
         start = self._parse_address(address)
-        memory = program.getMemory()
-        buffer = bytearray(length)
-        # integration-validate: Memory.getBytes(addr, byte[]) returns the count read and throws
-        # MemoryAccessException past initialized memory — clamp to what is actually readable.
-        try:
-            read = int(memory.getBytes(start, buffer))
-        except Exception:
-            read = 0
-            for index in range(length):
-                try:
-                    buffer[index] = int(memory.getByte(start.add(index))) & 0xFF
-                    read += 1
-                except Exception:
-                    break
-        data = bytes(buffer[:read])
+        data, read = self._get_bytes(program.getMemory(), start, length)
         return {
             "address": str(start),
             "data": data.hex(),
@@ -3389,12 +3413,8 @@ class PyGhidraBackend:
         Returns:
             Lowercase hex of the bytes actually read (may be shorter at a block boundary).
         """
-        buffer = bytearray(max(1, min(length, _MAX_READ_BYTES)))
-        try:
-            read = int(memory.getBytes(address, buffer))
-        except Exception:
-            read = 0
-        return bytes(buffer[:read]).hex()
+        data, _read = self._get_bytes(memory, address, max(1, min(length, _MAX_READ_BYTES)))
+        return data.hex()
 
     def _entry_point(self, program: Any) -> Any | None:  # pragma: no cover - JVM edge
         """Return the program entry-point ``Address`` if one is defined.

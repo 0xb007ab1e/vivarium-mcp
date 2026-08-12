@@ -85,6 +85,9 @@ def main():
     )
     out["metadata"] = backend.program_metadata({})
     out["memory_map"] = backend.memory_map({})
+    # Regression for #292: read_bytes must return the ACTUAL loaded bytes (not a silent zero-fill).
+    # The first 8 bytes at base are the first four Thumb NOPs -> "00bf" x4.
+    out["read_bytes"] = backend.read_bytes({"address": hex(BASE_ADDR), "length": 8})
     return out
 
 
@@ -237,4 +240,14 @@ def test_raw_binary_import_applies_on_real_worker(worker_image: str) -> None:
     assert any(expected_start in s for s in starts), (
         f"expected a memory block at base_addr {hex(_BASE_ADDR)} (image rebased); "
         f"got block starts {sorted(starts)!r}"
+    )
+
+    # Regression for #292: read_bytes returns the ACTUAL loaded bytes, not a silent zero-fill.
+    read = data.get("read_bytes", {})
+    assert read.get("data") == "00bf00bf00bf00bf", (
+        f"read_bytes did not return the loaded Thumb bytes (#292 zero-fill regression?); "
+        f"got {read!r}"
+    )
+    assert read.get("truncated") is False, (
+        f"read_bytes over mapped memory should not truncate: {read!r}"
     )
