@@ -73,6 +73,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "bsim_similarity",
     "find_similar_functions",
     "version_track",
+    "bsim_search_corpus",
     "list_functions",
     "get_function",
     # xrefs
@@ -586,6 +587,23 @@ def _handle_version_track(ctx: ToolContext, args: s.VersionTrackIn) -> s.Version
     # exist yet. Idempotent when a worker is already running for the session.
     ctx.sessions.ensure_worker(args.session_id, caller=ctx.caller_id)
     return ctx.port.version_track(args.session_id, args)
+
+
+def _handle_bsim_search_corpus(
+    ctx: ToolContext, args: s.BsimSearchCorpusIn
+) -> s.BsimSearchCorpusOut:
+    """Cross-binary BSim search over an ephemeral corpus (read-only w.r.t. the session — ADR-062).
+
+    Loads + analyzes the target + a bounded reference corpus in the session's worker (a capability,
+    gated like ``session_import``: confined import root + size cap, worker-only per ADR-001), so —
+    like import/version_track — it ensures the owning principal's worker. It does NOT touch the
+    session's own program (all binaries are fresh throwaways), so it needs no write-consent. Every
+    ``target_ref``/``reference_refs`` path is confined + size-capped server-side in the adapter
+    (CWE-22/CWE-400) — the handler does not path-validate them here.
+    """
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    ctx.sessions.ensure_worker(args.session_id, caller=ctx.caller_id)
+    return ctx.port.bsim_search_corpus(args.session_id, args)
 
 
 def _handle_list_functions(ctx: ToolContext, args: s.ListFunctionsIn) -> s.FunctionListOut:
@@ -1780,6 +1798,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "bsim_similarity": (_handle_bsim_similarity, s.BsimSimilarityIn),
     "find_similar_functions": (_handle_find_similar_functions, s.FindSimilarFunctionsIn),
     "version_track": (_handle_version_track, s.VersionTrackIn),
+    "bsim_search_corpus": (_handle_bsim_search_corpus, s.BsimSearchCorpusIn),
     "list_functions": (_handle_list_functions, s.ListFunctionsIn),
     "get_function": (_handle_get_function, s.GetFunctionIn),
     "xrefs_to": (_handle_xrefs_to, s.XrefsIn),

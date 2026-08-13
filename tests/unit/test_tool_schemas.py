@@ -104,7 +104,7 @@ def test_catalog_count_matches_registry() -> None:
     # (ADR-040: start_decompile_stream + fetch_job_results/job_status/cancel_job) + 1 Function ID
     # library-match tool (ADR-042 Phase 1: identify_functions). The registry list is the source.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 68
+    assert len(TIER1_TOOL_NAMES) == 69
 
 
 @pytest.mark.critical
@@ -463,6 +463,45 @@ def test_find_similar_functions_bounds_and_untrusted_name() -> None:
     assert isinstance(match.name, Untrusted)
     assert match.address == "0x401010" and match.similarity == 0.95  # scalars stay bare
     assert out.functions_scanned == 42 and out.target_address == "0x401000"
+
+
+def test_bsim_search_corpus_bounds_refs_and_untrusted_names() -> None:
+    """bsim_search_corpus bounds the corpus (1..16) + scores; match names are Untrusted."""
+    from vivarium.core.envelope import DataOrigin, Untrusted
+
+    a = s.BsimSearchCorpusIn(session_id="s", target_ref="t.bin", reference_refs=["r0.bin"])
+    assert a.min_similarity == 0.7 and a.limit == 100 and a.max_scan == 500  # safe defaults
+    with pytest.raises(ValidationError):
+        s.BsimSearchCorpusIn(session_id="s", target_ref="t", reference_refs=[])  # >=1 ref required
+    with pytest.raises(ValidationError):
+        s.BsimSearchCorpusIn(  # over the corpus cap (16)
+            session_id="s", target_ref="t", reference_refs=[f"r{i}" for i in range(17)]
+        )
+    with pytest.raises(ValidationError):
+        s.BsimSearchCorpusIn(
+            session_id="s", target_ref="t", reference_refs=["r"], min_similarity=1.5
+        )
+    with pytest.raises(ValidationError):
+        s.BsimSearchCorpusIn(session_id="s", target_ref="t", reference_refs=["r"], limit=10_001)
+
+    out = s.BsimSearchCorpusOut(
+        matches=[
+            s.CorpusMatch(
+                target_address="0x401000",
+                target_name=Untrusted(value="my_fn", origin=DataOrigin.BINARY),
+                reference_index=0,
+                reference_address="0x500000",
+                reference_name=Untrusted(value="libc_fn", origin=DataOrigin.BINARY),
+                similarity=0.95,
+            )
+        ],
+        target_functions_scanned=3,
+        corpus_functions_scanned=7,
+    )
+    match = out.matches[0]
+    assert isinstance(match.target_name, Untrusted) and isinstance(match.reference_name, Untrusted)
+    assert match.target_address == "0x401000" and match.reference_index == 0  # scalars bare
+    assert match.similarity == 0.95 and out.corpus_functions_scanned == 7 and out.truncated is False
 
 
 def test_version_track_bounds_correlator_and_all_safe() -> None:

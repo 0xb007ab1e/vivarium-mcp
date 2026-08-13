@@ -994,6 +994,80 @@ class FindSimilarFunctionsOut(_Out):
 
 
 # =====================================================================================
+# Cross-binary BSim search (ephemeral corpus)
+# =====================================================================================
+#: Max reference binaries in one ``bsim_search_corpus`` call (ADR-062 D4) — bounds the N+1
+#: load/analyze cost; each ref is also individually size-capped before load.
+_MAX_CORPUS_REFS = 16
+
+
+class BsimSearchCorpusIn(_SessionScopedIn):
+    """Arguments for ``bsim_search_corpus`` — cross-binary BSim similarity (ADR-062).
+
+    Read-only w.r.t. the session: loads the target + a bounded corpus of reference binaries
+    **fresh** in the session's worker (one at a time — vectors survive each program's release),
+    BSim-signs their functions, and returns, for each target function, its best reference-corpus
+    match at similarity ``>= min_similarity``. **Ephemeral** — the corpus is exactly
+    ``reference_refs`` for this call; no persistent BSim database (ADR-062 D0, stateless-worker
+    mandate ADR-002). The session's own program is NOT a participant.
+
+    Attributes:
+        target_ref: The binary whose functions are searched — a path under ``VIVARIUM_IMPORT_ROOT``
+            (confined + size-capped server-side).
+        reference_refs: The reference corpus — 1..16 binary paths under ``VIVARIUM_IMPORT_ROOT``
+            (each confined + size-capped). Only references of the SAME address size as the target
+            contribute (ADR-062 D3); others are skipped.
+        min_similarity: Minimum BSim cosine similarity to report, in ``[0, 1]`` (default 0.7).
+        limit: Maximum matches to return (top-K after sorting by similarity).
+        max_scan: Cap on functions signature-scanned per binary (bounds the decompile cost).
+    """
+
+    target_ref: str = Field(min_length=1, max_length=512)
+    reference_refs: list[str] = Field(min_length=1, max_length=_MAX_CORPUS_REFS)
+    min_similarity: float = Field(default=0.7, ge=0.0, le=1.0)
+    limit: int = Field(default=100, ge=1, le=_MAX_LIMIT)
+    max_scan: int = Field(default=500, ge=1, le=_MAX_LIMIT)
+
+
+class CorpusMatch(_Out):
+    """One cross-binary BSim match (ADR-062): a target function ↔ a reference-corpus function.
+
+    Attributes:
+        target_address: The target function's entry address (hex) — server-normalized, safe.
+        target_name: The target function name — untrusted (Ghidra-recovered / binary-derived).
+        reference_index: 0-based index into ``reference_refs`` naming the matched reference — safe.
+        reference_address: The matched reference function's entry address (hex) — safe.
+        reference_name: The matched reference function name — untrusted (binary-derived).
+        similarity: BSim cosine similarity in ``[0, 1]`` (1.0 = identical) — computed scalar, safe.
+    """
+
+    target_address: str
+    target_name: Untrusted[str]
+    reference_index: int
+    reference_address: str
+    reference_name: Untrusted[str]
+    similarity: float
+
+
+class BsimSearchCorpusOut(_Out):
+    """Result of ``bsim_search_corpus`` (ADR-062).
+
+    Attributes:
+        matches: Best per-target-function matches at similarity ``>= min_similarity``, sorted
+            high-to-low (capped at ``limit``).
+        target_functions_scanned: How many target functions were signature-scanned — safe.
+        corpus_functions_scanned: Total reference functions signed across the (same-arch) corpus —
+            safe (a skipped mismatched-arch reference contributes zero).
+        truncated: Whether ``limit`` clipped the returned match list.
+    """
+
+    matches: list[CorpusMatch]
+    target_functions_scanned: int
+    corpus_functions_scanned: int
+    truncated: bool = False
+
+
+# =====================================================================================
 # Version Tracking (two-program function matching)
 # =====================================================================================
 #: Closed allow-list of VT correlators (ADR-060 D4). No arbitrary correlator class is ever

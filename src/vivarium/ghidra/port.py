@@ -173,6 +173,14 @@ class GhidraPort(Protocol):
         """
         ...
 
+    def bsim_search_corpus(self, sid: str, a: s.BsimSearchCorpusIn) -> s.BsimSearchCorpusOut:
+        """Cross-binary BSim search over an ephemeral reference corpus (read-only — ADR-062).
+
+        Target + reference binaries are confined + size-capped server-side, loaded fresh (one at a
+        time), BSim-signed, compared, then wiped. No persistent DB; session program untouched.
+        """
+        ...
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         ...

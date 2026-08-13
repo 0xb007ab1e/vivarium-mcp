@@ -1215,6 +1215,45 @@ class RpcGhidraAdapter:
             )
         )
 
+    def bsim_search_corpus(self, sid: str, a: s.BsimSearchCorpusIn) -> s.BsimSearchCorpusOut:
+        """Cross-binary BSim search over an ephemeral reference corpus (ADR-062).
+
+        Confines + size-caps the target AND every reference ref (the same resolver/cap/pre-flight as
+        ``import_binary`` — no byte reaches the JVM until it passes) BEFORE the worker is contacted,
+        then issues the RPC bounded by the (longer) analysis timeout: N+1 loads + analyses + the
+        BSim comparison cost far more than one read-only tool call.
+
+        Args:
+            sid: The session (supplies auth/scoping + the worker; not a program).
+            a: Validated ``bsim_search_corpus`` arguments.
+
+        Returns:
+            The per-target best cross-binary matches (names Untrusted; addresses/scores SAFE) with
+            scan counts + ``truncated``.
+
+        Raises:
+            GhidraMcpError: ``VALIDATION`` / ``LIMIT_EXCEEDED`` / ``RESOURCE_EXHAUSTED`` if the
+                target or a reference fails confinement/cap/pre-flight (:meth:`_resolve_and_cap`).
+        """
+        # Confine + cap the target and EVERY reference pre-Ghidra (fail closed before the worker).
+        self._resolve_and_cap(a.target_ref)
+        for ref in a.reference_refs:
+            self._resolve_and_cap(ref)
+        return _build_bsim_search_corpus(
+            self._call(
+                sid,
+                "bsim_search_corpus",
+                {
+                    "target_ref": a.target_ref,
+                    "reference_refs": list(a.reference_refs),
+                    "min_similarity": a.min_similarity,
+                    "limit": a.limit,
+                    "max_scan": a.max_scan,
+                },
+                timeout_s=self._analysis_timeout_s,
+            )
+        )
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         return _build_function_list(
@@ -2681,6 +2720,30 @@ def _build_version_track(r: dict[str, Any]) -> s.VersionTrackOut:
     return s.VersionTrackOut(
         matches=[_build_version_match(m) for m in r.get("matches", [])],
         match_count=int(r["match_count"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
+def _build_corpus_match(r: dict[str, Any]) -> s.CorpusMatch:
+    """Build one :class:`CorpusMatch` (ADR-062): names are binary-derived (untrusted); rest safe."""
+    return s.CorpusMatch(
+        target_address=str(r["target_address"]),
+        target_name=_w(r["target_name"], DataOrigin.BINARY),
+        reference_index=int(r["reference_index"]),
+        reference_address=str(r["reference_address"]),
+        reference_name=_w(r["reference_name"], DataOrigin.BINARY),
+        similarity=float(r["similarity"]),
+    )
+
+
+@_fail_closed
+def _build_bsim_search_corpus(r: dict[str, Any]) -> s.BsimSearchCorpusOut:
+    """Build :class:`BsimSearchCorpusOut` (ADR-062) from a plain result."""
+    return s.BsimSearchCorpusOut(
+        matches=[_build_corpus_match(m) for m in r.get("matches", [])],
+        target_functions_scanned=int(r["target_functions_scanned"]),
+        corpus_functions_scanned=int(r["corpus_functions_scanned"]),
         truncated=bool(r.get("truncated", False)),
     )
 

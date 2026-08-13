@@ -2,15 +2,15 @@
 
 > Pydantic source of truth: [`src/vivarium/tools/schemas.py`](../../src/vivarium/tools/schemas.py).
 > Allow-list registry: [`src/vivarium/tools/registry.py`](../../src/vivarium/tools/registry.py).
-> **Read-by-default.** 52 of the 68 tools are read-only; the **16 mutation/write tools** below are
+> **Read-by-default.** 53 of the 69 tools are read-only; the **16 mutation/write tools** below are
 > **default-deny**, gated by per-session write-consent (`session_enable_writes`) — structural writes
 > additionally by `allow_structural`. **`runScript`/arbitrary script execution is permanently out of
 > scope** (PLAN §2), and the tool surface is a **fixed allow-list** (no dynamic registration).
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **68** tools (asserted in tests by
-  `len(TIER1_TOOL_NAMES) == 68`). The breakdown:
+- **Allow-list only:** the catalog is fixed; there are exactly **69** tools (asserted in tests by
+  `len(TIER1_TOOL_NAMES) == 69`). The breakdown:
   22 Tier-1 read-only (v1) + **1 p-code emulation tool (ADR-049: `emulate`; read-effect-only)** +
   **1 p-code listing tool (ADR-052: `get_pcode`; read-only)** +
   **1 high (SSA) p-code tool (ADR-053: `get_high_pcode`; read-only)** +
@@ -21,6 +21,7 @@
   **1 BSim similarity tool (ADR-058: `bsim_similarity`; read-only)** +
   **1 whole-program BSim find-similar tool (ADR-059: `find_similar_functions`; read-only)** +
   **1 two-program Version Tracking tool (ADR-060: `version_track`; read-only w.r.t. the session)** +
+  **1 cross-binary BSim corpus search tool (ADR-062: `bsim_search_corpus`; read-only w.r.t. the session)** +
   **1 C++ demangler tool (ADR-050: `demangle`; read-only, program-independent)** +
   5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
   reporting/metrics tools (ADR-008; all read-only) + **1 Function ID library-match tool (ADR-042
@@ -30,7 +31,7 @@
   streaming-extraction tools (ADR-040: `start_decompile_stream` + the generic
   `fetch_job_results`/`job_status`/`cancel_job`; read-only, output-only)** + **2 v1.2
   annotation-persistence tools (ADR-018: `session_export_annotations` read-only +
-  `session_import_annotations` GATED)**. That is **52 read-only + 16 mutation/write** (the 16 = the 6
+  `session_import_annotations` GATED)**. That is **53 read-only + 16 mutation/write** (the 16 = the 6
   ADR-012 write tools + the 9 structural-write tools + the gated `session_import_annotations`; it
   matches the `WRITE_TOOLS` frozenset in `registry.py`).
   Every write tool is GATED by per-session write-consent (structural additionally by
@@ -83,6 +84,7 @@
 | `bsim_similarity` | `BsimSimilarityIn{function_a, function_b}` | `BsimSimilarityOut{address_a, address_b, similarity}` | **ADR-058** BSim FUZZY similarity (read-only). Generates each function's BSim feature signature (`GenSignatures` + the bundled `medium_32/64` weights) and returns their cosine `similarity` in `[0,1]` (1.0 = identical) — the *continuous* counterpart to `function_hash`'s exact match, for near-duplicates / variant routines. Decompiles both functions but does NOT mutate; bounded to two functions. All fields SAFE (addresses + a computed score) |
 | `find_similar_functions` | `FindSimilarFunctionsIn{function, min_similarity=0.7, limit=20, max_scan=500}` | `FindSimilarFunctionsOut{target_address, matches[]{address, name*, similarity}, functions_scanned, truncated}` | **ADR-059** whole-program BSim clone/variant search (read-only). One `GenSignatures` scan of the target + up to `max_scan` functions, ranked by cosine similarity ≥ `min_similarity` (top `limit`). Built on `bsim_similarity`. Decompiles each scanned function (cost ∝ `max_scan`, wall-clock-bounded) but does NOT mutate. Only each match `name` is `*`=UNTRUSTED; addresses/score/counts are SAFE |
 | `version_track` | `VersionTrackIn{source_ref_a, source_ref_b, correlator=exact_instructions, min_confidence=0.0, limit=100}` | `VersionTrackOut{matches[]{source_address, destination_address, similarity, confidence}, match_count, truncated}` | **ADR-060** two-program Version Tracking (read-only w.r.t. the session). Loads BOTH refs FRESH in the session's worker (the session's own program is NOT a participant — untouched), auto-analyzes both, runs the chosen (closed allow-list: `exact_instructions`/`exact_bytes`/`exact_mnemonics`/`duplicate_function`) VT correlator over their loaded+initialized address sets, returns function matches filtered by `min_confidence` (log-scale) sorted high-to-low (top `limit`), then RELEASES + WIPES both programs. Both refs confined + size-capped server-side (CWE-22/CWE-400); gated like `session_import` (capability), NOT write-consent (no session mutation). All fields SAFE (addresses + computed scores) |
+| `bsim_search_corpus` | `BsimSearchCorpusIn{target_ref, reference_refs[1..16], min_similarity=0.7, limit=100, max_scan=500}` | `BsimSearchCorpusOut{matches[]{target_address, target_name*, reference_index, reference_address, reference_name*, similarity}, target_functions_scanned, corpus_functions_scanned, truncated}` | **ADR-062** cross-binary BSim search over an EPHEMERAL corpus (read-only w.r.t. the session). Loads the target + a bounded (≤16) reference corpus FRESH in the session's worker one at a time (BSim vectors survive each program's release — memory bounded), BSim-signs each with the target's `medium_NN` weights, and returns each target function's best reference match at cosine similarity ≥ `min_similarity` (top `limit`), then WIPES everything. **No persistent DB** (ADR-062 D0; stateless mandate ADR-002 intact) — the corpus is exactly `reference_refs`. References of a different address size than the target are skipped (D3). All refs confined + size-capped server-side (CWE-22/CWE-400); gated like `session_import` (capability), NOT write-consent. Only match `*`=names are UNTRUSTED; addresses/index/score/counts SAFE |
 | `list_functions` | `ListFunctionsIn{offset, limit≤10000, name_contains?}` | `FunctionListOut{functions[], total, truncated}` |
 | `get_function` | `GetFunctionIn{function}` | `FunctionDetail{address, name*, signature*, size, is_thunk, calling_convention*?}` |
 

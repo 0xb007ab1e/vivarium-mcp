@@ -396,6 +396,22 @@ class PyGhidraBackend:
             limit=_clamp_count(params.get("limit", 100)),
         )
 
+    def bsim_search_corpus(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Cross-binary BSim search over an ephemeral reference corpus (read-only — ADR-062).
+
+        Loads the target + each reference binary fresh (one at a time), BSim-signs them, and returns
+        each target function's best reference-corpus match. Ephemeral — no persistent DB; the
+        session's own program is untouched. All refs were confined + size-capped by the server.
+        """
+        refs = params.get("reference_refs") or []
+        return self._gh_bsim_search_corpus(
+            target_ref=str(_require(params, "target_ref")),
+            reference_refs=[str(r) for r in refs],
+            min_similarity=float(params.get("min_similarity", 0.7)),
+            limit=_clamp_count(params.get("limit", 100)),
+            max_scan=_clamp_count(params.get("max_scan", 500)),
+        )
+
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:
         """List functions (paginated/bounded)."""
         offset, limit = _page(params)
@@ -2457,6 +2473,189 @@ class PyGhidraBackend:
         return {
             "matches": matches[:limit],
             "match_count": match_count,
+            "truncated": len(matches) > limit,
+        }
+
+    def _bsim_sign(
+        self, program: Any, factory: Any, max_scan: int
+    ) -> list[tuple[str, str, Any]]:  # pragma: no cover - JVM edge
+        """BSim-sign a program's functions; return ``[(name, hex_address, LSHVector), ...]``.
+
+        One bounded ``GenSignatures`` scan (``<= max_scan`` functions), ADR-062. Captures each
+        function's name + canonical hex entry address BEFORE the program is released (the caller
+        releases it right after), keyed to the signature by entry offset, so the returned vectors
+        are usable after the source program is gone (grounded: BSim vectors survive release).
+
+        Args:
+            program: A loaded + analyzed program.
+            factory: The shared ``LSHVectorFactory`` (same config across the whole corpus).
+            max_scan: Cap on functions signed.
+
+        Returns:
+            ``[(name, hex_address, LSHVector), ...]`` — name is plain (the server wraps it).
+        """
+        from ghidra.features.bsim.query import GenSignatures
+
+        # Snapshot function metadata by entry offset while the program is loaded.
+        meta_by_off: dict[int, tuple[str, str]] = {}
+        for count, func in enumerate(program.getFunctionManager().getFunctions(True)):
+            if count >= max_scan:
+                break
+            meta_by_off[int(func.getEntryPoint().getOffset())] = (
+                str(func.getEntryPoint()),
+                _to_text(func.getName()),
+            )
+
+        gensig = GenSignatures(False)
+        sigs: list[tuple[str, str, Any]] = []
+        try:
+            gensig.setVectorFactory(factory)
+            gensig.openProgram(program, None, None, None, None, None)
+            for off in meta_by_off:
+                # scanFunction takes the Function; re-fetch by entry address (offset -> address).
+                addr = program.getAddressFactory().getDefaultAddressSpace().getAddress(off)
+                func = program.getFunctionManager().getFunctionAt(addr)
+                if func is not None:
+                    gensig.scanFunction(func)
+            manager = gensig.getDescriptionManager()
+            for desc in manager.listAllFunctions():
+                record = desc.getSignatureRecord()
+                if record is None:
+                    continue
+                meta = meta_by_off.get(int(desc.getAddress()))
+                if meta is not None:
+                    hex_addr, name = meta
+                    sigs.append((name, hex_addr, record.getLSHVector()))
+        finally:
+            gensig.dispose()
+        return sigs
+
+    def _gh_bsim_search_corpus(  # noqa: C901 - one bounded multi-binary sign + compare
+        self,
+        target_ref: str,
+        reference_refs: list[str],
+        min_similarity: float,
+        limit: int,
+        max_scan: int,
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Cross-binary BSim search over an ephemeral reference corpus (ADR-062).
+
+        Loads the target + each reference fresh in a throwaway project (reusing the VT lockable
+        domain-file load+analyze path), BSim-signs each with the **target's** ``medium_NN`` factory,
+        releasing each program right after signing (memory bounded to one loaded program at a time —
+        vectors survive release), then for each target function returns its best reference-corpus
+        match at similarity ``>= min_similarity``. References of a different address size than the
+        target are skipped (incomparable vectors — ADR-062 D3). Ephemeral: the corpus is exactly
+        ``reference_refs``, and everything is released + wiped at the end (ADR-002). The session's
+        own program is NOT a participant. Bounded by ``max_scan`` + ``limit`` + the wall-clock kill.
+
+        Args:
+            target_ref: The server-confined target binary path.
+            reference_refs: The server-confined reference binary paths (the corpus).
+            min_similarity: Minimum cosine similarity to report (``[0, 1]``).
+            limit: Maximum matches to return (top-K after sorting).
+            max_scan: Cap on functions signed per binary.
+
+        Returns:
+            ``{"matches": [{"target_address", "target_name", "reference_index", "reference_address",
+            "reference_name", "similarity"}, ...], "target_functions_scanned",
+            "corpus_functions_scanned", "truncated"}``.
+
+        Raises:
+            WorkerError: ``analysis-failed`` on an unsupported target address size or if a program
+                cannot be loaded/analyzed/signed.
+        """
+        import contextlib
+        import shutil
+        from pathlib import Path
+
+        import pyghidra
+
+        # BSim may be the first tool on a session (loads its own binaries — no prior import), so
+        # start the JVM (idempotent) BEFORE importing any ``ghidra.*``/``generic.*`` module (they
+        # live on the JVM classpath and are unimportable until the JVM is up).
+        pyghidra.start(verbose=False)
+
+        from generic.lsh.vector import VectorCompare
+        from ghidra.features.bsim.query import FunctionDatabase
+        from ghidra.util.task import TaskMonitor
+        from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+        monitor = TaskMonitor.DUMMY
+        consumer = "vivarium-bsim"
+        project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
+        corpus_path = Path(project_dir) / "bsim"
+        corpus_path.mkdir(parents=True, exist_ok=True)
+        bsim_dir = str(corpus_path)
+
+        proj_ctx = pyghidra.open_project(bsim_dir, "bsim", create=True)
+        proj = proj_ctx.__enter__()
+        held: list[Any] = []
+        target_sigs: list[tuple[str, str, Any]] = []
+        corpus: list[tuple[int, str, str, Any]] = []
+        try:
+            root = proj.getProjectData().getRootFolder()
+
+            target = self._vt_load_program(proj, root, target_ref, "target", consumer, monitor)
+            held.append(target)
+            size = int(target.getAddressFactory().getDefaultAddressSpace().getSize())
+            template = self._BSIM_TEMPLATES.get(size)
+            if template is None:
+                raise WorkerError(CODE_ANALYSIS_FAILED, f"BSim: unsupported address size {size}")
+            config = FunctionDatabase.loadConfigurationTemplate(template)
+            factory = FunctionDatabase.generateLSHVectorFactory()
+            factory.set(config.weightfactory, config.idflookup, config.info.settings)
+            target_sigs = self._bsim_sign(target, factory, max_scan)
+            target.release(consumer)
+            held.remove(target)
+
+            for index, ref in enumerate(reference_refs):
+                program = self._vt_load_program(proj, root, ref, f"ref{index}", consumer, monitor)
+                held.append(program)
+                try:
+                    ref_size = int(program.getAddressFactory().getDefaultAddressSpace().getSize())
+                    if ref_size == size:  # skip incomparable-arch references (ADR-062 D3)
+                        for name, addr, vec in self._bsim_sign(program, factory, max_scan):
+                            corpus.append((index, name, addr, vec))
+                finally:
+                    program.release(consumer)
+                    held.remove(program)
+
+            comparer = VectorCompare()
+            matches: list[dict[str, Any]] = []
+            for t_name, t_addr, t_vec in target_sigs:
+                best: dict[str, Any] | None = None
+                for ref_index, r_name, r_addr, r_vec in corpus:
+                    score = float(t_vec.compare(r_vec, comparer))
+                    if score >= min_similarity and (best is None or score > best["similarity"]):
+                        best = {
+                            "target_address": t_addr,
+                            "target_name": t_name,
+                            "reference_index": ref_index,
+                            "reference_address": r_addr,
+                            "reference_name": r_name,
+                            "similarity": score,
+                        }
+                if best is not None:
+                    matches.append(best)
+        except WorkerError:
+            raise
+        except Exception as exc:
+            raise WorkerError(CODE_ANALYSIS_FAILED, "cross-binary BSim search failed") from exc
+        finally:
+            for obj in held:
+                with contextlib.suppress(Exception):
+                    obj.release(consumer)
+            with contextlib.suppress(Exception):
+                proj_ctx.__exit__(None, None, None)
+            with contextlib.suppress(Exception):
+                shutil.rmtree(bsim_dir, ignore_errors=True)
+
+        matches.sort(key=lambda m: m["similarity"], reverse=True)
+        return {
+            "matches": matches[:limit],
+            "target_functions_scanned": len(target_sigs),
+            "corpus_functions_scanned": len(corpus),
             "truncated": len(matches) > limit,
         }
 

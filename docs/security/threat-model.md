@@ -8,8 +8,9 @@
 > **structural-mutation Phase B — signature + data-type apply (TB7 structural Phase B, §10,
 > ADR-014)**, and (v1.2) the **annotation-persistence import boundary (TB8, §12, ADR-018)**. v1.8
 > adds the **Version Tracking second-binary surface (TB3 delta, ADR-060 — ACCEPTED + IMPLEMENTED
-> 2026-08-13)** and the **companion-PDB second-file surface (TB3 delta, ADR-061 — ACCEPTED +
-> IMPLEMENTED 2026-08-13)**.
+> 2026-08-13)**, the **companion-PDB second-file surface (TB3 delta, ADR-061 — ACCEPTED +
+> IMPLEMENTED 2026-08-13)**, and the **cross-binary BSim ephemeral-corpus surface (TB3 delta,
+> ADR-062 — ACCEPTED + IMPLEMENTED 2026-08-13)**.
 > Source of truth: [`PLAN.md`](../../PLAN.md).
 > **Data classification:** the analyzed binary and all derived artifacts are **confidential** and
 > of **hostile origin** (master §5).
@@ -219,6 +220,31 @@ Likelihood × Impact → severity (master §7). "L/M/H".
 >   name `the_answer`, symbols 8→10), re-proven by the gated `test_import_pdb.py` live-regression hard
 >   gate. No GUID enforcement in the initial cut (operator pairs the two files; a mismatch yields
 >   wrong-but-contained, envelope-wrapped symbols) — a future refinement.
+
+> **TB3 delta — v1.8 cross-binary BSim: an EPHEMERAL multi-binary corpus (ADR-062 — ACCEPTED +
+> IMPLEMENTED 2026-08-13).** `bsim_search_corpus` loads a target + up to 16 reference binaries and
+> compares their BSim function-signatures. This is **not a new boundary** — it is **more inputs across
+> TB3** — and the operator explicitly chose the **ephemeral** shape over a persistent BSim database,
+> keeping ADR-002:
+> - **No persistent store; statelessness intact.** The "corpus" is exactly the passed
+>   `reference_refs`, built + queried + wiped **within the call**. There is **no persistent BSim DB**
+>   accumulating hostile-origin signatures across sessions (that was the rejected alternative — it
+>   would relax ADR-002). Binaries are loaded **one at a time** (BSim vectors survive each program's
+>   release), so only one program is resident at once; each is released, and the worker is wiped on
+>   evict (ADR-002).
+> - **Multiple hostile binaries, static feature extraction only.** BSim signing is decompile + LSH
+>   vector — **no cross-binary code execution**; all binaries are inert data inside the **unchanged**
+>   ADR-004 isolation (no egress, ro-rootfs, dropped caps, gVisor, mem/pids/cpu caps, wall-clock kill,
+>   now covering N+1 sequential loads/analyses).
+> - **Confined + size-capped + bounded.** The target and **every** reference are confined-root-resolved
+>   (CWE-22) + size-capped (CWE-400) before the JVM; the corpus is capped at 16 refs and `max_scan`
+>   functions/binary (bounds the load/analyze/decompile cost).
+> - **Output safe except names.** `target_address` / `reference_address` / `reference_index` /
+>   `similarity` are computed/normalized scalars (SAFE); `target_name` / `reference_name` are
+>   binary-derived → untrusted-enveloped (ADR-005). The session's own program is NOT a participant.
+> - **Grounded + built.** Sign→release→cross-compare grounded end-to-end (a target function matched a
+>   separately-loaded reference at similarity 1.0; vectors survive release), re-proven by the gated
+>   `test_bsim_search_corpus.py` live-regression hard gate.
 
 ### TB4 — Worker → Server → LLM (untrusted output)
 | STRIDE | Threat | L×I | Mitigation |

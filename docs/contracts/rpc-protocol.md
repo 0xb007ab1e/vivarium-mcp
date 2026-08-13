@@ -180,7 +180,12 @@ Tracking — read-only w.r.t. the session; confines + size-caps two refs server-
 fresh in the worker via the lockable domain-file path, auto-analyzes both, runs an allow-listed VT
 correlator, returns `{matches[]{source_address, destination_address, similarity, confidence},
 match_count, truncated}`, then releases + wipes both — the session's own program is never a
-participant), `list_functions`, `get_function`,
+participant), `bsim_search_corpus` (ADR-062 cross-binary BSim search over an EPHEMERAL corpus —
+read-only w.r.t. the session; confines + size-caps the target + up to 16 reference refs, loads each
+fresh one at a time, BSim-signs, returns each target function's best reference-corpus match
+`{matches[]{target_address, target_name, reference_index, reference_address, reference_name,
+similarity}, target_functions_scanned, corpus_functions_scanned, truncated}`, then wipes all — NO
+persistent DB, session program untouched), `list_functions`, `get_function`,
 `xrefs_to`, `xrefs_from`, `list_strings`, `list_symbols`, `get_symbol`, `list_data`,
 `get_data_type`, `list_data_types` (ADR-056 the list-counterpart to `get_data_type` — read-only;
 paginated summary rows over the program's DataTypeManager), `get_comments`, `memory_map`, `read_bytes`,

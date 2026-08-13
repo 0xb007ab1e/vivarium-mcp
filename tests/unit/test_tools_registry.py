@@ -239,6 +239,12 @@ class FakePort:
         self._rec("version_track", sid)
         return s.VersionTrackOut(matches=[], match_count=0)
 
+    def bsim_search_corpus(self, sid: str, a: s.BsimSearchCorpusIn) -> s.BsimSearchCorpusOut:
+        self._rec("bsim_search_corpus", sid)
+        return s.BsimSearchCorpusOut(
+            matches=[], target_functions_scanned=0, corpus_functions_scanned=0
+        )
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         self._rec("list_functions", sid)
         return s.FunctionListOut(functions=[], total=0)
@@ -487,11 +493,12 @@ def test_catalog_is_exactly_67_unique_tools() -> None:
     # listing (ADR-056: list_data_types; read-only) + 1 v1.8 function match-hash (ADR-057:
     # function_hash; read-only) + 1 v1.8 BSim similarity (ADR-058: bsim_similarity; read-only) + 1
     # v1.8 whole-program BSim find-similar (ADR-059: find_similar_functions; read-only) + 1 v1.8
-    # two-program Version Tracking (ADR-060: version_track; read-only w.r.t. the session) — the 15
-    # mutation tools GATED by per-session write-consent (the structural 9 additionally by
+    # two-program Version Tracking (ADR-060: version_track; read-only w.r.t. the session) + 1 v1.8
+    # cross-binary BSim corpus search (ADR-062: bsim_search_corpus; read-only w.r.t. the session) —
+    # the 15 mutation tools GATED by per-session write-consent (the structural 9 additionally by
     # allow_structural); import is GATED identically (+ allow_struct for structural entries).
-    assert len(reg.TIER1_TOOL_NAMES) == 68
-    assert len(set(reg.TIER1_TOOL_NAMES)) == 68
+    assert len(reg.TIER1_TOOL_NAMES) == 69
+    assert len(set(reg.TIER1_TOOL_NAMES)) == 69
 
 
 def test_handler_table_matches_frozen_allow_list() -> None:
@@ -657,6 +664,16 @@ def test_version_track_ensures_worker_and_dispatches(ctx: reg.ToolContext) -> No
     )
     assert isinstance(out, s.VersionTrackOut)
     assert out.match_count == 0 and out.matches == []
+
+
+def test_bsim_search_corpus_ensures_worker_and_dispatches(ctx: reg.ToolContext) -> None:
+    """bsim_search_corpus authorizes, ensures the worker, and dispatches (ADR-062)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["bsim_search_corpus"](
+        session_id=_VALID_SID, target_ref="t.bin", reference_refs=["r0.bin", "r1.bin"]
+    )
+    assert isinstance(out, s.BsimSearchCorpusOut)
+    assert out.matches == [] and out.corpus_functions_scanned == 0
 
 
 def test_list_functions_validates_name_contains_when_provided(ctx: reg.ToolContext) -> None:

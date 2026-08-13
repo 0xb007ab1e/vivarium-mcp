@@ -422,6 +422,7 @@ jobs:
             tests/integration/test_find_similar_functions.py \
             tests/integration/test_version_track.py \
             tests/integration/test_import_pdb.py \
+            tests/integration/test_bsim_search_corpus.py \
             ${DETERMINISTIC}
 
       # --- FAIL-LOUD ON SKIP: a skipped hard gate is a FAILURE, not a silent pass ------------------
@@ -466,13 +467,14 @@ jobs:
           # ADR-058 BSim similarity: identical funcs score 1.0, an unrelated pair clearly lower (1) +
           # ADR-059 whole-program BSim search: find_similar ranks clone+variant, excludes unrelated (1) +
           # ADR-060 Version Tracking: two identical ARM ELFs exact-instructions-match (sim 1.0, same addr) (1) +
-          # ADR-061 companion PDB: a PE imported with pdb_ref surfaces the PDB function name the_answer (1) = 25.
+          # ADR-061 companion PDB: a PE imported with pdb_ref surfaces the PDB function name the_answer (1) +
+          # ADR-062 cross-binary BSim: a target function matches a separately-loaded reference (sim 1.0) (1) = 26.
           # The deterministic same-toolchain FID gate (zlib + musl, 2) is SELF-ACTIVATING: included
           # only when the worker image ships the bundled DBs (FID_DETERMINISTIC_GATE=1), so the
-          # expected floor is 27 then, 25 otherwise. When inactive the test is omitted (not skipped),
+          # expected floor is 28 then, 26 otherwise. When inactive the test is omitted (not skipped),
           # so the zero-skip rule below still holds.
           import os
-          expected = 27 if os.environ.get("FID_DETERMINISTIC_GATE", "0") == "1" else 25
+          expected = 28 if os.environ.get("FID_DETERMINISTIC_GATE", "0") == "1" else 26
           if tests < expected:
               problems.append(f"expected >={expected} hard-gate tests to run, collected {tests}")
           if skipped:

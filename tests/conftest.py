@@ -425,6 +425,36 @@ class FakeGhidraPort:
             matches=keep[: a.limit], match_count=len(matches), truncated=len(keep) > a.limit
         )
 
+    def bsim_search_corpus(self, sid: str, a: s.BsimSearchCorpusIn) -> s.BsimSearchCorpusOut:
+        """Return a deterministic cross-binary BSim match set (names untrusted, ADR-062)."""
+        self._maybe_fail()
+        matches = [
+            s.CorpusMatch(
+                target_address="0x00401000",
+                target_name=_u("shared_fn"),
+                reference_index=0,
+                reference_address="0x00500000",
+                reference_name=_u("libc_shared_fn"),
+                similarity=1.0,
+            ),
+            s.CorpusMatch(
+                target_address="0x00401040",
+                target_name=_u("variant_fn"),
+                reference_index=0,
+                reference_address="0x00500080",
+                reference_name=_u("libc_variant"),
+                similarity=0.83,
+            ),
+        ]
+        keep = [m for m in matches if m.similarity >= a.min_similarity]
+        keep.sort(key=lambda m: m.similarity, reverse=True)
+        return s.BsimSearchCorpusOut(
+            matches=keep[: a.limit],
+            target_functions_scanned=2,
+            corpus_functions_scanned=4,
+            truncated=len(keep) > a.limit,
+        )
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """Return a bounded, deterministic function summary page."""
         self._maybe_fail()
