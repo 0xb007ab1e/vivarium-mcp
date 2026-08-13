@@ -125,12 +125,33 @@ input across TB3** — but it does add surface that the threat-model delta must 
 
 ## Open items to resolve before / during implementation
 
-1. **VT lock lifecycle** (D5) — the concrete open-program/consumer/transaction sequence that lets
-   `createVTSession` acquire both programs cleanly (the grounded blocker).
+1. **VT program lifecycle — the CONFIRMED blocker (needs dedicated integration research).** Follow-up
+   probing (2026-08-13) pinned down a hard tension between two requirements of
+   `VTSessionDB.createVTSession(name, source, dest, consumer)`:
+   - The **destination must be writable** — loading via the `pyghidra.program_loader()` builder
+     (`getPrimaryDomainObject()`) yields a **read-only** program → `ReadOnlyException: VT Session
+     destination program is read-only`.
+   - The programs must be **lockable by VT** — loading via `pyghidra.open_program` (writable) leaves
+     them held by the open-program **consumer/lock**, so `createVTSession` fails with
+     `LockException: domain object(s) are busy/locked`.
+   Tried and still failing: both-writable-and-quiescent (no lingering transactions); a **single shared
+   project** with both programs (still read-only via the builder / lock-conflict via open_program).
+   **Root cause:** Ghidra's Version Tracking is tightly coupled to the **tool/project framework** —
+   `VTSessionDB` expects programs opened as **project domain files with a checkout/consumer discipline
+   it manages**, not bare pyghidra loads. **Recommended path for the build:** drive VT through Ghidra's
+   own headless VT harness (the `analyzeHeadless` VT / `VTAutoMatchScript` `GhidraScript` lifecycle, or
+   `VTSessionDB` created against project domain files opened writable with the correct consumer +
+   checkout), replicating how the tool holds the programs — NOT bare `open_program`/`program_loader`.
+   This is a **research task**, not a quick fix, and it gates the whole increment. (The design-first
+   decision was correct: this is exactly the risk ADR-060 flagged, now confirmed real.)
 2. **Second-binary import path** — whether `version_track` reuses the `session_import` confined
    resolver + size machinery directly, or a dedicated bounded loader.
 3. **Correlator set** — confirm the initial allow-list (exact + duplicate-function) vs. adding the
    reference/symbol-name correlators in v1.
+
+> **Build status (2026-08-13):** attempted the build on "next"; hit open item #1 (the lifecycle
+> blocker) and STOPPED rather than ship a broken/partial VT. No `version_track` code exists — the tool
+> remains **Proposed**. The blocker is documented above for the future dedicated increment.
 
 ## Testing (planned, master §4)
 
