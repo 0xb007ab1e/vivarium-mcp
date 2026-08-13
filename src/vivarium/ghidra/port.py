@@ -155,6 +155,10 @@ class GhidraPort(Protocol):
         """Return a function's Ghidra match-hash fingerprints (read-only — ADR-057)."""
         ...
 
+    def bsim_similarity(self, sid: str, a: s.BsimSimilarityIn) -> s.BsimSimilarityOut:
+        """Return the BSim cosine similarity between two functions (read-only — ADR-058)."""
+        ...
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         ...

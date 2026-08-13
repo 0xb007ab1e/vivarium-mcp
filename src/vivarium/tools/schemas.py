@@ -896,6 +896,37 @@ class FunctionHashOut(_Out):
     instruction_count: int
 
 
+class BsimSimilarityIn(_SessionScopedIn):
+    """Arguments for ``bsim_similarity`` — BSim FUZZY similarity between two functions (ADR-058).
+
+    Read-only: generates each function's BSim feature signature (via Ghidra's ``GenSignatures`` +
+    bundled ``medium`` weights) and returns their cosine similarity in ``[0, 1]``. Unlike
+    ``function_hash`` (exact match), this is a continuous score — 1.0 for identical/equivalent code,
+    lower as the functions diverge — so it finds *near*-duplicates and variant routines.
+
+    Attributes:
+        function_a: First function — name or entry address (hex).
+        function_b: Second function — name or entry address (hex).
+    """
+
+    function_a: str = Field(min_length=1, max_length=_MAX_NAME)
+    function_b: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class BsimSimilarityOut(_Out):
+    """Result of ``bsim_similarity`` (ADR-058) — all fields SAFE (addresses + a computed score).
+
+    Attributes:
+        address_a: Entry address of ``function_a`` (hex) — server-normalized, safe.
+        address_b: Entry address of ``function_b`` (hex) — server-normalized, safe.
+        similarity: BSim cosine similarity in ``[0, 1]`` (1.0 = identical) — a computed scalar.
+    """
+
+    address_a: str
+    address_b: str
+    similarity: float
+
+
 # =====================================================================================
 # Comments
 # =====================================================================================

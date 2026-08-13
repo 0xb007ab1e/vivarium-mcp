@@ -70,6 +70,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "basic_blocks",
     "list_data_types",
     "function_hash",
+    "bsim_similarity",
     "list_functions",
     "get_function",
     # xrefs
@@ -548,6 +549,14 @@ def _handle_function_hash(ctx: ToolContext, args: s.FunctionHashIn) -> s.Functio
     ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.function)
     return ctx.port.function_hash(args.session_id, args)
+
+
+def _handle_bsim_similarity(ctx: ToolContext, args: s.BsimSimilarityIn) -> s.BsimSimilarityOut:
+    """Return the BSim cosine similarity between two functions (read-only — ADR-058)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    v.validate_name(args.function_a)
+    v.validate_name(args.function_b)
+    return ctx.port.bsim_similarity(args.session_id, args)
 
 
 def _handle_list_functions(ctx: ToolContext, args: s.ListFunctionsIn) -> s.FunctionListOut:
@@ -1739,6 +1748,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "basic_blocks": (_handle_basic_blocks, s.BasicBlocksIn),
     "list_data_types": (_handle_list_data_types, s.ListDataTypesIn),
     "function_hash": (_handle_function_hash, s.FunctionHashIn),
+    "bsim_similarity": (_handle_bsim_similarity, s.BsimSimilarityIn),
     "list_functions": (_handle_list_functions, s.ListFunctionsIn),
     "get_function": (_handle_get_function, s.GetFunctionIn),
     "xrefs_to": (_handle_xrefs_to, s.XrefsIn),

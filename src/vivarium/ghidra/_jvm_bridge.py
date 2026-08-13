@@ -361,6 +361,12 @@ class PyGhidraBackend:
         """Return a function's Ghidra match-hash fingerprints (read-only — ADR-057)."""
         return self._gh_function_hash(str(_require(params, "function")))
 
+    def bsim_similarity(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return the BSim cosine similarity between two functions (read-only — ADR-058)."""
+        return self._gh_bsim_similarity(
+            str(_require(params, "function_a")), str(_require(params, "function_b"))
+        )
+
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:
         """List functions (paginated/bounded)."""
         offset, limit = _page(params)
@@ -2005,6 +2011,79 @@ class PyGhidraBackend:
             ),
             "exact_mnemonics": str(int(ExactMnemonicsFunctionHasher.INSTANCE.hash(func, monitor))),
             "instruction_count": count,
+        }
+
+    #: BSim config template name by address size (bits). The bundled ``medium_*`` weights ship in
+    #: the pinned Ghidra install (Features/BSim/data). Only the mainstream 32/64-bit sizes map.
+    _BSIM_TEMPLATES: ClassVar[dict[int, str]] = {32: "medium_32", 64: "medium_64"}
+
+    def _gh_bsim_similarity(
+        self, function_a: str, function_b: str
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Return the BSim cosine similarity between two functions (ADR-058).
+
+        Generates each function's BSim feature signature with Ghidra's ``GenSignatures`` + bundled
+        ``medium`` weights (``FunctionDatabase.loadConfigurationTemplate`` → a configured
+        ``LSHVectorFactory``), then compares the two ``LSHVector``s (``vec.compare`` → cosine
+        similarity in ``[0, 1]``). Read-only: signature generation decompiles each function but does
+        NOT mutate the program DB; ``GenSignatures`` is disposed in a ``finally`` (ADR-002 memory
+        discipline). Bounded to exactly two functions; the worker wall-clock kill backs it.
+
+        Args:
+            function_a: First function — name or entry address (hex).
+            function_b: Second function — name or entry address (hex).
+
+        Returns:
+            ``{"address_a", "address_b", "similarity": float}`` (plain; all SAFE).
+
+        Raises:
+            WorkerError: ``not-found`` if a function does not resolve; ``analysis-failed`` on an
+                unsupported architecture or if a signature could not be generated.
+        """
+        from generic.lsh.vector import VectorCompare  # type: ignore[import-not-found]
+        from ghidra.features.bsim.query import (  # type: ignore[import-not-found]
+            FunctionDatabase,
+            GenSignatures,
+        )
+        from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+        program = self._require_program()
+        func_a = self._resolve_function(function_a)
+        func_b = self._resolve_function(function_b)
+
+        size = int(program.getAddressFactory().getDefaultAddressSpace().getSize())
+        template = self._BSIM_TEMPLATES.get(size)
+        if template is None:
+            raise WorkerError(CODE_ANALYSIS_FAILED, f"BSim: unsupported address size {size}")
+
+        config = FunctionDatabase.loadConfigurationTemplate(template)
+        factory = FunctionDatabase.generateLSHVectorFactory()
+        factory.set(config.weightfactory, config.idflookup, config.info.settings)
+
+        gensig = GenSignatures(False)
+        try:
+            gensig.setVectorFactory(factory)
+            gensig.openProgram(program, None, None, None, None, None)
+            gensig.scanFunction(func_a)
+            gensig.scanFunction(func_b)
+            manager = gensig.getDescriptionManager()
+            vectors: dict[str, Any] = {}
+            for desc in manager.listAllFunctions():
+                record = desc.getSignatureRecord()
+                if record is not None:
+                    vectors[str(desc.getFunctionName())] = record.getLSHVector()
+            vec_a = vectors.get(str(func_a.getName()))
+            vec_b = vectors.get(str(func_b.getName()))
+            if vec_a is None or vec_b is None:
+                raise WorkerError(CODE_ANALYSIS_FAILED, "BSim: could not generate a signature")
+            similarity = float(vec_a.compare(vec_b, VectorCompare()))
+        finally:
+            gensig.dispose()
+
+        return {
+            "address_a": str(func_a.getEntryPoint()),
+            "address_b": str(func_b.getEntryPoint()),
+            "similarity": similarity,
         }
 
     def _gh_get_comments(

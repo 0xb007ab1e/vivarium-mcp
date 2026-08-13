@@ -104,7 +104,7 @@ def test_catalog_count_matches_registry() -> None:
     # (ADR-040: start_decompile_stream + fetch_job_results/job_status/cancel_job) + 1 Function ID
     # library-match tool (ADR-042 Phase 1: identify_functions). The registry list is the source.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 65
+    assert len(TIER1_TOOL_NAMES) == 66
 
 
 @pytest.mark.critical
@@ -413,3 +413,20 @@ def test_function_hash_requires_function_and_is_all_safe() -> None:
     for value in out.model_dump().values():
         assert not isinstance(value, Untrusted)
     assert out.exact_instructions == "4495632401614105116"
+
+
+@pytest.mark.critical
+def test_bsim_similarity_requires_both_functions_and_is_all_safe() -> None:
+    """bsim_similarity requires two functions; result is addresses + a score, all SAFE (ADR-058)."""
+    from vivarium.core.envelope import Untrusted
+
+    s.BsimSimilarityIn(session_id="s", function_a="a", function_b="b")  # ok
+    with pytest.raises(ValidationError):
+        s.BsimSimilarityIn(session_id="s", function_a="", function_b="b")  # function_a required
+    with pytest.raises(ValidationError):
+        s.BsimSimilarityIn(session_id="s", function_a="a", function_b="")  # function_b required
+
+    out = s.BsimSimilarityOut(address_a="0x401000", address_b="0x401010", similarity=1.0)
+    for value in out.model_dump().values():
+        assert not isinstance(value, Untrusted)
+    assert out.similarity == 1.0

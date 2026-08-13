@@ -87,6 +87,7 @@ RPC_METHODS = frozenset(
         "basic_blocks",
         "list_data_types",
         "function_hash",
+        "bsim_similarity",
         "list_functions",
         "get_function",
         "xrefs_to",
@@ -235,6 +236,10 @@ class GhidraBackend(Protocol):
 
     def function_hash(self, params: dict[str, Any]) -> dict[str, Any]:
         """Return a function's Ghidra match-hash fingerprints — v1.8 (ADR-057)."""
+        ...
+
+    def bsim_similarity(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return the BSim cosine similarity between two functions — v1.8 (ADR-058)."""
         ...
 
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:

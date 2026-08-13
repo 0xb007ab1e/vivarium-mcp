@@ -383,6 +383,11 @@ class FakeGhidraPort:
             instruction_count=2,
         )
 
+    def bsim_similarity(self, sid: str, a: s.BsimSimilarityIn) -> s.BsimSimilarityOut:
+        """Return a deterministic BSim similarity score (all safe scalars, ADR-058)."""
+        self._maybe_fail()
+        return s.BsimSimilarityOut(address_a="0x00401000", address_b="0x00401010", similarity=0.75)
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """Return a bounded, deterministic function summary page."""
         self._maybe_fail()

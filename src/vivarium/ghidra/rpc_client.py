@@ -1122,6 +1122,14 @@ class RpcGhidraAdapter:
         """Return a function's Ghidra match-hash fingerprints (ADR-057)."""
         return _build_function_hash(self._tool_call(sid, "function_hash", {"function": a.function}))
 
+    def bsim_similarity(self, sid: str, a: s.BsimSimilarityIn) -> s.BsimSimilarityOut:
+        """Return the BSim cosine similarity between two functions (ADR-058)."""
+        return _build_bsim_similarity(
+            self._tool_call(
+                sid, "bsim_similarity", {"function_a": a.function_a, "function_b": a.function_b}
+            )
+        )
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         return _build_function_list(
@@ -2537,6 +2545,16 @@ def _build_function_hash(r: dict[str, Any]) -> s.FunctionHashOut:
         exact_instructions=str(r["exact_instructions"]),
         exact_mnemonics=str(r["exact_mnemonics"]),
         instruction_count=int(r["instruction_count"]),
+    )
+
+
+@_fail_closed
+def _build_bsim_similarity(r: dict[str, Any]) -> s.BsimSimilarityOut:
+    """Build :class:`BsimSimilarityOut` (ADR-058) — addresses + a computed score, all SAFE."""
+    return s.BsimSimilarityOut(
+        address_a=str(r["address_a"]),
+        address_b=str(r["address_b"]),
+        similarity=float(r["similarity"]),
     )
 
 
