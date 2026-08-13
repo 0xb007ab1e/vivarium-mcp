@@ -111,7 +111,7 @@ WORKDIR /opt/ghidra-src
 # A checksum mismatch FAILS THE BUILD (fail closed — supply-chain integrity, no tampered artifact).
 RUN set -eux; \
     echo "${GHIDRA_ZIP_SHA256}  ghidra.zip" > ghidra.zip.sha256; \
-    curl -fsSL --proto '=https' --tlsv1.2 -o ghidra.zip "${GHIDRA_ZIP_URL}"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 60 --proto '=https' --tlsv1.2 -o ghidra.zip "${GHIDRA_ZIP_URL}"; \
     sha256sum -c ghidra.zip.sha256; \
     unzip -q ghidra.zip; \
     rm -f ghidra.zip ghidra.zip.sha256; \
@@ -331,7 +331,7 @@ RUN set -eux; \
 WORKDIR /opt/zlib-src
 RUN set -eux; \
     echo "${ZLIB_TARBALL_SHA256}  zlib.tar.gz" > zlib.tar.gz.sha256; \
-    curl -fsSL --proto '=https' --tlsv1.2 -o zlib.tar.gz "${ZLIB_TARBALL_URL}"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 60 --proto '=https' --tlsv1.2 -o zlib.tar.gz "${ZLIB_TARBALL_URL}"; \
     sha256sum -c zlib.tar.gz.sha256; \
     tar -xzf zlib.tar.gz; \
     rm -f zlib.tar.gz zlib.tar.gz.sha256
@@ -438,7 +438,7 @@ RUN set -eux; \
 WORKDIR /opt/musl-src
 RUN set -eux; \
     echo "${MUSL_TARBALL_SHA256}  musl.tar.gz" > musl.tar.gz.sha256; \
-    curl -fsSL --proto '=https' --tlsv1.2 -o musl.tar.gz "${MUSL_TARBALL_URL}"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 60 --proto '=https' --tlsv1.2 -o musl.tar.gz "${MUSL_TARBALL_URL}"; \
     sha256sum -c musl.tar.gz.sha256; \
     tar -xzf musl.tar.gz; \
     rm -f musl.tar.gz musl.tar.gz.sha256
@@ -541,7 +541,7 @@ RUN set -eux; \
 WORKDIR /opt/openssl-src
 RUN set -eux; \
     echo "${OPENSSL_TARBALL_SHA256}  openssl.tar.gz" > openssl.tar.gz.sha256; \
-    curl -fsSL --proto '=https' --tlsv1.2 -o openssl.tar.gz "${OPENSSL_TARBALL_URL}"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 60 --proto '=https' --tlsv1.2 -o openssl.tar.gz "${OPENSSL_TARBALL_URL}"; \
     sha256sum -c openssl.tar.gz.sha256; \
     tar -xzf openssl.tar.gz; \
     rm -f openssl.tar.gz openssl.tar.gz.sha256
@@ -683,7 +683,7 @@ RUN set -eux; \
 WORKDIR /opt/boost-src
 RUN set -eux; \
     echo "${BOOST_TARBALL_SHA256}  boost.tar.gz" > boost.tar.gz.sha256; \
-    curl -fsSL --proto '=https' --tlsv1.2 -o boost.tar.gz "${BOOST_TARBALL_URL}"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 60 --proto '=https' --tlsv1.2 -o boost.tar.gz "${BOOST_TARBALL_URL}"; \
     sha256sum -c boost.tar.gz.sha256; \
     tar -xzf boost.tar.gz; \
     rm -f boost.tar.gz boost.tar.gz.sha256
