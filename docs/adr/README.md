@@ -1,6 +1,6 @@
 # Architecture Decision Records (ADR) index
 
-This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-063).
+This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-072).
 Each ADR captures one significant decision: its context, the decision, alternatives, and consequences.
 Records are **point-in-time** — a `Status:` of *Proposed* reflects the record when it was written; what
 actually shipped in each release is tracked in [`../../CHANGELOG.md`](../../CHANGELOG.md) and the
@@ -49,6 +49,17 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 - **ADR-048** — Loader options: fat/universal Mach-O slice selection (DYLD-component deferred).
 - **ADR-061** — PDB companion symbols: apply a Microsoft PDB at import (`session_import` `pdb_ref`).
 - **ADR-063** — DYLD shared-cache support — **DEFERRED** (fixture-blocked; capability ready).
+
+### v1.9 capability-gap batch (post-v1.8 survey)
+- **ADR-064** — Data-flow slicing (read-only def-use / taint reachability) — **Accepted** (in progress).
+- **ADR-065** — Multi-region / scatter-load raw import (same-arch regions into one session) — *Proposed*.
+- **ADR-066** — Emulation ergonomics: call-with-args + library-call stubs on `emulate` — *Proposed*.
+- **ADR-067** — Function-granularity binary-diff report (patch-diffing) — *Proposed*.
+- **ADR-068** — String / constant deobfuscation (stack-strings, XOR-decoded) — *Proposed*.
+- **ADR-069** — Automatic struct/type recovery from access patterns (proposes; existing write applies) — *Proposed*.
+- **ADR-070** — Extended firmware container unwrap + loaders (OTA/uImage/decompress, fuzz-gated) — *Proposed*.
+- **ADR-071** — Debug-info import beyond PDB (DWARF / `.map` / `.sym`) — *Proposed*.
+- **ADR-072** — Firmware-aware secret/credential/key-material scan (redacted) — *Proposed*.
 
 ### Read/analysis tools
 - **ADR-007** — Semantic-naming support tools (call graph, leaf-first ordering, function context).
