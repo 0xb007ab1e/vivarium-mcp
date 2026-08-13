@@ -211,6 +211,10 @@ class FakePort:
         self._rec("basic_blocks", sid)
         return s.BasicBlocksOut(blocks=[])
 
+    def list_data_types(self, sid: str, a: s.ListDataTypesIn) -> s.DataTypeListOut:
+        self._rec("list_data_types", sid)
+        return s.DataTypeListOut(data_types=[], total=0)
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         self._rec("list_functions", sid)
         return s.FunctionListOut(functions=[], total=0)
@@ -441,7 +445,7 @@ def ctx() -> reg.ToolContext:
     )
 
 
-def test_catalog_is_exactly_63_unique_tools() -> None:
+def test_catalog_is_exactly_64_unique_tools() -> None:
     # 22 Tier-1 + 5 v1.1 semantic-naming (ADR-007) + 8 v1.1 Tier-2 metrics (ADR-008; READ-ONLY)
     # + 1 Function ID library-match (ADR-042 Phase 1: identify_functions; READ-ONLY)
     # + 6 v1.1 mutation/write (ADR-012) + 2 v1.1 structural mutation (ADR-013 Phase A) + 2 v1.1
@@ -455,11 +459,12 @@ def test_catalog_is_exactly_63_unique_tools() -> None:
     # program-independent) + 1 v1.8 bundled type-archive apply (ADR-051: apply_type_archive;
     # structural WRITE) + 1 v1.8 p-code listing (ADR-052: get_pcode; read-only) + 1 v1.8 high (SSA)
     # p-code (ADR-053: get_high_pcode; read-only) + 1 v1.8 stack-frame layout (ADR-054: stack_frame;
-    # read-only) + 1 v1.8 basic-block CFG (ADR-055: basic_blocks; read-only) — the 15 mutation tools
-    # GATED by per-session write-consent (the structural 9 additionally by allow_structural); import
-    # is GATED identically (+ allow_structural for structural entries).
-    assert len(reg.TIER1_TOOL_NAMES) == 63
-    assert len(set(reg.TIER1_TOOL_NAMES)) == 63
+    # read-only) + 1 v1.8 basic-block CFG (ADR-055: basic_blocks; read-only) + 1 v1.8 data-type
+    # listing (ADR-056: list_data_types; read-only) — the 15 mutation tools GATED by per-session
+    # write-consent (the structural 9 additionally by allow_structural); import is GATED identically
+    # (+ allow_structural for structural entries).
+    assert len(reg.TIER1_TOOL_NAMES) == 64
+    assert len(set(reg.TIER1_TOOL_NAMES)) == 64
 
 
 def test_handler_table_matches_frozen_allow_list() -> None:
@@ -580,6 +585,20 @@ def test_basic_blocks_validates_function_and_dispatches(ctx: reg.ToolContext) ->
     handlers = reg.build_handlers(ctx)
     out = handlers["basic_blocks"](session_id=_VALID_SID, function="main")
     assert isinstance(out, s.BasicBlocksOut)
+
+
+def test_list_data_types_dispatches(ctx: reg.ToolContext) -> None:
+    """list_data_types authorizes + dispatches (ADR-056)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["list_data_types"](session_id=_VALID_SID)
+    assert isinstance(out, s.DataTypeListOut)
+
+
+def test_list_data_types_validates_name_contains_when_provided(ctx: reg.ToolContext) -> None:
+    """list_data_types with a name_contains filter runs the name validator + dispatches."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["list_data_types"](session_id=_VALID_SID, name_contains="wid")
+    assert isinstance(out, s.DataTypeListOut)
 
 
 def test_list_functions_validates_name_contains_when_provided(ctx: reg.ToolContext) -> None:

@@ -85,6 +85,7 @@ RPC_METHODS = frozenset(
         "get_high_pcode",
         "stack_frame",
         "basic_blocks",
+        "list_data_types",
         "list_functions",
         "get_function",
         "xrefs_to",
@@ -225,6 +226,10 @@ class GhidraBackend(Protocol):
 
     def basic_blocks(self, params: dict[str, Any]) -> dict[str, Any]:
         """Return a function's basic blocks + successor edges — v1.8 (ADR-055)."""
+        ...
+
+    def list_data_types(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List the program's data types, paginated — v1.8 (ADR-056)."""
         ...
 
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:

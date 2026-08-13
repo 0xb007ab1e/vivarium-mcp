@@ -104,7 +104,7 @@ def test_catalog_count_matches_registry() -> None:
     # (ADR-040: start_decompile_stream + fetch_job_results/job_status/cancel_job) + 1 Function ID
     # library-match tool (ADR-042 Phase 1: identify_functions). The registry list is the source.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 63
+    assert len(TIER1_TOOL_NAMES) == 64
 
 
 @pytest.mark.critical
@@ -367,3 +367,27 @@ def test_basic_blocks_bounds_and_safe_scalars() -> None:
     # CFG structure is server-normalized addresses/counts — nothing untrusted.
     for value in out.model_dump().values():
         assert not isinstance(value, Untrusted)
+
+
+@pytest.mark.critical
+def test_list_data_types_paginated_and_name_untrusted() -> None:
+    """list_data_types is a bounded page; each type name is Untrusted, kind/size bare (ADR-056)."""
+    from vivarium.core.envelope import DataOrigin, Untrusted
+
+    a = s.ListDataTypesIn(session_id="s")
+    assert a.offset == 0  # safe defaults
+    with pytest.raises(ValidationError):
+        s.ListDataTypesIn(session_id="s", limit=10_001)  # > hard cap
+
+    out = s.DataTypeListOut(
+        data_types=[
+            s.DataTypeSummary(
+                name=Untrusted(value="widget_t", origin=DataOrigin.BINARY), kind="struct", size=8
+            )
+        ],
+        total=1,
+    )
+    dt = out.data_types[0]
+    assert isinstance(dt.name, Untrusted)
+    assert dt.kind == "struct" and dt.size == 8  # server/worker scalars stay bare
+    assert out.total == 1

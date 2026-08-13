@@ -352,6 +352,11 @@ class PyGhidraBackend:
         cap = _clamp_count(params.get("max_blocks", 256))
         return self._gh_basic_blocks(str(_require(params, "function")), cap)
 
+    def list_data_types(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List the program's data types, paginated (read-only — ADR-056)."""
+        offset, limit = _page(params)
+        return self._gh_list_data_types(offset, limit, params.get("name_contains"))
+
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:
         """List functions (paginated/bounded)."""
         offset, limit = _page(params)
@@ -1912,6 +1917,48 @@ class PyGhidraBackend:
                     "definition": _to_text(_data_type_definition(data_type)),
                 }
         raise WorkerError(CODE_NOT_FOUND, "data type not found")
+
+    def _gh_list_data_types(
+        self, offset: int, limit: int, name_contains: str | None
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """List the program's data types via DataTypeManager (paginated/bounded — ADR-056).
+
+        Iterates ``DataTypeManager.getAllDataTypes()`` — the types established in this session
+        (defined/applied/analysis-added) — and emits lightweight summary rows (name/kind/size), NOT
+        the full rendered definition (fetch that per type via ``get_data_type``). Read-only. Mirrors
+        :meth:`_gh_list_functions`'s pagination + optional case-insensitive substring filter.
+
+        Args:
+            offset: Zero-based start index into the (optionally filtered) type set.
+            limit: Maximum types to return (already clamped).
+            name_contains: Optional case-insensitive substring filter.
+
+        Returns:
+            ``{"data_types": [{"name", "kind", "size"}, ...], "total": int, "truncated": bool}``.
+        """
+        program = self._require_program()
+        needle = name_contains.lower() if name_contains else None
+        rows: list[dict[str, Any]] = []
+        total = 0
+        truncated = False
+        for data_type in program.getDataTypeManager().getAllDataTypes():
+            name = str(data_type.getName())
+            if needle is not None and needle not in name.lower():
+                continue
+            total += 1
+            if (total - 1) < offset:
+                continue
+            if len(rows) >= limit:
+                truncated = True
+                continue
+            rows.append(
+                {
+                    "name": _to_text(data_type.getName()),
+                    "kind": _data_type_kind(data_type),
+                    "size": int(data_type.getLength()),
+                }
+            )
+        return {"data_types": rows, "total": total, "truncated": truncated}
 
     def _gh_get_comments(
         self, offset: int, limit: int, address: str | None

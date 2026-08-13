@@ -2,20 +2,21 @@
 
 > Pydantic source of truth: [`src/vivarium/tools/schemas.py`](../../src/vivarium/tools/schemas.py).
 > Allow-list registry: [`src/vivarium/tools/registry.py`](../../src/vivarium/tools/registry.py).
-> **Read-by-default.** 47 of the 63 tools are read-only; the **16 mutation/write tools** below are
+> **Read-by-default.** 48 of the 64 tools are read-only; the **16 mutation/write tools** below are
 > **default-deny**, gated by per-session write-consent (`session_enable_writes`) — structural writes
 > additionally by `allow_structural`. **`runScript`/arbitrary script execution is permanently out of
 > scope** (PLAN §2), and the tool surface is a **fixed allow-list** (no dynamic registration).
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **63** tools (asserted in tests by
-  `len(TIER1_TOOL_NAMES) == 63`). The breakdown:
+- **Allow-list only:** the catalog is fixed; there are exactly **64** tools (asserted in tests by
+  `len(TIER1_TOOL_NAMES) == 64`). The breakdown:
   22 Tier-1 read-only (v1) + **1 p-code emulation tool (ADR-049: `emulate`; read-effect-only)** +
   **1 p-code listing tool (ADR-052: `get_pcode`; read-only)** +
   **1 high (SSA) p-code tool (ADR-053: `get_high_pcode`; read-only)** +
   **1 stack-frame tool (ADR-054: `stack_frame`; read-only)** +
   **1 basic-block CFG tool (ADR-055: `basic_blocks`; read-only)** +
+  **1 data-type listing tool (ADR-056: `list_data_types`; read-only)** +
   **1 C++ demangler tool (ADR-050: `demangle`; read-only, program-independent)** +
   5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
   reporting/metrics tools (ADR-008; all read-only) + **1 Function ID library-match tool (ADR-042
@@ -25,7 +26,7 @@
   streaming-extraction tools (ADR-040: `start_decompile_stream` + the generic
   `fetch_job_results`/`job_status`/`cancel_job`; read-only, output-only)** + **2 v1.2
   annotation-persistence tools (ADR-018: `session_export_annotations` read-only +
-  `session_import_annotations` GATED)**. That is **47 read-only + 16 mutation/write** (the 16 = the 6
+  `session_import_annotations` GATED)**. That is **48 read-only + 16 mutation/write** (the 16 = the 6
   ADR-012 write tools + the 9 structural-write tools + the gated `session_import_annotations`; it
   matches the `WRITE_TOOLS` frozenset in `registry.py`).
   Every write tool is GATED by per-session write-consent (structural additionally by
@@ -91,6 +92,7 @@
 | `get_symbol` | `GetSymbolIn{identifier}` | `Symbol{address, name*, kind, namespace*?}` |
 | `list_data` | `ListDataIn{offset, limit}` | `DataListOut{data[], total, truncated}` |
 | `get_data_type` | `GetDataTypeIn{name}` | `DataType{name*, kind, size, definition*}` |
+| `list_data_types` | `ListDataTypesIn{offset, limit, name_contains?}` | `DataTypeListOut{data_types[]{name*, kind, size}, total, truncated}` | **ADR-056** the list-counterpart to `get_data_type` (read-only). Enumerates the program `DataTypeManager` — the types established in THIS session (defined via `define_struct`/`define_types`, applied via `apply_data_type`/`apply_type_archive`, or analysis-added); a fresh program's manager is empty. Lightweight summary rows (no rendered definition — fetch that per type via `get_data_type`). `name` is `*`=UNTRUSTED; kind/size are safe |
 
 ### Comments (read-only)
 | Tool | Input | Output |

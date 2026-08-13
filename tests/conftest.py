@@ -361,6 +361,17 @@ class FakeGhidraPort:
         ]
         return s.BasicBlocksOut(blocks=blocks[: a.max_blocks], truncated=a.max_blocks < 2)
 
+    def list_data_types(self, sid: str, a: s.ListDataTypesIn) -> s.DataTypeListOut:
+        """Return a bounded, deterministic data-type summary page (name untrusted, ADR-056)."""
+        self._maybe_fail()
+        rows = [
+            s.DataTypeSummary(name=_u("widget_t"), kind="struct", size=8),
+            s.DataTypeSummary(name=_u("int"), kind="builtin", size=4),
+        ]
+        return s.DataTypeListOut(
+            data_types=rows[: a.limit], total=len(rows), truncated=a.limit < len(rows)
+        )
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """Return a bounded, deterministic function summary page."""
         self._maybe_fail()

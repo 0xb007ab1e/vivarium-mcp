@@ -68,6 +68,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "get_high_pcode",
     "stack_frame",
     "basic_blocks",
+    "list_data_types",
     "list_functions",
     "get_function",
     # xrefs
@@ -531,6 +532,14 @@ def _handle_basic_blocks(ctx: ToolContext, args: s.BasicBlocksIn) -> s.BasicBloc
     ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.function)
     return ctx.port.basic_blocks(args.session_id, args)
+
+
+def _handle_list_data_types(ctx: ToolContext, args: s.ListDataTypesIn) -> s.DataTypeListOut:
+    """List the program's data types, paginated (read-only — ADR-056)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    if args.name_contains is not None:
+        v.validate_name(args.name_contains)
+    return ctx.port.list_data_types(args.session_id, args)
 
 
 def _handle_list_functions(ctx: ToolContext, args: s.ListFunctionsIn) -> s.FunctionListOut:
@@ -1720,6 +1729,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "get_high_pcode": (_handle_get_high_pcode, s.GetHighPcodeIn),
     "stack_frame": (_handle_stack_frame, s.StackFrameIn),
     "basic_blocks": (_handle_basic_blocks, s.BasicBlocksIn),
+    "list_data_types": (_handle_list_data_types, s.ListDataTypesIn),
     "list_functions": (_handle_list_functions, s.ListFunctionsIn),
     "get_function": (_handle_get_function, s.GetFunctionIn),
     "xrefs_to": (_handle_xrefs_to, s.XrefsIn),

@@ -1108,6 +1108,16 @@ class RpcGhidraAdapter:
             )
         )
 
+    def list_data_types(self, sid: str, a: s.ListDataTypesIn) -> s.DataTypeListOut:
+        """List the program's data types, paginated (ADR-056)."""
+        return _build_data_type_list(
+            self._tool_call(
+                sid,
+                "list_data_types",
+                {"offset": a.offset, "limit": a.limit, "name_contains": a.name_contains},
+            )
+        )
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         return _build_function_list(
@@ -2492,6 +2502,24 @@ def _build_basic_blocks(r: dict[str, Any]) -> s.BasicBlocksOut:
     """Build :class:`BasicBlocksOut` (ADR-055) from a plain result."""
     return s.BasicBlocksOut(
         blocks=[_build_basic_block(b) for b in r.get("blocks", [])],
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
+def _build_data_type_summary(r: dict[str, Any]) -> s.DataTypeSummary:
+    """Build one :class:`DataTypeSummary`: the type name is binary/library-derived (untrusted)."""
+    return s.DataTypeSummary(
+        name=_w(r["name"], DataOrigin.BINARY), kind=str(r["kind"]), size=int(r["size"])
+    )
+
+
+@_fail_closed
+def _build_data_type_list(r: dict[str, Any]) -> s.DataTypeListOut:
+    """Build :class:`DataTypeListOut` (ADR-056) from a plain result."""
+    return s.DataTypeListOut(
+        data_types=[_build_data_type_summary(d) for d in r.get("data_types", [])],
+        total=int(r["total"]),
         truncated=bool(r.get("truncated", False)),
     )
 

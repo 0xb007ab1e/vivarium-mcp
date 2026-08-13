@@ -815,6 +815,50 @@ class DataType(_Out):
     definition: Untrusted[str]
 
 
+class ListDataTypesIn(_Page):
+    """Arguments for ``list_data_types`` — paginated, bounded (ADR-056).
+
+    Enumerates the types in the program's ``DataTypeManager`` — i.e. the types established in this
+    session (defined via ``define_struct``/``define_types``, applied via ``apply_data_type``/
+    ``apply_type_archive``, or added by analysis). It is the list-counterpart to ``get_data_type``
+    (which resolves one type by name in the same manager). Use ``get_data_type`` for a single type's
+    full rendered definition; this returns lightweight summary rows.
+
+    Attributes:
+        name_contains: Optional case-insensitive substring filter (validated; not a regex).
+    """
+
+    name_contains: str | None = Field(default=None, max_length=_MAX_NAME)
+
+
+class DataTypeSummary(_Out):
+    """Summary record for one data type (ADR-056) — no definition (fetch via get_data_type).
+
+    Attributes:
+        name: Type name — untrusted (binary/library-derived).
+        kind: Category (e.g. ``"struct"``, ``"enum"``, ``"typedef"``, ``"pointer"``) — safe.
+        size: Size in bytes — safe.
+    """
+
+    name: Untrusted[str]
+    kind: str
+    size: int
+
+
+class DataTypeListOut(_Out):
+    """Result of ``list_data_types`` (ADR-056).
+
+    Attributes:
+        data_types: Bounded list of data-type summaries.
+        total: Total matching types (for pagination) — safe count.
+        truncated: Whether the page was capped.
+    """
+
+    data_types: list[DataTypeSummary]
+    total: int
+    truncated: bool = False
+
+
 # =====================================================================================
 # Comments
 # =====================================================================================

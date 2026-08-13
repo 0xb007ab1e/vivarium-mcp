@@ -147,6 +147,10 @@ class GhidraPort(Protocol):
         """Return a function's basic blocks + successor edges (read-only — ADR-055)."""
         ...
 
+    def list_data_types(self, sid: str, a: s.ListDataTypesIn) -> s.DataTypeListOut:
+        """List the program's data types, paginated (read-only — ADR-056)."""
+        ...
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         ...
