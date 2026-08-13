@@ -303,7 +303,7 @@ jobs:
           IMAGE="ghcr.io/${OWNER}/vivarium-worker@${DIGEST}"
           if ! cosign verify \
               --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-              --certificate-identity-regexp "^https://github.com/${REPO}/.github/workflows/worker-image.yml@refs/tags/" \
+              --certificate-identity-regexp "^https://github.com/${REPO}/.github/workflows/worker-image.yml@refs/(heads|tags)/" \
               "${IMAGE}" >/dev/null; then
             echo "::error::cosign verify FAILED for ${IMAGE} — refusing to propose an unverified" \
                  "trust pin (possible supply-chain tampering)."

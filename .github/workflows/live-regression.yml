@@ -310,7 +310,7 @@ jobs:
           # force-build paths handled above). "Test what you ship" — or fail.
           if ! cosign verify \
               --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-              --certificate-identity-regexp "^https://github.com/${REPO}/.github/workflows/worker-image.yml@refs/tags/" \
+              --certificate-identity-regexp "^https://github.com/${REPO}/.github/workflows/worker-image.yml@refs/(heads|tags)/" \
               "${WORKER_IMAGE}"; then
             echo "::error::cosign verify FAILED for the released worker image ${WORKER_IMAGE} —" \
                  "refusing to fall back to a local build (possible supply-chain tampering)."
