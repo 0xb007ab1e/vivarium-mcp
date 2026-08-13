@@ -123,35 +123,60 @@ input across TB3** — but it does add surface that the threat-model delta must 
   VT session/correlator lifecycle (incl. the lock issue), match extraction, and a real trust-boundary
   delta (two hostile binaries). Adds one Tier-1 read-only tool.
 
-## Open items to resolve before / during implementation
+## The VT program-lifecycle blocker — **RESOLVED** (2026-08-13 research)
 
-1. **VT program lifecycle — the CONFIRMED blocker (needs dedicated integration research).** Follow-up
-   probing (2026-08-13) pinned down a hard tension between two requirements of
-   `VTSessionDB.createVTSession(name, source, dest, consumer)`:
-   - The **destination must be writable** — loading via the `pyghidra.program_loader()` builder
-     (`getPrimaryDomainObject()`) yields a **read-only** program → `ReadOnlyException: VT Session
-     destination program is read-only`.
-   - The programs must be **lockable by VT** — loading via `pyghidra.open_program` (writable) leaves
-     them held by the open-program **consumer/lock**, so `createVTSession` fails with
-     `LockException: domain object(s) are busy/locked`.
-   Tried and still failing: both-writable-and-quiescent (no lingering transactions); a **single shared
-   project** with both programs (still read-only via the builder / lock-conflict via open_program).
-   **Root cause:** Ghidra's Version Tracking is tightly coupled to the **tool/project framework** —
-   `VTSessionDB` expects programs opened as **project domain files with a checkout/consumer discipline
-   it manages**, not bare pyghidra loads. **Recommended path for the build:** drive VT through Ghidra's
-   own headless VT harness (the `analyzeHeadless` VT / `VTAutoMatchScript` `GhidraScript` lifecycle, or
-   `VTSessionDB` created against project domain files opened writable with the correct consumer +
-   checkout), replicating how the tool holds the programs — NOT bare `open_program`/`program_loader`.
-   This is a **research task**, not a quick fix, and it gates the whole increment. (The design-first
-   decision was correct: this is exactly the risk ADR-060 flagged, now confirmed real.)
-2. **Second-binary import path** — whether `version_track` reuses the `session_import` confined
-   resolver + size machinery directly, or a dedicated bounded loader.
-3. **Correlator set** — confirm the initial allow-list (exact + duplicate-function) vs. adding the
-   reference/symbol-name correlators in v1.
+The gating blocker (`createVTSession` / `new VTSessionDB(...)` raising `LockException: domain object(s)
+are busy/locked`, or `ReadOnlyException` on the destination) is **solved**. Root cause + fix, grounded
+live in the worker (a two-program VT run produced `match_count=1`, similarity 1.0):
 
-> **Build status (2026-08-13):** attempted the build on "next"; hit open item #1 (the lifecycle
-> blocker) and STOPPED rather than ship a broken/partial VT. No `version_track` code exists — the tool
-> remains **Proposed**. The blocker is documented above for the future dedicated increment.
+- **Root cause:** `pyghidra.open_program` (and the `GhidraProject` it uses) holds a **perpetual open
+  transaction** on the program for the lifetime of the handle. A probe showed `getCurrentTransactionInfo()`
+  is **non-null** and `canLock()` is **False** even outside any explicit transaction — so VT (which must
+  **lock** both programs to snapshot them into the session) cannot acquire the lock. The
+  `program_loader()` builder avoids the transaction but returns a **read-only** program (the destination
+  must be writable). Neither bare-load path yields a *writable + lockable* program.
+- **The fix — open programs from project DOMAIN FILES via `getDomainObject`** (how Ghidra's own tool /
+  `CreateAppliedExactMatchingSessionScript` holds them):
+  1. `proj = pyghidra.open_project(dir, name, create=True)`; `root = proj.getProjectData().getRootFolder()`.
+  2. Load the binary (builder), then **save it as a domain file**: `root.createFile(name, prog, monitor)`.
+  3. **Close** the transient builder handle (`loaded.close()`).
+  4. Reopen writable via the domain file: `df.getDomainObject(consumer, /*okToUpgrade*/True,
+     /*okToRecover*/False, monitor)` → **no auto-transaction → `canLock()=True`**.
+  5. Create the session with the **constructor** `new VTSessionDB(name, source, dest, consumer)` (NOT
+     the static `createVTSession`); optionally place it in the project via `folder.createFile`.
+  6. `correlator = factory.createCorrelator(src, srcAddrSet, dst, dstAddrSet, factory.createDefaultOptions())`;
+     `matchSet = correlator.correlate(session, monitor)`; iterate `matchSet.getMatches()` →
+     `getSourceAddress()` / `getDestinationAddress()` / `getSimilarityScore().getScore()` /
+     `getConfidenceScore().getScore()`; `session.release(consumer)`.
+
+## Design refinement from the research — VT loads BOTH binaries fresh (session program NOT reused)
+
+The session's own program is loaded by the backend via `pyghidra.open_program` → it carries the
+perpetual transaction (`canLock()=False`), so it **cannot be a VT participant**. Therefore
+`version_track` loads **both** binaries **fresh** (via the lockable domain-file path above) in a
+**throwaway VT project** inside the session's worker, correlates them, extracts the matches, then
+releases + wipes both programs and the VT session. This **supersedes ADR-060 D3's "session program =
+source"**: the session's program is now **completely untouched** — not even read by VT — which is
+*stronger* for security (no risk of mutating or locking the live session program). Revised tool shape:
+
+`version_track(session_id, source_ref_a, source_ref_b, correlator?, min_confidence?, limit?)` — both
+`source_ref_a` and `source_ref_b` resolve through the **confined import root** (CWE-22) and are
+size-capped (CWE-400); the `session_id` provides auth/scoping + the worker, not a program. Both binaries
+are analyzed (correlators need functions defined) — bounded by the wall-clock kill + memory caps.
+
+## Remaining open items (smaller)
+
+1. **Two-binary import + analyze cost** — two fresh imports + analyses per call; bound with the
+   `session_import` size cap + the wall-clock kill; consider a lighter analysis profile for VT loads.
+2. **Correlator set** — confirm the initial allow-list (exact instructions/bytes/mnemonics +
+   duplicate-function) vs. adding reference/symbol-name correlators in v1.
+3. **Match volume** — bound the returned matches (`limit` + `min_confidence`); large programs can
+   produce many.
+
+> **Build status (2026-08-13):** the gating lifecycle blocker is **RESOLVED** (recipe above, grounded).
+> No `version_track` code exists yet — the tool remains **Proposed** pending the go-ahead to build the
+> (now de-risked) increment. The design is refined to the *both-fresh* model; the session program is no
+> longer a participant, so ADR-060 D3 + the TB3 delta are updated accordingly.
 
 ## Testing (planned, master §4)
 
