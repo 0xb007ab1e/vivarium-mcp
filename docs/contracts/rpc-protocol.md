@@ -167,6 +167,9 @@ an in-flight `start_decompile_stream` promptly (on client `cancel_job`), the ser
 `import_binary`, `analyze`, `decompile_function`, `disassemble`, `get_pcode` (ADR-052 low p-code
 listing — read-only; lifts each instruction's raw p-code ops, no execution), `get_high_pcode`
 (ADR-053 high/SSA p-code — read-only; the decompiler's refined constant-folded IR for a function),
+`data_flow_slice` (ADR-064 bounded intra-function def-use slice — read-only; walks the HighFunction
+SSA def-use graph backward=defs/forward=uses from a seed address, boundary nodes at params/constants,
+bounded by max_nodes/max_depth; each rendered op is untrusted),
 `stack_frame` (ADR-054 recovered stack layout — read-only; the function's locals/parameters with
 offsets, types, sizes from the Stack analyzer), `basic_blocks` (ADR-055 control-flow graph —
 read-only; each basic block's address range + intraprocedural successor edges from

@@ -139,6 +139,10 @@ class GhidraPort(Protocol):
         """Return a function's decompiler-refined high (SSA) p-code (read-only — ADR-053)."""
         ...
 
+    def data_flow_slice(self, sid: str, a: s.DataFlowSliceIn) -> s.DataFlowSliceOut:
+        """Return a bounded intra-function def-use slice from a seed (read-only — ADR-064)."""
+        ...
+
     def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
         """Return a function's recovered stack-frame layout (read-only — ADR-054)."""
         ...

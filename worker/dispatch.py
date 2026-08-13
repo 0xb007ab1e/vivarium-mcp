@@ -83,6 +83,7 @@ RPC_METHODS = frozenset(
         "disassemble",
         "get_pcode",
         "get_high_pcode",
+        "data_flow_slice",
         "stack_frame",
         "basic_blocks",
         "list_data_types",
@@ -223,6 +224,10 @@ class GhidraBackend(Protocol):
 
     def get_high_pcode(self, params: dict[str, Any]) -> dict[str, Any]:
         """Return a function's decompiler-refined high (SSA) p-code — v1.8 (ADR-053)."""
+        ...
+
+    def data_flow_slice(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a bounded intra-function def-use slice from a seed — v1.9 (ADR-064)."""
         ...
 
     def stack_frame(self, params: dict[str, Any]) -> dict[str, Any]:

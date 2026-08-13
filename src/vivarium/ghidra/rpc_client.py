@@ -1124,6 +1124,22 @@ class RpcGhidraAdapter:
             self._tool_call(sid, "get_high_pcode", {"function": a.function, "max_ops": a.max_ops})
         )
 
+    def data_flow_slice(self, sid: str, a: s.DataFlowSliceIn) -> s.DataFlowSliceOut:
+        """Return a bounded intra-function def-use slice from a seed (ADR-064)."""
+        return _build_data_flow_slice(
+            self._tool_call(
+                sid,
+                "data_flow_slice",
+                {
+                    "function": a.function,
+                    "seed": a.seed,
+                    "direction": a.direction,
+                    "max_nodes": a.max_nodes,
+                    "max_depth": a.max_depth,
+                },
+            )
+        )
+
     def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
         """Return a function's recovered stack-frame layout (ADR-054)."""
         return _build_stack_frame(self._tool_call(sid, "stack_frame", {"function": a.function}))
@@ -2597,6 +2613,28 @@ def _build_get_high_pcode(r: dict[str, Any]) -> s.GetHighPcodeOut:
     """Build :class:`GetHighPcodeOut` (ADR-053) from a plain result."""
     return s.GetHighPcodeOut(
         ops=[_build_high_pcode_op(o) for o in r.get("ops", [])],
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_slice_node(r: dict[str, Any]) -> s.SliceNode:
+    """Build one :class:`SliceNode` (ADR-064): the rendered op / var name is decompiler-derived."""
+    raw_op = r.get("pcode_op")
+    addr = r.get("address")
+    return s.SliceNode(
+        address=None if addr is None else str(addr),
+        pcode_op=None if raw_op is None else _w(str(raw_op), DataOrigin.GHIDRA),
+        role=r["role"],
+    )
+
+
+@_fail_closed
+def _build_data_flow_slice(r: dict[str, Any]) -> s.DataFlowSliceOut:
+    """Build :class:`DataFlowSliceOut` (ADR-064) from a plain result."""
+    return s.DataFlowSliceOut(
+        seed=str(r["seed"]),
+        direction=r["direction"],
+        nodes=[_build_slice_node(n) for n in r.get("nodes", [])],
         truncated=bool(r.get("truncated", False)),
     )
 

@@ -485,6 +485,63 @@ class GetHighPcodeOut(_Out):
     truncated: bool = False
 
 
+class DataFlowSliceIn(_SessionScopedIn):
+    """Arguments for ``data_flow_slice`` — a bounded intra-function def-use slice (ADR-064).
+
+    Read-only: decompiles ``function`` to its SSA ``HighFunction`` and walks the def-use graph from
+    the p-code op at ``seed`` (an address). ``backward`` returns the defs feeding the seed (its
+    provenance); ``forward`` returns the uses it feeds (where it goes). Intra-function — a value
+    with no definition (a parameter/constant/input) is reported as a ``boundary`` node — never
+    followed across the function edge. Bounded by ``max_nodes`` + ``max_depth``.
+
+    Attributes:
+        function: Function name or entry address (hex) containing the seed.
+        seed: The seed **address** (hex) — a p-code op at that address within the function.
+        direction: ``"backward"`` (defs feeding the seed) or ``"forward"`` (uses fed by it).
+        max_nodes: Cap on returned slice nodes (bounded).
+        max_depth: Cap on the def-use walk depth (bounded).
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    seed: str = Field(min_length=1, max_length=_MAX_NAME)
+    direction: Literal["backward", "forward"] = "backward"
+    max_nodes: int = Field(default=256, ge=1, le=_MAX_LIMIT)
+    max_depth: int = Field(default=64, ge=1, le=_MAX_LIMIT)
+
+
+class SliceNode(_Out):
+    """One node on a data-flow slice (ADR-064).
+
+    Attributes:
+        address: The op's sequence-number address (hex) — server-normalized, safe; ``None`` for a
+            ``boundary`` node (a parameter/constant/input with no defining op).
+        pcode_op: The op rendered as text (or, for a ``boundary`` node, the high-variable name) —
+            untrusted (decompiler-derived); ``None`` when unavailable.
+        role: ``"def"`` (a defining op, backward), ``"use"`` (a using op, forward), or
+            ``"boundary"`` (an undefined input at the function edge).
+    """
+
+    address: str | None = None
+    pcode_op: Untrusted[str] | None = None
+    role: Literal["def", "use", "boundary"]
+
+
+class DataFlowSliceOut(_Out):
+    """Result of ``data_flow_slice`` (ADR-064).
+
+    Attributes:
+        seed: The normalized seed address the slice started from (hex) — safe.
+        direction: The direction walked (echoed).
+        nodes: Bounded list of the slice's def-use nodes.
+        truncated: Whether the ``max_nodes`` cap clipped the walk.
+    """
+
+    seed: str
+    direction: Literal["backward", "forward"]
+    nodes: list[SliceNode]
+    truncated: bool = False
+
+
 class StackFrameIn(_SessionScopedIn):
     """Arguments for ``stack_frame`` — a function's recovered stack layout (ADR-054).
 
