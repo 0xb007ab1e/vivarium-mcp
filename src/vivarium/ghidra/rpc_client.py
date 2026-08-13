@@ -438,6 +438,50 @@ class RpcGhidraAdapter:
         with contextlib.suppress(Exception):
             sess.worker.kill()
 
+    def _resolve_and_cap(self, source_ref: str) -> int:
+        """Confine + size-cap a ``source_ref`` server-side, pre-Ghidra (ADR-001 / CWE-22 / CWE-400).
+
+        Resolves the ref through the injected confined resolver, maps a rejected/unresolvable ref to
+        a category-SAFE ``VALIDATION`` (F4 reason: escapes-root / not-found / malformed — never the
+        root path or the ref value, master §5), then enforces the hard binary-size cap and the OOM
+        pre-flight. No byte reaches the JVM until the ref has passed all three. Shared by
+        ``import_binary`` and ``version_track`` so both confine identically.
+
+        Args:
+            source_ref: The (server-side) reference to resolve and cap.
+
+        Returns:
+            The resolved input byte size (past the hard cap + pre-flight).
+
+        Raises:
+            GhidraMcpError: ``VALIDATION`` if the ref cannot be resolved; ``LIMIT_EXCEEDED`` if over
+                the hard size cap; ``RESOURCE_EXHAUSTED`` if the reject-mode pre-flight trips.
+        """
+        try:
+            size_bytes = self._source_resolver(source_ref)
+        except (OSError, ValueError) as exc:
+            # Fail closed: the resolver signalled an unresolvable/rejected ref (OSError from a
+            # stat, or ValueError from a confined resolver rejecting a path outside its allow-list
+            # root). Map to VALIDATION with a category-SAFE detail naming the specific reason (F4:
+            # outside-root vs not-found vs malformed) so the client can self-correct — WITHOUT the
+            # resolved root path or the source_ref value (master §5). The underlying exception is
+            # chained SERVER-SIDE only. Any other exception type is a wiring/programmer bug and
+            # propagates unmasked (fail fast — topic-error-handling).
+            raw_reason = getattr(exc, "reason", None)
+            if isinstance(raw_reason, str):
+                reason = raw_reason
+            elif isinstance(exc, FileNotFoundError):
+                reason = "not-found"  # the built-in resolver's bare stat miss
+            else:
+                reason = ""
+            detail = _SOURCE_REF_DETAILS.get(reason, _DEFAULT_SOURCE_REF_DETAIL)
+            raise _errors.make_error(ErrorType.VALIDATION, detail) from exc
+        # Fail closed BEFORE the worker: an over-cap binary is rejected pre-Ghidra (TB3 DoS).
+        check_binary_size(size_bytes, self._limits)
+        # OOM pre-flight (ADR-023 D3 + ADR-029 C): may warn, reject, or be skipped per the mode.
+        self._preflight_check(size_bytes)
+        return size_bytes
+
     def import_binary(self, session_id: str, args: s.SessionImportIn) -> s.SessionInfo:
         """Import the binary into the session's worker, enforcing the size cap FIRST.
 
@@ -465,29 +509,7 @@ class RpcGhidraAdapter:
                 ``RESOURCE_EXHAUSTED`` if the pre-flight is in ``reject`` mode and the input
                 exceeds the OOM-plausible threshold.
         """
-        try:
-            size_bytes = self._source_resolver(args.source_ref)
-        except (OSError, ValueError) as exc:
-            # Fail closed: the resolver signalled an unresolvable/rejected ref (OSError from a
-            # stat, or ValueError from a confined resolver rejecting a path outside its allow-list
-            # root). Map to VALIDATION with a category-SAFE detail naming the specific reason (F4:
-            # outside-root vs not-found vs malformed) so the client can self-correct — WITHOUT the
-            # resolved root path or the source_ref value (master §5). The underlying exception is
-            # chained SERVER-SIDE only. Any other exception type is a wiring/programmer bug and
-            # propagates unmasked (fail fast — topic-error-handling).
-            raw_reason = getattr(exc, "reason", None)
-            if isinstance(raw_reason, str):
-                reason = raw_reason
-            elif isinstance(exc, FileNotFoundError):
-                reason = "not-found"  # the built-in resolver's bare stat miss
-            else:
-                reason = ""
-            detail = _SOURCE_REF_DETAILS.get(reason, _DEFAULT_SOURCE_REF_DETAIL)
-            raise _errors.make_error(ErrorType.VALIDATION, detail) from exc
-        # Fail closed BEFORE the worker: an over-cap binary is rejected pre-Ghidra (TB3 DoS).
-        check_binary_size(size_bytes, self._limits)
-        # OOM pre-flight (ADR-023 D3 + ADR-029 C): may warn, reject, or be skipped per the mode.
-        self._preflight_check(size_bytes)
+        size_bytes = self._resolve_and_cap(args.source_ref)
         params: dict[str, object] = {
             "source_ref": args.source_ref,
             "expected_sha256": args.expected_sha256,
@@ -1144,6 +1166,46 @@ class RpcGhidraAdapter:
                     "limit": a.limit,
                     "max_scan": a.max_scan,
                 },
+            )
+        )
+
+    def version_track(self, sid: str, a: s.VersionTrackIn) -> s.VersionTrackOut:
+        """Correlate functions between two confined binaries via Ghidra VT (ADR-060).
+
+        Both refs are confined + size-capped server-side BEFORE the worker is contacted (ADR-001: no
+        byte reaches the JVM until it passes the cap), reusing the same resolver/cap/pre-flight as
+        ``import_binary`` (:meth:`_resolve_and_cap`). The worker loads both fresh, analyzes both,
+        runs the (allow-listed) correlator, and wipes them — the session program is untouched. The
+        call is bounded by the (longer) analysis timeout: two imports + two analyses + a correlation
+        cost far more than a single read-only tool call.
+
+        Args:
+            sid: The session (supplies auth/scoping + the worker; not a program).
+            a: Validated ``version_track`` arguments (correlator is a closed ``Literal``).
+
+        Returns:
+            The VT matches (addresses + scores, all SAFE) with a total ``match_count`` +
+            ``truncated``.
+
+        Raises:
+            GhidraMcpError: ``VALIDATION`` / ``LIMIT_EXCEEDED`` / ``RESOURCE_EXHAUSTED`` if a ref
+                fails confinement/cap/pre-flight (per :meth:`_resolve_and_cap`).
+        """
+        # Confine + cap BOTH refs pre-Ghidra (fail closed before the worker touches either byte).
+        self._resolve_and_cap(a.source_ref_a)
+        self._resolve_and_cap(a.source_ref_b)
+        return _build_version_track(
+            self._call(
+                sid,
+                "version_track",
+                {
+                    "source_ref_a": a.source_ref_a,
+                    "source_ref_b": a.source_ref_b,
+                    "correlator": a.correlator,
+                    "min_confidence": a.min_confidence,
+                    "limit": a.limit,
+                },
+                timeout_s=self._analysis_timeout_s,
             )
         )
 
@@ -2592,6 +2654,27 @@ def _build_find_similar_functions(r: dict[str, Any]) -> s.FindSimilarFunctionsOu
         target_address=str(r["target_address"]),
         matches=[_build_similar_function(m) for m in r.get("matches", [])],
         functions_scanned=int(r["functions_scanned"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
+def _build_version_match(r: dict[str, Any]) -> s.VersionMatch:
+    """Build one :class:`VersionMatch` (ADR-060) — addresses + computed scores, all SAFE."""
+    return s.VersionMatch(
+        source_address=str(r["source_address"]),
+        destination_address=str(r["destination_address"]),
+        similarity=float(r["similarity"]),
+        confidence=float(r["confidence"]),
+    )
+
+
+@_fail_closed
+def _build_version_track(r: dict[str, Any]) -> s.VersionTrackOut:
+    """Build :class:`VersionTrackOut` (ADR-060) from a plain result — all fields SAFE."""
+    return s.VersionTrackOut(
+        matches=[_build_version_match(m) for m in r.get("matches", [])],
+        match_count=int(r["match_count"]),
         truncated=bool(r.get("truncated", False)),
     )
 

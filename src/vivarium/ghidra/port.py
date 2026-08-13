@@ -165,6 +165,14 @@ class GhidraPort(Protocol):
         """Rank the program's functions by BSim similarity to a target (read-only — ADR-059)."""
         ...
 
+    def version_track(self, sid: str, a: s.VersionTrackIn) -> s.VersionTrackOut:
+        """Correlate functions between two confined binaries (read-only — ADR-060).
+
+        Both refs are confined + size-capped server-side; the two programs are loaded fresh in the
+        session's worker, analyzed, VT-correlated, then wiped. The session program is untouched.
+        """
+        ...
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         ...

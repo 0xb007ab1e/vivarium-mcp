@@ -376,6 +376,21 @@ class PyGhidraBackend:
             max_scan=_clamp_count(params.get("max_scan", 500)),
         )
 
+    def version_track(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Correlate functions between two confined binaries via Ghidra VT (ADR-060).
+
+        The session's own program is NOT a participant: both refs are loaded fresh in a throwaway VT
+        project inside this worker, analyzed, correlated, then released + wiped. The paths were
+        confined + size-capped by the server (ADR-001 / CWE-22 / CWE-400).
+        """
+        return self._gh_version_track(
+            source_ref_a=str(_require(params, "source_ref_a")),
+            source_ref_b=str(_require(params, "source_ref_b")),
+            correlator=str(params.get("correlator", "exact_instructions")),
+            min_confidence=float(params.get("min_confidence", 0.0)),
+            limit=_clamp_count(params.get("limit", 100)),
+        )
+
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:
         """List functions (paginated/bounded)."""
         offset, limit = _page(params)
@@ -2184,6 +2199,192 @@ class PyGhidraBackend:
             "matches": matches[:limit],
             "functions_scanned": len(candidates),
             "truncated": truncated,
+        }
+
+    #: Closed correlator allow-list (ADR-060 D4): client token -> Ghidra VT correlator factory
+    #: class name (in ``ghidra.feature.vt.api.correlator.program``). Mirrors the ``_VT_CORRELATORS``
+    #: schema Literal. NO arbitrary correlator class is instantiated from client input (CWE-470).
+    _VT_CORRELATOR_FACTORIES: ClassVar[dict[str, str]] = {
+        "exact_instructions": "ExactMatchInstructionsProgramCorrelatorFactory",
+        "exact_bytes": "ExactMatchBytesProgramCorrelatorFactory",
+        "exact_mnemonics": "ExactMatchMnemonicsProgramCorrelatorFactory",
+        "duplicate_function": "DuplicateFunctionMatchProgramCorrelatorFactory",
+    }
+
+    def _vt_load_program(
+        self, proj: Any, root: Any, path: str, name: str, consumer: str, monitor: Any
+    ) -> Any:  # pragma: no cover - JVM edge
+        """Load ``path`` fresh into ``proj`` as a WRITABLE, LOCKABLE program for VT (ADR-060).
+
+        ``pyghidra.open_program`` / ``program_loader().load()`` yield a program that is either
+        read-only OR carries a perpetual open transaction (``canLock()==False``) — VT needs to LOCK
+        both programs to snapshot them, so neither works. The fix (grounded live; how Ghidra's own
+        ``CreateAppliedExactMatchingSessionScript`` holds programs) is to load, SAVE as a project
+        domain file, close the transient builder handle, then reopen writable via
+        ``getDomainObject`` (no auto-transaction → ``canLock()==True``), and auto-analyze
+        (correlators need functions defined).
+
+        Args:
+            proj: The throwaway VT project.
+            root: The project's root folder.
+            path: The server-confined, size-capped binary path.
+            name: The in-project domain-file name for this program.
+            consumer: The domain-object consumer token (released in the caller's ``finally``).
+            monitor: A ``TaskMonitor`` for the load/analyze.
+
+        Returns:
+            A writable, analyzed ``Program`` held by ``consumer``.
+        """
+        import pyghidra
+
+        # ghidra.app.plugin.core.analysis is already missing-ignored at its first import (in the
+        # analyze path); a second ignore here would be flagged unused (mypy reports the missing
+        # module once per file).
+        from ghidra.app.plugin.core.analysis import AutoAnalysisManager
+
+        loaded = pyghidra.program_loader().source(path).project(proj).load()
+        try:
+            transient = loaded.getPrimaryDomainObject()
+            root.createFile(name, transient, monitor)  # persist as a project domain file
+            domain_file = transient.getDomainFile()
+        finally:
+            loaded.close()  # drop the transient builder handle (its consumer differs)
+        # Reopen writable + lockable (consumer, okToUpgrade=True, okToRecover=False, monitor).
+        program = domain_file.getDomainObject(consumer, True, False, monitor)
+        manager = AutoAnalysisManager.getAnalysisManager(program)
+        tx = program.startTransaction("vt-analyze")
+        try:
+            manager.reAnalyzeAll(None)
+            manager.startAnalysis(monitor)
+        finally:
+            program.endTransaction(tx, True)
+        return program
+
+    def _gh_version_track(
+        self,
+        source_ref_a: str,
+        source_ref_b: str,
+        correlator: str,
+        min_confidence: float,
+        limit: int,
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Correlate functions between two confined binaries via Ghidra Version Tracking (ADR-060).
+
+        Loads BOTH refs fresh into a throwaway VT project inside this worker (the session's own
+        program is NOT a participant — stronger isolation than ADR-060 D3's original "session =
+        source"), auto-analyzes both, runs the (allow-listed) correlator over the loaded+initialized
+        address sets, extracts the matches (addresses + similarity/confidence scores, all SAFE),
+        filters by ``min_confidence``, sorts by confidence high-to-low, caps at ``limit``, then
+        releases both programs + the VT session and wipes the throwaway project (ADR-002 store
+        discipline). Both loads + analyses + the correlation are backed by the worker wall-clock
+        kill + memory caps (ADR-004) — now covering two loaded programs.
+
+        Args:
+            source_ref_a: SOURCE binary (server-confined + size-capped path).
+            source_ref_b: DESTINATION binary (server-confined + size-capped path); VT writes match
+                markup into it — it is a throwaway, wiped here.
+            correlator: The client correlator token (checked against the allow-list map).
+            min_confidence: Minimum VT confidence (log-scale) to report.
+            limit: Maximum matches to return (sorted by confidence).
+
+        Returns:
+            ``{"matches": [{"source_address", "destination_address", "similarity", "confidence"},
+            ...], "match_count", "truncated"}`` (plain; all SAFE).
+
+        Raises:
+            WorkerError: ``validation`` if the correlator token is unknown (defense in depth);
+                ``analysis-failed`` if a program cannot be loaded/analyzed or VT fails.
+        """
+        import contextlib
+        import shutil
+        from pathlib import Path
+
+        import pyghidra
+
+        # VT may be the FIRST tool on a session (it loads its own binaries — no prior
+        # session_import), so the JVM may not be booted yet. Start it (idempotent) BEFORE importing
+        # any ``ghidra.*`` module — those live on the JVM classpath and are unimportable until the
+        # JVM is up (same pattern as the demangler, which also needs the JVM but no program).
+        pyghidra.start(verbose=False)
+
+        from ghidra.feature.vt.api.correlator import (  # type: ignore[import-not-found]
+            program as _vt_correlators,
+        )
+        from ghidra.feature.vt.api.db import VTSessionDB  # type: ignore[import-not-found]
+        from ghidra.util.task import TaskMonitor
+        from worker.dispatch import CODE_ANALYSIS_FAILED, CODE_INVALID_PARAMS, WorkerError
+
+        factory_name = self._VT_CORRELATOR_FACTORIES.get(correlator)
+        if factory_name is None:  # schema already closed this; belt-and-suspenders (CWE-20)
+            raise WorkerError(CODE_INVALID_PARAMS, "unknown correlator")
+
+        monitor = TaskMonitor.DUMMY
+        consumer = "vivarium-vt"
+        project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
+        vt_path = Path(project_dir) / "vt"
+        vt_path.mkdir(parents=True, exist_ok=True)
+        vt_dir = str(vt_path)  # pyghidra.open_project + shutil want a str path
+
+        proj_ctx = pyghidra.open_project(vt_dir, "vt", create=True)
+        proj = proj_ctx.__enter__()
+        source = dest = session = None
+        try:
+            root = proj.getProjectData().getRootFolder()
+            source = self._vt_load_program(proj, root, source_ref_a, "A", consumer, monitor)
+            dest = self._vt_load_program(proj, root, source_ref_b, "B", consumer, monitor)
+
+            factory = getattr(_vt_correlators, factory_name)()
+            src_set = source.getMemory().getLoadedAndInitializedAddressSet()
+            dst_set = dest.getMemory().getLoadedAndInitializedAddressSet()
+
+            session = VTSessionDB("vivarium-vt-session", source, dest, consumer)
+            corr = factory.createCorrelator(
+                source, src_set, dest, dst_set, factory.createDefaultOptions()
+            )
+            tx = session.startTransaction("correlate")
+            try:
+                match_set = corr.correlate(session, monitor)
+            finally:
+                session.endTransaction(tx, True)
+
+            match_count = int(match_set.getMatchCount())
+            matches: list[dict[str, Any]] = []
+            for match in match_set.getMatches():
+                confidence = float(match.getConfidenceScore().getScore())
+                if confidence < min_confidence:
+                    continue
+                matches.append(
+                    {
+                        "source_address": str(match.getSourceAddress()),
+                        "destination_address": str(match.getDestinationAddress()),
+                        "similarity": float(match.getSimilarityScore().getScore()),
+                        "confidence": confidence,
+                    }
+                )
+        except WorkerError:
+            raise
+        except Exception as exc:
+            # Any VT/analysis/load failure fails closed with a category-safe slug (the original is
+            # chained server-side only — never leak binary-derived detail; master §5 / ADR-005).
+            raise WorkerError(CODE_ANALYSIS_FAILED, "version tracking failed") from exc
+        finally:
+            # Release everything we hold, then wipe the throwaway project (ADR-002). Best-effort:
+            # a cleanup hiccup must not mask the result/error, and the worker store is wiped on
+            # evict regardless.
+            for obj in (session, dest, source):
+                if obj is not None:
+                    with contextlib.suppress(Exception):
+                        obj.release(consumer)
+            with contextlib.suppress(Exception):
+                proj_ctx.__exit__(None, None, None)
+            with contextlib.suppress(Exception):
+                shutil.rmtree(vt_dir, ignore_errors=True)
+
+        matches.sort(key=lambda m: m["confidence"], reverse=True)
+        return {
+            "matches": matches[:limit],
+            "match_count": match_count,
+            "truncated": len(matches) > limit,
         }
 
     def _gh_get_comments(

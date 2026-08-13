@@ -235,6 +235,10 @@ class FakePort:
         self._rec("find_similar_functions", sid)
         return s.FindSimilarFunctionsOut(target_address="0x401000", matches=[], functions_scanned=0)
 
+    def version_track(self, sid: str, a: s.VersionTrackIn) -> s.VersionTrackOut:
+        self._rec("version_track", sid)
+        return s.VersionTrackOut(matches=[], match_count=0)
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         self._rec("list_functions", sid)
         return s.FunctionListOut(functions=[], total=0)
@@ -482,11 +486,12 @@ def test_catalog_is_exactly_67_unique_tools() -> None:
     # read-only) + 1 v1.8 basic-block CFG (ADR-055: basic_blocks; read-only) + 1 v1.8 data-type
     # listing (ADR-056: list_data_types; read-only) + 1 v1.8 function match-hash (ADR-057:
     # function_hash; read-only) + 1 v1.8 BSim similarity (ADR-058: bsim_similarity; read-only) + 1
-    # v1.8 whole-program BSim find-similar (ADR-059: find_similar_functions; read-only) — the 15
+    # v1.8 whole-program BSim find-similar (ADR-059: find_similar_functions; read-only) + 1 v1.8
+    # two-program Version Tracking (ADR-060: version_track; read-only w.r.t. the session) — the 15
     # mutation tools GATED by per-session write-consent (the structural 9 additionally by
     # allow_structural); import is GATED identically (+ allow_struct for structural entries).
-    assert len(reg.TIER1_TOOL_NAMES) == 67
-    assert len(set(reg.TIER1_TOOL_NAMES)) == 67
+    assert len(reg.TIER1_TOOL_NAMES) == 68
+    assert len(set(reg.TIER1_TOOL_NAMES)) == 68
 
 
 def test_handler_table_matches_frozen_allow_list() -> None:
@@ -642,6 +647,16 @@ def test_find_similar_functions_validates_function_and_dispatches(ctx: reg.ToolC
     handlers = reg.build_handlers(ctx)
     out = handlers["find_similar_functions"](session_id=_VALID_SID, function="main")
     assert isinstance(out, s.FindSimilarFunctionsOut)
+
+
+def test_version_track_ensures_worker_and_dispatches(ctx: reg.ToolContext) -> None:
+    """version_track authorizes, ensures the worker (like import), and dispatches (ADR-060)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["version_track"](
+        session_id=_VALID_SID, source_ref_a="a.bin", source_ref_b="b.bin"
+    )
+    assert isinstance(out, s.VersionTrackOut)
+    assert out.match_count == 0 and out.matches == []
 
 
 def test_list_functions_validates_name_contains_when_provided(ctx: reg.ToolContext) -> None:

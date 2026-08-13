@@ -104,7 +104,7 @@ def test_catalog_count_matches_registry() -> None:
     # (ADR-040: start_decompile_stream + fetch_job_results/job_status/cancel_job) + 1 Function ID
     # library-match tool (ADR-042 Phase 1: identify_functions). The registry list is the source.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 67
+    assert len(TIER1_TOOL_NAMES) == 68
 
 
 @pytest.mark.critical
@@ -463,3 +463,43 @@ def test_find_similar_functions_bounds_and_untrusted_name() -> None:
     assert isinstance(match.name, Untrusted)
     assert match.address == "0x401010" and match.similarity == 0.95  # scalars stay bare
     assert out.functions_scanned == 42 and out.target_address == "0x401000"
+
+
+def test_version_track_bounds_correlator_and_all_safe() -> None:
+    """version_track bounds both refs + a closed correlator; all output fields are SAFE."""
+    a = s.VersionTrackIn(session_id="s", source_ref_a="a.bin", source_ref_b="b.bin")
+    # Safe defaults: exact-instructions correlator, all matches (min_confidence 0), capped at 100.
+    assert a.correlator == "exact_instructions" and a.min_confidence == 0.0 and a.limit == 100
+    with pytest.raises(ValidationError):
+        s.VersionTrackIn(session_id="s", source_ref_a="", source_ref_b="b")  # ref_a required
+    with pytest.raises(ValidationError):
+        s.VersionTrackIn(session_id="s", source_ref_a="a", source_ref_b="")  # ref_b required
+    with pytest.raises(ValidationError):
+        s.VersionTrackIn(  # correlator is a closed allow-list — arbitrary class rejected
+            session_id="s",
+            source_ref_a="a",
+            source_ref_b="b",
+            correlator="arbitrary_class",  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValidationError):
+        s.VersionTrackIn(  # confidence cannot be negative
+            session_id="s", source_ref_a="a", source_ref_b="b", min_confidence=-0.1
+        )
+    with pytest.raises(ValidationError):
+        s.VersionTrackIn(session_id="s", source_ref_a="a", source_ref_b="b", limit=10_001)  # > cap
+
+    out = s.VersionTrackOut(
+        matches=[
+            s.VersionMatch(
+                source_address="0x401000",
+                destination_address="0x401000",
+                similarity=1.0,
+                confidence=10.0,
+            )
+        ],
+        match_count=1,
+    )
+    match = out.matches[0]
+    assert match.source_address == "0x401000" and match.destination_address == "0x401000"
+    assert match.similarity == 1.0 and match.confidence == 10.0  # computed scalars, bare/SAFE
+    assert out.match_count == 1 and out.truncated is False

@@ -7,8 +7,8 @@
 > ADR-012)**, the **structural-mutation Phase A (TB7 structural, §10, ADR-013)**, and the
 > **structural-mutation Phase B — signature + data-type apply (TB7 structural Phase B, §10,
 > ADR-014)**, and (v1.2) the **annotation-persistence import boundary (TB8, §12, ADR-018)**. v1.8
-> proposes the **Version Tracking second-binary surface (TB3 delta, ADR-060 — PROPOSED, review before
-> code)**.
+> adds the **Version Tracking second-binary surface (TB3 delta, ADR-060 — ACCEPTED + IMPLEMENTED
+> 2026-08-13)**.
 > Source of truth: [`PLAN.md`](../../PLAN.md).
 > **Data classification:** the analyzed binary and all derived artifacts are **confidential** and
 > of **hostile origin** (master §5).
@@ -163,8 +163,8 @@ Likelihood × Impact → severity (master §7). "L/M/H".
 > paths** (size + configured-MiB integers only). The profile→analyzer-option mapping is pure data;
 > the JVM option-setting is the worker-only edge.
 
-> **TB3 delta — v1.8 Version Tracking: two TRANSIENT hostile binaries (ADR-060 — PROPOSED; lifecycle
-> blocker RESOLVED 2026-08-13, review before code).** `version_track` loads **two** binaries fresh into
+> **TB3 delta — v1.8 Version Tracking: two TRANSIENT hostile binaries (ADR-060 — ACCEPTED +
+> IMPLEMENTED 2026-08-13; lifecycle blocker RESOLVED).** `version_track` loads **two** binaries fresh into
 > the session's already-hardened worker and correlates their functions (patch/known-good diff). This is
 > **not a new boundary** — it is **two more inputs across TB3** (binary → analyzer). Refined from the
 > initial design: the research showed the live **session program cannot be a VT participant** (the
@@ -188,10 +188,10 @@ Likelihood × Impact → severity (master §7). "L/M/H".
 > - **Output stays safe.** Matches are `{source_address, destination_address, similarity, confidence}`
 >   — server-normalized addresses + computed scores (SAFE); the initial cut returns **no binary-derived
 >   field**. Any future function-name field MUST be untrusted-enveloped (ADR-005/TB4).
-> - **Lifecycle blocker RESOLVED.** The headless VT program lifecycle (writable + lockable) is solved
->   by opening programs from project domain files via `getDomainObject` (recipe in ADR-060); grounded
->   end-to-end (`match_count=1`, similarity 1.0). **No code lands until this delta + ADR-060 are
->   reviewed.**
+> - **Lifecycle blocker RESOLVED + built.** The headless VT program lifecycle (writable + lockable) is
+>   solved by opening programs from project domain files via `getDomainObject` (recipe in ADR-060);
+>   grounded end-to-end (`match_count=1`, similarity 1.0) and now shipped as tool #68, re-proven by the
+>   gated `test_version_track.py` live-regression hard gate.
 
 ### TB4 — Worker → Server → LLM (untrusted output)
 | STRIDE | Threat | L×I | Mitigation |

@@ -1,7 +1,9 @@
 # ADR-060: Version Tracking — two-program function matching (`version_track`)
 
-- **Status:** **Proposed** (2026-08-13). Design + threat-model FIRST, per the operator's decision;
-  **no code lands until this ADR + the TB3 delta are reviewed.**
+- **Status:** **Accepted + Implemented** (2026-08-13). Design + threat-model were done first (per the
+  operator's decision); the tool is now built, wired across all surfaces, and **live-proven on the
+  real worker** (`match_count=1`, `{00010054↔00010054, similarity 1.0, confidence 10.0}` for two
+  identical ARM ELFs via the `exact_instructions` correlator). See the implementation record below.
 - **Date:** 2026-08-13
 - **Deciders:** Human operator (chose "design + ADR first" over building it blind); assistant grounded
   the feasibility + drafted the design.
@@ -187,7 +189,34 @@ are analyzed (correlators need functions defined) — bounded by the wall-clock 
   returns the function match (source↔destination address) with a high score; a program with no shared
   function returns no matches. Abuse: an oversized second binary is rejected before load.
 
-## Rollout
+## Implementation record (2026-08-13)
 
-**None yet** — this is a Proposed design. On acceptance of this ADR + the TB3 delta, implementation
-follows as its own gated increment. No behavior changes until then.
+Built as tool #68 (`version_track`), read-only w.r.t. the session, wired across every surface:
+
+- **Schema** (`schemas.py`): `VersionTrackIn{source_ref_a, source_ref_b, correlator, min_confidence,
+  limit}` with the closed `_VT_CORRELATORS` Literal (`exact_instructions`/`exact_bytes`/
+  `exact_mnemonics`/`duplicate_function`); `VersionMatch{source_address, destination_address,
+  similarity, confidence}` + `VersionTrackOut{matches, match_count, truncated}` — all fields SAFE
+  (addresses + computed scores; no binary-derived names in the initial cut, so no envelope needed).
+- **Server adapter** (`rpc_client.py`): both refs confined + size-capped + OOM-pre-flighted via the
+  shared `_resolve_and_cap` helper (extracted from `import_binary`, so both confine IDENTICALLY —
+  CWE-22/CWE-400) BEFORE the worker is contacted; the call is bounded by the (longer) **analysis
+  timeout** (two loads + two analyses + a correlation). The result builder maps plain scalars.
+- **Handler** (`registry.py`): owner-scoped `authorize` + `ensure_worker` (a capability gated like
+  `session_import`; NOT write-consent — no session mutation). Added to `TIER1_TOOL_NAMES` (68) and
+  the `_HANDLERS` table; **not** in `WRITE_TOOLS`.
+- **Worker** (`_jvm_bridge.py` `_gh_version_track`): starts the JVM (VT may be the first tool on a
+  session — no prior import), loads **both** refs fresh via the lockable domain-file path
+  (`_vt_load_program`: `program_loader().load()` → `root.createFile` → `loaded.close()` →
+  `getDomainObject(consumer, True, False, monitor)` → `AutoAnalysisManager` analyze), builds the
+  allow-listed correlator factory by name, runs it over both loaded+initialized address sets in a
+  `VTSessionDB(...)` constructor session, extracts matches (filter `min_confidence`, sort by
+  confidence desc, cap `limit`), then **releases both programs + the session and `rmtree`s the
+  throwaway VT project** in a `finally` (ADR-002). The session's own program is never a participant.
+- **Tests:** unit schema + registry dispatch (68-count asserts bumped); a gated live integration test
+  (`test_version_track.py`) — two identical synthetic ARM ELFs must exact-instructions-match — added
+  to the `live-regression.yml` hard-gate list (floor 23→24 / 25→26 with the FID gate).
+
+The `createVTSession` lock blocker (see below) was resolved via the domain-file `getDomainObject`
+path + the `VTSessionDB` constructor; grounded live before build and re-proven by the integration
+test against the pinned worker image (via the working-tree src-mount).

@@ -72,6 +72,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "function_hash",
     "bsim_similarity",
     "find_similar_functions",
+    "version_track",
     "list_functions",
     "get_function",
     # xrefs
@@ -567,6 +568,24 @@ def _handle_find_similar_functions(
     ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.function)
     return ctx.port.find_similar_functions(args.session_id, args)
+
+
+def _handle_version_track(ctx: ToolContext, args: s.VersionTrackIn) -> s.VersionTrackOut:
+    """Correlate functions between two confined binaries via Ghidra VT (read-only — ADR-060).
+
+    Loads + analyzes TWO binaries in the session's worker (a capability, gated exactly like
+    ``session_import``: confined import root + size cap, worker-only per ADR-001), so — like import
+    — it ensures the owning principal's worker is spawned. It does NOT touch the session's own
+    program (both refs are loaded fresh + wiped), so it needs no write-consent on the session
+    (ADR-060 D3/D7). The two ``source_ref``s are confined + size-capped server-side in the adapter
+    (CWE-22/CWE-400) — the handler does not path-validate them here.
+    """
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    # Spawn the session's hardened worker if not already up (owner-scoped, ADR-017): version_track
+    # loads its own binaries and does not require a prior session_import, so the worker may not
+    # exist yet. Idempotent when a worker is already running for the session.
+    ctx.sessions.ensure_worker(args.session_id, caller=ctx.caller_id)
+    return ctx.port.version_track(args.session_id, args)
 
 
 def _handle_list_functions(ctx: ToolContext, args: s.ListFunctionsIn) -> s.FunctionListOut:
@@ -1760,6 +1779,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "function_hash": (_handle_function_hash, s.FunctionHashIn),
     "bsim_similarity": (_handle_bsim_similarity, s.BsimSimilarityIn),
     "find_similar_functions": (_handle_find_similar_functions, s.FindSimilarFunctionsIn),
+    "version_track": (_handle_version_track, s.VersionTrackIn),
     "list_functions": (_handle_list_functions, s.ListFunctionsIn),
     "get_function": (_handle_get_function, s.GetFunctionIn),
     "xrefs_to": (_handle_xrefs_to, s.XrefsIn),

@@ -89,6 +89,7 @@ RPC_METHODS = frozenset(
         "function_hash",
         "bsim_similarity",
         "find_similar_functions",
+        "version_track",
         "list_functions",
         "get_function",
         "xrefs_to",
@@ -245,6 +246,10 @@ class GhidraBackend(Protocol):
 
     def find_similar_functions(self, params: dict[str, Any]) -> dict[str, Any]:
         """Rank the program's functions by BSim similarity to a target — v1.8 (ADR-059)."""
+        ...
+
+    def version_track(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Correlate functions between two confined binaries via Ghidra VT — v1.8 (ADR-060)."""
         ...
 
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:

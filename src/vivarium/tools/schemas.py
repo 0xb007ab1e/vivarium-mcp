@@ -980,6 +980,95 @@ class FindSimilarFunctionsOut(_Out):
 
 
 # =====================================================================================
+# Version Tracking (two-program function matching)
+# =====================================================================================
+#: Closed allow-list of VT correlators (ADR-060 D4). No arbitrary correlator class is ever
+#: instantiated from client input — only these curated Ghidra correlator factories.
+_VT_CORRELATORS = Literal[
+    "exact_instructions",
+    "exact_bytes",
+    "exact_mnemonics",
+    "duplicate_function",
+]
+
+
+class VersionTrackIn(_SessionScopedIn):
+    """Arguments for ``version_track`` — two-program function matching (ADR-060).
+
+    Ghidra Version Tracking correlates functions between **two** binaries (patch analysis /
+    known-good comparison / build-to-build correspondence). Both binaries are loaded **fresh** in
+    the session's already-hardened worker via a throwaway VT project, auto-analyzed, correlated by
+    the chosen (allow-listed) correlator, then released + wiped — the session's own program is NOT a
+    participant and is never touched (ADR-060 both-fresh refinement). The ``session_id`` supplies
+    auth/scoping + the worker, not a program.
+
+    Both refs resolve through the **same confined import root** as ``session_import`` (CWE-22: no
+    arbitrary path) and are size-capped identically BEFORE any byte reaches Ghidra (CWE-400). The
+    correlation + both analyses are backed by the worker wall-clock kill (ADR-002) and container
+    memory/pids/cpu caps (ADR-004) — now covering two loaded programs.
+
+    Attributes:
+        source_ref_a: SOURCE binary — a path under ``VIVARIUM_IMPORT_ROOT`` (confined + size-capped
+            server-side). Its functions are the match origins.
+        source_ref_b: DESTINATION binary — a path under ``VIVARIUM_IMPORT_ROOT`` (confined +
+            size-capped server-side). Opened writable in the throwaway project (VT writes match
+            markup into the destination); it is wiped at the end of the call.
+        correlator: Which VT correlator to run (closed allow-list; unknown → rejected). Defaults to
+            ``"exact_instructions"``.
+        min_confidence: Minimum VT confidence score to report (default ``0.0`` = all). NOTE: VT
+            confidence is a **log-scale** score (roughly ``0..10+``), NOT a ``[0, 1]`` probability —
+            higher is stronger; hence no upper bound.
+        limit: Maximum matches to return (bounds a large match set; no silent loss — a clipped set
+            sets ``truncated``).
+    """
+
+    source_ref_a: str = Field(min_length=1, max_length=512)
+    source_ref_b: str = Field(min_length=1, max_length=512)
+    correlator: _VT_CORRELATORS = "exact_instructions"
+    min_confidence: float = Field(default=0.0, ge=0.0)
+    limit: int = Field(default=100, ge=1, le=_MAX_LIMIT)
+
+
+class VersionMatch(_Out):
+    """One VT function match between the two programs (ADR-060) — all fields SAFE.
+
+    Attributes:
+        source_address: Entry address of the matched function in ``source_ref_a`` (hex) —
+            server-normalized, safe.
+        destination_address: Entry address of the matched function in ``source_ref_b`` (hex) —
+            server-normalized, safe.
+        similarity: VT similarity score in ``[0, 1]`` (1.0 = identical) — a computed scalar, safe.
+        confidence: VT confidence score (log-scale, ``0..10+``; higher = stronger) — a computed
+            scalar, safe.
+    """
+
+    source_address: str
+    destination_address: str
+    similarity: float
+    confidence: float
+
+
+class VersionTrackOut(_Out):
+    """Result of ``version_track`` (ADR-060) — addresses + computed scores only (all SAFE).
+
+    The initial cut returns addresses + scores only (no binary-derived names), so nothing needs the
+    untrusted-data envelope. If a match ever carries a Ghidra-recovered function name, that name
+    MUST be wrapped ``Untrusted`` (ADR-005 / ADR-060 D6).
+
+    Attributes:
+        matches: Function matches passing ``min_confidence``, sorted by confidence high-to-low
+            (capped at ``limit``).
+        match_count: Total matches the correlator produced before ``min_confidence``/``limit`` — a
+            computed scalar, safe.
+        truncated: Whether ``limit`` clipped the returned match list.
+    """
+
+    matches: list[VersionMatch]
+    match_count: int
+    truncated: bool = False
+
+
+# =====================================================================================
 # Comments
 # =====================================================================================
 class GetCommentsIn(_Page):

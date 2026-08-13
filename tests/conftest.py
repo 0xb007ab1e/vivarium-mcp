@@ -402,6 +402,29 @@ class FakeGhidraPort:
             target_address="0x00401000", matches=keep, functions_scanned=2, truncated=False
         )
 
+    def version_track(self, sid: str, a: s.VersionTrackIn) -> s.VersionTrackOut:
+        """Return a deterministic two-program VT match set (all safe scalars, ADR-060)."""
+        self._maybe_fail()
+        matches = [
+            s.VersionMatch(
+                source_address="0x00401000",
+                destination_address="0x00401000",
+                similarity=1.0,
+                confidence=10.0,
+            ),
+            s.VersionMatch(
+                source_address="0x00401030",
+                destination_address="0x00401040",
+                similarity=0.9,
+                confidence=3.0,
+            ),
+        ]
+        keep = [m for m in matches if m.confidence >= a.min_confidence]
+        keep.sort(key=lambda m: m.confidence, reverse=True)
+        return s.VersionTrackOut(
+            matches=keep[: a.limit], match_count=len(matches), truncated=len(keep) > a.limit
+        )
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """Return a bounded, deterministic function summary page."""
         self._maybe_fail()
