@@ -51,6 +51,15 @@ jobs:
         # The CI scanner tools (bandit/semgrep/pip-audit) are now hash-pinned too (v1.5 #1 follow-up)
         # — rescan their lock so a new CVE in the scanner surface surfaces between PRs as well.
         run: pip-audit --strict --desc --requirement requirements-sast.lock
+      - name: pip-audit (mutation lockfile)
+        # gap Z1 (round-10): the remaining CI-only tool lockfiles (mutation, groundtruth, docs) were
+        # covered by Renovate OSV alerts but had no pip-audit belt-and-suspenders here. Rescan them
+        # too so ALL hash-pinned lockfiles get a scheduled advisory sweep, not just runtime/dev/sast.
+        run: pip-audit --strict --desc --requirement requirements-mutation.lock
+      - name: pip-audit (groundtruth lockfile)
+        run: pip-audit --strict --desc --requirement requirements-groundtruth.lock
+      - name: pip-audit (docs-site lockfile)
+        run: pip-audit --strict --desc --requirement requirements-docs.lock
 
   # --- Container image CVE rescan — rebuild from the digest-pinned Containerfiles + Trivy ---------
   # Rebuilding from the pinned bases re-materializes the exact base layers that shipped, so a new

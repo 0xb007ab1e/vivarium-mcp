@@ -74,6 +74,16 @@ required gate, and CI/docs/threat-model currency.
   (fail-closed kill+evict; LLM02 / CWE-400).
 
 ### Internal / CI / supply-chain / docs
+- **All hash-pinned lockfiles now get a scheduled pip-audit (gap Z1, round-10).** `scheduled-rescan.yml`
+  extends its advisory sweep to `requirements-{mutation,groundtruth,docs}.lock` (previously only
+  runtime/dev/sast were pip-audited; the rest relied solely on Renovate OSV alerts) — belt-and-suspenders
+  CVE detection across every dependency surface.
+- **Pages `deploy` job tightened to least-privilege (gap Z2, round-10).** Dropped the unused
+  `contents: read` from `docs-pages.yml`'s deploy job (it consumes only the prebuilt artifact; `contents`
+  now defaults to none). `pages: write` + `id-token: write` unchanged.
+- **Threat model acknowledges the Pages publishing surface (gap Z3, round-10).** Added a §4 delta for
+  `docs-pages.yml`: an info-only, non-gating CI publish surface (SHA-pinned actions, hash-pinned docs
+  deps, deploy gated to `main` so forks can't publish or reach the OIDC identity). L×L=Low.
 - **Worker-image auto-repin PR is signed, CI-triggering, and pre-verified (#258, #259, #261, #265).**
   The per-release trust-pin bump PR is now opened via a GitHub App (GitHub-signed commit + real
   `pull_request` checks so it can actually merge), gated on both `REPIN_APP_*` secrets (fail-safe

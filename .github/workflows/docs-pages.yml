@@ -61,9 +61,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      # gap Z2 (round-10): least-privilege — the deploy job consumes only the prebuilt Pages
+      # artifact (no checkout / no repo read), so `contents` stays at its default (none).
       pages: write # deploy to GitHub Pages
       id-token: write # OIDC token the deploy-pages action exchanges
-      contents: read
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
