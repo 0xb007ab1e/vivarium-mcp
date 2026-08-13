@@ -195,6 +195,56 @@ class FakePort:
         self._rec("disassemble", sid)
         return s.DisassembleOut(instructions=[])
 
+    def get_pcode(self, sid: str, a: s.GetPcodeIn) -> s.GetPcodeOut:
+        self._rec("get_pcode", sid)
+        return s.GetPcodeOut(instructions=[])
+
+    def get_high_pcode(self, sid: str, a: s.GetHighPcodeIn) -> s.GetHighPcodeOut:
+        self._rec("get_high_pcode", sid)
+        return s.GetHighPcodeOut(ops=[])
+
+    def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
+        self._rec("stack_frame", sid)
+        return s.StackFrameOut(frame_size=0, variables=[])
+
+    def basic_blocks(self, sid: str, a: s.BasicBlocksIn) -> s.BasicBlocksOut:
+        self._rec("basic_blocks", sid)
+        return s.BasicBlocksOut(blocks=[])
+
+    def list_data_types(self, sid: str, a: s.ListDataTypesIn) -> s.DataTypeListOut:
+        self._rec("list_data_types", sid)
+        return s.DataTypeListOut(data_types=[], total=0)
+
+    def function_hash(self, sid: str, a: s.FunctionHashIn) -> s.FunctionHashOut:
+        self._rec("function_hash", sid)
+        return s.FunctionHashOut(
+            address="0x401000",
+            exact_bytes="1",
+            exact_instructions="2",
+            exact_mnemonics="3",
+            instruction_count=0,
+        )
+
+    def bsim_similarity(self, sid: str, a: s.BsimSimilarityIn) -> s.BsimSimilarityOut:
+        self._rec("bsim_similarity", sid)
+        return s.BsimSimilarityOut(address_a="0x401000", address_b="0x401010", similarity=1.0)
+
+    def find_similar_functions(
+        self, sid: str, a: s.FindSimilarFunctionsIn
+    ) -> s.FindSimilarFunctionsOut:
+        self._rec("find_similar_functions", sid)
+        return s.FindSimilarFunctionsOut(target_address="0x401000", matches=[], functions_scanned=0)
+
+    def version_track(self, sid: str, a: s.VersionTrackIn) -> s.VersionTrackOut:
+        self._rec("version_track", sid)
+        return s.VersionTrackOut(matches=[], match_count=0)
+
+    def bsim_search_corpus(self, sid: str, a: s.BsimSearchCorpusIn) -> s.BsimSearchCorpusOut:
+        self._rec("bsim_search_corpus", sid)
+        return s.BsimSearchCorpusOut(
+            matches=[], target_functions_scanned=0, corpus_functions_scanned=0
+        )
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         self._rec("list_functions", sid)
         return s.FunctionListOut(functions=[], total=0)
@@ -244,6 +294,18 @@ class FakePort:
     def read_bytes(self, sid: str, a: s.ReadBytesIn) -> s.ReadBytesOut:
         self._rec("read_bytes", sid)
         return s.ReadBytesOut(address="0x401000", data=_u("deadbeef"), length=4)
+
+    def emulate(self, sid: str, a: s.EmulateIn) -> s.EmulateOut:
+        self._rec("emulate", sid)
+        return s.EmulateOut(steps_executed=1, stop_reason="halted", registers=[], memory=[])
+
+    def demangle(self, sid: str, a: s.DemangleIn) -> s.DemangleOut:
+        self._rec("demangle", sid)
+        return s.DemangleOut(demangled=_u("ns::fn(int)"), scheme="gnu")
+
+    def apply_type_archive(self, sid: str, a: s.ApplyTypeArchiveIn) -> s.ApplyTypeArchiveResult:
+        self._rec("apply_type_archive", sid)
+        return s.ApplyTypeArchiveResult(archive=a.archive, functions_updated=0, applied=True)
 
     def search_bytes(self, sid: str, a: s.SearchBytesIn) -> s.SearchBytesOut:
         self._rec("search_bytes", sid)
@@ -413,7 +475,7 @@ def ctx() -> reg.ToolContext:
     )
 
 
-def test_catalog_is_exactly_56_unique_tools() -> None:
+def test_catalog_is_exactly_67_unique_tools() -> None:
     # 22 Tier-1 + 5 v1.1 semantic-naming (ADR-007) + 8 v1.1 Tier-2 metrics (ADR-008; READ-ONLY)
     # + 1 Function ID library-match (ADR-042 Phase 1: identify_functions; READ-ONLY)
     # + 6 v1.1 mutation/write (ADR-012) + 2 v1.1 structural mutation (ADR-013 Phase A) + 2 v1.1
@@ -422,11 +484,21 @@ def test_catalog_is_exactly_56_unique_tools() -> None:
     # multi-type composite batch (ADR-021: define_types, GATED by allow_structural) + 1 v1.4
     # composite deletion (ADR-031: delete_type, session-authored only, GATED by allow_structural)
     # + 4 v1.x streaming-extraction tools (ADR-040: start_decompile_stream + fetch_job_results /
-    # job_status / cancel_job; READ-ONLY, output-only) — the 14 mutation tools GATED by per-session
-    # write-consent (the structural 8 additionally by allow_structural); import is GATED identically
-    # (+ allow_structural for structural entries).
-    assert len(reg.TIER1_TOOL_NAMES) == 56
-    assert len(set(reg.TIER1_TOOL_NAMES)) == 56
+    # job_status / cancel_job; READ-ONLY, output-only) + 1 v1.8 p-code emulation (ADR-049: emulate;
+    # READ-ONLY, program DB not mutated) + 1 v1.8 C++ demangler (ADR-050: demangle; READ-ONLY,
+    # program-independent) + 1 v1.8 bundled type-archive apply (ADR-051: apply_type_archive;
+    # structural WRITE) + 1 v1.8 p-code listing (ADR-052: get_pcode; read-only) + 1 v1.8 high (SSA)
+    # p-code (ADR-053: get_high_pcode; read-only) + 1 v1.8 stack-frame layout (ADR-054: stack_frame;
+    # read-only) + 1 v1.8 basic-block CFG (ADR-055: basic_blocks; read-only) + 1 v1.8 data-type
+    # listing (ADR-056: list_data_types; read-only) + 1 v1.8 function match-hash (ADR-057:
+    # function_hash; read-only) + 1 v1.8 BSim similarity (ADR-058: bsim_similarity; read-only) + 1
+    # v1.8 whole-program BSim find-similar (ADR-059: find_similar_functions; read-only) + 1 v1.8
+    # two-program Version Tracking (ADR-060: version_track; read-only w.r.t. the session) + 1 v1.8
+    # cross-binary BSim corpus search (ADR-062: bsim_search_corpus; read-only w.r.t. the session) —
+    # the 15 mutation tools GATED by per-session write-consent (the structural 9 additionally by
+    # allow_structural); import is GATED identically (+ allow_struct for structural entries).
+    assert len(reg.TIER1_TOOL_NAMES) == 69
+    assert len(set(reg.TIER1_TOOL_NAMES)) == 69
 
 
 def test_handler_table_matches_frozen_allow_list() -> None:
@@ -506,6 +578,104 @@ def test_disassemble_validates_function_when_provided(ctx: reg.ToolContext) -> N
     assert isinstance(out, s.DisassembleOut)
 
 
+def test_get_pcode_validates_start_and_dispatches(ctx: reg.ToolContext) -> None:
+    """get_pcode with an explicit start runs the address validator + dispatches (ADR-052)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["get_pcode"](session_id=_VALID_SID, start="0x401000")
+    assert isinstance(out, s.GetPcodeOut)
+
+
+def test_get_pcode_validates_function_and_dispatches(ctx: reg.ToolContext) -> None:
+    """get_pcode with an explicit function runs the name validator + dispatches (ADR-052)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["get_pcode"](session_id=_VALID_SID, function="main")
+    assert isinstance(out, s.GetPcodeOut)
+
+
+def test_get_pcode_requires_start_or_function(ctx: reg.ToolContext) -> None:
+    """get_pcode with neither start nor function fails closed as VALIDATION (ADR-052)."""
+    handlers = reg.build_handlers(ctx)
+    with pytest.raises(GhidraMcpError) as ei:
+        handlers["get_pcode"](session_id=_VALID_SID)
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+
+
+def test_get_high_pcode_validates_function_and_dispatches(ctx: reg.ToolContext) -> None:
+    """get_high_pcode runs the function-name validator + dispatches (ADR-053)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["get_high_pcode"](session_id=_VALID_SID, function="main")
+    assert isinstance(out, s.GetHighPcodeOut)
+
+
+def test_stack_frame_validates_function_and_dispatches(ctx: reg.ToolContext) -> None:
+    """stack_frame runs the function-name validator + dispatches (ADR-054)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["stack_frame"](session_id=_VALID_SID, function="main")
+    assert isinstance(out, s.StackFrameOut)
+
+
+def test_basic_blocks_validates_function_and_dispatches(ctx: reg.ToolContext) -> None:
+    """basic_blocks runs the function-name validator + dispatches (ADR-055)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["basic_blocks"](session_id=_VALID_SID, function="main")
+    assert isinstance(out, s.BasicBlocksOut)
+
+
+def test_list_data_types_dispatches(ctx: reg.ToolContext) -> None:
+    """list_data_types authorizes + dispatches (ADR-056)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["list_data_types"](session_id=_VALID_SID)
+    assert isinstance(out, s.DataTypeListOut)
+
+
+def test_list_data_types_validates_name_contains_when_provided(ctx: reg.ToolContext) -> None:
+    """list_data_types with a name_contains filter runs the name validator + dispatches."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["list_data_types"](session_id=_VALID_SID, name_contains="wid")
+    assert isinstance(out, s.DataTypeListOut)
+
+
+def test_function_hash_validates_function_and_dispatches(ctx: reg.ToolContext) -> None:
+    """function_hash runs the function-name validator + dispatches (ADR-057)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["function_hash"](session_id=_VALID_SID, function="main")
+    assert isinstance(out, s.FunctionHashOut)
+
+
+def test_bsim_similarity_validates_both_functions_and_dispatches(ctx: reg.ToolContext) -> None:
+    """bsim_similarity validates both function names + dispatches (ADR-058)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["bsim_similarity"](session_id=_VALID_SID, function_a="a", function_b="b")
+    assert isinstance(out, s.BsimSimilarityOut)
+
+
+def test_find_similar_functions_validates_function_and_dispatches(ctx: reg.ToolContext) -> None:
+    """find_similar_functions validates the target name + dispatches (ADR-059)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["find_similar_functions"](session_id=_VALID_SID, function="main")
+    assert isinstance(out, s.FindSimilarFunctionsOut)
+
+
+def test_version_track_ensures_worker_and_dispatches(ctx: reg.ToolContext) -> None:
+    """version_track authorizes, ensures the worker (like import), and dispatches (ADR-060)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["version_track"](
+        session_id=_VALID_SID, source_ref_a="a.bin", source_ref_b="b.bin"
+    )
+    assert isinstance(out, s.VersionTrackOut)
+    assert out.match_count == 0 and out.matches == []
+
+
+def test_bsim_search_corpus_ensures_worker_and_dispatches(ctx: reg.ToolContext) -> None:
+    """bsim_search_corpus authorizes, ensures the worker, and dispatches (ADR-062)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["bsim_search_corpus"](
+        session_id=_VALID_SID, target_ref="t.bin", reference_refs=["r0.bin", "r1.bin"]
+    )
+    assert isinstance(out, s.BsimSearchCorpusOut)
+    assert out.matches == [] and out.corpus_functions_scanned == 0
+
+
 def test_list_functions_validates_name_contains_when_provided(ctx: reg.ToolContext) -> None:
     """list_functions with a name_contains filter runs the name validator + dispatches."""
     handlers = reg.build_handlers(ctx)
@@ -525,6 +695,43 @@ def test_get_comments_validates_address_when_provided(ctx: reg.ToolContext) -> N
     handlers = reg.build_handlers(ctx)
     out = handlers["get_comments"](session_id=_VALID_SID, address="0x401000")
     assert isinstance(out, s.CommentListOut)
+
+
+def test_emulate_parse_checks_every_address_then_dispatches(ctx: reg.ToolContext) -> None:
+    """emulate parse-checks start/stop_at/write+read addresses (ADR-049) then dispatches."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["emulate"](
+        session_id=_VALID_SID,
+        start="0x401000",
+        stop_at="0x401010",
+        write_memory=[{"address": "0x402000", "data_hex": "9090"}],
+        read_registers=["RAX"],
+        read_memory=[{"address": "0x402000", "length": 4}],
+    )
+    assert isinstance(out, s.EmulateOut)
+
+
+def test_emulate_without_stop_at_dispatches(ctx: reg.ToolContext) -> None:
+    """emulate with no stop_at skips the stop-address parse-check and still dispatches (ADR-049)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["emulate"](session_id=_VALID_SID, start="0x401000", read_registers=["RAX"])
+    assert isinstance(out, s.EmulateOut)
+
+
+def test_emulate_rejects_malformed_start_address(ctx: reg.ToolContext) -> None:
+    """A malformed start address fails closed as VALIDATION before the worker (ADR-049)."""
+    handlers = reg.build_handlers(ctx)
+    with pytest.raises(GhidraMcpError) as ei:
+        handlers["emulate"](session_id=_VALID_SID, start="not-an-address")
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+
+
+def test_demangle_authorizes_then_dispatches(ctx: reg.ToolContext) -> None:
+    """demangle authorizes the session (BOLA) and dispatches, returning a DemangleOut (ADR-050)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["demangle"](session_id=_VALID_SID, mangled="_ZN3foo3barEi")
+    assert isinstance(out, s.DemangleOut)
+    assert out.scheme in ("gnu", "msvc")
 
 
 def test_caller_id_uses_static_principal_by_default() -> None:
@@ -921,6 +1128,7 @@ _EXPECTED_WRITE_TOOLS = frozenset(
         "rename_parameter",
         "set_function_signature",
         "apply_data_type",
+        "apply_type_archive",
         "define_struct",
         "define_union",
         "define_types",
@@ -964,7 +1172,7 @@ def test_write_tools_is_subset_of_catalog() -> None:
 def test_write_tools_is_exactly_the_expected_set() -> None:
     """Pin the exact write set so a new mutator (or a misclassified read tool) trips a test."""
     assert reg.WRITE_TOOLS == _EXPECTED_WRITE_TOOLS
-    assert len(reg.WRITE_TOOLS) == 15
+    assert len(reg.WRITE_TOOLS) == 16
 
 
 @pytest.mark.parametrize(
@@ -1059,6 +1267,7 @@ _GATED_WRITE_CALLS = [
     ("session_undo", {"session_id": _VALID_SID}),
     ("rename_function", {"session_id": _VALID_SID, "function": "main", "new_name": "parse"}),
     ("define_struct", {"session_id": _VALID_SID, "name": "S", "fields": []}),
+    ("apply_type_archive", {"session_id": _VALID_SID, "archive": "generic_clib_64"}),
     ("delete_type", {"session_id": _VALID_SID, "name": "S"}),
     ("session_import_annotations", {"session_id": _VALID_SID, "annotations": {}}),
 ]

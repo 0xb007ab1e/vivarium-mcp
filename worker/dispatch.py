@@ -81,6 +81,16 @@ RPC_METHODS = frozenset(
         "analyze",
         "decompile_function",
         "disassemble",
+        "get_pcode",
+        "get_high_pcode",
+        "stack_frame",
+        "basic_blocks",
+        "list_data_types",
+        "function_hash",
+        "bsim_similarity",
+        "find_similar_functions",
+        "version_track",
+        "bsim_search_corpus",
         "list_functions",
         "get_function",
         "xrefs_to",
@@ -93,6 +103,8 @@ RPC_METHODS = frozenset(
         "get_comments",
         "memory_map",
         "read_bytes",
+        "emulate",
+        "demangle",
         "search_bytes",
         "search_strings",
         "program_metadata",
@@ -120,6 +132,8 @@ RPC_METHODS = frozenset(
         # structural type-aware writes (v1.1 — ADR-014 Phase B; resolved TypeRefs, NO C parser)
         "set_function_signature",
         "apply_data_type",
+        # bundled type-archive application (v1.8 — ADR-051; allow-listed GDT, no client path)
+        "apply_type_archive",
         # composite-type creation (v1.1 — ADR-015 Phase C; resolved FieldSpec list, NO C parser)
         "define_struct",
         "define_union",
@@ -203,6 +217,46 @@ class GhidraBackend(Protocol):
         """Disassemble a bounded range or function."""
         ...
 
+    def get_pcode(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List lifted low p-code for a bounded range or function — v1.8 (ADR-052)."""
+        ...
+
+    def get_high_pcode(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a function's decompiler-refined high (SSA) p-code — v1.8 (ADR-053)."""
+        ...
+
+    def stack_frame(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a function's recovered stack-frame layout — v1.8 (ADR-054)."""
+        ...
+
+    def basic_blocks(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a function's basic blocks + successor edges — v1.8 (ADR-055)."""
+        ...
+
+    def list_data_types(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List the program's data types, paginated — v1.8 (ADR-056)."""
+        ...
+
+    def function_hash(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a function's Ghidra match-hash fingerprints — v1.8 (ADR-057)."""
+        ...
+
+    def bsim_similarity(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return the BSim cosine similarity between two functions — v1.8 (ADR-058)."""
+        ...
+
+    def find_similar_functions(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rank the program's functions by BSim similarity to a target — v1.8 (ADR-059)."""
+        ...
+
+    def version_track(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Correlate functions between two confined binaries via Ghidra VT — v1.8 (ADR-060)."""
+        ...
+
+    def bsim_search_corpus(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Cross-binary BSim search over an ephemeral reference corpus — v1.8 (ADR-062)."""
+        ...
+
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:
         """List functions (paginated/bounded)."""
         ...
@@ -249,6 +303,14 @@ class GhidraBackend(Protocol):
 
     def read_bytes(self, params: dict[str, Any]) -> dict[str, Any]:
         """Bounded raw byte read."""
+        ...
+
+    def emulate(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Bounded p-code emulation (ADR-049)."""
+        ...
+
+    def demangle(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Resolve a mangled C++ symbol to a readable name (ADR-050)."""
         ...
 
     def search_bytes(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -324,6 +386,10 @@ class GhidraBackend(Protocol):
 
     def apply_data_type(self, params: dict[str, Any]) -> dict[str, Any]:
         """Apply a resolvable type at an address inside a transaction — v1.1."""
+        ...
+
+    def apply_type_archive(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Apply a bundled Ghidra Data Type archive inside a transaction — v1.8 (ADR-051)."""
         ...
 
     # --- composite-type creation (v1.1 — ADR-015 Phase C; resolved FieldSpec list, one txn) ---

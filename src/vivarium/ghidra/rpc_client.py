@@ -110,6 +110,41 @@ WorkerLauncher = Callable[[str, str], WorkerProcess]
 SourceResolver = Callable[[str], int]
 
 
+class SourceRefError(OSError):
+    """A ``source_ref`` the resolver rejected, tagged with a category-safe ``reason`` (F4).
+
+    Subclasses :class:`OSError` so the existing ``except (OSError, ValueError)`` in
+    :meth:`RpcGhidraAdapter.import_binary` still catches it; the ``reason`` selects a specific,
+    content-free ``VALIDATION`` detail (see :data:`_SOURCE_REF_DETAILS`) so the client can tell
+    *outside-the-root* from *not-found* from *malformed* — actionable without leaking the resolved
+    root path or the ``source_ref`` value (master §5, ADR-005).
+    """
+
+    def __init__(self, reason: str, message: str) -> None:
+        """Initialize with a category ``reason`` and a server-side (log-only) ``message``.
+
+        Args:
+            reason: One of ``escapes-root`` / ``not-found`` / ``malformed`` — selects the safe
+                client detail; an unknown reason falls back to the generic detail.
+            message: The server-side exception text (chained, never forwarded to the client).
+        """
+        super().__init__(message)
+        self.reason = reason
+
+
+#: Category-safe ``VALIDATION`` detail per resolver reject reason. Deliberately references only the
+#: documented env-var name (safe operator guidance), NEVER the resolved root path or the client's
+#: ``source_ref`` value (master §5 redaction). An unknown reason falls back to the generic detail.
+_SOURCE_REF_DETAILS: dict[str, str] = {
+    "escapes-root": "source_ref must be a path under the import root (VIVARIUM_IMPORT_ROOT)",
+    "not-found": "source_ref was not found under the import root (VIVARIUM_IMPORT_ROOT)",
+    "malformed": "source_ref is not a valid path",
+}
+#: Fallback when the resolver signalled a reject without a recognized reason (e.g. the default
+#: built-in resolver's bare stat failure) — the original pre-F4 content-free detail.
+_DEFAULT_SOURCE_REF_DETAIL = "input reference could not be resolved"
+
+
 # --- Tier-2 internal scan budgets (ADR-008; bounded BEFORE the worker — std-cwe CWE-400) -----
 #: How many defined strings ``ioc_scan`` pulls in one bounded page before scanning (the worker also
 #: clamps; ``truncated`` is honest when more exist). Sized to a generous-but-bounded triage window.
@@ -403,6 +438,50 @@ class RpcGhidraAdapter:
         with contextlib.suppress(Exception):
             sess.worker.kill()
 
+    def _resolve_and_cap(self, source_ref: str) -> int:
+        """Confine + size-cap a ``source_ref`` server-side, pre-Ghidra (ADR-001 / CWE-22 / CWE-400).
+
+        Resolves the ref through the injected confined resolver, maps a rejected/unresolvable ref to
+        a category-SAFE ``VALIDATION`` (F4 reason: escapes-root / not-found / malformed — never the
+        root path or the ref value, master §5), then enforces the hard binary-size cap and the OOM
+        pre-flight. No byte reaches the JVM until the ref has passed all three. Shared by
+        ``import_binary`` and ``version_track`` so both confine identically.
+
+        Args:
+            source_ref: The (server-side) reference to resolve and cap.
+
+        Returns:
+            The resolved input byte size (past the hard cap + pre-flight).
+
+        Raises:
+            GhidraMcpError: ``VALIDATION`` if the ref cannot be resolved; ``LIMIT_EXCEEDED`` if over
+                the hard size cap; ``RESOURCE_EXHAUSTED`` if the reject-mode pre-flight trips.
+        """
+        try:
+            size_bytes = self._source_resolver(source_ref)
+        except (OSError, ValueError) as exc:
+            # Fail closed: the resolver signalled an unresolvable/rejected ref (OSError from a
+            # stat, or ValueError from a confined resolver rejecting a path outside its allow-list
+            # root). Map to VALIDATION with a category-SAFE detail naming the specific reason (F4:
+            # outside-root vs not-found vs malformed) so the client can self-correct — WITHOUT the
+            # resolved root path or the source_ref value (master §5). The underlying exception is
+            # chained SERVER-SIDE only. Any other exception type is a wiring/programmer bug and
+            # propagates unmasked (fail fast — topic-error-handling).
+            raw_reason = getattr(exc, "reason", None)
+            if isinstance(raw_reason, str):
+                reason = raw_reason
+            elif isinstance(exc, FileNotFoundError):
+                reason = "not-found"  # the built-in resolver's bare stat miss
+            else:
+                reason = ""
+            detail = _SOURCE_REF_DETAILS.get(reason, _DEFAULT_SOURCE_REF_DETAIL)
+            raise _errors.make_error(ErrorType.VALIDATION, detail) from exc
+        # Fail closed BEFORE the worker: an over-cap binary is rejected pre-Ghidra (TB3 DoS).
+        check_binary_size(size_bytes, self._limits)
+        # OOM pre-flight (ADR-023 D3 + ADR-029 C): may warn, reject, or be skipped per the mode.
+        self._preflight_check(size_bytes)
+        return size_bytes
+
     def import_binary(self, session_id: str, args: s.SessionImportIn) -> s.SessionInfo:
         """Import the binary into the session's worker, enforcing the size cap FIRST.
 
@@ -430,26 +509,43 @@ class RpcGhidraAdapter:
                 ``RESOURCE_EXHAUSTED`` if the pre-flight is in ``reject`` mode and the input
                 exceeds the OOM-plausible threshold.
         """
-        try:
-            size_bytes = self._source_resolver(args.source_ref)
-        except (OSError, ValueError) as exc:
-            # Fail closed: the resolver signalled an unresolvable/rejected ref (OSError from a
-            # stat, or ValueError from a confined resolver rejecting a path outside its allow-list
-            # root). Map to VALIDATION with a fixed, content-free detail; the underlying exception
-            # is chained SERVER-SIDE only (never forwarded to the client — master §5). Any other
-            # exception type is a wiring/programmer bug and propagates unmasked (fail fast —
-            # topic-error-handling).
-            raise _errors.make_error(
-                ErrorType.VALIDATION, "input reference could not be resolved"
-            ) from exc
-        # Fail closed BEFORE the worker: an over-cap binary is rejected pre-Ghidra (TB3 DoS).
-        check_binary_size(size_bytes, self._limits)
-        # OOM pre-flight (ADR-023 D3 + ADR-029 C): may warn, reject, or be skipped per the mode.
-        self._preflight_check(size_bytes)
+        size_bytes = self._resolve_and_cap(args.source_ref)
+        params: dict[str, object] = {
+            "source_ref": args.source_ref,
+            "expected_sha256": args.expected_sha256,
+        }
+        # Loader hints: only attach when explicitly opted in (loader != 'auto'). When loader='auto'
+        # (the default) NO extra key crosses the wire — params are byte-for-byte identical to the
+        # pre-ADR-045 auto path (the ADR-029/030 no-op guarantee). The schema has already validated
+        # the hint combination + the processor allow-list server-side.
+        if args.loader == "binary":
+            params["loader"] = args.loader
+            params["processor"] = args.processor
+            params["base_addr"] = args.base_addr
+            if args.entry is not None:
+                params["entry"] = args.entry
+        elif args.loader in ("intel-hex", "motorola-hex"):
+            # ADR-046: hex loaders take addresses from the records — only loader + processor cross.
+            params["loader"] = args.loader
+            params["processor"] = args.processor
+        elif args.loader in ("dex", "apk"):
+            # ADR-047: self-describing formats — force the loader; the format supplies everything.
+            params["loader"] = args.loader
+        elif args.loader == "macho":
+            # ADR-047 force + ADR-048 optional fat-slice selection via `processor`.
+            params["loader"] = args.loader
+            if args.processor is not None:
+                params["processor"] = args.processor
+        # ADR-061 companion PDB (opt-in; loader='auto' only, enforced by the schema): confine +
+        # size-cap the PDB with the SAME resolver/cap/pre-flight as the binary (no byte reaches the
+        # JVM until it passes), then thread it. Absent → no key crosses (byte-for-byte no-op).
+        if args.pdb_ref is not None:
+            self._resolve_and_cap(args.pdb_ref)
+            params["pdb_ref"] = args.pdb_ref
         result = self._call(
             session_id,
             "import_binary",
-            {"source_ref": args.source_ref, "expected_sha256": args.expected_sha256},
+            params,
             timeout_s=self._tool_timeout_s,
         )
         info = _validate(s.SessionInfo, result)
@@ -1012,6 +1108,152 @@ class RpcGhidraAdapter:
             )
         )
 
+    def get_pcode(self, sid: str, a: s.GetPcodeIn) -> s.GetPcodeOut:
+        """List lifted low p-code for a bounded range or function (ADR-052)."""
+        return _build_get_pcode(
+            self._tool_call(
+                sid,
+                "get_pcode",
+                {"start": a.start, "function": a.function, "max_instructions": a.max_instructions},
+            )
+        )
+
+    def get_high_pcode(self, sid: str, a: s.GetHighPcodeIn) -> s.GetHighPcodeOut:
+        """Return a function's decompiler-refined high (SSA) p-code (ADR-053)."""
+        return _build_get_high_pcode(
+            self._tool_call(sid, "get_high_pcode", {"function": a.function, "max_ops": a.max_ops})
+        )
+
+    def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
+        """Return a function's recovered stack-frame layout (ADR-054)."""
+        return _build_stack_frame(self._tool_call(sid, "stack_frame", {"function": a.function}))
+
+    def basic_blocks(self, sid: str, a: s.BasicBlocksIn) -> s.BasicBlocksOut:
+        """Return a function's basic blocks + successor edges (ADR-055)."""
+        return _build_basic_blocks(
+            self._tool_call(
+                sid, "basic_blocks", {"function": a.function, "max_blocks": a.max_blocks}
+            )
+        )
+
+    def list_data_types(self, sid: str, a: s.ListDataTypesIn) -> s.DataTypeListOut:
+        """List the program's data types, paginated (ADR-056)."""
+        return _build_data_type_list(
+            self._tool_call(
+                sid,
+                "list_data_types",
+                {"offset": a.offset, "limit": a.limit, "name_contains": a.name_contains},
+            )
+        )
+
+    def function_hash(self, sid: str, a: s.FunctionHashIn) -> s.FunctionHashOut:
+        """Return a function's Ghidra match-hash fingerprints (ADR-057)."""
+        return _build_function_hash(self._tool_call(sid, "function_hash", {"function": a.function}))
+
+    def bsim_similarity(self, sid: str, a: s.BsimSimilarityIn) -> s.BsimSimilarityOut:
+        """Return the BSim cosine similarity between two functions (ADR-058)."""
+        return _build_bsim_similarity(
+            self._tool_call(
+                sid, "bsim_similarity", {"function_a": a.function_a, "function_b": a.function_b}
+            )
+        )
+
+    def find_similar_functions(
+        self, sid: str, a: s.FindSimilarFunctionsIn
+    ) -> s.FindSimilarFunctionsOut:
+        """Rank the program's functions by BSim similarity to a target (ADR-059)."""
+        return _build_find_similar_functions(
+            self._tool_call(
+                sid,
+                "find_similar_functions",
+                {
+                    "function": a.function,
+                    "min_similarity": a.min_similarity,
+                    "limit": a.limit,
+                    "max_scan": a.max_scan,
+                },
+            )
+        )
+
+    def version_track(self, sid: str, a: s.VersionTrackIn) -> s.VersionTrackOut:
+        """Correlate functions between two confined binaries via Ghidra VT (ADR-060).
+
+        Both refs are confined + size-capped server-side BEFORE the worker is contacted (ADR-001: no
+        byte reaches the JVM until it passes the cap), reusing the same resolver/cap/pre-flight as
+        ``import_binary`` (:meth:`_resolve_and_cap`). The worker loads both fresh, analyzes both,
+        runs the (allow-listed) correlator, and wipes them — the session program is untouched. The
+        call is bounded by the (longer) analysis timeout: two imports + two analyses + a correlation
+        cost far more than a single read-only tool call.
+
+        Args:
+            sid: The session (supplies auth/scoping + the worker; not a program).
+            a: Validated ``version_track`` arguments (correlator is a closed ``Literal``).
+
+        Returns:
+            The VT matches (addresses + scores, all SAFE) with a total ``match_count`` +
+            ``truncated``.
+
+        Raises:
+            GhidraMcpError: ``VALIDATION`` / ``LIMIT_EXCEEDED`` / ``RESOURCE_EXHAUSTED`` if a ref
+                fails confinement/cap/pre-flight (per :meth:`_resolve_and_cap`).
+        """
+        # Confine + cap BOTH refs pre-Ghidra (fail closed before the worker touches either byte).
+        self._resolve_and_cap(a.source_ref_a)
+        self._resolve_and_cap(a.source_ref_b)
+        return _build_version_track(
+            self._call(
+                sid,
+                "version_track",
+                {
+                    "source_ref_a": a.source_ref_a,
+                    "source_ref_b": a.source_ref_b,
+                    "correlator": a.correlator,
+                    "min_confidence": a.min_confidence,
+                    "limit": a.limit,
+                },
+                timeout_s=self._analysis_timeout_s,
+            )
+        )
+
+    def bsim_search_corpus(self, sid: str, a: s.BsimSearchCorpusIn) -> s.BsimSearchCorpusOut:
+        """Cross-binary BSim search over an ephemeral reference corpus (ADR-062).
+
+        Confines + size-caps the target AND every reference ref (the same resolver/cap/pre-flight as
+        ``import_binary`` — no byte reaches the JVM until it passes) BEFORE the worker is contacted,
+        then issues the RPC bounded by the (longer) analysis timeout: N+1 loads + analyses + the
+        BSim comparison cost far more than one read-only tool call.
+
+        Args:
+            sid: The session (supplies auth/scoping + the worker; not a program).
+            a: Validated ``bsim_search_corpus`` arguments.
+
+        Returns:
+            The per-target best cross-binary matches (names Untrusted; addresses/scores SAFE) with
+            scan counts + ``truncated``.
+
+        Raises:
+            GhidraMcpError: ``VALIDATION`` / ``LIMIT_EXCEEDED`` / ``RESOURCE_EXHAUSTED`` if the
+                target or a reference fails confinement/cap/pre-flight (:meth:`_resolve_and_cap`).
+        """
+        # Confine + cap the target and EVERY reference pre-Ghidra (fail closed before the worker).
+        self._resolve_and_cap(a.target_ref)
+        for ref in a.reference_refs:
+            self._resolve_and_cap(ref)
+        return _build_bsim_search_corpus(
+            self._call(
+                sid,
+                "bsim_search_corpus",
+                {
+                    "target_ref": a.target_ref,
+                    "reference_refs": list(a.reference_refs),
+                    "min_similarity": a.min_similarity,
+                    "limit": a.limit,
+                    "max_scan": a.max_scan,
+                },
+                timeout_s=self._analysis_timeout_s,
+            )
+        )
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         return _build_function_list(
@@ -1088,6 +1330,35 @@ class RpcGhidraAdapter:
         """Bounded raw byte read."""
         return _build_read_bytes(
             self._tool_call(sid, "read_bytes", {"address": a.address, "length": a.length})
+        )
+
+    def emulate(self, sid: str, a: s.EmulateIn) -> s.EmulateOut:
+        """Bounded p-code emulation (ADR-049)."""
+        return _build_emulate(
+            self._tool_call(
+                sid,
+                "emulate",
+                {
+                    "start": a.start,
+                    "set_registers": a.set_registers,
+                    "write_memory": [
+                        {"address": w.address, "data_hex": w.data_hex}
+                        for w in (a.write_memory or [])
+                    ],
+                    "max_steps": a.max_steps,
+                    "stop_at": a.stop_at,
+                    "read_registers": a.read_registers,
+                    "read_memory": [
+                        {"address": r.address, "length": r.length} for r in (a.read_memory or [])
+                    ],
+                },
+            )
+        )
+
+    def demangle(self, sid: str, a: s.DemangleIn) -> s.DemangleOut:
+        """Resolve a mangled C++ symbol to a readable name (ADR-050)."""
+        return _build_demangle(
+            self._tool_call(sid, "demangle", {"mangled": a.mangled, "scheme": a.scheme})
         )
 
     def search_bytes(self, sid: str, a: s.SearchBytesIn) -> s.SearchBytesOut:
@@ -1586,6 +1857,12 @@ class RpcGhidraAdapter:
                     "clear_existing": a.clear_existing,
                 },
             )
+        )
+
+    def apply_type_archive(self, sid: str, a: s.ApplyTypeArchiveIn) -> s.ApplyTypeArchiveResult:
+        """Apply a bundled Ghidra Data Type archive (structural — ADR-051)."""
+        return _build_apply_type_archive_result(
+            self._tool_call(sid, "apply_type_archive", {"archive": a.archive})
         )
 
     # --- composite-type creation (v1.1 — ADR-015 Phase C; structured FieldSpec params) ---
@@ -2291,6 +2568,187 @@ def _build_disassemble(r: dict[str, Any]) -> s.DisassembleOut:
 
 
 @_fail_closed
+def _build_pcode_instruction(r: dict[str, Any]) -> s.PcodeInstruction:
+    """Build a :class:`PcodeInstruction`: mnemonic + p-code ops are GHIDRA-lifted (untrusted)."""
+    return s.PcodeInstruction(
+        address=str(r["address"]),
+        mnemonic=_w(r["mnemonic"], DataOrigin.GHIDRA),
+        pcode=[_w(op, DataOrigin.GHIDRA) for op in r.get("pcode", [])],
+    )
+
+
+@_fail_closed
+def _build_get_pcode(r: dict[str, Any]) -> s.GetPcodeOut:
+    """Build :class:`GetPcodeOut` (ADR-052) from a plain result."""
+    return s.GetPcodeOut(
+        instructions=[_build_pcode_instruction(i) for i in r.get("instructions", [])],
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
+def _build_high_pcode_op(r: dict[str, Any]) -> s.HighPcodeOp:
+    """Build one :class:`HighPcodeOp`: the rendered op is decompiler-derived (untrusted)."""
+    return s.HighPcodeOp(address=str(r["address"]), op=_w(r["op"], DataOrigin.GHIDRA))
+
+
+@_fail_closed
+def _build_get_high_pcode(r: dict[str, Any]) -> s.GetHighPcodeOut:
+    """Build :class:`GetHighPcodeOut` (ADR-053) from a plain result."""
+    return s.GetHighPcodeOut(
+        ops=[_build_high_pcode_op(o) for o in r.get("ops", [])],
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
+def _build_stack_variable(r: dict[str, Any]) -> s.StackVariable:
+    """Build one :class:`StackVariable`: name + data_type are binary/Ghidra-derived (untrusted)."""
+    return s.StackVariable(
+        name=_w(r["name"], DataOrigin.GHIDRA),
+        stack_offset=int(r["stack_offset"]),
+        data_type=_w(r["data_type"], DataOrigin.BINARY),
+        size=int(r["size"]),
+        is_parameter=bool(r["is_parameter"]),
+    )
+
+
+@_fail_closed
+def _build_stack_frame(r: dict[str, Any]) -> s.StackFrameOut:
+    """Build :class:`StackFrameOut` (ADR-054) from a plain result."""
+    return s.StackFrameOut(
+        frame_size=int(r["frame_size"]),
+        variables=[_build_stack_variable(v) for v in r.get("variables", [])],
+    )
+
+
+@_fail_closed
+def _build_basic_block(r: dict[str, Any]) -> s.BasicBlock:
+    """Build one :class:`BasicBlock`: all fields are server-normalized addresses/counts (safe)."""
+    return s.BasicBlock(
+        address=str(r["address"]),
+        end_address=str(r["end_address"]),
+        size=int(r["size"]),
+        successors=[str(sx) for sx in r.get("successors", [])],
+    )
+
+
+@_fail_closed
+def _build_basic_blocks(r: dict[str, Any]) -> s.BasicBlocksOut:
+    """Build :class:`BasicBlocksOut` (ADR-055) from a plain result."""
+    return s.BasicBlocksOut(
+        blocks=[_build_basic_block(b) for b in r.get("blocks", [])],
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
+def _build_data_type_summary(r: dict[str, Any]) -> s.DataTypeSummary:
+    """Build one :class:`DataTypeSummary`: the type name is binary/library-derived (untrusted)."""
+    return s.DataTypeSummary(
+        name=_w(r["name"], DataOrigin.BINARY), kind=str(r["kind"]), size=int(r["size"])
+    )
+
+
+@_fail_closed
+def _build_data_type_list(r: dict[str, Any]) -> s.DataTypeListOut:
+    """Build :class:`DataTypeListOut` (ADR-056) from a plain result."""
+    return s.DataTypeListOut(
+        data_types=[_build_data_type_summary(d) for d in r.get("data_types", [])],
+        total=int(r["total"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
+def _build_function_hash(r: dict[str, Any]) -> s.FunctionHashOut:
+    """Build :class:`FunctionHashOut` (ADR-057) — all fields SAFE (opaque digests / scalars)."""
+    return s.FunctionHashOut(
+        address=str(r["address"]),
+        exact_bytes=str(r["exact_bytes"]),
+        exact_instructions=str(r["exact_instructions"]),
+        exact_mnemonics=str(r["exact_mnemonics"]),
+        instruction_count=int(r["instruction_count"]),
+    )
+
+
+@_fail_closed
+def _build_bsim_similarity(r: dict[str, Any]) -> s.BsimSimilarityOut:
+    """Build :class:`BsimSimilarityOut` (ADR-058) — addresses + a computed score, all SAFE."""
+    return s.BsimSimilarityOut(
+        address_a=str(r["address_a"]),
+        address_b=str(r["address_b"]),
+        similarity=float(r["similarity"]),
+    )
+
+
+@_fail_closed
+def _build_similar_function(r: dict[str, Any]) -> s.SimilarFunction:
+    """Build one :class:`SimilarFunction`: name is binary-derived (untrusted); score/addr safe."""
+    return s.SimilarFunction(
+        address=str(r["address"]),
+        name=_w(r["name"], DataOrigin.BINARY),
+        similarity=float(r["similarity"]),
+    )
+
+
+@_fail_closed
+def _build_find_similar_functions(r: dict[str, Any]) -> s.FindSimilarFunctionsOut:
+    """Build :class:`FindSimilarFunctionsOut` (ADR-059) from a plain result."""
+    return s.FindSimilarFunctionsOut(
+        target_address=str(r["target_address"]),
+        matches=[_build_similar_function(m) for m in r.get("matches", [])],
+        functions_scanned=int(r["functions_scanned"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
+def _build_version_match(r: dict[str, Any]) -> s.VersionMatch:
+    """Build one :class:`VersionMatch` (ADR-060) — addresses + computed scores, all SAFE."""
+    return s.VersionMatch(
+        source_address=str(r["source_address"]),
+        destination_address=str(r["destination_address"]),
+        similarity=float(r["similarity"]),
+        confidence=float(r["confidence"]),
+    )
+
+
+@_fail_closed
+def _build_version_track(r: dict[str, Any]) -> s.VersionTrackOut:
+    """Build :class:`VersionTrackOut` (ADR-060) from a plain result — all fields SAFE."""
+    return s.VersionTrackOut(
+        matches=[_build_version_match(m) for m in r.get("matches", [])],
+        match_count=int(r["match_count"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
+def _build_corpus_match(r: dict[str, Any]) -> s.CorpusMatch:
+    """Build one :class:`CorpusMatch` (ADR-062): names are binary-derived (untrusted); rest safe."""
+    return s.CorpusMatch(
+        target_address=str(r["target_address"]),
+        target_name=_w(r["target_name"], DataOrigin.BINARY),
+        reference_index=int(r["reference_index"]),
+        reference_address=str(r["reference_address"]),
+        reference_name=_w(r["reference_name"], DataOrigin.BINARY),
+        similarity=float(r["similarity"]),
+    )
+
+
+@_fail_closed
+def _build_bsim_search_corpus(r: dict[str, Any]) -> s.BsimSearchCorpusOut:
+    """Build :class:`BsimSearchCorpusOut` (ADR-062) from a plain result."""
+    return s.BsimSearchCorpusOut(
+        matches=[_build_corpus_match(m) for m in r.get("matches", [])],
+        target_functions_scanned=int(r["target_functions_scanned"]),
+        corpus_functions_scanned=int(r["corpus_functions_scanned"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
 def _build_function_summary(r: dict[str, Any]) -> s.FunctionSummary:
     """Build one :class:`FunctionSummary`: name=BINARY; size is safe."""
     return s.FunctionSummary(
@@ -2443,6 +2901,46 @@ def _build_read_bytes(r: dict[str, Any]) -> s.ReadBytesOut:
         data=_w(r["data"], DataOrigin.BINARY, encoding="hex"),
         length=int(r["length"]),
         truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
+def _build_emulate(r: dict[str, Any]) -> s.EmulateOut:
+    """Build :class:`EmulateOut` (ADR-049): register/memory VALUES are BINARY (emulation output)."""
+    sr = str(r["stop_reason"])
+    if sr not in ("stop-address", "max-steps", "halted", "fault"):
+        sr = "fault"  # fail closed on an unexpected worker stop_reason
+    stop_reason = cast('Literal["stop-address", "max-steps", "halted", "fault"]', sr)
+    return s.EmulateOut(
+        steps_executed=int(r["steps_executed"]),
+        stop_reason=stop_reason,
+        registers=[
+            s.RegisterValue(
+                name=str(x["name"]), value=_w(x["value"], DataOrigin.BINARY, encoding="hex")
+            )
+            for x in r.get("registers", [])
+        ],
+        memory=[
+            s.MemoryRegion(
+                address=str(x["address"]),
+                data=_w(x["data"], DataOrigin.BINARY, encoding="hex"),
+                length=int(x["length"]),
+            )
+            for x in r.get("memory", [])
+        ],
+    )
+
+
+@_fail_closed
+def _build_demangle(r: dict[str, Any]) -> s.DemangleOut:
+    """Build :class:`DemangleOut` (ADR-050): the demangled name is BINARY-derived → UNTRUSTED."""
+    demangled = r.get("demangled")
+    scheme = r.get("scheme")
+    if scheme not in ("gnu", "msvc", None):
+        scheme = None  # fail closed on an unexpected worker scheme
+    return s.DemangleOut(
+        demangled=(None if demangled is None else _w(str(demangled), DataOrigin.BINARY)),
+        scheme=cast('Literal["gnu", "msvc"] | None', scheme),
     )
 
 
@@ -2849,6 +3347,16 @@ def _build_apply_data_type_result(r: dict[str, Any]) -> s.ApplyDataTypeResult:
         address=str(r["address"]),
         type_name=_w(r["type_name"], DataOrigin.BINARY),
         size=int(r["size"]),
+        applied=bool(r["applied"]),
+    )
+
+
+@_fail_closed
+def _build_apply_type_archive_result(r: dict[str, Any]) -> s.ApplyTypeArchiveResult:
+    """Build an ``ApplyTypeArchiveResult`` (ADR-051) — all fields SAFE scalars (no Untrusted)."""
+    return s.ApplyTypeArchiveResult(
+        archive=str(r["archive"]),
+        functions_updated=int(r["functions_updated"]),
         applied=bool(r["applied"]),
     )
 

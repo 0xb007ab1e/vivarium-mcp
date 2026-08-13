@@ -244,16 +244,20 @@ def _workflow_files() -> list[Path]:
     return sorted((_repo_root() / ".github" / "workflows").glob("*.yml"))
 
 
-def test_cosign_identity_regexp_is_tail_anchored_to_refs_tags() -> None:
-    """Every worker-image cosign verify anchors the identity to ``@refs/tags/`` (round-8 X7).
+def test_cosign_identity_regexp_is_anchored_to_a_ref() -> None:
+    """Every worker-image cosign verify anchors the identity to ``@refs/(heads|tags)/``.
 
-    W5 (#271) tail-anchored the cosign ``--certificate-identity-regexp`` at all verify sites so only
-    a TAG-built signature verifies (3 of 4 were loose before). Those copies are hand-maintained with
-    nothing asserting they stay anchored — the drift the doc/coverage tripwires kill elsewhere.
-    Assert any workflow verifying the worker-image identity uses the ``@refs/tags/`` form and NONE
-    uses the loose bare-``@`` form (``worker-image.yml@"``).
+    W5 (#271) tail-anchored the cosign ``--certificate-identity-regexp`` at all verify sites so a
+    LOOSE bare-``@`` no longer matches (3 of 4 were loose before). The anchor was originally
+    ``@refs/tags/`` (tag-built only), but that makes a worker-code PR unverifiable pre-release
+    (chicken-and-egg: the branch-built image is signed ``@refs/heads/<branch>`` and live-regression
+    could never trust it before a tag exists). It is now ``@refs/(heads|tags)/`` — still the strong
+    guarantee that the image was built + keyless-signed by THIS repo's ``worker-image.yml`` OIDC
+    identity from a real ref, just not requiring a release tag; the loose bare-``@`` remains
+    forbidden. Assert every worker-image cosign-verify workflow uses the anchored form and NONE the
+    loose form (``worker-image.yml@"``).
     """
-    anchored = "worker-image.yml@refs/tags/"
+    anchored = "worker-image.yml@refs/(heads|tags)/"
     loose = 'worker-image.yml@"'  # bare @ immediately followed by the closing quote (pre-W5 form)
     checked = 0
     offenders: list[str] = []
@@ -264,7 +268,7 @@ def test_cosign_identity_regexp_is_tail_anchored_to_refs_tags() -> None:
         checked += 1
         if anchored not in text or loose in text:
             offenders.append(wf.name)
-    assert not offenders, f"worker-image cosign identity not @refs/tags/-anchored in: {offenders}"
+    assert not offenders, f"cosign identity not @refs/(heads|tags)/-anchored in: {offenders}"
     assert checked >= 4, f"expected >=4 worker-image cosign verify sites, got {checked} (deleted?)"
 
 

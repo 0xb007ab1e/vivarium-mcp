@@ -180,6 +180,10 @@ class FakePort:
             name=a.name, kind="struct", size=4, field_count=len(a.fields), applied=True
         )
 
+    def apply_type_archive(self, sid: str, a: s.ApplyTypeArchiveIn) -> s.ApplyTypeArchiveResult:
+        self.calls.append(("apply_type_archive", sid))
+        return s.ApplyTypeArchiveResult(archive=a.archive, functions_updated=3, applied=True)
+
 
 def _ctx() -> reg.ToolContext:
     """Build a tool context with the write-aware fakes."""
@@ -514,3 +518,31 @@ def test_rejected_define_struct_does_not_record() -> None:
     handlers["session_enable_writes"](session_id=_VALID_SID, allow_structural=True)
     handlers["define_struct"](**_struct_in("widget_t"))
     assert _sessions(ctx).composite_targets == []
+
+
+# --- apply_type_archive (v1.8 — ADR-051; structural write) ----------------------------------
+@pytest.mark.critical
+def test_apply_type_archive_with_structural_consent_dispatches() -> None:
+    """With structural consent, apply_type_archive checks consent + dispatches (ADR-051)."""
+    ctx = _ctx()
+    handlers = reg.build_handlers(ctx)
+    handlers["session_enable_writes"](session_id=_VALID_SID, allow_structural=True)
+    out = handlers["apply_type_archive"](session_id=_VALID_SID, archive="generic_clib_64")
+    assert isinstance(out, s.ApplyTypeArchiveResult)
+    assert out.archive == "generic_clib_64"
+    assert out.applied is True
+    assert out.functions_updated == 3
+    assert _VALID_SID in _sessions(ctx).consent_checks
+    assert ("apply_type_archive", _VALID_SID) in _port(ctx).calls
+
+
+@pytest.mark.critical
+def test_apply_type_archive_without_structural_consent_is_denied() -> None:
+    """Non-structural consent is not enough — apply_type_archive needs allow_structural."""
+    ctx = _ctx()
+    handlers = reg.build_handlers(ctx)
+    handlers["session_enable_writes"](session_id=_VALID_SID)  # writes on, allow_structural=False
+    with pytest.raises(GhidraMcpError) as exc:
+        handlers["apply_type_archive"](session_id=_VALID_SID, archive="generic_clib_64")
+    assert exc.value.envelope.type is ErrorType.VALIDATION
+    assert _port(ctx).calls == []  # fail closed — no write reached the worker

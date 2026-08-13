@@ -42,6 +42,17 @@ _MAX_PARAMS = 64  # a function with >64 params is pathological; bounds construct
 _MAX_POINTER_DEPTH = 8  # sane ``****…`` cap on a TypeRef's pointer modifiers
 _MAX_ARRAY_LEN = 65_536  # bounds an array element-count; the worker confines its byte footprint too
 
+# --- p-code emulation bounds (ADR-049; hostile-code DoS guards — CWE-400) ---
+_MAX_EMULATE_STEPS = 1_000_000  # hard per-call p-code step cap (operator-ratified); wall-clock too
+_DEFAULT_EMULATE_STEPS = 100_000  # default step budget when the client omits max_steps
+_MAX_EMULATE_REGISTERS = 64  # cap on set_registers / read_registers list length
+_MAX_EMULATE_MEM_WRITE = 65_536  # cap on total pre-run memory-write bytes
+_MAX_EMULATE_MEM_REGIONS = 16  # cap on write_memory / read_memory region count
+_MAX_EMULATE_MEM_READ = 65_536  # cap on a single read_memory region length
+
+# --- demangler bound (ADR-050; a hostile mangled name is untrusted input — CWE-400/CWE-20) ---
+_MAX_MANGLED_LEN = 8_192  # cap on a mangled symbol string (heavy templates are long; bound DoS)
+
 
 class _In(BaseModel):
     """Base for tool *input* models: immutable, reject unknown fields."""
@@ -136,15 +147,141 @@ class SessionImportIn(_SessionScopedIn):
     and enforces the size cap BEFORE handing it to the worker). The client never streams arbitrary
     bytes that bypass the cap.
 
+    Loader hints (ADR-045, F1) enable importing **headerless raw/firmware images** (no ELF/PE
+    header) — the bare-metal embedded-RE case. They are **additive and opt-in**: when ``loader`` is
+    ``"auto"`` and no hint is set, the RPC params and the worker call are BYTE-FOR-BYTE identical to
+    the pre-ADR-045 auto path (the ADR-029/030 no-op guarantee). ``processor`` is validated against
+    a curated allow-list server-side (``vivarium.core.languages``) BEFORE the worker is touched
+    (CWE-20); the worker independently re-validates against the installed languages (defense in
+    depth). All hints are plain config values, not bytes.
+
     Attributes:
-        source_ref: Server-resolved reference to the input (e.g. a pre-registered upload id or an
-            allow-listed mount path). Resolution + path confinement happen server-side (CWE-22).
+        source_ref: Server-resolved reference to the input — a path under ``VIVARIUM_IMPORT_ROOT``.
+            Resolution + path confinement happen server-side (CWE-22). Rejected when it escapes the
+            import root, is missing, or exceeds the size cap.
         expected_sha256: Optional client-asserted digest; the server verifies the actual bytes
             match (integrity / wrong-file guard).
+        loader: Which Ghidra loader to drive (closed set; unknown → rejected):
+            * ``"auto"`` (default) — opinion loaders: detects ELF/PE/Mach-O/DEX/… from the header;
+              forbids all hints.
+            * ``"binary"`` — ``BinaryLoader`` for a headerless raw image; REQUIRES ``processor`` +
+              ``base_addr`` (ADR-045 F1).
+            * ``"intel-hex"`` / ``"motorola-hex"`` — ``IntelHexLoader`` / ``MotorolaHexLoader`` for
+              hex-delivered firmware (ADR-046); REQUIRE ``processor`` only — the load addresses come
+              from the hex records, so ``base_addr``/``entry`` are NOT allowed.
+            * ``"dex"`` / ``"apk"`` — force ``DexLoader`` / ``ApkLoader`` for a self-describing
+              Android DEX / APK (ADR-047); the format carries its own processor + layout, so NO
+              hints are allowed (``auto`` also loads these — the forced value pins the loader).
+            * ``"macho"`` — force ``MachoLoader`` (ADR-047); no ``base_addr``/``entry``. For a
+              **fat/universal** Mach-O, an optional allow-listed ``processor`` selects that arch
+              **slice** (ADR-048); omit it to load the default slice.
+        processor: A Ghidra ``LanguageID`` (e.g. ``"ARM:LE:32:Cortex"``, ``"x86:LE:64:default"``);
+            required by ``binary``/``intel-hex``/``motorola-hex``. Must be in the allow-list
+            (:data:`vivarium.core.languages.SUPPORTED_LANGUAGE_IDS`).
+        base_addr: Image base / load address for a raw image (``binary`` only — raw images carry no
+            header to supply it); bounded to the processor's address width.
+        entry: Optional entry-point hint (``binary`` only; a disassembly seed). If given, must be
+            ``>= base_addr`` and within the processor's address width.
+        pdb_ref: Optional **companion Microsoft PDB** for a Windows PE (ADR-061) — a second
+            server-resolved path under ``VIVARIUM_IMPORT_ROOT`` (confined + size-capped like
+            ``source_ref``). When set, the PDB's symbols/types are applied to the freshly-loaded
+            program before analysis. Allowed **only** with ``loader="auto"`` (the opinion-loaded PE
+            case); rejected with any other loader. Omit for no PDB (byte-for-byte the pre-ADR-061
+            path).
     """
 
     source_ref: str = Field(min_length=1, max_length=512)
     expected_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
+    loader: Literal["auto", "binary", "intel-hex", "motorola-hex", "dex", "macho", "apk"] = "auto"
+    processor: str | None = Field(default=None, min_length=1, max_length=128)
+    base_addr: int | None = Field(default=None, ge=0)
+    entry: int | None = Field(default=None, ge=0)
+    pdb_ref: str | None = Field(default=None, min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def _validate_loader_hints(self) -> SessionImportIn:  # noqa: C901 — one branch per loader kind
+        """Enforce the ADR-045 loader-hint rules server-side, before the worker (fail closed).
+
+        Rules:
+            * ``loader="binary"`` REQUIRES ``processor`` and ``base_addr`` (a raw image is
+              meaningless without them).
+            * ``loader="auto"`` FORBIDS any of ``processor``/``base_addr``/``entry`` — the client's
+              intent is otherwise ambiguous; no silent ignoring.
+            * ``processor`` must be in the curated allow-list (``vivarium.core.languages``).
+            * ``base_addr``/``entry`` must fit the processor's address width; ``entry`` >=
+              ``base_addr``.
+            * ``pdb_ref`` (ADR-061 companion PDB) is allowed only with ``loader="auto"``.
+
+        Returns:
+            ``self`` when the hint combination is valid.
+
+        Raises:
+            ValueError: On any violation (the server boundary maps a pydantic ``ValidationError`` to
+                a ``VALIDATION`` envelope — content-free, fail closed).
+        """
+        # Import locally to keep the schema module import-light and the dependency one-directional.
+        from vivarium.core import languages
+
+        # ADR-061: a companion PDB pairs with an opinion-loaded Windows PE. Applies to every loader
+        # branch (each returns early below), so gate it here up front — allowed only with
+        # loader="auto"; any other loader with pdb_ref set is ambiguous → rejected (fail closed).
+        if self.pdb_ref is not None and self.loader != "auto":
+            raise ValueError("pdb_ref (companion PDB) is only allowed with loader='auto'")
+
+        def _require_supported_processor() -> None:
+            if self.processor is None or not languages.is_supported_language(self.processor):
+                raise ValueError(
+                    "unsupported/absent processor: must be one of the "
+                    f"{len(languages.SUPPORTED_LANGUAGE_IDS)} installed Ghidra LanguageIDs "
+                    "(e.g. ARM:LE:32:Cortex, x86:LE:64:default, MIPS:BE:32:default, "
+                    "RISCV:LE:32:default) — see the vivarium://docs/importing resource"
+                )
+
+        # `auto` and the self-describing container loaders (ADR-047: dex/apk — the format carries
+        # its own processor + layout) take NO hints; auto lets opinion pick the loader, the named
+        # ones force it. A hint here is ambiguous → rejected, not silently ignored.
+        if self.loader in ("auto", "dex", "apk"):
+            if self.processor is not None or self.base_addr is not None or self.entry is not None:
+                raise ValueError(
+                    f"loader='{self.loader}' is self-describing; "
+                    "processor/base_addr/entry are not allowed"
+                )
+            return self
+
+        if self.loader == "macho":
+            # Self-describing, but `processor` is OPTIONAL and selects a **fat/universal slice**
+            # (ADR-048): absent → the default slice; present → the slice with that LanguageID.
+            # base_addr/entry never apply (Mach-O carries its own layout).
+            if self.base_addr is not None or self.entry is not None:
+                raise ValueError("loader='macho' does not take base_addr/entry")
+            if self.processor is not None:
+                _require_supported_processor()
+            return self
+
+        if self.loader in ("intel-hex", "motorola-hex"):
+            # Hex formats carry their own load addresses in the records, so they need only the
+            # processor; base_addr/entry are meaningless here and rejected (no silent ignoring).
+            _require_supported_processor()
+            if self.base_addr is not None or self.entry is not None:
+                raise ValueError(
+                    f"loader='{self.loader}' takes addresses from the hex records; "
+                    "base_addr/entry are not allowed"
+                )
+            return self
+
+        # loader == "binary"
+        if self.processor is None or self.base_addr is None:
+            raise ValueError("loader='binary' requires both `processor` and `base_addr`")
+        _require_supported_processor()
+        max_addr = 1 << languages.address_bits(self.processor)
+        if self.base_addr >= max_addr:
+            raise ValueError("base_addr exceeds the processor's address width")
+        if self.entry is not None:
+            if self.entry >= max_addr:
+                raise ValueError("entry exceeds the processor's address width")
+            if self.entry < self.base_addr:
+                raise ValueError("entry must be >= base_addr")
+        return self
 
 
 class SessionAnalyzeIn(_SessionScopedIn):
@@ -261,6 +398,180 @@ class DisassembleOut(_Out):
     """
 
     instructions: list[Instruction]
+    truncated: bool = False
+
+
+class GetPcodeIn(_SessionScopedIn):
+    """Arguments for ``get_pcode`` — list the lifted p-code (IR) for a range/function (ADR-052).
+
+    Read-only: it lifts each instruction to its raw (low) p-code operations — the same IR the
+    ``emulate`` interpreter steps — without executing anything. Bounded like ``disassemble``.
+
+    Attributes:
+        start: Start address (hex).
+        function: Optional function name/address to lift instead of a raw range.
+        max_instructions: Cap on instructions returned (bounded).
+    """
+
+    start: str | None = Field(default=None, max_length=_MAX_NAME)
+    function: str | None = Field(default=None, max_length=_MAX_NAME)
+    max_instructions: int = Field(default=256, ge=1, le=_MAX_LIMIT)
+
+
+class PcodeInstruction(_Out):
+    """One instruction's lifted p-code (ADR-052).
+
+    Attributes:
+        address: Instruction address (hex) — server-normalized, safe.
+        mnemonic: Instruction mnemonic — untrusted (binary-derived).
+        pcode: The instruction's low p-code operations, each rendered as text — untrusted.
+    """
+
+    address: str
+    mnemonic: Untrusted[str]
+    pcode: list[Untrusted[str]]
+
+
+class GetPcodeOut(_Out):
+    """Result of ``get_pcode`` (ADR-052).
+
+    Attributes:
+        instructions: Bounded list of instructions, each with its lifted p-code.
+        truncated: Whether the ``max_instructions`` cap clipped the result.
+    """
+
+    instructions: list[PcodeInstruction]
+    truncated: bool = False
+
+
+class GetHighPcodeIn(_SessionScopedIn):
+    """Arguments for ``get_high_pcode`` — the decompiler's refined (SSA) p-code for a function.
+
+    Read-only: it decompiles the function and returns its **high** p-code — the SSA, dead-code-
+    eliminated, constant-folded IR the decompiler builds (much closer to semantics than the raw low
+    p-code of ``get_pcode``, ADR-053). Function-scoped (a whole function is decompiled); bounded by
+    ``max_ops``.
+
+    Attributes:
+        function: Function name or entry address (hex) to decompile.
+        max_ops: Cap on high p-code operations returned (bounded).
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    max_ops: int = Field(default=256, ge=1, le=_MAX_LIMIT)
+
+
+class HighPcodeOp(_Out):
+    """One high (decompiler-refined) p-code operation (ADR-053).
+
+    Attributes:
+        address: The operation's sequence-number address (hex) — server-normalized, safe.
+        op: The operation rendered as text — untrusted (decompiler-derived).
+    """
+
+    address: str
+    op: Untrusted[str]
+
+
+class GetHighPcodeOut(_Out):
+    """Result of ``get_high_pcode`` (ADR-053).
+
+    Attributes:
+        ops: Bounded list of the function's high p-code operations.
+        truncated: Whether the ``max_ops`` cap clipped the result.
+    """
+
+    ops: list[HighPcodeOp]
+    truncated: bool = False
+
+
+class StackFrameIn(_SessionScopedIn):
+    """Arguments for ``stack_frame`` — a function's recovered stack layout (ADR-054).
+
+    Read-only: returns the function's stack-frame variables (locals + stack parameters) with their
+    offsets, names, types, and sizes, as populated by Ghidra's Stack analyzer during auto-analysis.
+    A function that has not been analyzed yet returns an empty variable list (not an error) —
+    ``session_analyze`` first for a populated frame.
+
+    Attributes:
+        function: Function name or entry address (hex).
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class StackVariable(_Out):
+    """One stack-frame variable (ADR-054).
+
+    Attributes:
+        name: The variable name — untrusted (Ghidra-recovered, e.g. ``local_c``).
+        stack_offset: The variable's frame offset — server-side scalar, safe.
+        data_type: The variable's type name — untrusted (binary-derived).
+        size: The variable size in bytes — worker scalar, safe.
+        is_parameter: Whether the offset is in the parameter region — safe.
+    """
+
+    name: Untrusted[str]
+    stack_offset: int
+    data_type: Untrusted[str]
+    size: int
+    is_parameter: bool
+
+
+class StackFrameOut(_Out):
+    """Result of ``stack_frame`` (ADR-054).
+
+    Attributes:
+        frame_size: The total stack-frame size in bytes — worker scalar, safe.
+        variables: The frame's stack variables (locals + stack parameters).
+    """
+
+    frame_size: int
+    variables: list[StackVariable]
+
+
+class BasicBlocksIn(_SessionScopedIn):
+    """Arguments for ``basic_blocks`` — a function's control-flow graph (ADR-055).
+
+    Read-only: returns the function's basic blocks (CFG nodes) with their address ranges and
+    intraprocedural successor edges, from Ghidra's ``BasicBlockModel``. Distinct from
+    ``cyclomatic_complexity`` (which returns only block/edge COUNTS) — this returns the structure.
+    Bounded by ``max_blocks``.
+
+    Attributes:
+        function: Function name or entry address (hex).
+        max_blocks: Cap on basic blocks returned (bounded).
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    max_blocks: int = Field(default=256, ge=1, le=_MAX_LIMIT)
+
+
+class BasicBlock(_Out):
+    """One control-flow basic block (ADR-055) — all fields are server-normalized addresses/counts.
+
+    Attributes:
+        address: The block's first (start) address (hex) — server-normalized, safe.
+        end_address: The block's last address (hex) — server-normalized, safe.
+        size: Number of addresses in the block — worker scalar, safe.
+        successors: Start addresses (hex) of the block's intraprocedural successors — safe.
+    """
+
+    address: str
+    end_address: str
+    size: int
+    successors: list[str]
+
+
+class BasicBlocksOut(_Out):
+    """Result of ``basic_blocks`` (ADR-055).
+
+    Attributes:
+        blocks: Bounded list of the function's basic blocks (CFG nodes + successor edges).
+        truncated: Whether the ``max_blocks`` cap clipped the result.
+    """
+
+    blocks: list[BasicBlock]
     truncated: bool = False
 
 
@@ -518,6 +829,333 @@ class DataType(_Out):
     definition: Untrusted[str]
 
 
+class ListDataTypesIn(_Page):
+    """Arguments for ``list_data_types`` — paginated, bounded (ADR-056).
+
+    Enumerates the types in the program's ``DataTypeManager`` — i.e. the types established in this
+    session (defined via ``define_struct``/``define_types``, applied via ``apply_data_type``/
+    ``apply_type_archive``, or added by analysis). It is the list-counterpart to ``get_data_type``
+    (which resolves one type by name in the same manager). Use ``get_data_type`` for a single type's
+    full rendered definition; this returns lightweight summary rows.
+
+    Attributes:
+        name_contains: Optional case-insensitive substring filter (validated; not a regex).
+    """
+
+    name_contains: str | None = Field(default=None, max_length=_MAX_NAME)
+
+
+class DataTypeSummary(_Out):
+    """Summary record for one data type (ADR-056) — no definition (fetch via get_data_type).
+
+    Attributes:
+        name: Type name — untrusted (binary/library-derived).
+        kind: Category (e.g. ``"struct"``, ``"enum"``, ``"typedef"``, ``"pointer"``) — safe.
+        size: Size in bytes — safe.
+    """
+
+    name: Untrusted[str]
+    kind: str
+    size: int
+
+
+class DataTypeListOut(_Out):
+    """Result of ``list_data_types`` (ADR-056).
+
+    Attributes:
+        data_types: Bounded list of data-type summaries.
+        total: Total matching types (for pagination) — safe count.
+        truncated: Whether the page was capped.
+    """
+
+    data_types: list[DataTypeSummary]
+    total: int
+    truncated: bool = False
+
+
+class FunctionHashIn(_SessionScopedIn):
+    """Arguments for ``function_hash`` — Ghidra's function-match fingerprints (ADR-057).
+
+    Read-only: returns a function's Ghidra-native match hashes at three granularities (the same
+    hashers behind Ghidra's function-match/diff feature). Two functions sharing a hash are dupes
+    at that granularity — the basis for finding statically-linked library copies, repeated routines,
+    or relocated/recompiled clones.
+
+    Attributes:
+        function: Function name or entry address (hex).
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class FunctionHashOut(_Out):
+    """Result of ``function_hash`` (ADR-057) — all fields SAFE (opaque digests / server scalars).
+
+    The three hashes are opaque equality tokens (Ghidra-computed 64-bit values, rendered as decimal
+    strings). Compare them across functions: equal hash ⇒ duplicate at that granularity.
+
+    Attributes:
+        address: The function's entry address (hex) — server-normalized, safe.
+        exact_bytes: Hash of the raw bytes — matches identical code WITH identical operands.
+        exact_instructions: Hash with OPERANDS MASKED — matches the same code with different
+            immediates/addresses (relocated/recompiled clones).
+        exact_mnemonics: Hash of the mnemonic sequence only — the loosest of the three.
+        instruction_count: Number of instructions hashed — worker scalar, safe.
+    """
+
+    address: str
+    exact_bytes: str
+    exact_instructions: str
+    exact_mnemonics: str
+    instruction_count: int
+
+
+class BsimSimilarityIn(_SessionScopedIn):
+    """Arguments for ``bsim_similarity`` — BSim FUZZY similarity between two functions (ADR-058).
+
+    Read-only: generates each function's BSim feature signature (via Ghidra's ``GenSignatures`` +
+    bundled ``medium`` weights) and returns their cosine similarity in ``[0, 1]``. Unlike
+    ``function_hash`` (exact match), this is a continuous score — 1.0 for identical/equivalent code,
+    lower as the functions diverge — so it finds *near*-duplicates and variant routines.
+
+    Attributes:
+        function_a: First function — name or entry address (hex).
+        function_b: Second function — name or entry address (hex).
+    """
+
+    function_a: str = Field(min_length=1, max_length=_MAX_NAME)
+    function_b: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class BsimSimilarityOut(_Out):
+    """Result of ``bsim_similarity`` (ADR-058) — all fields SAFE (addresses + a computed score).
+
+    Attributes:
+        address_a: Entry address of ``function_a`` (hex) — server-normalized, safe.
+        address_b: Entry address of ``function_b`` (hex) — server-normalized, safe.
+        similarity: BSim cosine similarity in ``[0, 1]`` (1.0 = identical) — a computed scalar.
+    """
+
+    address_a: str
+    address_b: str
+    similarity: float
+
+
+class FindSimilarFunctionsIn(_SessionScopedIn):
+    """Arguments for ``find_similar_functions`` — rank functions by BSim similarity (ADR-059).
+
+    Read-only: generates BSim feature signatures for the target and a bounded pool of the program's
+    functions (one ``GenSignatures`` scan), then returns the ones whose cosine similarity to the
+    target is ``>= min_similarity``, sorted high-to-low. This is the whole-program clone/variant
+    search built on ``bsim_similarity`` (ADR-058). NOTE: it decompiles each scanned function — cost
+    grows with ``max_scan``; the worker wall-clock kill backs it.
+
+    Attributes:
+        function: The target function — name or entry address (hex).
+        min_similarity: Minimum cosine similarity to report, in ``[0, 1]`` (default 0.7).
+        limit: Maximum matches to return (top-K after sorting).
+        max_scan: Cap on candidate functions signature-scanned (bounds the decompile cost).
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    min_similarity: float = Field(default=0.7, ge=0.0, le=1.0)
+    limit: int = Field(default=20, ge=1, le=_MAX_LIMIT)
+    max_scan: int = Field(default=500, ge=1, le=_MAX_LIMIT)
+
+
+class SimilarFunction(_Out):
+    """One BSim-similar function (ADR-059).
+
+    Attributes:
+        address: The function's entry address (hex) — server-normalized, safe.
+        name: The function name — untrusted (Ghidra-recovered / binary-derived).
+        similarity: BSim cosine similarity to the target in ``[0, 1]`` — a computed scalar, safe.
+    """
+
+    address: str
+    name: Untrusted[str]
+    similarity: float
+
+
+class FindSimilarFunctionsOut(_Out):
+    """Result of ``find_similar_functions`` (ADR-059).
+
+    Attributes:
+        target_address: The target function's entry address (hex) — safe.
+        matches: Functions with similarity ``>= min_similarity``, sorted high-to-low (capped).
+        functions_scanned: How many candidate functions were signature-scanned — safe.
+        truncated: Whether ``max_scan`` clipped the candidate pool.
+    """
+
+    target_address: str
+    matches: list[SimilarFunction]
+    functions_scanned: int
+    truncated: bool = False
+
+
+# =====================================================================================
+# Cross-binary BSim search (ephemeral corpus)
+# =====================================================================================
+#: Max reference binaries in one ``bsim_search_corpus`` call (ADR-062 D4) — bounds the N+1
+#: load/analyze cost; each ref is also individually size-capped before load.
+_MAX_CORPUS_REFS = 16
+
+
+class BsimSearchCorpusIn(_SessionScopedIn):
+    """Arguments for ``bsim_search_corpus`` — cross-binary BSim similarity (ADR-062).
+
+    Read-only w.r.t. the session: loads the target + a bounded corpus of reference binaries
+    **fresh** in the session's worker (one at a time — vectors survive each program's release),
+    BSim-signs their functions, and returns, for each target function, its best reference-corpus
+    match at similarity ``>= min_similarity``. **Ephemeral** — the corpus is exactly
+    ``reference_refs`` for this call; no persistent BSim database (ADR-062 D0, stateless-worker
+    mandate ADR-002). The session's own program is NOT a participant.
+
+    Attributes:
+        target_ref: The binary whose functions are searched — a path under ``VIVARIUM_IMPORT_ROOT``
+            (confined + size-capped server-side).
+        reference_refs: The reference corpus — 1..16 binary paths under ``VIVARIUM_IMPORT_ROOT``
+            (each confined + size-capped). Only references of the SAME address size as the target
+            contribute (ADR-062 D3); others are skipped.
+        min_similarity: Minimum BSim cosine similarity to report, in ``[0, 1]`` (default 0.7).
+        limit: Maximum matches to return (top-K after sorting by similarity).
+        max_scan: Cap on functions signature-scanned per binary (bounds the decompile cost).
+    """
+
+    target_ref: str = Field(min_length=1, max_length=512)
+    reference_refs: list[str] = Field(min_length=1, max_length=_MAX_CORPUS_REFS)
+    min_similarity: float = Field(default=0.7, ge=0.0, le=1.0)
+    limit: int = Field(default=100, ge=1, le=_MAX_LIMIT)
+    max_scan: int = Field(default=500, ge=1, le=_MAX_LIMIT)
+
+
+class CorpusMatch(_Out):
+    """One cross-binary BSim match (ADR-062): a target function ↔ a reference-corpus function.
+
+    Attributes:
+        target_address: The target function's entry address (hex) — server-normalized, safe.
+        target_name: The target function name — untrusted (Ghidra-recovered / binary-derived).
+        reference_index: 0-based index into ``reference_refs`` naming the matched reference — safe.
+        reference_address: The matched reference function's entry address (hex) — safe.
+        reference_name: The matched reference function name — untrusted (binary-derived).
+        similarity: BSim cosine similarity in ``[0, 1]`` (1.0 = identical) — computed scalar, safe.
+    """
+
+    target_address: str
+    target_name: Untrusted[str]
+    reference_index: int
+    reference_address: str
+    reference_name: Untrusted[str]
+    similarity: float
+
+
+class BsimSearchCorpusOut(_Out):
+    """Result of ``bsim_search_corpus`` (ADR-062).
+
+    Attributes:
+        matches: Best per-target-function matches at similarity ``>= min_similarity``, sorted
+            high-to-low (capped at ``limit``).
+        target_functions_scanned: How many target functions were signature-scanned — safe.
+        corpus_functions_scanned: Total reference functions signed across the (same-arch) corpus —
+            safe (a skipped mismatched-arch reference contributes zero).
+        truncated: Whether ``limit`` clipped the returned match list.
+    """
+
+    matches: list[CorpusMatch]
+    target_functions_scanned: int
+    corpus_functions_scanned: int
+    truncated: bool = False
+
+
+# =====================================================================================
+# Version Tracking (two-program function matching)
+# =====================================================================================
+#: Closed allow-list of VT correlators (ADR-060 D4). No arbitrary correlator class is ever
+#: instantiated from client input — only these curated Ghidra correlator factories.
+_VT_CORRELATORS = Literal[
+    "exact_instructions",
+    "exact_bytes",
+    "exact_mnemonics",
+    "duplicate_function",
+]
+
+
+class VersionTrackIn(_SessionScopedIn):
+    """Arguments for ``version_track`` — two-program function matching (ADR-060).
+
+    Ghidra Version Tracking correlates functions between **two** binaries (patch analysis /
+    known-good comparison / build-to-build correspondence). Both binaries are loaded **fresh** in
+    the session's already-hardened worker via a throwaway VT project, auto-analyzed, correlated by
+    the chosen (allow-listed) correlator, then released + wiped — the session's own program is NOT a
+    participant and is never touched (ADR-060 both-fresh refinement). The ``session_id`` supplies
+    auth/scoping + the worker, not a program.
+
+    Both refs resolve through the **same confined import root** as ``session_import`` (CWE-22: no
+    arbitrary path) and are size-capped identically BEFORE any byte reaches Ghidra (CWE-400). The
+    correlation + both analyses are backed by the worker wall-clock kill (ADR-002) and container
+    memory/pids/cpu caps (ADR-004) — now covering two loaded programs.
+
+    Attributes:
+        source_ref_a: SOURCE binary — a path under ``VIVARIUM_IMPORT_ROOT`` (confined + size-capped
+            server-side). Its functions are the match origins.
+        source_ref_b: DESTINATION binary — a path under ``VIVARIUM_IMPORT_ROOT`` (confined +
+            size-capped server-side). Opened writable in the throwaway project (VT writes match
+            markup into the destination); it is wiped at the end of the call.
+        correlator: Which VT correlator to run (closed allow-list; unknown → rejected). Defaults to
+            ``"exact_instructions"``.
+        min_confidence: Minimum VT confidence score to report (default ``0.0`` = all). NOTE: VT
+            confidence is a **log-scale** score (roughly ``0..10+``), NOT a ``[0, 1]`` probability —
+            higher is stronger; hence no upper bound.
+        limit: Maximum matches to return (bounds a large match set; no silent loss — a clipped set
+            sets ``truncated``).
+    """
+
+    source_ref_a: str = Field(min_length=1, max_length=512)
+    source_ref_b: str = Field(min_length=1, max_length=512)
+    correlator: _VT_CORRELATORS = "exact_instructions"
+    min_confidence: float = Field(default=0.0, ge=0.0)
+    limit: int = Field(default=100, ge=1, le=_MAX_LIMIT)
+
+
+class VersionMatch(_Out):
+    """One VT function match between the two programs (ADR-060) — all fields SAFE.
+
+    Attributes:
+        source_address: Entry address of the matched function in ``source_ref_a`` (hex) —
+            server-normalized, safe.
+        destination_address: Entry address of the matched function in ``source_ref_b`` (hex) —
+            server-normalized, safe.
+        similarity: VT similarity score in ``[0, 1]`` (1.0 = identical) — a computed scalar, safe.
+        confidence: VT confidence score (log-scale, ``0..10+``; higher = stronger) — a computed
+            scalar, safe.
+    """
+
+    source_address: str
+    destination_address: str
+    similarity: float
+    confidence: float
+
+
+class VersionTrackOut(_Out):
+    """Result of ``version_track`` (ADR-060) — addresses + computed scores only (all SAFE).
+
+    The initial cut returns addresses + scores only (no binary-derived names), so nothing needs the
+    untrusted-data envelope. If a match ever carries a Ghidra-recovered function name, that name
+    MUST be wrapped ``Untrusted`` (ADR-005 / ADR-060 D6).
+
+    Attributes:
+        matches: Function matches passing ``min_confidence``, sorted by confidence high-to-low
+            (capped at ``limit``).
+        match_count: Total matches the correlator produced before ``min_confidence``/``limit`` — a
+            computed scalar, safe.
+        truncated: Whether ``limit`` clipped the returned match list.
+    """
+
+    matches: list[VersionMatch]
+    match_count: int
+    truncated: bool = False
+
+
 # =====================================================================================
 # Comments
 # =====================================================================================
@@ -622,6 +1260,154 @@ class ReadBytesOut(_Out):
     data: Untrusted[str]
     length: int
     truncated: bool = False
+
+
+class MemWrite(_In):
+    """One pre-run memory write for ``emulate`` — stage an argument/buffer (ADR-049).
+
+    Attributes:
+        address: Destination address (hex).
+        data_hex: The bytes to write, hex-encoded (bounded; the batch total is capped too).
+    """
+
+    address: str = Field(min_length=1, max_length=_MAX_NAME)
+    data_hex: str = Field(
+        min_length=2, max_length=2 * _MAX_EMULATE_MEM_WRITE, pattern=r"^[0-9a-fA-F]+$"
+    )
+
+
+class MemRead(_In):
+    """One post-run memory range to read back for ``emulate`` (ADR-049).
+
+    Attributes:
+        address: Start address (hex).
+        length: Number of bytes to read (1..``_MAX_EMULATE_MEM_READ``).
+    """
+
+    address: str = Field(min_length=1, max_length=_MAX_NAME)
+    length: int = Field(ge=1, le=_MAX_EMULATE_MEM_READ)
+
+
+class EmulateIn(_SessionScopedIn):
+    """Arguments for ``emulate`` — bounded Ghidra p-code emulation (ADR-049).
+
+    Runs the (HOSTILE) program in Ghidra's p-code interpreter — no native execution, no syscalls, no
+    I/O; the program DB is not mutated. Bounded by ``max_steps`` (the hard step cap), the per-call
+    wall-clock kill (ADR-002), and the worker memory cap.
+
+    Attributes:
+        start: Address (hex) to begin execution (the initial PC).
+        set_registers: Optional ``{register_name: value}`` presets (e.g. args, a stack pointer).
+        write_memory: Optional pre-run memory writes (stage args/buffers); batch-total bounded.
+        max_steps: P-code step budget, clamped to ``[1, _MAX_EMULATE_STEPS]`` (default 100k).
+        stop_at: Optional address (hex); execution stops when the PC reaches it.
+        read_registers: Optional register names to return after the run.
+        read_memory: Optional memory ranges to return after the run.
+    """
+
+    start: str = Field(min_length=1, max_length=_MAX_NAME)
+    set_registers: dict[str, int] | None = None
+    write_memory: list[MemWrite] | None = None
+    max_steps: int = Field(default=_DEFAULT_EMULATE_STEPS, ge=1, le=_MAX_EMULATE_STEPS)
+    stop_at: str | None = Field(default=None, max_length=_MAX_NAME)
+    read_registers: list[str] | None = None
+    read_memory: list[MemRead] | None = None
+
+    @model_validator(mode="after")
+    def _bound_emulate(self) -> EmulateIn:
+        """Cap list lengths + the total memory-write size (CWE-400; fail closed).
+
+        Returns:
+            ``self`` when within bounds.
+
+        Raises:
+            ValueError: If any register/region list or the memory-write total exceeds its cap.
+        """
+        if self.set_registers is not None and len(self.set_registers) > _MAX_EMULATE_REGISTERS:
+            raise ValueError(f"set_registers exceeds the {_MAX_EMULATE_REGISTERS}-register cap")
+        if self.read_registers is not None and len(self.read_registers) > _MAX_EMULATE_REGISTERS:
+            raise ValueError(f"read_registers exceeds the {_MAX_EMULATE_REGISTERS}-register cap")
+        _region_lists = (("write_memory", self.write_memory), ("read_memory", self.read_memory))
+        for label, regions in _region_lists:
+            if regions is not None and len(regions) > _MAX_EMULATE_MEM_REGIONS:
+                raise ValueError(f"{label} exceeds the {_MAX_EMULATE_MEM_REGIONS}-region cap")
+        if self.write_memory is not None:
+            total = sum(len(w.data_hex) // 2 for w in self.write_memory)
+            if total > _MAX_EMULATE_MEM_WRITE:
+                raise ValueError(f"write_memory total exceeds {_MAX_EMULATE_MEM_WRITE} bytes")
+        return self
+
+
+class RegisterValue(_Out):
+    """One emulated register value (``name`` safe; ``value`` UNTRUSTED — binary-derived).
+
+    Attributes:
+        name: The register name — safe (client-supplied / program register id).
+        value: The register value, hex-encoded — UNTRUSTED (attacker-influenced emulation output).
+    """
+
+    name: str
+    value: Untrusted[str]
+
+
+class MemoryRegion(_Out):
+    """One emulated memory readback (``address`` safe; ``data`` UNTRUSTED — binary-derived).
+
+    Attributes:
+        address: Start address (hex) — safe.
+        data: The bytes, hex-encoded — UNTRUSTED (emulation output).
+        length: Number of bytes returned — safe.
+    """
+
+    address: str
+    data: Untrusted[str]
+    length: int
+
+
+class EmulateOut(_Out):
+    """Result of ``emulate`` (ADR-049).
+
+    Attributes:
+        steps_executed: Number of p-code steps run (bounded by ``max_steps``) — safe.
+        stop_reason: Why emulation stopped (closed vocabulary) — safe.
+        registers: Requested register values (each ``value`` UNTRUSTED).
+        memory: Requested memory ranges (each ``data`` UNTRUSTED).
+    """
+
+    steps_executed: int
+    stop_reason: Literal["stop-address", "max-steps", "halted", "fault"]
+    registers: list[RegisterValue]
+    memory: list[MemoryRegion]
+
+
+class DemangleIn(_SessionScopedIn):
+    """Arguments for ``demangle`` — resolve a mangled C++ symbol to a readable name (ADR-050).
+
+    The mangled string is binary-derived (a symbol lifted from the analyzed program) and therefore
+    HOSTILE input — it is bounded (``max_length``) so a crafted, deeply-nested name cannot make the
+    demangler do unbounded work; the worker wall-clock kill backs that bound. Read-only: the program
+    DB is never touched.
+
+    Attributes:
+        mangled: The mangled symbol string (bounded; treated as untrusted).
+        scheme: Which demangler to use — ``auto`` (try GNU/Itanium then MSVC), ``gnu``, or ``msvc``.
+    """
+
+    mangled: str = Field(min_length=1, max_length=_MAX_MANGLED_LEN)
+    scheme: Literal["auto", "gnu", "msvc"] = "auto"
+
+
+class DemangleOut(_Out):
+    """Result of ``demangle`` (ADR-050): ``demangled`` is UNTRUSTED — binary-derived.
+
+    Attributes:
+        demangled: The demangled signature — UNTRUSTED; ``None`` if the string is not a mangled name
+            in any tried scheme (a non-mangled input is not an error).
+        scheme: Which demangler matched (``gnu``/``msvc``), or ``None`` if nothing matched — safe.
+    """
+
+    demangled: Untrusted[str] | None = None
+    scheme: Literal["gnu", "msvc"] | None = None
 
 
 class SearchBytesIn(_Page):
@@ -1651,6 +2437,45 @@ class ApplyDataTypeResult(_Out):
     address: str
     type_name: Untrusted[str]
     size: int
+    applied: bool
+
+
+# --- bundled type-archive application (v1.8 — ADR-051; structural write, GATED by allow_structural)
+# The `archive` name is a CLOSED allow-list (no arbitrary path — CWE-22): the worker maps the name
+# to a GDT bundled in the pinned Ghidra install. Applies library function signatures to same-named
+# functions (pulling in referenced types). All result fields are SAFE (server/worker scalars — the
+# applied prototypes live in the program DB, not echoed back), so NO field is Untrusted.
+_TYPE_ARCHIVE_NAMES = Literal[
+    "generic_clib", "generic_clib_64", "windows_vs12_32", "windows_vs12_64", "mac_osx"
+]
+
+
+class ApplyTypeArchiveIn(_SessionScopedIn):
+    """Arguments for ``apply_type_archive`` — apply a bundled Ghidra Data Type archive (ADR-051).
+
+    A **structural write**: it applies library function prototypes to same-named functions (and
+    pulls in the referenced types), so it is gated by write-consent + ``allow_structural`` and
+    captured by ``session_undo``. ``archive`` is a closed allow-list — the worker resolves it to a
+    ``.gdt`` in the pinned Ghidra install; **no client-supplied path** is ever opened (CWE-22).
+
+    Attributes:
+        archive: Which bundled type library to apply (closed allow-list).
+    """
+
+    archive: _TYPE_ARCHIVE_NAMES
+
+
+class ApplyTypeArchiveResult(_Out):
+    """Result of ``apply_type_archive`` (ADR-051) — all fields SAFE (no binary-derived echo).
+
+    Attributes:
+        archive: The applied archive name — safe (the allow-listed name we validated).
+        functions_updated: Count of functions whose signature the archive changed — worker scalar.
+        applied: Whether the write committed — safe.
+    """
+
+    archive: str
+    functions_updated: int
     applied: bool
 
 

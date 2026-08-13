@@ -6,12 +6,46 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
-Continued **security-hardening / gap-remediation** (round-6 → round-9 findings, #258–#284) — **no
-new tools, no contract changes** (Tier-1 catalog stays **56**, observable behavior unchanged). A
-streaming cancel-availability fix and a concurrency guard, hostile-worker output/flood clamps, a
-daemon restart-race fix, the worker-image auto-repin trust-anchor flow made signed + CI-triggering +
-verified with the cosign trust identity tightened to tag builds, plus CI-drift tripwires, workflow
-linting promoted to a required gate, and CI/docs/threat-model currency.
+The **v1.8 capability batch** (ADR-045 … ADR-063) broadens Ghidra loader coverage and adds a set of
+read-only analysis + cross-binary tools, growing the Tier-1 catalog from **56 to 69** tools. Every
+new tool is read-only (or, for `apply_type_archive`, a consent-gated structural write) and enforces
+the standard confinement + size caps before the worker (ADR-001); each was proven live against a
+real hardened worker. Separately, the **security-hardening / gap-remediation** work continues below.
+
+### Added
+
+- **Broader `session_import` loader coverage.** Import **headerless raw/firmware images**
+  (`loader="binary"` + `processor`/`base_addr`/`entry`, ADR-045); **Intel-HEX / Motorola-SREC**
+  firmware (ADR-046); **self-describing DEX / Mach-O / APK** (force the loader, ADR-047); and select
+  a **fat/universal Mach-O arch slice** by `processor` (ADR-048). All hints are additive + opt-in —
+  with no hint the import path is byte-for-byte the pre-ADR-045 behavior. (DYLD shared-cache
+  component selection is **deferred**, fixture-blocked — ADR-063.)
+- **Companion PDB symbols at import (`pdb_ref`, ADR-061).** `session_import` accepts an optional
+  second confined + size-capped path — a Microsoft PDB — whose symbols/types are applied to the
+  freshly-loaded Windows PE before analysis (recovers real function names/types). Applied at load,
+  not a write tool.
+- **P-code emulation (`emulate`, ADR-049).** Bounded p-code interpreter (step/region/size caps);
+  no native execution, syscalls, or I/O.
+- **P-code & structure inspection tools (read-only).** `get_pcode` (low p-code — ADR-052),
+  `get_high_pcode` (high/SSA p-code — ADR-053), `stack_frame` (recovered stack layout — ADR-054),
+  `basic_blocks` (control-flow graph — ADR-055), `list_data_types` (data-type enumeration — ADR-056).
+- **C++ demangling (`demangle`, ADR-050).** Read-only, program-independent (GNU/Itanium + MSVC).
+- **Function similarity & matching tools.** `function_hash` (exact match-hashes — ADR-057),
+  `bsim_similarity` (fuzzy pairwise BSim — ADR-058), `find_similar_functions` (whole-program BSim
+  clone/variant search — ADR-059); `version_track` (two-program Version Tracking — ADR-060) and
+  `bsim_search_corpus` (cross-binary BSim over an **ephemeral** corpus — ADR-062), both read-only
+  w.r.t. the session (they load their own throwaway binaries and never touch the session program;
+  no persistent BSim database — the stateless-worker mandate is kept).
+- **Bundled type-archive application (`apply_type_archive`, ADR-051).** A consent-gated structural
+  write that applies a bundled Ghidra `.gdt` (e.g. `generic_clib_64`) to set library prototypes.
+
+Continued **security-hardening / gap-remediation** (round-6 → round-9 findings, #258–#284): **these
+hardening rounds add no tools and make no contract changes** (observable behavior unchanged; the
+catalog growth above is the v1.8 batch, not the hardening work). A streaming cancel-availability fix
+and a concurrency guard, hostile-worker output/flood clamps, a daemon restart-race fix, the
+worker-image auto-repin trust-anchor flow made signed + CI-triggering + verified with the cosign
+trust identity tightened to tag builds, plus CI-drift tripwires, workflow linting promoted to a
+required gate, and CI/docs/threat-model currency.
 
 ### Fixed
 - **Cancelling a stream frees the session at once (#260, gap V1).** `cancel_job` now drains the

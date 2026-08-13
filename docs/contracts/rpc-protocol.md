@@ -164,9 +164,34 @@ an in-flight `start_decompile_stream` promptly (on client `cancel_job`), the ser
   violation → kill + evict (§6).
 
 ### RPC methods (worker-facing; one per Ghidra-touching operation)
-`import_binary`, `analyze`, `decompile_function`, `disassemble`, `list_functions`, `get_function`,
+`import_binary`, `analyze`, `decompile_function`, `disassemble`, `get_pcode` (ADR-052 low p-code
+listing — read-only; lifts each instruction's raw p-code ops, no execution), `get_high_pcode`
+(ADR-053 high/SSA p-code — read-only; the decompiler's refined constant-folded IR for a function),
+`stack_frame` (ADR-054 recovered stack layout — read-only; the function's locals/parameters with
+offsets, types, sizes from the Stack analyzer), `basic_blocks` (ADR-055 control-flow graph —
+read-only; each basic block's address range + intraprocedural successor edges from
+`BasicBlockModel`), `function_hash` (ADR-057 function match-hashes — read-only; Ghidra's own
+exact-bytes / exact-instructions / exact-mnemonics function hashers for duplicate detection),
+`bsim_similarity` (ADR-058 BSim fuzzy similarity — read-only; cosine similarity between two
+functions' BSim feature signatures via GenSignatures + the bundled medium weights),
+`find_similar_functions` (ADR-059 whole-program BSim clone/variant search — read-only; ranks up to
+`max_scan` functions by BSim similarity to a target), `version_track` (ADR-060 two-program Version
+Tracking — read-only w.r.t. the session; confines + size-caps two refs server-side, loads BOTH
+fresh in the worker via the lockable domain-file path, auto-analyzes both, runs an allow-listed VT
+correlator, returns `{matches[]{source_address, destination_address, similarity, confidence},
+match_count, truncated}`, then releases + wipes both — the session's own program is never a
+participant), `bsim_search_corpus` (ADR-062 cross-binary BSim search over an EPHEMERAL corpus —
+read-only w.r.t. the session; confines + size-caps the target + up to 16 reference refs, loads each
+fresh one at a time, BSim-signs, returns each target function's best reference-corpus match
+`{matches[]{target_address, target_name, reference_index, reference_address, reference_name,
+similarity}, target_functions_scanned, corpus_functions_scanned, truncated}`, then wipes all — NO
+persistent DB, session program untouched), `list_functions`, `get_function`,
 `xrefs_to`, `xrefs_from`, `list_strings`, `list_symbols`, `get_symbol`, `list_data`,
-`get_data_type`, `get_comments`, `memory_map`, `read_bytes`, `search_bytes`, `search_strings`,
+`get_data_type`, `list_data_types` (ADR-056 the list-counterpart to `get_data_type` — read-only;
+paginated summary rows over the program's DataTypeManager), `get_comments`, `memory_map`, `read_bytes`,
+`emulate` (ADR-049 p-code emulation —
+bounded, read-effect-only; interpreter, no native exec/syscalls/IO), `demangle` (ADR-050 C++
+demangler — read-only, program-independent; GNU/Itanium + MSVC), `search_bytes`, `search_strings`,
 `program_metadata`, the v1.1 semantic-naming extraction primitives `call_graph` and
 `referenced_strings` (ADR-007), the v1.1 Tier-2 extraction primitives `function_cfg`, `imports`,
 `exports`, and `coverage` (ADR-008), the **Function ID library-match primitive**
@@ -184,7 +209,10 @@ write-consent and validates the inputs first), the v1.1 **structural-write primi
 **name-only**, gated additionally by `allow_structural`; same one-transaction + rollback semantics),
 `set_function_signature` and `apply_data_type` (ADR-014 Phase B — **structured** input: each `TypeRef`
 is RESOLVED against the program's `DataTypeManager` / a closed base vocab, **never parsed from a C
-string**; an unresolvable ref fails closed; same gate + transaction semantics), the v1.1
+string**; an unresolvable ref fails closed; same gate + transaction semantics), the v1.8
+**bundled type-archive apply** `apply_type_archive` (ADR-051 — applies a CLOSED-allow-list bundled
+`.gdt`'s function signatures to same-named functions; the worker resolves the archive name to a path
+in the pinned Ghidra install, NEVER a client path — CWE-22; structural, one transaction), the v1.1
 **composite-creation primitives** `define_struct` and `define_union` (ADR-015 Phase C — the empty
 composite is pre-registered in the DTM at the start of the transaction so self-`named` pointers
 resolve; a by-value self-embed is rejected, a name collision is fail-closed rejected, and the
@@ -259,6 +287,33 @@ opt-in, worker-only**: no existing field is repurposed, the client-facing `sessi
 surface gains only this additive optional field, and the **tool count is unchanged**. The flag adds
 no capability/agency — it only emits progress (ADR-001 intact); the analysis deadline is unchanged
 (§6).
+
+**`import_binary` — additive loader hints (v1.8 — ADR-045, F1; server → worker, OPTIONAL):** the
+`import_binary` RPC params MAY carry `loader` (`"binary"`) with `processor` (a Ghidra `LanguageID`),
+`base_addr` (int), and optional `entry` (int). **The default (auto) omits every key** — when no
+loader hint is requested the params are byte-for-byte identical to today's `{ "source_ref": …,
+"expected_sha256": … }` and the worker takes the unchanged opinion/container-loader path. When
+`loader = "binary"` the worker drives `BinaryLoader` with the (server-allow-listed) `processor`,
+rebases the raw image to `base_addr`, and optionally seeds `entry` — for **headerless raw/firmware
+images**. When `loader` is `"intel-hex"` or `"motorola-hex"` (ADR-046) the worker drives
+`IntelHexLoader`/`MotorolaHexLoader` with `processor` only — the hex records carry their own load
+addresses, so `base_addr`/`entry` are not sent. When `loader` is `"dex"`, `"macho"`, or `"apk"` (ADR-047) the
+worker forces `DexLoader`/`MachoLoader`/`ApkLoader` with no `processor` at all — the self-describing
+format supplies the language + layout (`auto` also detects these; the forced value pins the loader).
+A fat/universal Mach-O loads its default slice, or the slice named by an optional `processor` on `loader="macho"` (ADR-048, via the `program_loader` builder); DYLD-component selection is deferred (fixture-blocked). The server validates the hint combination + the
+`processor` allow-list + address-width bounds **before** the worker (CWE-20); the worker
+**re-validates** the language against the installed set and fails closed `not-found` if absent
+(defense in depth). **Additive, opt-in, no new capability/agency** — read-only import, no script
+execution, tool count unchanged (ADR-001 intact).
+
+**`import_binary` — companion PDB (v1.8 — ADR-061; server → worker, OPTIONAL):** the params MAY
+carry `pdb_ref` (a second server-confined + size-capped path under `VIVARIUM_IMPORT_ROOT`), allowed
+only with the auto loader (no `loader` key). When present, after the PE is loaded the worker applies
+the Microsoft PDB's symbols/types to the fresh program via Ghidra's cross-platform `pdb2` reader +
+`DefaultPdbApplicator.applyNoAnalysisState` (inside one transaction), before analysis. Both refs are
+confined + size-capped **before** the worker (CWE-22/CWE-400); a malformed/hostile PDB fails closed
+`not-found`. Absent ⇒ no key crosses the wire (byte-for-byte the pre-ADR-061 path). Applied at load,
+NOT a write tool — no write-consent, tool count unchanged.
 
 ## 5. Error model (worker → server)
 

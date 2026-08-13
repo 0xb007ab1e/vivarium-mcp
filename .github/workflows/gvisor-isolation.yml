@@ -129,7 +129,7 @@ jobs:
           WORKER_IMAGE="ghcr.io/${OWNER}/vivarium-worker@${DIGEST}"
           cosign verify \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --certificate-identity-regexp "^https://github.com/${REPO}/.github/workflows/worker-image.yml@refs/tags/" \
+            --certificate-identity-regexp "^https://github.com/${REPO}/.github/workflows/worker-image.yml@refs/(heads|tags)/" \
             "$WORKER_IMAGE"
           podman pull "$WORKER_IMAGE"
           echo "VIVARIUM_WORKER_IMAGE=$WORKER_IMAGE" >> "$GITHUB_ENV"

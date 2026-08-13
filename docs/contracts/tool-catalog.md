@@ -2,25 +2,38 @@
 
 > Pydantic source of truth: [`src/vivarium/tools/schemas.py`](../../src/vivarium/tools/schemas.py).
 > Allow-list registry: [`src/vivarium/tools/registry.py`](../../src/vivarium/tools/registry.py).
-> **Read-by-default.** 41 of the 56 tools are read-only; the **15 mutation/write tools** below are
+> **Read-by-default.** 53 of the 69 tools are read-only; the **16 mutation/write tools** below are
 > **default-deny**, gated by per-session write-consent (`session_enable_writes`) — structural writes
 > additionally by `allow_structural`. **`runScript`/arbitrary script execution is permanently out of
 > scope** (PLAN §2), and the tool surface is a **fixed allow-list** (no dynamic registration).
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **56** tools (asserted in tests by
-  `len(TIER1_TOOL_NAMES) == 56`). The breakdown:
-  22 Tier-1 read-only (v1) + 5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
+- **Allow-list only:** the catalog is fixed; there are exactly **69** tools (asserted in tests by
+  `len(TIER1_TOOL_NAMES) == 69`). The breakdown:
+  22 Tier-1 read-only (v1) + **1 p-code emulation tool (ADR-049: `emulate`; read-effect-only)** +
+  **1 p-code listing tool (ADR-052: `get_pcode`; read-only)** +
+  **1 high (SSA) p-code tool (ADR-053: `get_high_pcode`; read-only)** +
+  **1 stack-frame tool (ADR-054: `stack_frame`; read-only)** +
+  **1 basic-block CFG tool (ADR-055: `basic_blocks`; read-only)** +
+  **1 data-type listing tool (ADR-056: `list_data_types`; read-only)** +
+  **1 function match-hash tool (ADR-057: `function_hash`; read-only)** +
+  **1 BSim similarity tool (ADR-058: `bsim_similarity`; read-only)** +
+  **1 whole-program BSim find-similar tool (ADR-059: `find_similar_functions`; read-only)** +
+  **1 two-program Version Tracking tool (ADR-060: `version_track`; read-only w.r.t. the session)** +
+  **1 cross-binary BSim corpus search tool (ADR-062: `bsim_search_corpus`; read-only w.r.t. the session)** +
+  **1 C++ demangler tool (ADR-050: `demangle`; read-only, program-independent)** +
+  5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
   reporting/metrics tools (ADR-008; all read-only) + **1 Function ID library-match tool (ADR-042
-  Phase 1: `identify_functions`; read-only)** + **6 v1.1 mutation/write tools (ADR-012) + 8
+  Phase 1: `identify_functions`; read-only)** + **6 v1.1 mutation/write tools (ADR-012) + 9
   structural-write tools (ADR-013 Phase A + ADR-014 Phase B + ADR-015 Phase C + ADR-021 batch
-  `define_types` + ADR-031 `delete_type`)** + **4 v1.x streaming-extraction tools (ADR-040:
-  `start_decompile_stream` + the generic `fetch_job_results`/`job_status`/`cancel_job`;
-  read-only, output-only)** + **2 v1.2 annotation-persistence tools (ADR-018:
-  `session_export_annotations` read-only + `session_import_annotations` GATED)**. That is **41
-  read-only + 15 mutation/write** (the 15 = the 6 ADR-012 write tools + the 8 structural-write tools
-  + the gated `session_import_annotations`; it matches the `WRITE_TOOLS` frozenset in `registry.py`).
+  `define_types` + ADR-031 `delete_type` + ADR-051 `apply_type_archive`)** + **4 v1.x
+  streaming-extraction tools (ADR-040: `start_decompile_stream` + the generic
+  `fetch_job_results`/`job_status`/`cancel_job`; read-only, output-only)** + **2 v1.2
+  annotation-persistence tools (ADR-018: `session_export_annotations` read-only +
+  `session_import_annotations` GATED)**. That is **53 read-only + 16 mutation/write** (the 16 = the 6
+  ADR-012 write tools + the 9 structural-write tools + the gated `session_import_annotations`; it
+  matches the `WRITE_TOOLS` frozenset in `registry.py`).
   Every write tool is GATED by per-session write-consent (structural additionally by
   `allow_structural`); import is GATED identically (and additionally by `allow_structural` when any
   imported entry is structural).
@@ -39,7 +52,7 @@
 | Tool | Input | Output | Notes |
 |------|-------|--------|-------|
 | `session_create` | `SessionCreateIn{label?}` | `SessionInfo` | opaque CSPRNG id; no worker yet; cap-checked |
-| `session_import` | `SessionImportIn{source_ref, expected_sha256?}` | `SessionInfo` | size cap enforced **before** Ghidra; digest verified; path confined |
+| `session_import` | `SessionImportIn{source_ref, expected_sha256?, loader?, processor?, base_addr?, entry?, pdb_ref?}` | `SessionInfo` | size cap enforced **before** Ghidra; digest verified; path confined (`source_ref` is a path under `VIVARIUM_IMPORT_ROOT`). **Loader hints (ADR-045, F1) are additive + opt-in:** `loader` (`auto`/`binary`, default `auto`) — `auto` drives the opinion/container loaders (ELF/PE) **byte-for-byte as before**; `binary` drives `BinaryLoader` for a **headerless raw/firmware image** and REQUIRES `processor` (a Ghidra `LanguageID` in the allow-list `vivarium.core.languages` — the full installed set, e.g. `ARM:LE:32:Cortex`, `x86:LE:64:default`, `MIPS:BE:32:default`, `RISCV:LE:32:default`) + `base_addr` (image base, bounded to the processor's address width); optional `entry` (entry-point seed, `>= base_addr`). **Hex loaders (ADR-046):** `intel-hex`/`motorola-hex` drive `IntelHexLoader`/`MotorolaHexLoader` for hex-delivered firmware — REQUIRE `processor` only; `base_addr`/`entry` are rejected (the records carry their own addresses). **Self-describing (ADR-047):** `dex`/`macho`/`apk` force `DexLoader`/`MachoLoader`/`ApkLoader` for Android DEX / Mach-O / APK — NO hints allowed (the format carries processor + layout; `auto` also detects these). **Fat-Mach-O slice (ADR-048):** an optional allow-listed `processor` on `loader="macho"` selects that arch slice (via the `program_loader` builder); omit for the default slice. DYLD-component selection is fixture-blocked (deferred). **Companion PDB (ADR-061):** an optional `pdb_ref` (a second confined + size-capped path under `VIVARIUM_IMPORT_ROOT`, `loader="auto"` only) applies a Microsoft PDB's symbols/types to the freshly-loaded PE **before** analysis (Ghidra's cross-platform `pdb2` reader → `DefaultPdbApplicator.applyNoAnalysisState`); a hostile/malformed PDB fails closed `not-found`. Not a write tool (applied at load, no write-consent). Hints are validated **server-side before the worker** (allow-list + width bounds, CWE-20); the worker re-validates the language against the installed set (defense in depth) and fails closed `not-found`. No hint set ⇒ byte-for-byte the pre-ADR-045 path |
 | `session_analyze` | `SessionAnalyzeIn{timeout_seconds?, profile?, progress?}` | `SessionInfo` | bounded by analysis timeout → kills worker on expiry; `profile` (`default`/`light`/`deep`, ADR-029 B) is **additive** — `default` is a byte-for-byte no-op; `light` trades depth for speed/heap, `deep` adds depth; reduces/adjusts depth only (no new capability). `progress` (bool, default `false`, ADR-030 Phase 1) is **additive + opt-in** — `true` emits bounded, redacted worker→server `$/progress` notifications (percent + closed phase enum only) relayed to the **server log only** (Phase 1); default `false` is byte-for-byte today's single-frame exchange; the analysis deadline is **not** extended by progress. **Client progress (ADR-030 Phase 2):** when the MCP client supplies a standard `progressToken` (MCP `_meta`), the server streams each frame to the client as a `notifications/progress` (percent out of 100; closed-vocab phase as the message) — no extra arg needed (a token implies progress, so the server forces worker emission on). **No token ⇒ byte-for-byte the pre-Phase-2 path** (inline, no client relay) |
 | `session_status` | `_SessionScopedIn{session_id}` | `SessionInfo` | state/TTL; no binary content |
 | `session_close` | `SessionCloseIn{session_id}` | `SessionCloseOut{store_wiped}` | kill worker + **verified wipe** (ADR-002) |
@@ -63,6 +76,15 @@
 |------|-------|--------|
 | `decompile_function` | `DecompileFunctionIn{function}` | `DecompiledFunction{address, name*, c_code*, signature*}` |
 | `disassemble` | `DisassembleIn{start?, function?, max_instructions≤10000}` | `DisassembleOut{instructions[], truncated}` |
+| `get_pcode` | `GetPcodeIn{start?, function?, max_instructions≤10000}` | `GetPcodeOut{instructions[]{address, mnemonic*, pcode[]*}, truncated}` | **ADR-052** p-code (IR) listing (read-only). Lifts each instruction to its raw low p-code ops (`Instruction.getPcode()`) — the SAME IR `emulate` interprets — WITHOUT executing anything; program DB untouched. Bounded like `disassemble` (+ a per-instruction op cap). `mnemonic` + each `pcode` op are `*`=UNTRUSTED (Ghidra-lifted) |
+| `get_high_pcode` | `GetHighPcodeIn{function, max_ops≤10000}` | `GetHighPcodeOut{ops[]{address, op*}, truncated}` | **ADR-053** high (SSA) p-code (read-only). Decompiles the function and returns its REFINED IR (`HighFunction.getPcodeOps()`) — SSA + dead-code-eliminated + constant-folded (e.g. `mov eax,5; add eax,3` → a single `COPY 0x8`). Between `get_pcode` (raw IR) and `decompile_function` (C). Read-only; decompiler disposed per call. Each `op` is `*`=UNTRUSTED (decompiler-derived) |
+| `stack_frame` | `StackFrameIn{function}` | `StackFrameOut{frame_size, variables[]{name*, stack_offset, data_type*, size, is_parameter}}` | **ADR-054** recovered stack layout (read-only). Reads `Function.getStackFrame()` — the locals + stack parameters the Stack analyzer populated during auto-analysis (offset, name, type, size). An un-analyzed function returns an empty list (not an error — `session_analyze` first). `name` + `data_type` are `*`=UNTRUSTED (Ghidra/binary-derived); offsets/sizes are safe scalars |
+| `basic_blocks` | `BasicBlocksIn{function, max_blocks≤10000}` | `BasicBlocksOut{blocks[]{address, end_address, size, successors[]}, truncated}` | **ADR-055** control-flow graph (read-only). Walks `BasicBlockModel` over the function and returns each basic block's address range + intraprocedural successor edges (the CFG STRUCTURE — vs `cyclomatic_complexity`, which returns only counts). All fields are server-normalized addresses/counts — nothing untrusted (no instruction text) |
+| `function_hash` | `FunctionHashIn{function}` | `FunctionHashOut{address, exact_bytes, exact_instructions, exact_mnemonics, instruction_count}` | **ADR-057** function match-hashes (read-only). Ghidra's OWN function hashers (behind its function-match/diff): `exact_bytes` (identical code+operands), `exact_instructions` (OPERANDS MASKED — matches relocated/recompiled clones), `exact_mnemonics` (mnemonic sequence). Two functions sharing a hash are duplicates at that granularity — find statically-linked lib copies / repeated routines. Hashes are opaque decimal-string equality tokens; all fields SAFE |
+| `bsim_similarity` | `BsimSimilarityIn{function_a, function_b}` | `BsimSimilarityOut{address_a, address_b, similarity}` | **ADR-058** BSim FUZZY similarity (read-only). Generates each function's BSim feature signature (`GenSignatures` + the bundled `medium_32/64` weights) and returns their cosine `similarity` in `[0,1]` (1.0 = identical) — the *continuous* counterpart to `function_hash`'s exact match, for near-duplicates / variant routines. Decompiles both functions but does NOT mutate; bounded to two functions. All fields SAFE (addresses + a computed score) |
+| `find_similar_functions` | `FindSimilarFunctionsIn{function, min_similarity=0.7, limit=20, max_scan=500}` | `FindSimilarFunctionsOut{target_address, matches[]{address, name*, similarity}, functions_scanned, truncated}` | **ADR-059** whole-program BSim clone/variant search (read-only). One `GenSignatures` scan of the target + up to `max_scan` functions, ranked by cosine similarity ≥ `min_similarity` (top `limit`). Built on `bsim_similarity`. Decompiles each scanned function (cost ∝ `max_scan`, wall-clock-bounded) but does NOT mutate. Only each match `name` is `*`=UNTRUSTED; addresses/score/counts are SAFE |
+| `version_track` | `VersionTrackIn{source_ref_a, source_ref_b, correlator=exact_instructions, min_confidence=0.0, limit=100}` | `VersionTrackOut{matches[]{source_address, destination_address, similarity, confidence}, match_count, truncated}` | **ADR-060** two-program Version Tracking (read-only w.r.t. the session). Loads BOTH refs FRESH in the session's worker (the session's own program is NOT a participant — untouched), auto-analyzes both, runs the chosen (closed allow-list: `exact_instructions`/`exact_bytes`/`exact_mnemonics`/`duplicate_function`) VT correlator over their loaded+initialized address sets, returns function matches filtered by `min_confidence` (log-scale) sorted high-to-low (top `limit`), then RELEASES + WIPES both programs. Both refs confined + size-capped server-side (CWE-22/CWE-400); gated like `session_import` (capability), NOT write-consent (no session mutation). All fields SAFE (addresses + computed scores) |
+| `bsim_search_corpus` | `BsimSearchCorpusIn{target_ref, reference_refs[1..16], min_similarity=0.7, limit=100, max_scan=500}` | `BsimSearchCorpusOut{matches[]{target_address, target_name*, reference_index, reference_address, reference_name*, similarity}, target_functions_scanned, corpus_functions_scanned, truncated}` | **ADR-062** cross-binary BSim search over an EPHEMERAL corpus (read-only w.r.t. the session). Loads the target + a bounded (≤16) reference corpus FRESH in the session's worker one at a time (BSim vectors survive each program's release — memory bounded), BSim-signs each with the target's `medium_NN` weights, and returns each target function's best reference match at cosine similarity ≥ `min_similarity` (top `limit`), then WIPES everything. **No persistent DB** (ADR-062 D0; stateless mandate ADR-002 intact) — the corpus is exactly `reference_refs`. References of a different address size than the target are skipped (D3). All refs confined + size-capped server-side (CWE-22/CWE-400); gated like `session_import` (capability), NOT write-consent. Only match `*`=names are UNTRUSTED; addresses/index/score/counts SAFE |
 | `list_functions` | `ListFunctionsIn{offset, limit≤10000, name_contains?}` | `FunctionListOut{functions[], total, truncated}` |
 | `get_function` | `GetFunctionIn{function}` | `FunctionDetail{address, name*, signature*, size, is_thunk, calling_convention*?}` |
 
@@ -80,6 +102,7 @@
 | `get_symbol` | `GetSymbolIn{identifier}` | `Symbol{address, name*, kind, namespace*?}` |
 | `list_data` | `ListDataIn{offset, limit}` | `DataListOut{data[], total, truncated}` |
 | `get_data_type` | `GetDataTypeIn{name}` | `DataType{name*, kind, size, definition*}` |
+| `list_data_types` | `ListDataTypesIn{offset, limit, name_contains?}` | `DataTypeListOut{data_types[]{name*, kind, size}, total, truncated}` | **ADR-056** the list-counterpart to `get_data_type` (read-only). Enumerates the program `DataTypeManager` — the types established in THIS session (defined via `define_struct`/`define_types`, applied via `apply_data_type`/`apply_type_archive`, or analysis-added); a fresh program's manager is empty. Lightweight summary rows (no rendered definition — fetch that per type via `get_data_type`). `name` is `*`=UNTRUSTED; kind/size are safe |
 
 ### Comments (read-only)
 | Tool | Input | Output |
@@ -91,7 +114,8 @@
 |------|-------|--------|
 | `memory_map` | `MemoryMapIn{session_id}` | `MemoryMapOut{blocks[]}` |
 | `read_bytes` | `ReadBytesIn{address, length≤1 MiB}` | `ReadBytesOut{address, data* (hex), length, truncated}` |
-| `search_bytes` | `SearchBytesIn{pattern_hex, offset, limit}` | `SearchBytesOut{matches[], total, truncated}` |
+| `emulate` | `EmulateIn{start, set_registers?, write_memory?, max_steps≤1M, stop_at?, read_registers?, read_memory?}` | `EmulateOut{steps_executed, stop_reason, registers[]{name, value*}, memory[]{address, data*, length}}` | **ADR-049 p-code emulation** (read-effect-only). Ghidra's p-code **interpreter** — NO native execution / syscalls / I/O; program DB not mutated. Bounded by `max_steps` (server-clamped, default 100k) + the per-call wall-clock kill + worker memory cap. Register/memory readback VALUES are `*`=UNTRUSTED (attacker-influenced). All parsing/emulation stays in the ephemeral worker container |
+| `demangle` | `DemangleIn{mangled≤8KiB, scheme=auto\|gnu\|msvc}` | `DemangleOut{demangled*?, scheme?}` | **ADR-050 C++ demangler** (read-only, program-independent). Resolves a mangled symbol via Ghidra's GNU/Itanium + MSVC demanglers (`auto` tries both). The mangled string is HOSTILE binary-derived input — length-bounded (DoS guard) + the worker wall-clock kill backs it. `demangled` `*`=UNTRUSTED; `None` if not a mangled name in a tried scheme (non-mangled input is not an error). No program is loaded or mutated |
 | `search_strings` | `SearchStringsIn{query, offset, limit}` | `SearchStringsOut{strings[], total, truncated}` |
 
 ### Metadata
@@ -176,6 +200,7 @@ identifier allow-list / `validate_comment_text` normalization — stored-injecti
 | `rename_parameter` | `RenameParameterIn{function, parameter, new_name}` | `StructuralRenameResult{address, function*, old_name*, new_name, applied}` | **structural**; name-only; gated by `allow_structural` |
 | `set_function_signature` | `SetFunctionSignatureIn{function, return_type: TypeRef, parameters: [ParamSpec], calling_convention?}` | `SetFunctionSignatureResult{address, function*, old_signature*, new_signature*, applied}` | **structural** (ADR-014 Phase B); structured input; gated by `allow_structural` |
 | `apply_data_type` | `ApplyDataTypeIn{address, type: TypeRef, clear_existing=false}` | `ApplyDataTypeResult{address, type_name*, size, applied}` | **structural** (ADR-014 Phase B); applies an EXISTING/resolvable type; gated by `allow_structural` |
+| `apply_type_archive` | `ApplyTypeArchiveIn{archive: generic_clib\|generic_clib_64\|windows_vs12_32\|windows_vs12_64\|mac_osx}` | `ApplyTypeArchiveResult{archive, functions_updated, applied}` | **structural** (ADR-051); applies a BUNDLED Ghidra type-archive's function signatures to same-named functions (resolves libc/Win32 API prototypes). `archive` is a CLOSED allow-list — the worker maps it to a `.gdt` in the pinned install; NO client path (CWE-22). One transaction (`session_undo` reverts). All result fields SAFE. Gated by `allow_structural` |
 | `define_struct` | `DefineStructIn{name, fields: [FieldSpec], packed=false}` | `DefineStructResult{name, kind, size, field_count, applied}` | **structural** (ADR-015 Phase C); creates a NEW struct; gated by `allow_structural` |
 | `define_union` | `DefineUnionIn{name, fields: [FieldSpec]}` | `DefineUnionResult{name, kind, size, field_count, applied}` | **structural** (ADR-015 Phase C); creates a NEW union; gated by `allow_structural` |
 | `define_types` | `DefineTypesIn{types: [CompositeSpec]}` | `DefineTypesResult{types: [{name, kind, size, field_count}], applied}` | **structural** (ADR-021); creates a BATCH of interdependent NEW composites in ONE transaction (a field may reference another batch member); GATED by write-consent + `allow_structural`; **by-value cycles rejected, pointer cycles allowed** |

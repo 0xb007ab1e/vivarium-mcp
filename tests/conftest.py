@@ -308,6 +308,153 @@ class FakeGhidraPort:
         ]
         return s.DisassembleOut(instructions=instrs, truncated=a.max_instructions < 2)
 
+    def get_pcode(self, sid: str, a: s.GetPcodeIn) -> s.GetPcodeOut:
+        """Return a bounded, deterministic p-code listing (mnemonic + ops untrusted, ADR-052)."""
+        self._maybe_fail()
+        count = min(a.max_instructions, 2)
+        instrs = [
+            s.PcodeInstruction(
+                address=f"0x0040{1000 + i:04x}",
+                mnemonic=_ug("MOV"),
+                pcode=[_ug("(register, 0x0, 8) COPY (const, 0x1, 8)")],
+            )
+            for i in range(count)
+        ]
+        return s.GetPcodeOut(instructions=instrs, truncated=a.max_instructions < 2)
+
+    def get_high_pcode(self, sid: str, a: s.GetHighPcodeIn) -> s.GetHighPcodeOut:
+        """Return a deterministic high (SSA) p-code listing (op text untrusted, ADR-053)."""
+        self._maybe_fail()
+        ops = [
+            s.HighPcodeOp(address="0x00401000", op=_ug("(register, 0x0, 8) COPY (const, 0x8, 8)")),
+            s.HighPcodeOp(address="0x00401008", op=_ug(" ---  RETURN (const, 0x0, 8)")),
+        ]
+        return s.GetHighPcodeOut(ops=ops[: a.max_ops], truncated=a.max_ops < 2)
+
+    def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
+        """Return a deterministic stack frame (name/type untrusted, ADR-054)."""
+        self._maybe_fail()
+        return s.StackFrameOut(
+            frame_size=16,
+            variables=[
+                s.StackVariable(
+                    name=_ug("local_c"),
+                    stack_offset=-12,
+                    data_type=_u("undefined4"),
+                    size=4,
+                    is_parameter=False,
+                )
+            ],
+        )
+
+    def basic_blocks(self, sid: str, a: s.BasicBlocksIn) -> s.BasicBlocksOut:
+        """Return a deterministic 2-block CFG (all fields safe addresses/counts, ADR-055)."""
+        self._maybe_fail()
+        blocks = [
+            s.BasicBlock(
+                address="0x00401000",
+                end_address="0x00401003",
+                size=4,
+                successors=["0x00401004"],
+            ),
+            s.BasicBlock(address="0x00401004", end_address="0x00401004", size=1, successors=[]),
+        ]
+        return s.BasicBlocksOut(blocks=blocks[: a.max_blocks], truncated=a.max_blocks < 2)
+
+    def list_data_types(self, sid: str, a: s.ListDataTypesIn) -> s.DataTypeListOut:
+        """Return a bounded, deterministic data-type summary page (name untrusted, ADR-056)."""
+        self._maybe_fail()
+        rows = [
+            s.DataTypeSummary(name=_u("widget_t"), kind="struct", size=8),
+            s.DataTypeSummary(name=_u("int"), kind="builtin", size=4),
+        ]
+        return s.DataTypeListOut(
+            data_types=rows[: a.limit], total=len(rows), truncated=a.limit < len(rows)
+        )
+
+    def function_hash(self, sid: str, a: s.FunctionHashIn) -> s.FunctionHashOut:
+        """Return deterministic function match-hash fingerprints (all safe scalars, ADR-057)."""
+        self._maybe_fail()
+        return s.FunctionHashOut(
+            address="0x00401000",
+            exact_bytes="-74093867017437165",
+            exact_instructions="4495632401614105116",
+            exact_mnemonics="8291194091361135616",
+            instruction_count=2,
+        )
+
+    def bsim_similarity(self, sid: str, a: s.BsimSimilarityIn) -> s.BsimSimilarityOut:
+        """Return a deterministic BSim similarity score (all safe scalars, ADR-058)."""
+        self._maybe_fail()
+        return s.BsimSimilarityOut(address_a="0x00401000", address_b="0x00401010", similarity=0.75)
+
+    def find_similar_functions(
+        self, sid: str, a: s.FindSimilarFunctionsIn
+    ) -> s.FindSimilarFunctionsOut:
+        """Return a deterministic BSim similarity ranking (name untrusted, ADR-059)."""
+        self._maybe_fail()
+        matches = [
+            s.SimilarFunction(address="0x00401010", name=_u("clone_fn"), similarity=1.0),
+            s.SimilarFunction(address="0x00401020", name=_u("variant_fn"), similarity=0.82),
+        ]
+        keep = [m for m in matches if m.similarity >= a.min_similarity][: a.limit]
+        return s.FindSimilarFunctionsOut(
+            target_address="0x00401000", matches=keep, functions_scanned=2, truncated=False
+        )
+
+    def version_track(self, sid: str, a: s.VersionTrackIn) -> s.VersionTrackOut:
+        """Return a deterministic two-program VT match set (all safe scalars, ADR-060)."""
+        self._maybe_fail()
+        matches = [
+            s.VersionMatch(
+                source_address="0x00401000",
+                destination_address="0x00401000",
+                similarity=1.0,
+                confidence=10.0,
+            ),
+            s.VersionMatch(
+                source_address="0x00401030",
+                destination_address="0x00401040",
+                similarity=0.9,
+                confidence=3.0,
+            ),
+        ]
+        keep = [m for m in matches if m.confidence >= a.min_confidence]
+        keep.sort(key=lambda m: m.confidence, reverse=True)
+        return s.VersionTrackOut(
+            matches=keep[: a.limit], match_count=len(matches), truncated=len(keep) > a.limit
+        )
+
+    def bsim_search_corpus(self, sid: str, a: s.BsimSearchCorpusIn) -> s.BsimSearchCorpusOut:
+        """Return a deterministic cross-binary BSim match set (names untrusted, ADR-062)."""
+        self._maybe_fail()
+        matches = [
+            s.CorpusMatch(
+                target_address="0x00401000",
+                target_name=_u("shared_fn"),
+                reference_index=0,
+                reference_address="0x00500000",
+                reference_name=_u("libc_shared_fn"),
+                similarity=1.0,
+            ),
+            s.CorpusMatch(
+                target_address="0x00401040",
+                target_name=_u("variant_fn"),
+                reference_index=0,
+                reference_address="0x00500080",
+                reference_name=_u("libc_variant"),
+                similarity=0.83,
+            ),
+        ]
+        keep = [m for m in matches if m.similarity >= a.min_similarity]
+        keep.sort(key=lambda m: m.similarity, reverse=True)
+        return s.BsimSearchCorpusOut(
+            matches=keep[: a.limit],
+            target_functions_scanned=2,
+            corpus_functions_scanned=4,
+            truncated=len(keep) > a.limit,
+        )
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """Return a bounded, deterministic function summary page."""
         self._maybe_fail()
@@ -433,6 +580,33 @@ class FakeGhidraPort:
         return s.ReadBytesOut(
             address=a.address, data=_u("deadbeef", encoding="hex"), length=4, truncated=False
         )
+
+    def emulate(self, sid: str, a: s.EmulateIn) -> s.EmulateOut:
+        """Return a deterministic bounded emulation result (values untrusted, ADR-049)."""
+        self._maybe_fail()
+        return s.EmulateOut(
+            steps_executed=3,
+            stop_reason="stop-address" if a.stop_at else "max-steps",
+            registers=[
+                s.RegisterValue(name=n, value=_u("08", encoding="hex"))
+                for n in (a.read_registers or [])
+            ],
+            memory=[
+                s.MemoryRegion(
+                    address=r.address, data=_u("00" * r.length, encoding="hex"), length=r.length
+                )
+                for r in (a.read_memory or [])
+            ],
+        )
+
+    def demangle(self, sid: str, a: s.DemangleIn) -> s.DemangleOut:
+        """Return a deterministic demangle result (demangled name untrusted, ADR-050)."""
+        self._maybe_fail()
+        # Return the scheme as a bare Literal (not a str-typed variable) so it satisfies
+        # DemangleOut.scheme's ``Literal['gnu', 'msvc'] | None`` under mypy --strict.
+        if a.scheme == "msvc" or a.mangled.startswith("?"):
+            return s.DemangleOut(demangled=_u("ns::fn(int)"), scheme="msvc")
+        return s.DemangleOut(demangled=_u("ns::fn(int)"), scheme="gnu")
 
     def search_bytes(self, sid: str, a: s.SearchBytesIn) -> s.SearchBytesOut:
         """Return deterministic bounded byte-search matches (untrusted context)."""
@@ -641,6 +815,10 @@ class FakeGhidraPort:
     def apply_data_type(self, sid: str, a: s.ApplyDataTypeIn) -> s.ApplyDataTypeResult:
         """Reserved structural type-aware stub (ADR-014)."""
         raise NotImplementedError("RESERVED (v1.1 ADR-014): apply_data_type")
+
+    def apply_type_archive(self, sid: str, a: s.ApplyTypeArchiveIn) -> s.ApplyTypeArchiveResult:
+        """Reserved bundled type-archive stub (ADR-051; mutation tests use a dedicated fake)."""
+        raise NotImplementedError("RESERVED (v1.8 ADR-051): apply_type_archive")
 
     def define_struct(self, sid: str, a: s.DefineStructIn) -> s.DefineStructResult:
         """Reserved composite-creation stub (ADR-015; mutation tests use a dedicated fake)."""

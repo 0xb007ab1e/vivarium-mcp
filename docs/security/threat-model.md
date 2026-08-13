@@ -6,7 +6,11 @@
 > network boundary (TB6, ADR-011)**, the **annotation-mutation (write) boundary (TB7, §10,
 > ADR-012)**, the **structural-mutation Phase A (TB7 structural, §10, ADR-013)**, and the
 > **structural-mutation Phase B — signature + data-type apply (TB7 structural Phase B, §10,
-> ADR-014)**, and (v1.2) the **annotation-persistence import boundary (TB8, §12, ADR-018)**.
+> ADR-014)**, and (v1.2) the **annotation-persistence import boundary (TB8, §12, ADR-018)**. v1.8
+> adds the **Version Tracking second-binary surface (TB3 delta, ADR-060 — ACCEPTED + IMPLEMENTED
+> 2026-08-13)**, the **companion-PDB second-file surface (TB3 delta, ADR-061 — ACCEPTED +
+> IMPLEMENTED 2026-08-13)**, and the **cross-binary BSim ephemeral-corpus surface (TB3 delta,
+> ADR-062 — ACCEPTED + IMPLEMENTED 2026-08-13)**.
 > Source of truth: [`PLAN.md`](../../PLAN.md).
 > **Data classification:** the analyzed binary and all derived artifacts are **confidential** and
 > of **hostile origin** (master §5).
@@ -160,6 +164,87 @@ Likelihood × Impact → severity (master §7). "L/M/H".
 > The new `worker.preflight_rejected` log and the reject error carry **no binary content or host
 > paths** (size + configured-MiB integers only). The profile→analyzer-option mapping is pure data;
 > the JVM option-setting is the worker-only edge.
+
+> **TB3 delta — v1.8 Version Tracking: two TRANSIENT hostile binaries (ADR-060 — ACCEPTED +
+> IMPLEMENTED 2026-08-13; lifecycle blocker RESOLVED).** `version_track` loads **two** binaries fresh into
+> the session's already-hardened worker and correlates their functions (patch/known-good diff). This is
+> **not a new boundary** — it is **two more inputs across TB3** (binary → analyzer). Refined from the
+> initial design: the research showed the live **session program cannot be a VT participant** (the
+> backend opens it via `open_program`, which holds a perpetual transaction → `canLock()=False`), so VT
+> loads **both** sides fresh as throwaway programs — the **session's own program is completely
+> untouched (not even read)**. The added surface, and why it stays within TB3's containment:
+> - **Two hostile binaries in one worker.** VT is **static correlation** (feature comparison) — there
+>   is **no cross-binary code execution**; both binaries are inert data. Neither can act on the other
+>   or escape: the ADR-004 isolation stack (no egress, ro-rootfs, dropped caps, gVisor, tmpfs,
+>   mem/pids/cpu caps) is **unchanged byte-for-byte** and simply contains two throwaway programs; the
+>   wall-clock kill (ADR-002) backs the two analyses + the correlation.
+> - **Both programs are transient throwaways; the session program is untouched.** VT loads both sides
+>   as project domain files in a **throwaway VT project**, correlates, and **releases + wipes both
+>   programs + the VT session** at end of call. VT's match markup lands only in these throwaways — the
+>   **live session program is never a participant, never mutated, never locked** (`version_track` is
+>   read-only w.r.t. the session; no write-consent). Both binaries + derived matches are CONFIDENTIAL +
+>   hostile-origin (master §5 / ADR-005); the whole worker is killed + verified-wiped on evict (ADR-002).
+> - **Confined import + size cap.** BOTH binaries are resolved through the **same confined import root**
+>   as `session_import` (CWE-22: no arbitrary path) and **size-capped before load** (CWE-400) — no new
+>   file-read or unbounded-input surface.
+> - **Output stays safe.** Matches are `{source_address, destination_address, similarity, confidence}`
+>   — server-normalized addresses + computed scores (SAFE); the initial cut returns **no binary-derived
+>   field**. Any future function-name field MUST be untrusted-enveloped (ADR-005/TB4).
+> - **Lifecycle blocker RESOLVED + built.** The headless VT program lifecycle (writable + lockable) is
+>   solved by opening programs from project domain files via `getDomainObject` (recipe in ADR-060);
+>   grounded end-to-end (`match_count=1`, similarity 1.0) and now shipped as tool #68, re-proven by the
+>   gated `test_version_track.py` live-regression hard gate.
+
+> **TB3 delta — v1.8 companion PDB: a second hostile file + a complex parser (ADR-061 — ACCEPTED +
+> IMPLEMENTED 2026-08-13).** `session_import` grows an optional `pdb_ref`: a Microsoft PDB applied to
+> the freshly-loaded Windows PE (recovers the real function names/types). This is **not a new
+> boundary** — it is a **second input across TB3** (binary → analyzer) — but the added surface:
+> - **A second hostile file, parsed by a complex parser.** The PDB parser (MSF container + multiple
+>   typed streams — Ghidra's cross-platform `pdb2` reader) is a real attack surface, larger than a raw
+>   loader. It runs entirely inside the **unchanged** ADR-004 isolation (no egress, ro-rootfs, dropped
+>   caps, gVisor, mem/pids/cpu caps, wall-clock kill); the reader is data-in only, **no code execution**;
+>   a parse/apply fault fails closed with a category-safe `not-found` (no leaky detail — master §5).
+> - **Confined + size-capped.** BOTH `source_ref` and `pdb_ref` are confined-root-resolved (CWE-22) and
+>   size-capped (CWE-400) **before any byte reaches the JVM** (ADR-001) — no new file-read or unbounded
+>   surface. `pdb_ref` is allowed only with `loader="auto"` (the PE case), rejected otherwise.
+> - **Applied at load to the fresh program; NOT a write tool.** The symbols land in the session's own
+>   program as intended (this IS the enrichment), during import of a fresh program — no established
+>   program is mutated, so no write-consent (gated like `session_import` — a capability). The program +
+>   worker are wiped on evict (ADR-002) like any import.
+> - **Output stays safe.** `session_import` returns only server-computed `SessionInfo` — no binary-derived
+>   field. The applied names/types surface later through the read tools, where they are **already**
+>   untrusted-enveloped (ADR-005) — this delta adds **no** new output surface.
+> - **No new egress / caps change.** The worker stays network-less, ro-rootfs, dropped-caps, gVisor.
+> - **Grounded + built.** Headless apply (`PdbParser.parse` → `deserialize` → `DefaultPdbApplicator`
+>   → `applyNoAnalysisState`) grounded end-to-end (a fixture PE+PDB import surfaced the PDB function
+>   name `the_answer`, symbols 8→10), re-proven by the gated `test_import_pdb.py` live-regression hard
+>   gate. No GUID enforcement in the initial cut (operator pairs the two files; a mismatch yields
+>   wrong-but-contained, envelope-wrapped symbols) — a future refinement.
+
+> **TB3 delta — v1.8 cross-binary BSim: an EPHEMERAL multi-binary corpus (ADR-062 — ACCEPTED +
+> IMPLEMENTED 2026-08-13).** `bsim_search_corpus` loads a target + up to 16 reference binaries and
+> compares their BSim function-signatures. This is **not a new boundary** — it is **more inputs across
+> TB3** — and the operator explicitly chose the **ephemeral** shape over a persistent BSim database,
+> keeping ADR-002:
+> - **No persistent store; statelessness intact.** The "corpus" is exactly the passed
+>   `reference_refs`, built + queried + wiped **within the call**. There is **no persistent BSim DB**
+>   accumulating hostile-origin signatures across sessions (that was the rejected alternative — it
+>   would relax ADR-002). Binaries are loaded **one at a time** (BSim vectors survive each program's
+>   release), so only one program is resident at once; each is released, and the worker is wiped on
+>   evict (ADR-002).
+> - **Multiple hostile binaries, static feature extraction only.** BSim signing is decompile + LSH
+>   vector — **no cross-binary code execution**; all binaries are inert data inside the **unchanged**
+>   ADR-004 isolation (no egress, ro-rootfs, dropped caps, gVisor, mem/pids/cpu caps, wall-clock kill,
+>   now covering N+1 sequential loads/analyses).
+> - **Confined + size-capped + bounded.** The target and **every** reference are confined-root-resolved
+>   (CWE-22) + size-capped (CWE-400) before the JVM; the corpus is capped at 16 refs and `max_scan`
+>   functions/binary (bounds the load/analyze/decompile cost).
+> - **Output safe except names.** `target_address` / `reference_address` / `reference_index` /
+>   `similarity` are computed/normalized scalars (SAFE); `target_name` / `reference_name` are
+>   binary-derived → untrusted-enveloped (ADR-005). The session's own program is NOT a participant.
+> - **Grounded + built.** Sign→release→cross-compare grounded end-to-end (a target function matched a
+>   separately-loaded reference at similarity 1.0; vectors survive release), re-proven by the gated
+>   `test_bsim_search_corpus.py` live-regression hard gate.
 
 ### TB4 — Worker → Server → LLM (untrusted output)
 | STRIDE | Threat | L×I | Mitigation |

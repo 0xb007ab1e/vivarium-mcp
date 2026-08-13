@@ -64,6 +64,16 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     # code
     "decompile_function",
     "disassemble",
+    "get_pcode",
+    "get_high_pcode",
+    "stack_frame",
+    "basic_blocks",
+    "list_data_types",
+    "function_hash",
+    "bsim_similarity",
+    "find_similar_functions",
+    "version_track",
+    "bsim_search_corpus",
     "list_functions",
     "get_function",
     # xrefs
@@ -80,6 +90,8 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     # memory / bytes / search
     "memory_map",
     "read_bytes",
+    "emulate",
+    "demangle",
     "search_bytes",
     "search_strings",
     # metadata
@@ -114,6 +126,8 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     # structural type-aware writes (v1.1 — ADR-014 Phase B; additionally GATED by allow_structural)
     "set_function_signature",
     "apply_data_type",
+    # bundled type-archive application (v1.8 — ADR-051; additionally GATED by allow_structural)
+    "apply_type_archive",
     # composite-type creation (v1.1 — ADR-015 Phase C; additionally GATED by allow_structural)
     "define_struct",
     "define_union",
@@ -226,6 +240,7 @@ WRITE_TOOLS: frozenset[str] = frozenset(
         "rename_parameter",
         "set_function_signature",
         "apply_data_type",
+        "apply_type_archive",
         "define_struct",
         "define_union",
         "define_types",
@@ -312,7 +327,19 @@ def _handle_session_create(ctx: ToolContext, args: s.SessionCreateIn) -> s.Sessi
 
 
 def _handle_session_import(ctx: ToolContext, args: s.SessionImportIn) -> s.SessionInfo:
-    """Import a (size-checked) binary into the session's worker.
+    """Import a binary into the session's worker for analysis.
+
+    ``source_ref`` must be a path to a file **under the server's import root**
+    (``VIVARIUM_IMPORT_ROOT``) — NOT arbitrary bytes and NOT any host path. Example: with the root
+    at ``/srv/imports``, pass ``source_ref="/srv/imports/firmware.bin"`` (or a path relative to it).
+    It is rejected (``validation``) when it is outside the import root, not found, or malformed, and
+    (``limit-exceeded``) when it is over the size cap.
+
+    **Headerless raw/firmware images** (no ELF/PE header — e.g. bare-metal MCU dumps) need loader
+    hints (ADR-045): set ``loader="binary"`` with ``processor`` (a supported Ghidra ``LanguageID``
+    such as ``ARM:LE:32:Cortex`` or ``RISCV:LE:32:RV32GC``) and ``base_addr`` (the image load
+    address), plus optional ``entry``. For normal ELF/PE files omit all hints (``loader`` defaults
+    to ``auto``). See the ``vivarium://docs/importing`` resource for the full how-to.
 
     The size cap is enforced BEFORE any byte reaches Ghidra (DoS — PLAN §3 F7). The actual byte
     resolution + path confinement of ``source_ref`` is the adapter's responsibility (CWE-22),
@@ -479,6 +506,106 @@ def _handle_disassemble(ctx: ToolContext, args: s.DisassembleIn) -> s.Disassembl
     return ctx.port.disassemble(args.session_id, args)
 
 
+def _handle_get_pcode(ctx: ToolContext, args: s.GetPcodeIn) -> s.GetPcodeOut:
+    """List lifted low p-code for a bounded range or function (read-only — ADR-052)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    if args.start is not None:
+        v.parse_address(args.start)
+    if args.function is not None:
+        v.validate_name(args.function)
+    if args.start is None and args.function is None:
+        raise _require("either 'start' or 'function' must be provided")
+    return ctx.port.get_pcode(args.session_id, args)
+
+
+def _handle_get_high_pcode(ctx: ToolContext, args: s.GetHighPcodeIn) -> s.GetHighPcodeOut:
+    """Return a function's decompiler-refined high (SSA) p-code (read-only — ADR-053)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    v.validate_name(args.function)
+    return ctx.port.get_high_pcode(args.session_id, args)
+
+
+def _handle_stack_frame(ctx: ToolContext, args: s.StackFrameIn) -> s.StackFrameOut:
+    """Return a function's recovered stack-frame layout (read-only — ADR-054)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    v.validate_name(args.function)
+    return ctx.port.stack_frame(args.session_id, args)
+
+
+def _handle_basic_blocks(ctx: ToolContext, args: s.BasicBlocksIn) -> s.BasicBlocksOut:
+    """Return a function's basic blocks + successor edges (read-only — ADR-055)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    v.validate_name(args.function)
+    return ctx.port.basic_blocks(args.session_id, args)
+
+
+def _handle_list_data_types(ctx: ToolContext, args: s.ListDataTypesIn) -> s.DataTypeListOut:
+    """List the program's data types, paginated (read-only — ADR-056)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    if args.name_contains is not None:
+        v.validate_name(args.name_contains)
+    return ctx.port.list_data_types(args.session_id, args)
+
+
+def _handle_function_hash(ctx: ToolContext, args: s.FunctionHashIn) -> s.FunctionHashOut:
+    """Return a function's Ghidra match-hash fingerprints (read-only — ADR-057)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    v.validate_name(args.function)
+    return ctx.port.function_hash(args.session_id, args)
+
+
+def _handle_bsim_similarity(ctx: ToolContext, args: s.BsimSimilarityIn) -> s.BsimSimilarityOut:
+    """Return the BSim cosine similarity between two functions (read-only — ADR-058)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    v.validate_name(args.function_a)
+    v.validate_name(args.function_b)
+    return ctx.port.bsim_similarity(args.session_id, args)
+
+
+def _handle_find_similar_functions(
+    ctx: ToolContext, args: s.FindSimilarFunctionsIn
+) -> s.FindSimilarFunctionsOut:
+    """Rank the program's functions by BSim similarity to a target (read-only — ADR-059)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    v.validate_name(args.function)
+    return ctx.port.find_similar_functions(args.session_id, args)
+
+
+def _handle_version_track(ctx: ToolContext, args: s.VersionTrackIn) -> s.VersionTrackOut:
+    """Correlate functions between two confined binaries via Ghidra VT (read-only — ADR-060).
+
+    Loads + analyzes TWO binaries in the session's worker (a capability, gated exactly like
+    ``session_import``: confined import root + size cap, worker-only per ADR-001), so — like import
+    — it ensures the owning principal's worker is spawned. It does NOT touch the session's own
+    program (both refs are loaded fresh + wiped), so it needs no write-consent on the session
+    (ADR-060 D3/D7). The two ``source_ref``s are confined + size-capped server-side in the adapter
+    (CWE-22/CWE-400) — the handler does not path-validate them here.
+    """
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    # Spawn the session's hardened worker if not already up (owner-scoped, ADR-017): version_track
+    # loads its own binaries and does not require a prior session_import, so the worker may not
+    # exist yet. Idempotent when a worker is already running for the session.
+    ctx.sessions.ensure_worker(args.session_id, caller=ctx.caller_id)
+    return ctx.port.version_track(args.session_id, args)
+
+
+def _handle_bsim_search_corpus(
+    ctx: ToolContext, args: s.BsimSearchCorpusIn
+) -> s.BsimSearchCorpusOut:
+    """Cross-binary BSim search over an ephemeral corpus (read-only w.r.t. the session — ADR-062).
+
+    Loads + analyzes the target + a bounded reference corpus in the session's worker (a capability,
+    gated like ``session_import``: confined import root + size cap, worker-only per ADR-001), so —
+    like import/version_track — it ensures the owning principal's worker. It does NOT touch the
+    session's own program (all binaries are fresh throwaways), so it needs no write-consent. Every
+    ``target_ref``/``reference_refs`` path is confined + size-capped server-side in the adapter
+    (CWE-22/CWE-400) — the handler does not path-validate them here.
+    """
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    ctx.sessions.ensure_worker(args.session_id, caller=ctx.caller_id)
+    return ctx.port.bsim_search_corpus(args.session_id, args)
+
+
 def _handle_list_functions(ctx: ToolContext, args: s.ListFunctionsIn) -> s.FunctionListOut:
     """List functions (paginated/bounded)."""
     ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
@@ -574,6 +701,38 @@ def _handle_read_bytes(ctx: ToolContext, args: s.ReadBytesIn) -> s.ReadBytesOut:
     offset = v.parse_address(args.address)
     v.validate_byte_range(offset, args.length)
     return ctx.port.read_bytes(args.session_id, args)
+
+
+def _handle_emulate(ctx: ToolContext, args: s.EmulateIn) -> s.EmulateOut:
+    """Bounded p-code emulation (ADR-049) — read-effect-only; addresses validated pre-worker.
+
+    The schema already bounds step/region/size caps; here we authorize the session (BOLA) and
+    parse-check every address the client supplied (start/stop_at/write+read memory) so a malformed
+    address fails closed as VALIDATION before the worker. The emulator runs a HOSTILE program in a
+    p-code interpreter (no native exec / no I/O) bounded by max_steps + the wall-clock kill; the
+    output register/memory values are wrapped UNTRUSTED by the adapter (ADR-005).
+    """
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    v.parse_address(args.start)
+    if args.stop_at is not None:
+        v.parse_address(args.stop_at)
+    for write in args.write_memory or ():
+        v.parse_address(write.address)
+    for read in args.read_memory or ():
+        v.parse_address(read.address)
+    return ctx.port.emulate(args.session_id, args)
+
+
+def _handle_demangle(ctx: ToolContext, args: s.DemangleIn) -> s.DemangleOut:
+    """Demangle a C++ symbol (ADR-050) — read-only, program-independent, session-authorized.
+
+    The mangled string is HOSTILE binary-derived input; the schema length-bounds it (DoS guard) and
+    the worker wall-clock kill backs that. No program is touched; the demangled name is wrapped
+    UNTRUSTED by the adapter (ADR-005). Authorization (BOLA) still applies — the caller must own the
+    session the mangled symbol came from.
+    """
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    return ctx.port.demangle(args.session_id, args)
 
 
 def _handle_search_bytes(ctx: ToolContext, args: s.SearchBytesIn) -> s.SearchBytesOut:
@@ -993,6 +1152,34 @@ def _handle_apply_data_type(ctx: ToolContext, args: s.ApplyDataTypeIn) -> s.Appl
     _log.info(
         "tool.apply_data_type.outcome",
         extra={"tool": "apply_data_type", "session": args.session_id, "applied": result.applied},
+    )
+    return result
+
+
+def _handle_apply_type_archive(
+    ctx: ToolContext, args: s.ApplyTypeArchiveIn
+) -> s.ApplyTypeArchiveResult:
+    """Apply a bundled type archive's signatures (structural; gated by allow_structural — ADR-051).
+
+    A whole-program structural write: it applies a bundled GDT library's function prototypes to the
+    same-named functions. The ``archive`` name is a closed Literal (no arbitrary path — CWE-22); the
+    worker resolves it to a ``.gdt`` in the pinned Ghidra install and wraps the apply in one txn
+    (``session_undo`` reverts it). No binary-derived value is echoed back (only a count).
+    """
+    ctx.sessions.require_write_consent(args.session_id, structural=True, caller=ctx.caller_id)
+    _log.info(
+        "tool.apply_type_archive.intent",
+        extra={"tool": "apply_type_archive", "session": args.session_id, "archive": args.archive},
+    )
+    result = ctx.port.apply_type_archive(args.session_id, args)
+    _log.info(
+        "tool.apply_type_archive.outcome",
+        extra={
+            "tool": "apply_type_archive",
+            "session": args.session_id,
+            "applied": result.applied,
+            "functions_updated": result.functions_updated,
+        },
     )
     return result
 
@@ -1602,6 +1789,16 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "session_close": (_handle_session_close, s.SessionCloseIn),
     "decompile_function": (_handle_decompile_function, s.DecompileFunctionIn),
     "disassemble": (_handle_disassemble, s.DisassembleIn),
+    "get_pcode": (_handle_get_pcode, s.GetPcodeIn),
+    "get_high_pcode": (_handle_get_high_pcode, s.GetHighPcodeIn),
+    "stack_frame": (_handle_stack_frame, s.StackFrameIn),
+    "basic_blocks": (_handle_basic_blocks, s.BasicBlocksIn),
+    "list_data_types": (_handle_list_data_types, s.ListDataTypesIn),
+    "function_hash": (_handle_function_hash, s.FunctionHashIn),
+    "bsim_similarity": (_handle_bsim_similarity, s.BsimSimilarityIn),
+    "find_similar_functions": (_handle_find_similar_functions, s.FindSimilarFunctionsIn),
+    "version_track": (_handle_version_track, s.VersionTrackIn),
+    "bsim_search_corpus": (_handle_bsim_search_corpus, s.BsimSearchCorpusIn),
     "list_functions": (_handle_list_functions, s.ListFunctionsIn),
     "get_function": (_handle_get_function, s.GetFunctionIn),
     "xrefs_to": (_handle_xrefs_to, s.XrefsIn),
@@ -1614,6 +1811,8 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "get_comments": (_handle_get_comments, s.GetCommentsIn),
     "memory_map": (_handle_memory_map, s.MemoryMapIn),
     "read_bytes": (_handle_read_bytes, s.ReadBytesIn),
+    "emulate": (_handle_emulate, s.EmulateIn),
+    "demangle": (_handle_demangle, s.DemangleIn),
     "search_bytes": (_handle_search_bytes, s.SearchBytesIn),
     "search_strings": (_handle_search_strings, s.SearchStringsIn),
     "program_metadata": (_handle_program_metadata, s.ProgramMetadataIn),
@@ -1645,6 +1844,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     # structural type-aware writes (v1.1 — ADR-014 Phase B; gated additionally by allow_structural)
     "set_function_signature": (_handle_set_function_signature, s.SetFunctionSignatureIn),
     "apply_data_type": (_handle_apply_data_type, s.ApplyDataTypeIn),
+    "apply_type_archive": (_handle_apply_type_archive, s.ApplyTypeArchiveIn),
     # composite-type creation (v1.1 — ADR-015 Phase C; gated additionally by allow_structural)
     "define_struct": (_handle_define_struct, s.DefineStructIn),
     "define_union": (_handle_define_union, s.DefineUnionIn),

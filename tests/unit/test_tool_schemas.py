@@ -104,7 +104,7 @@ def test_catalog_count_matches_registry() -> None:
     # (ADR-040: start_decompile_stream + fetch_job_results/job_status/cancel_job) + 1 Function ID
     # library-match tool (ADR-042 Phase 1: identify_functions). The registry list is the source.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 56
+    assert len(TIER1_TOOL_NAMES) == 69
 
 
 @pytest.mark.critical
@@ -164,3 +164,381 @@ def test_fetch_job_results_in_bounds() -> None:
     assert s.FetchJobResultsIn(session_id="x", job="j").limit == 32  # default 32
     with pytest.raises(ValidationError):
         s.FetchJobResultsIn(session_id="x", job="j", limit=257)  # > max 256
+
+
+@pytest.mark.critical
+def test_emulate_defaults_and_step_cap() -> None:
+    """emulate defaults to a 100k step budget; rejects a request above the 1M cap (ADR-049)."""
+    a = s.EmulateIn(session_id="s", start="0x1000")
+    assert a.max_steps == 100_000  # conservative default budget
+    with pytest.raises(ValidationError):
+        s.EmulateIn(session_id="s", start="0x1000", max_steps=1_000_001)  # > 1M hard cap
+    with pytest.raises(ValidationError):
+        s.EmulateIn(session_id="s", start="0x1000", max_steps=0)  # ge=1
+
+
+@pytest.mark.critical
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"set_registers": {f"r{i}": 0 for i in range(65)}},  # > 64-register cap
+        {"read_registers": [f"r{i}" for i in range(65)]},  # > 64-register cap
+        {"write_memory": [{"address": "0x0", "data_hex": "90"}] * 17},  # > 16-region cap
+        {"read_memory": [{"address": "0x0", "length": 1}] * 17},  # > 16-region cap
+        # two per-region-legal writes whose batch total exceeds the 64 KiB cap
+        {"write_memory": [{"address": "0x0", "data_hex": "00" * 40_000}] * 2},
+    ],
+)
+def test_emulate_rejects_over_cap(kwargs: dict[str, object]) -> None:
+    # Every emulate list/size cap fails closed (hostile-code DoS guards — ADR-049 / CWE-400).
+    with pytest.raises(ValidationError):
+        s.EmulateIn(session_id="s", start="0x1000", **kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.critical
+def test_emulate_output_wraps_binary_values_untrusted() -> None:
+    # Register/memory VALUES are binary-derived emulation output — wrapped, not bare (ADR-005/049).
+    from vivarium.core.envelope import DataOrigin, Untrusted
+
+    out = s.EmulateOut(
+        steps_executed=4,
+        stop_reason="stop-address",
+        registers=[
+            s.RegisterValue(name="RAX", value=Untrusted(value="08", origin=DataOrigin.BINARY))
+        ],
+        memory=[
+            s.MemoryRegion(
+                address="0x402000",
+                data=Untrusted(value="00", origin=DataOrigin.BINARY),
+                length=1,
+            )
+        ],
+    )
+    assert isinstance(out.registers[0].value, Untrusted)
+    assert isinstance(out.memory[0].data, Untrusted)
+    assert out.registers[0].name == "RAX"  # server-known scalar stays bare
+
+
+@pytest.mark.critical
+def test_demangle_defaults_and_bounds() -> None:
+    """demangle defaults to the ``auto`` scheme and bounds the mangled string length (ADR-050)."""
+    a = s.DemangleIn(session_id="s", mangled="_ZN3foo3barEi")
+    assert a.scheme == "auto"  # try GNU then MSVC by default
+    with pytest.raises(ValidationError):
+        s.DemangleIn(session_id="s", mangled="")  # min_length=1
+    with pytest.raises(ValidationError):
+        s.DemangleIn(session_id="s", mangled="a" * 8_193)  # > 8 KiB cap
+    with pytest.raises(ValidationError):
+        s.DemangleIn(session_id="s", mangled="x", scheme="rust")  # type: ignore[arg-type]
+
+
+@pytest.mark.critical
+def test_demangle_output_wraps_name_untrusted_and_allows_no_match() -> None:
+    # The demangled name is binary-derived and wrapped; a non-mangled input yields None (not error).
+    from vivarium.core.envelope import DataOrigin, Untrusted
+
+    matched = s.DemangleOut(
+        demangled=Untrusted(value="foo::bar(int)", origin=DataOrigin.BINARY), scheme="gnu"
+    )
+    assert isinstance(matched.demangled, Untrusted)
+    assert matched.scheme == "gnu"
+
+    unmatched = s.DemangleOut()  # nothing matched — both fields default to None
+    assert unmatched.demangled is None
+    assert unmatched.scheme is None
+
+
+@pytest.mark.critical
+def test_apply_type_archive_closed_allowlist_and_safe_result() -> None:
+    """apply_type_archive accepts only allow-listed archive names; result carries no Untrusted."""
+    from vivarium.core.envelope import Untrusted
+
+    a = s.ApplyTypeArchiveIn(session_id="s", archive="generic_clib_64")
+    assert a.archive == "generic_clib_64"
+    with pytest.raises(ValidationError):
+        s.ApplyTypeArchiveIn(session_id="s", archive="/etc/passwd")  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        s.ApplyTypeArchiveIn(session_id="s", archive="glibc")  # type: ignore[arg-type]  # not on the list
+
+    # No arbitrary path can slip through; result fields are all SAFE scalars (no binary echo).
+    out = s.ApplyTypeArchiveResult(archive="generic_clib_64", functions_updated=7, applied=True)
+    for value in out.model_dump().values():
+        assert not isinstance(value, Untrusted)
+
+
+@pytest.mark.critical
+def test_get_pcode_bounds_and_untrusted_output() -> None:
+    """get_pcode is bounded like disassemble; mnemonic + each p-code op are wrapped Untrusted."""
+    from vivarium.core.envelope import DataOrigin, Untrusted
+
+    a = s.GetPcodeIn(session_id="s", start="0x1000")
+    assert a.max_instructions == 256  # conservative default
+    with pytest.raises(ValidationError):
+        s.GetPcodeIn(session_id="s", start="0x1000", max_instructions=10_001)  # > hard cap
+    with pytest.raises(ValidationError):
+        s.GetPcodeIn(session_id="s", start="0x1000", max_instructions=0)  # ge=1
+
+    out = s.PcodeInstruction(
+        address="0x401000",
+        mnemonic=Untrusted(value="ADD", origin=DataOrigin.GHIDRA),
+        pcode=[Untrusted(value="(register, 0x0, 4) INT_ADD ...", origin=DataOrigin.GHIDRA)],
+    )
+    assert isinstance(out.mnemonic, Untrusted)
+    assert all(isinstance(op, Untrusted) for op in out.pcode)
+    assert out.address == "0x401000"  # server-normalized scalar stays bare
+
+
+@pytest.mark.critical
+def test_get_high_pcode_bounds_and_untrusted_output() -> None:
+    """get_high_pcode requires a function, is bounded, and wraps each op Untrusted (ADR-053)."""
+    from vivarium.core.envelope import DataOrigin, Untrusted
+
+    a = s.GetHighPcodeIn(session_id="s", function="main")
+    assert a.max_ops == 256  # conservative default
+    with pytest.raises(ValidationError):
+        s.GetHighPcodeIn(session_id="s", function="")  # function is required (min_length=1)
+    with pytest.raises(ValidationError):
+        s.GetHighPcodeIn(session_id="s", function="main", max_ops=10_001)  # > hard cap
+    with pytest.raises(ValidationError):
+        s.GetHighPcodeIn(session_id="s", function="main", max_ops=0)  # ge=1
+
+    op = s.HighPcodeOp(
+        address="0x401000",
+        op=Untrusted(value="(register, 0x0, 8) COPY (const, 0x8, 8)", origin=DataOrigin.GHIDRA),
+    )
+    assert isinstance(op.op, Untrusted)
+    assert op.address == "0x401000"  # server-normalized scalar stays bare
+
+
+@pytest.mark.critical
+def test_stack_frame_requires_function_and_wraps_names_untrusted() -> None:
+    """stack_frame requires a function; recovered name + type are Untrusted, offsets/sizes bare."""
+    from vivarium.core.envelope import DataOrigin, Untrusted
+
+    s.StackFrameIn(session_id="s", function="main")  # ok
+    with pytest.raises(ValidationError):
+        s.StackFrameIn(session_id="s", function="")  # function required (min_length=1)
+
+    out = s.StackFrameOut(
+        frame_size=16,
+        variables=[
+            s.StackVariable(
+                name=Untrusted(value="local_c", origin=DataOrigin.GHIDRA),
+                stack_offset=-12,
+                data_type=Untrusted(value="undefined4", origin=DataOrigin.BINARY),
+                size=4,
+                is_parameter=False,
+            )
+        ],
+    )
+    var = out.variables[0]
+    assert isinstance(var.name, Untrusted)
+    assert isinstance(var.data_type, Untrusted)
+    assert var.stack_offset == -12 and var.size == 4  # server/worker scalars stay bare
+    assert out.frame_size == 16
+
+
+@pytest.mark.critical
+def test_basic_blocks_bounds_and_safe_scalars() -> None:
+    """basic_blocks requires a function, is bounded, and carries only SAFE address/count fields."""
+    from vivarium.core.envelope import Untrusted
+
+    a = s.BasicBlocksIn(session_id="s", function="main")
+    assert a.max_blocks == 256  # conservative default
+    with pytest.raises(ValidationError):
+        s.BasicBlocksIn(session_id="s", function="")  # function required (min_length=1)
+    with pytest.raises(ValidationError):
+        s.BasicBlocksIn(session_id="s", function="main", max_blocks=10_001)  # > hard cap
+    with pytest.raises(ValidationError):
+        s.BasicBlocksIn(session_id="s", function="main", max_blocks=0)  # ge=1
+
+    out = s.BasicBlocksOut(
+        blocks=[
+            s.BasicBlock(
+                address="0x401000",
+                end_address="0x401003",
+                size=4,
+                successors=["0x401004", "0x401006"],
+            )
+        ]
+    )
+    blk = out.blocks[0]
+    assert blk.address == "0x401000" and blk.successors == ["0x401004", "0x401006"]
+    # CFG structure is server-normalized addresses/counts — nothing untrusted.
+    for value in out.model_dump().values():
+        assert not isinstance(value, Untrusted)
+
+
+@pytest.mark.critical
+def test_list_data_types_paginated_and_name_untrusted() -> None:
+    """list_data_types is a bounded page; each type name is Untrusted, kind/size bare (ADR-056)."""
+    from vivarium.core.envelope import DataOrigin, Untrusted
+
+    a = s.ListDataTypesIn(session_id="s")
+    assert a.offset == 0  # safe defaults
+    with pytest.raises(ValidationError):
+        s.ListDataTypesIn(session_id="s", limit=10_001)  # > hard cap
+
+    out = s.DataTypeListOut(
+        data_types=[
+            s.DataTypeSummary(
+                name=Untrusted(value="widget_t", origin=DataOrigin.BINARY), kind="struct", size=8
+            )
+        ],
+        total=1,
+    )
+    dt = out.data_types[0]
+    assert isinstance(dt.name, Untrusted)
+    assert dt.kind == "struct" and dt.size == 8  # server/worker scalars stay bare
+    assert out.total == 1
+
+
+@pytest.mark.critical
+def test_function_hash_requires_function_and_is_all_safe() -> None:
+    """function_hash requires a function; all result fields are SAFE (opaque digests/scalars)."""
+    from vivarium.core.envelope import Untrusted
+
+    s.FunctionHashIn(session_id="s", function="main")  # ok
+    with pytest.raises(ValidationError):
+        s.FunctionHashIn(session_id="s", function="")  # function required (min_length=1)
+
+    out = s.FunctionHashOut(
+        address="0x401000",
+        exact_bytes="-74093867017437165",
+        exact_instructions="4495632401614105116",
+        exact_mnemonics="8291194091361135616",
+        instruction_count=2,
+    )
+    # The three hashes are opaque equality tokens; no field is binary-derived content.
+    for value in out.model_dump().values():
+        assert not isinstance(value, Untrusted)
+    assert out.exact_instructions == "4495632401614105116"
+
+
+@pytest.mark.critical
+def test_bsim_similarity_requires_both_functions_and_is_all_safe() -> None:
+    """bsim_similarity requires two functions; result is addresses + a score, all SAFE (ADR-058)."""
+    from vivarium.core.envelope import Untrusted
+
+    s.BsimSimilarityIn(session_id="s", function_a="a", function_b="b")  # ok
+    with pytest.raises(ValidationError):
+        s.BsimSimilarityIn(session_id="s", function_a="", function_b="b")  # function_a required
+    with pytest.raises(ValidationError):
+        s.BsimSimilarityIn(session_id="s", function_a="a", function_b="")  # function_b required
+
+    out = s.BsimSimilarityOut(address_a="0x401000", address_b="0x401010", similarity=1.0)
+    for value in out.model_dump().values():
+        assert not isinstance(value, Untrusted)
+    assert out.similarity == 1.0
+
+
+@pytest.mark.critical
+def test_find_similar_functions_bounds_and_untrusted_name() -> None:
+    """find_similar_functions is bounded; each match name is Untrusted, addr/score bare."""
+    from vivarium.core.envelope import DataOrigin, Untrusted
+
+    a = s.FindSimilarFunctionsIn(session_id="s", function="main")
+    assert a.min_similarity == 0.7 and a.limit == 20 and a.max_scan == 500  # safe defaults
+    with pytest.raises(ValidationError):
+        s.FindSimilarFunctionsIn(session_id="s", function="")  # target required
+    with pytest.raises(ValidationError):
+        s.FindSimilarFunctionsIn(session_id="s", function="m", min_similarity=1.5)  # > 1.0
+    with pytest.raises(ValidationError):
+        s.FindSimilarFunctionsIn(session_id="s", function="m", limit=10_001)  # > hard cap
+    with pytest.raises(ValidationError):
+        s.FindSimilarFunctionsIn(session_id="s", function="m", max_scan=10_001)  # > hard cap
+
+    out = s.FindSimilarFunctionsOut(
+        target_address="0x401000",
+        matches=[
+            s.SimilarFunction(
+                address="0x401010",
+                name=Untrusted(value="clone_fn", origin=DataOrigin.BINARY),
+                similarity=0.95,
+            )
+        ],
+        functions_scanned=42,
+    )
+    match = out.matches[0]
+    assert isinstance(match.name, Untrusted)
+    assert match.address == "0x401010" and match.similarity == 0.95  # scalars stay bare
+    assert out.functions_scanned == 42 and out.target_address == "0x401000"
+
+
+def test_bsim_search_corpus_bounds_refs_and_untrusted_names() -> None:
+    """bsim_search_corpus bounds the corpus (1..16) + scores; match names are Untrusted."""
+    from vivarium.core.envelope import DataOrigin, Untrusted
+
+    a = s.BsimSearchCorpusIn(session_id="s", target_ref="t.bin", reference_refs=["r0.bin"])
+    assert a.min_similarity == 0.7 and a.limit == 100 and a.max_scan == 500  # safe defaults
+    with pytest.raises(ValidationError):
+        s.BsimSearchCorpusIn(session_id="s", target_ref="t", reference_refs=[])  # >=1 ref required
+    with pytest.raises(ValidationError):
+        s.BsimSearchCorpusIn(  # over the corpus cap (16)
+            session_id="s", target_ref="t", reference_refs=[f"r{i}" for i in range(17)]
+        )
+    with pytest.raises(ValidationError):
+        s.BsimSearchCorpusIn(
+            session_id="s", target_ref="t", reference_refs=["r"], min_similarity=1.5
+        )
+    with pytest.raises(ValidationError):
+        s.BsimSearchCorpusIn(session_id="s", target_ref="t", reference_refs=["r"], limit=10_001)
+
+    out = s.BsimSearchCorpusOut(
+        matches=[
+            s.CorpusMatch(
+                target_address="0x401000",
+                target_name=Untrusted(value="my_fn", origin=DataOrigin.BINARY),
+                reference_index=0,
+                reference_address="0x500000",
+                reference_name=Untrusted(value="libc_fn", origin=DataOrigin.BINARY),
+                similarity=0.95,
+            )
+        ],
+        target_functions_scanned=3,
+        corpus_functions_scanned=7,
+    )
+    match = out.matches[0]
+    assert isinstance(match.target_name, Untrusted) and isinstance(match.reference_name, Untrusted)
+    assert match.target_address == "0x401000" and match.reference_index == 0  # scalars bare
+    assert match.similarity == 0.95 and out.corpus_functions_scanned == 7 and out.truncated is False
+
+
+def test_version_track_bounds_correlator_and_all_safe() -> None:
+    """version_track bounds both refs + a closed correlator; all output fields are SAFE."""
+    a = s.VersionTrackIn(session_id="s", source_ref_a="a.bin", source_ref_b="b.bin")
+    # Safe defaults: exact-instructions correlator, all matches (min_confidence 0), capped at 100.
+    assert a.correlator == "exact_instructions" and a.min_confidence == 0.0 and a.limit == 100
+    with pytest.raises(ValidationError):
+        s.VersionTrackIn(session_id="s", source_ref_a="", source_ref_b="b")  # ref_a required
+    with pytest.raises(ValidationError):
+        s.VersionTrackIn(session_id="s", source_ref_a="a", source_ref_b="")  # ref_b required
+    with pytest.raises(ValidationError):
+        s.VersionTrackIn(  # correlator is a closed allow-list — arbitrary class rejected
+            session_id="s",
+            source_ref_a="a",
+            source_ref_b="b",
+            correlator="arbitrary_class",  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValidationError):
+        s.VersionTrackIn(  # confidence cannot be negative
+            session_id="s", source_ref_a="a", source_ref_b="b", min_confidence=-0.1
+        )
+    with pytest.raises(ValidationError):
+        s.VersionTrackIn(session_id="s", source_ref_a="a", source_ref_b="b", limit=10_001)  # > cap
+
+    out = s.VersionTrackOut(
+        matches=[
+            s.VersionMatch(
+                source_address="0x401000",
+                destination_address="0x401000",
+                similarity=1.0,
+                confidence=10.0,
+            )
+        ],
+        match_count=1,
+    )
+    match = out.matches[0]
+    assert match.source_address == "0x401000" and match.destination_address == "0x401000"
+    assert match.similarity == 1.0 and match.confidence == 10.0  # computed scalars, bare/SAFE
+    assert out.match_count == 1 and out.truncated is False

@@ -24,11 +24,14 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import Any, ClassVar
 
 # Bounds the bridge enforces itself (defense-in-depth; the server also caps before calling).
 _MAX_RESULT_COUNT = 10_000
 _MAX_READ_BYTES = 1_048_576  # 1 MiB
+# Defensive per-instruction ceiling on emitted p-code ops (v1.8 — ADR-052 get_pcode). A SLEIGH
+# instruction lifts to a bounded op count, but cap it so one instruction can't balloon the response.
+_MAX_PCODE_OPS_PER_INSN = 256
 # Max FID match candidates the worker ever returns from identify_functions (v1.x — ADR-042 Phase 1;
 # mirrors rpc_client._IDENTIFY_MATCH_BUDGET). Defense-in-depth: the FID service can emit many
 # candidates per function on a large binary; the worker clamps + sets truncated, the server caps
@@ -195,6 +198,9 @@ class PyGhidraBackend:
         """Initialize an empty backend (no program loaded until ``import_binary``)."""
         self._program: Any | None = None
         self._project: Any | None = None
+        #: ADR-048: retained ``LoadResults`` from the ProgramLoader builder (fat-slice path) so its
+        #: consumer keeps the program alive; ``None`` for the open_program paths.
+        self._loaded: Any | None = None
         #: Hex SHA-256 of the imported binary (server-computed digest of input — safe scalar).
         self._sha256: str | None = None
         #: Whether Ghidra auto-analysis has completed for the open program.
@@ -205,14 +211,47 @@ class PyGhidraBackend:
         """Import the binary referenced by the (server-confined) source ref into the project.
 
         Args:
-            params: ``{"source_ref": str, "expected_sha256": str | None}``. The server has already
-                resolved/confined the path and enforced the size cap BEFORE this call.
+            params: ``{"source_ref": str, "expected_sha256": str | None}`` for the auto path, plus
+                the optional ADR-045 loader hints ``{"loader": "binary", "processor": str,
+                "base_addr": int, "entry": int | None}`` when the client requested a raw import. The
+                server has already resolved/confined the path, enforced the size cap, and validated
+                the hint combination + the processor allow-list BEFORE this call; the worker
+                re-validates the language against the installed set (defense in depth, ADR-045 §D2).
+                When no ``loader`` key is present the call is byte-for-byte the pre-ADR-045 path. An
+                optional ``pdb_ref`` (ADR-061; auto path only, server-confined + size-capped)
+                applies a companion Microsoft PDB's symbols/types to the loaded PE before analysis.
 
         Returns:
             A plain ``SessionInfo``-shaped dict.
         """
         source_ref = _require(params, "source_ref")
-        return self._gh_import(str(source_ref))
+        loader = params.get("loader")
+        if loader == "binary":
+            return self._gh_import(
+                str(source_ref),
+                loader="binary",
+                processor=str(_require(params, "processor")),
+                base_addr=int(_require(params, "base_addr")),
+                entry=None if params.get("entry") is None else int(params["entry"]),
+            )
+        if loader in ("intel-hex", "motorola-hex"):
+            # ADR-046: hex loaders need only a processor; addresses come from the records.
+            return self._gh_import(
+                str(source_ref), loader=str(loader), processor=str(_require(params, "processor"))
+            )
+        if loader in ("dex", "apk"):
+            # ADR-047: self-describing — force the loader; the format supplies processor + layout.
+            return self._gh_import(str(source_ref), loader=str(loader))
+        if loader == "macho":
+            # ADR-047 force + ADR-048 optional fat-slice `processor`.
+            proc = params.get("processor")
+            return self._gh_import(
+                str(source_ref), loader="macho", processor=None if proc is None else str(proc)
+            )
+        # AUTO path — plus the optional ADR-061 companion PDB (the server allows pdb_ref only with
+        # loader='auto', so it threads here and nowhere else).
+        pdb_ref = params.get("pdb_ref")
+        return self._gh_import(str(source_ref), pdb_ref=None if pdb_ref is None else str(pdb_ref))
 
     def analyze(
         self,
@@ -299,6 +338,80 @@ class PyGhidraBackend:
         cap = _clamp_count(params.get("max_instructions", 256))
         return self._gh_disassemble(params.get("start"), params.get("function"), cap)
 
+    def get_pcode(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List lifted low p-code for a bounded range or function (read-only — ADR-052)."""
+        cap = _clamp_count(params.get("max_instructions", 256))
+        return self._gh_get_pcode(params.get("start"), params.get("function"), cap)
+
+    def get_high_pcode(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a function's decompiler-refined high (SSA) p-code (read-only — ADR-053)."""
+        cap = _clamp_count(params.get("max_ops", 256))
+        return self._gh_get_high_pcode(str(_require(params, "function")), cap)
+
+    def stack_frame(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a function's recovered stack-frame layout (read-only — ADR-054)."""
+        return self._gh_stack_frame(str(_require(params, "function")))
+
+    def basic_blocks(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a function's basic blocks + successor edges (read-only — ADR-055)."""
+        cap = _clamp_count(params.get("max_blocks", 256))
+        return self._gh_basic_blocks(str(_require(params, "function")), cap)
+
+    def list_data_types(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List the program's data types, paginated (read-only — ADR-056)."""
+        offset, limit = _page(params)
+        return self._gh_list_data_types(offset, limit, params.get("name_contains"))
+
+    def function_hash(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a function's Ghidra match-hash fingerprints (read-only — ADR-057)."""
+        return self._gh_function_hash(str(_require(params, "function")))
+
+    def bsim_similarity(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return the BSim cosine similarity between two functions (read-only — ADR-058)."""
+        return self._gh_bsim_similarity(
+            str(_require(params, "function_a")), str(_require(params, "function_b"))
+        )
+
+    def find_similar_functions(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rank the program's functions by BSim similarity to a target (read-only — ADR-059)."""
+        return self._gh_find_similar_functions(
+            function=str(_require(params, "function")),
+            min_similarity=float(params.get("min_similarity", 0.7)),
+            limit=_clamp_count(params.get("limit", 20)),
+            max_scan=_clamp_count(params.get("max_scan", 500)),
+        )
+
+    def version_track(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Correlate functions between two confined binaries via Ghidra VT (ADR-060).
+
+        The session's own program is NOT a participant: both refs are loaded fresh in a throwaway VT
+        project inside this worker, analyzed, correlated, then released + wiped. The paths were
+        confined + size-capped by the server (ADR-001 / CWE-22 / CWE-400).
+        """
+        return self._gh_version_track(
+            source_ref_a=str(_require(params, "source_ref_a")),
+            source_ref_b=str(_require(params, "source_ref_b")),
+            correlator=str(params.get("correlator", "exact_instructions")),
+            min_confidence=float(params.get("min_confidence", 0.0)),
+            limit=_clamp_count(params.get("limit", 100)),
+        )
+
+    def bsim_search_corpus(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Cross-binary BSim search over an ephemeral reference corpus (read-only — ADR-062).
+
+        Loads the target + each reference binary fresh (one at a time), BSim-signs them, and returns
+        each target function's best reference-corpus match. Ephemeral — no persistent DB; the
+        session's own program is untouched. All refs were confined + size-capped by the server.
+        """
+        refs = params.get("reference_refs") or []
+        return self._gh_bsim_search_corpus(
+            target_ref=str(_require(params, "target_ref")),
+            reference_refs=[str(r) for r in refs],
+            min_similarity=float(params.get("min_similarity", 0.7)),
+            limit=_clamp_count(params.get("limit", 100)),
+            max_scan=_clamp_count(params.get("max_scan", 500)),
+        )
+
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:
         """List functions (paginated/bounded)."""
         offset, limit = _page(params)
@@ -354,6 +467,25 @@ class PyGhidraBackend:
         """Bounded raw byte read."""
         length = _clamp_read(int(_require(params, "length")))
         return self._gh_read_bytes(str(_require(params, "address")), length)
+
+    def emulate(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Bounded p-code emulation (ADR-049). The server has bounded step/region/size caps."""
+        return self._gh_emulate(
+            start=str(_require(params, "start")),
+            set_registers=dict(params.get("set_registers") or {}),
+            write_memory=list(params.get("write_memory") or []),
+            max_steps=int(params.get("max_steps", 100_000)),
+            stop_at=(None if params.get("stop_at") is None else str(params["stop_at"])),
+            read_registers=list(params.get("read_registers") or []),
+            read_memory=list(params.get("read_memory") or []),
+        )
+
+    def demangle(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Resolve a mangled C++ symbol to a readable name (ADR-050). Program-independent."""
+        return self._gh_demangle(
+            mangled=str(_require(params, "mangled")),
+            scheme=str(params.get("scheme", "auto")),
+        )
 
     def search_bytes(self, params: dict[str, Any]) -> dict[str, Any]:
         """Bounded byte-pattern search."""
@@ -574,6 +706,18 @@ class PyGhidraBackend:
         clear_existing = bool(params.get("clear_existing", False))
         return self._gh_apply_data_type(address, type_ref, clear_existing)
 
+    def apply_type_archive(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Apply a bundled Ghidra Data Type archive (write; one txn — ADR-051).
+
+        Args:
+            params: ``{"archive": str}`` — an allow-listed bundled-GDT name. The worker maps it to a
+                ``.gdt`` inside the pinned Ghidra install; NO client path is opened (CWE-22).
+
+        Returns:
+            ``{"archive", "functions_updated", "applied"}`` (plain; all fields SAFE).
+        """
+        return self._gh_apply_type_archive(str(_require(params, "archive")))
+
     def define_struct(self, params: dict[str, Any]) -> dict[str, Any]:
         """Create a new struct from a resolved field list (write; one txn — ADR-015 §3).
 
@@ -676,7 +820,16 @@ class PyGhidraBackend:
     # Each helper converts every Ghidra object to a plain str/int/bool before returning (no Java
     # object leaks the boundary); addresses render via ``str(addr)`` (Ghidra's canonical hex form).
 
-    def _gh_import(self, source_ref: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
+    def _gh_import(
+        self,
+        source_ref: str,
+        *,
+        loader: str | None = None,
+        processor: str | None = None,
+        base_addr: int | None = None,
+        entry: int | None = None,
+        pdb_ref: str | None = None,
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Import a binary file into a transient Ghidra project (PyGhidra).
 
         Opens the (server-confined, size-checked) file with PyGhidra and retains the program/
@@ -684,11 +837,30 @@ class PyGhidraBackend:
         dict contributing ``state`` + ``binary_sha256``; the server overlays the authoritative
         ids/timestamps (placeholders here satisfy the model's required scalars).
 
+        When ``loader`` is ``None`` (the default auto path) the ``open_program`` call is
+        byte-for-byte the pre-ADR-045 behavior — Ghidra's opinion/container loaders detect an
+        ELF/PE. When ``loader == "binary"`` (ADR-045, F1) the ``BinaryLoader`` is driven with the
+        allow-listed ``processor`` ``LanguageID`` and the raw image is rebased to ``base_addr``
+        (optionally seeding an entry point). The server has already validated the hints; the worker
+        re-validates the language implicitly — an uninstalled ``LanguageID`` makes ``open_program``
+        raise, which is translated to a category-safe ``not-found`` (defense in depth, ADR-045 §D2).
+
         Args:
             source_ref: The server-resolved, confined input path.
+            loader: ``None``/``"auto"`` for the container path; ``"binary"`` for a raw image.
+            processor: The allow-listed Ghidra ``LanguageID`` (required when ``loader`` is binary).
+            base_addr: The image base to rebase the raw image to (required when ``loader ==
+                "binary"``).
+            entry: Optional entry-point offset to seed as an external entry point.
+            pdb_ref: Optional companion PDB path (auto path only, ADR-061); when set, its
+                symbols/types are applied to the loaded PE before analysis via :meth:`_apply_pdb`.
 
         Returns:
             A plain ``SessionInfo``-shaped dict.
+
+        Raises:
+            WorkerError: ``not-found`` if a raw import names a ``LanguageID`` not installed in this
+                Ghidra build, or the ``BinaryLoader`` could not load the image.
         """
         import hashlib  # stdlib — digest the bytes the worker actually opened
 
@@ -707,16 +879,274 @@ class PyGhidraBackend:
         # per-session worker store (writable tmpfs mounted by deploy/; created in the image).
         # Found via the in-worker analyze smoke against a real ELF.
         project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
-        ctx = pyghidra.open_program(
-            source_ref,
-            project_location=project_dir,
-            project_name="session",
-            analyze=False,
-        )
-        program = ctx.__enter__()
-        self._project = ctx  # retain the context manager for the worker launcher to close on evict
-        self._program = getattr(program, "getCurrentProgram", lambda: program)()
+
+        if loader == "binary":
+            self._open_raw_binary(
+                source_ref, project_dir, str(processor), int(base_addr or 0), entry
+            )
+        elif loader in ("intel-hex", "motorola-hex"):
+            self._open_named_loader(source_ref, project_dir, str(loader), str(processor))
+        elif loader == "macho" and processor is not None:
+            # ADR-048: select a fat/universal Mach-O slice by LanguageID (needs the ProgramLoader
+            # builder — open_program ignores `language` for slice selection).
+            self._open_macho_slice(source_ref, project_dir, str(processor))
+        elif loader in ("dex", "macho", "apk"):
+            # Self-describing (ADR-047): force the loader, no language (the format carries it).
+            self._open_named_loader(source_ref, project_dir, str(loader), None)
+        else:
+            # AUTO path — byte-for-byte the pre-ADR-045 call (opinion/container loaders).
+            ctx = pyghidra.open_program(
+                source_ref,
+                project_location=project_dir,
+                project_name="session",
+                analyze=False,
+            )
+            program = ctx.__enter__()
+            self._project = ctx  # retain the ctx manager for the launcher to close on evict
+            self._program = getattr(program, "getCurrentProgram", lambda: program)()
+            # ADR-061: apply the companion PDB to the fresh PE BEFORE analysis (auto path only;
+            # the server allows pdb_ref only with loader='auto'). Symbols/types land now so a later
+            # session_analyze benefits from them.
+            if pdb_ref is not None:
+                self._apply_pdb(pdb_ref)
         return _session_info_dict("importing", self._sha256, analysis_complete=False)
+
+    def _apply_pdb(self, pdb_ref: str) -> None:  # pragma: no cover - JVM edge
+        """Apply a companion Microsoft PDB's symbols/types to the loaded program (ADR-061).
+
+        Uses Ghidra's cross-platform ``pdb2`` reader + applicator (NOT the Windows-only native
+        ``pdb.exe``): ``PdbParser.parse`` → ``deserialize`` → ``DefaultPdbApplicator(...)`` →
+        ``applyNoAnalysisState()`` (the headless entry — ``applyDataTypesAndMainSymbolsAnalysis``
+        requires an active analysis session), inside one transaction (it mutates the program DB).
+        The ``pdb_ref`` was confined + size-capped by the server (ADR-001/CWE-22/CWE-400). A hostile
+        PDB is contained by the unchanged ADR-004 isolation; a parse/apply failure fails closed with
+        a category-safe slug (the original exception is chained server-side only — master §5).
+
+        Args:
+            pdb_ref: The server-resolved, confined path to the PDB.
+
+        Raises:
+            WorkerError: ``not-found`` if the PDB cannot be parsed or applied (defense in depth; the
+                server already resolved the path).
+        """
+        from ghidra.app.util.bin.format.pdb2.pdbreader import (  # type: ignore[import-not-found]
+            PdbParser,
+            PdbReaderOptions,
+        )
+        from ghidra.app.util.importer import MessageLog  # type: ignore[import-not-found]
+        from ghidra.app.util.pdb.pdbapplicator import (  # type: ignore[import-not-found]
+            DefaultPdbApplicator,
+            PdbApplicatorOptions,
+        )
+        from ghidra.util.task import TaskMonitor  # type: ignore[import-not-found]
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        program = self._require_program()
+        monitor = TaskMonitor.DUMMY
+        try:
+            pdb = PdbParser.parse(pdb_ref, PdbReaderOptions(), monitor)
+            try:
+                pdb.deserialize()
+                tx = program.startTransaction("session_import (pdb apply)")
+                try:
+                    applicator = DefaultPdbApplicator(
+                        pdb,
+                        program,
+                        program.getDataTypeManager(),
+                        program.getImageBase(),
+                        PdbApplicatorOptions(),
+                        monitor,
+                        MessageLog(),
+                    )
+                    applicator.applyNoAnalysisState()
+                finally:
+                    program.endTransaction(tx, True)
+            finally:
+                pdb.close()
+        except Exception as exc:
+            raise WorkerError(
+                CODE_NOT_FOUND, "companion PDB could not be parsed or applied"
+            ) from exc
+
+    def _open_raw_binary(
+        self,
+        source_ref: str,
+        project_dir: str,
+        processor: str,
+        base_addr: int,
+        entry: int | None,
+    ) -> None:  # pragma: no cover - JVM edge
+        """Open a headerless raw image via ``BinaryLoader`` and rebase it (ADR-045, F1).
+
+        Drives PyGhidra's ``BinaryLoader`` with the allow-listed ``processor`` ``LanguageID`` (an
+        uninstalled id makes ``open_program`` raise → translated to ``not-found``), retains the
+        program/context on ``self`` exactly like the auto path, then rebases the loaded image to
+        ``base_addr`` (BinaryLoader maps at 0 by default) and optionally marks ``entry`` as an
+        external entry point — both inside one Ghidra transaction (ADR-012 §4).
+
+        Args:
+            source_ref: The server-resolved, confined input path.
+            project_dir: The writable per-session project location.
+            processor: The allow-listed ``LanguageID``.
+            base_addr: The image base to rebase to.
+            entry: Optional entry-point offset to seed.
+
+        Raises:
+            WorkerError: ``not-found`` if the language is not installed or the image cannot load.
+        """
+        import pyghidra
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        try:
+            ctx = pyghidra.open_program(
+                source_ref,
+                project_location=project_dir,
+                project_name="session",
+                analyze=False,
+                language=processor,
+                loader="ghidra.app.util.opinion.BinaryLoader",
+            )
+            program = ctx.__enter__()
+        except Exception as exc:
+            # The server already allow-listed `processor`; a failure here means the LanguageID is
+            # not installed in this pinned build OR BinaryLoader rejected the raw image. Fail closed
+            # with a category-safe slug (the original exception is chained server-side only).
+            raise WorkerError(
+                CODE_NOT_FOUND, "processor language not installed or raw image could not be loaded"
+            ) from exc
+
+        self._project = ctx  # retain the ctx manager for the launcher to close on evict
+        prog = getattr(program, "getCurrentProgram", lambda: program)()
+        self._program = prog
+
+        space = prog.getAddressFactory().getDefaultAddressSpace()
+
+        def _rebase() -> None:
+            prog.setImageBase(space.getAddress(base_addr), True)
+            if entry is not None:
+                prog.getSymbolTable().addExternalEntryPoint(space.getAddress(entry))
+
+        self._in_transaction("session_import (raw layout)", _rebase)
+
+    #: Client loader hint -> Ghidra loader class. Hex formats (ADR-046) take a ``processor``;
+    #: self-describing container formats (ADR-047) take none (the format carries it).
+    _NAMED_LOADERS: ClassVar[dict[str, str]] = {
+        "intel-hex": "ghidra.app.util.opinion.IntelHexLoader",
+        "motorola-hex": "ghidra.app.util.opinion.MotorolaHexLoader",
+        "dex": "ghidra.app.util.opinion.DexLoader",
+        "macho": "ghidra.app.util.opinion.MachoLoader",
+        "apk": "ghidra.app.util.opinion.ApkLoader",
+    }
+
+    #: Allow-listed type-archive name -> path RELATIVE to ``GHIDRA_INSTALL_DIR`` (ADR-051). The name
+    #: is a closed set (mirrored by the ``_TYPE_ARCHIVE_NAMES`` schema Literal); NO client path is
+    #: ever opened (CWE-22). These ship inside the pinned Ghidra install.
+    _TYPE_ARCHIVES: ClassVar[dict[str, str]] = {
+        "generic_clib": "Ghidra/Features/Base/data/typeinfo/generic/generic_clib.gdt",
+        "generic_clib_64": "Ghidra/Features/Base/data/typeinfo/generic/generic_clib_64.gdt",
+        "windows_vs12_32": "Ghidra/Features/Base/data/typeinfo/win32/windows_vs12_32.gdt",
+        "windows_vs12_64": "Ghidra/Features/Base/data/typeinfo/win32/windows_vs12_64.gdt",
+        "mac_osx": "Ghidra/Features/Base/data/typeinfo/mac_10.9/mac_osx.gdt",
+    }
+
+    def _open_named_loader(
+        self, source_ref: str, project_dir: str, loader: str, processor: str | None
+    ) -> None:  # pragma: no cover - JVM edge
+        """Open via an explicitly-named Ghidra loader (ADR-046 hex / ADR-047 self-describing).
+
+        Drives the mapped loader class (:data:`_NAMED_LOADERS`). When ``processor`` is given (hex
+        loaders — Intel-HEX / SREC carry addresses but no arch) it is passed as ``language``; when
+        ``None`` (self-describing — DEX / Mach-O carry their own processor + layout) no language is
+        passed. There is **no rebase**: the loader lays memory out itself. Retains the program/
+        context on ``self`` exactly like the other paths.
+
+        Args:
+            source_ref: The server-resolved, confined input path.
+            project_dir: The writable per-session project location.
+            loader: The client loader token (mapped via :data:`_NAMED_LOADERS`).
+            processor: The allow-listed ``LanguageID`` for the hex loaders, or ``None`` for the
+                self-describing loaders.
+
+        Raises:
+            WorkerError: ``not-found`` if the (given) language is not installed or the file cannot
+                be loaded by the selected loader.
+        """
+        import pyghidra
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        loader_class = self._NAMED_LOADERS[loader]
+        open_kwargs: dict[str, Any] = {
+            "project_location": project_dir,
+            "project_name": "session",
+            "analyze": False,
+            "loader": loader_class,
+        }
+        if processor is not None:
+            open_kwargs["language"] = processor
+        try:
+            ctx = pyghidra.open_program(source_ref, **open_kwargs)
+            program = ctx.__enter__()
+        except Exception as exc:
+            raise WorkerError(
+                CODE_NOT_FOUND,
+                f"loader='{loader}' could not load the image (unsupported/absent language, "
+                "or the file did not match the format)",
+            ) from exc
+
+        self._project = ctx  # retain the ctx manager for the launcher to close on evict
+        self._program = getattr(program, "getCurrentProgram", lambda: program)()
+
+    def _open_macho_slice(
+        self, source_ref: str, project_dir: str, processor: str
+    ) -> None:  # pragma: no cover - JVM edge
+        """Load a specific fat/universal Mach-O **slice** by ``LanguageID`` (ADR-048).
+
+        ``open_program`` ignores its ``language`` arg for Mach-O slice selection (it always takes
+        the default slice), so this uses the lower-level ``pyghidra.program_loader()`` builder,
+        which DOES honor ``language`` to pick the matching ``LoadSpec`` (verified). The project is
+        opened
+        under ``project_dir`` — the per-session store the server verified-wipes on eviction
+        (ADR-002) — so this path inherits the same teardown guarantee as the others (eviction = kill
+        worker + wipe the store dir, independent of the loader API). Retains the project ctx + the
+        loaded program + the ``LoadResults`` on ``self`` (the last so its consumer keeps the program
+        alive).
+
+        Args:
+            source_ref: The server-resolved, confined input path.
+            project_dir: The writable per-session project location (the wiped store).
+            processor: The allow-listed ``LanguageID`` naming the desired slice.
+
+        Raises:
+            WorkerError: ``not-found`` if no slice matches the language or the file cannot load.
+        """
+        import jpype
+        import pyghidra
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        # Unlike open_program (self-starts the JVM), the program_loader() builder needs the JVM
+        # running first. start() is idempotent (a no-op once started).
+        pyghidra.start()
+        try:
+            project_ctx = pyghidra.open_project(project_dir, "session", create=True)
+            project = project_ctx.__enter__()
+            loaded = (
+                pyghidra.program_loader()
+                .source(source_ref)
+                .project(project)
+                .loaders(jpype.JClass("ghidra.app.util.opinion.MachoLoader"))
+                .language(processor)
+                .load()
+            )
+            program = loaded.getPrimaryDomainObject()
+        except Exception as exc:
+            raise WorkerError(
+                CODE_NOT_FOUND,
+                "no Mach-O slice matched the requested processor, or the file could not be loaded",
+            ) from exc
+
+        self._project = project_ctx  # retain (server kills+wipes on evict; process death frees it)
+        self._loaded = loaded  # keep the LoadResults' consumer alive so the program is not released
+        self._program = program
 
     def _gh_analyze(
         self,
@@ -833,7 +1263,10 @@ class PyGhidraBackend:
         from ghidra.app.plugin.core.analysis import (  # type: ignore[import-not-found]
             AutoAnalysisManager,
         )
-        from ghidra.util.task import TaskMonitor  # type: ignore[import-not-found]
+
+        # ghidra.util.task is missing-ignored at its first in-file import (in _apply_pdb, ADR-061);
+        # a second ignore here would be flagged unused (mypy reports the missing module once/file).
+        from ghidra.util.task import TaskMonitor
 
         program = self._require_program()
 
@@ -967,6 +1400,150 @@ class PyGhidraBackend:
             "c_code": _to_text(c_code),
             "signature": _to_text(func.getPrototypeString(False, False)),
         }
+
+    def _gh_get_high_pcode(
+        self, function: str, cap: int
+    ) -> dict[str, Any]:  # pragma: no cover - JVM
+        """Return a function's decompiler-refined high (SSA) p-code (ADR-053).
+
+        Decompiles the function and iterates ``HighFunction.getPcodeOps()`` — the SSA, dead-code-
+        eliminated, constant-folded IR (e.g. ``mov eax,5; add eax,3`` collapses to a single
+        ``COPY 0x8``). Read-only: the program DB is not touched; the decompiler is disposed in a
+        ``finally`` (ADR-002 memory discipline, same lifecycle as ``_gh_decompile``). Each op's
+        seqnum address is a safe scalar; the rendered op text is decompiler-derived (server wraps it
+        untrusted). Bounded by ``cap`` ops.
+
+        Args:
+            function: Function name or entry address (hex).
+            cap: Maximum high p-code ops to return (already clamped).
+
+        Returns:
+            ``{"ops": [{"address", "op"}, ...], "truncated": bool}``.
+
+        Raises:
+            WorkerError: ``not-found`` if the function does not resolve; ``analysis-failed`` if the
+                decompiler did not complete or produced no high function.
+        """
+        # DecompInterface + ConsoleTaskMonitor are recorded missing-ignored at their first import
+        # (in _gh_decompile, above), so no per-line ignore here (a second would be "unused").
+        from ghidra.app.decompiler import DecompInterface
+        from ghidra.util.task import ConsoleTaskMonitor
+        from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+        program = self._require_program()
+        func = self._resolve_function(function)
+        decompiler = DecompInterface()
+        try:
+            decompiler.openProgram(program)
+            results = decompiler.decompileFunction(func, 0, ConsoleTaskMonitor())
+            if results is None or not results.decompileCompleted():
+                raise WorkerError(CODE_ANALYSIS_FAILED, "decompilation did not complete")
+            high = results.getHighFunction()
+            if high is None:
+                raise WorkerError(CODE_ANALYSIS_FAILED, "no high p-code produced")
+            ops: list[dict[str, Any]] = []
+            truncated = False
+            iterator = high.getPcodeOps()
+            while iterator.hasNext():
+                if len(ops) >= cap:
+                    truncated = True
+                    break
+                op = iterator.next()
+                ops.append({"address": str(op.getSeqnum().getTarget()), "op": _to_text(str(op))})
+        finally:
+            decompiler.dispose()
+        return {"ops": ops, "truncated": truncated}
+
+    def _gh_stack_frame(self, function: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Return a function's recovered stack-frame layout (ADR-054).
+
+        Reads ``Function.getStackFrame()`` — the locals + stack parameters the Stack analyzer
+        populated during auto-analysis (each with its frame offset, name, type, and size).
+        Read-only: the program DB is not touched. A not-yet-analyzed function has an empty variable
+        list (not an error — ``session_analyze`` first). Names/types are Ghidra/binary-derived
+        (server wraps them untrusted); offsets/sizes are safe scalars.
+
+        Args:
+            function: Function name or entry address (hex).
+
+        Returns:
+            ``{"frame_size": int, "variables": [{"name", "stack_offset", "data_type", "size",
+            "is_parameter"}, ...]}``.
+
+        Raises:
+            WorkerError: ``not-found`` if the function does not resolve.
+        """
+        func = self._resolve_function(function)  # requires a loaded program (guards, fail-closed)
+        frame = func.getStackFrame()
+        variables: list[dict[str, Any]] = []
+        for var in frame.getStackVariables():
+            offset = int(var.getStackOffset())
+            data_type = var.getDataType()
+            variables.append(
+                {
+                    "name": _to_text(var.getName()),
+                    "stack_offset": offset,
+                    "data_type": _to_text(data_type.getName()) if data_type is not None else "",
+                    "size": int(var.getLength()),
+                    "is_parameter": bool(frame.isParameterOffset(offset)),
+                }
+            )
+        return {"frame_size": int(frame.getFrameSize()), "variables": variables}
+
+    def _gh_basic_blocks(self, function: str, cap: int) -> dict[str, Any]:  # pragma: no cover - JVM
+        """Return a function's basic blocks + intraprocedural successor edges (ADR-055).
+
+        Walks ``BasicBlockModel`` over the resolved function's body (the same model
+        :meth:`_gh_function_cfg` uses for complexity COUNTS) and emits each block's address range +
+        the start addresses of its successors that stay inside the function. Read-only: the program
+        DB is not touched. All fields are server-normalized addresses / counts (no untrusted content
+        — no instruction text is returned). Bounded by ``cap`` blocks.
+
+        Args:
+            function: Function name or entry address (hex).
+            cap: Maximum basic blocks to return (already clamped).
+
+        Returns:
+            ``{"blocks": [{"address", "end_address", "size", "successors": [hex]}, ...],
+            "truncated": bool}``.
+
+        Raises:
+            WorkerError: ``not-found`` if the function does not resolve.
+        """
+        # This is the FIRST BasicBlockModel import in the file (so it carries the missing-ignore);
+        # ghidra.util.task is already missing-ignored at its first import (in _gh_decompile), so no
+        # per-line ignore on it (a second would be "unused" — mypy unused-ignore).
+        from ghidra.program.model.block import BasicBlockModel  # type: ignore[import-not-found]
+        from ghidra.util.task import TaskMonitor
+
+        func = self._resolve_function(function)  # requires a loaded program (guards, fail-closed)
+        body = func.getBody()
+        model = BasicBlockModel(self._require_program())
+        monitor = TaskMonitor.DUMMY
+        blocks: list[dict[str, Any]] = []
+        truncated = False
+        iterator = model.getCodeBlocksContaining(body, monitor)
+        while iterator.hasNext():
+            if len(blocks) >= cap:
+                truncated = True
+                break
+            block = iterator.next()
+            successors: list[str] = []
+            destinations = block.getDestinations(monitor)
+            while destinations.hasNext():
+                dest = destinations.next().getDestinationBlock()
+                # Only intraprocedural edges (a flow leaving the function is not a CFG edge here).
+                if dest is not None and body.contains(dest.getFirstStartAddress()):
+                    successors.append(str(dest.getFirstStartAddress()))
+            blocks.append(
+                {
+                    "address": str(block.getFirstStartAddress()),
+                    "end_address": str(block.getMaxAddress()),
+                    "size": int(block.getNumAddresses()),
+                    "successors": successors,
+                }
+            )
+        return {"blocks": blocks, "truncated": truncated}
 
     def _gh_decompile_stream(  # pragma: no cover - JVM edge
         self,
@@ -1160,6 +1737,55 @@ class PyGhidraBackend:
                     "mnemonic": _to_text(instr.getMnemonicString()),
                     "operands": _to_text(_instruction_operands(instr)),
                     "bytes_hex": _bytes_to_hex(instr.getBytes()),
+                }
+            )
+        return {"instructions": instructions, "truncated": truncated}
+
+    def _gh_get_pcode(
+        self, start: str | None, function: str | None, cap: int
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """List the lifted low p-code per instruction over a bounded range/function (ADR-052).
+
+        Read-only: lifts each instruction to its raw p-code ops (``Instruction.getPcode()``) — the
+        same IR ``emulate`` interprets — and renders each op as text. NOTHING is executed and the
+        program DB is not touched. Bounded exactly like ``disassemble`` (``cap`` instructions); each
+        instruction's op list is additionally capped (a defensive per-instruction ceiling).
+
+        Args:
+            start: Optional start address (hex) for a raw range.
+            function: Optional function name/address (takes precedence over ``start``).
+            cap: Maximum instructions to return (already clamped).
+
+        Returns:
+            ``{"instructions": [{"address", "mnemonic", "pcode": [str]}, ...], "truncated": bool}``.
+
+        Raises:
+            WorkerError: ``invalid-params`` if neither ``start`` nor ``function`` is given.
+        """
+        from worker.dispatch import CODE_INVALID_PARAMS, WorkerError
+
+        program = self._require_program()
+        listing = program.getListing()
+        if function is not None:
+            func = self._resolve_function(function)
+            iterator = listing.getInstructions(func.getBody(), True)
+        elif start is not None:
+            iterator = listing.getInstructions(self._parse_address(start), True)
+        else:
+            raise WorkerError(CODE_INVALID_PARAMS, "get_pcode requires start or function")
+
+        instructions: list[dict[str, Any]] = []
+        truncated = False
+        for instr in iterator:
+            if len(instructions) >= cap:
+                truncated = True
+                break
+            ops = [_to_text(str(op)) for op in instr.getPcode()[:_MAX_PCODE_OPS_PER_INSN]]
+            instructions.append(
+                {
+                    "address": str(instr.getAddress()),
+                    "mnemonic": _to_text(instr.getMnemonicString()),
+                    "pcode": ops,
                 }
             )
         return {"instructions": instructions, "truncated": truncated}
@@ -1415,6 +2041,624 @@ class PyGhidraBackend:
                 }
         raise WorkerError(CODE_NOT_FOUND, "data type not found")
 
+    def _gh_list_data_types(
+        self, offset: int, limit: int, name_contains: str | None
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """List the program's data types via DataTypeManager (paginated/bounded — ADR-056).
+
+        Iterates ``DataTypeManager.getAllDataTypes()`` — the types established in this session
+        (defined/applied/analysis-added) — and emits lightweight summary rows (name/kind/size), NOT
+        the full rendered definition (fetch that per type via ``get_data_type``). Read-only. Mirrors
+        :meth:`_gh_list_functions`'s pagination + optional case-insensitive substring filter.
+
+        Args:
+            offset: Zero-based start index into the (optionally filtered) type set.
+            limit: Maximum types to return (already clamped).
+            name_contains: Optional case-insensitive substring filter.
+
+        Returns:
+            ``{"data_types": [{"name", "kind", "size"}, ...], "total": int, "truncated": bool}``.
+        """
+        program = self._require_program()
+        needle = name_contains.lower() if name_contains else None
+        rows: list[dict[str, Any]] = []
+        total = 0
+        truncated = False
+        for data_type in program.getDataTypeManager().getAllDataTypes():
+            name = str(data_type.getName())
+            if needle is not None and needle not in name.lower():
+                continue
+            total += 1
+            if (total - 1) < offset:
+                continue
+            if len(rows) >= limit:
+                truncated = True
+                continue
+            rows.append(
+                {
+                    "name": _to_text(data_type.getName()),
+                    "kind": _data_type_kind(data_type),
+                    "size": int(data_type.getLength()),
+                }
+            )
+        return {"data_types": rows, "total": total, "truncated": truncated}
+
+    def _gh_function_hash(self, function: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Return a function's Ghidra match-hash fingerprints at three granularities (ADR-057).
+
+        Uses Ghidra's own ``ghidra.app.plugin.match`` function hashers (the ones behind its
+        function-match/diff feature): ``ExactBytes`` (raw bytes), ``ExactInstructions`` (operands
+        masked — catches relocated/recompiled clones), and ``ExactMnemonics`` (mnemonic sequence).
+        Read-only: the program DB is not touched. Each hash is an opaque 64-bit equality token,
+        rendered as a decimal string (SAFE — a Ghidra-computed digest, not echoed binary content).
+
+        Args:
+            function: Function name or entry address (hex).
+
+        Returns:
+            ``{"address", "exact_bytes", "exact_instructions", "exact_mnemonics",
+            "instruction_count"}`` (plain; all SAFE).
+
+        Raises:
+            WorkerError: ``not-found`` if the function does not resolve.
+        """
+        from ghidra.app.plugin.match import (  # type: ignore[import-not-found]
+            ExactBytesFunctionHasher,
+            ExactInstructionsFunctionHasher,
+            ExactMnemonicsFunctionHasher,
+        )
+
+        # ghidra.util.task is already missing-ignored at its first import (in _gh_decompile).
+        from ghidra.util.task import TaskMonitor
+
+        func = self._resolve_function(function)
+        monitor = TaskMonitor.DUMMY
+        count = 0
+        for _instr in self._require_program().getListing().getInstructions(func.getBody(), True):
+            count += 1
+        return {
+            "address": str(func.getEntryPoint()),
+            "exact_bytes": str(int(ExactBytesFunctionHasher.INSTANCE.hash(func, monitor))),
+            "exact_instructions": str(
+                int(ExactInstructionsFunctionHasher.INSTANCE.hash(func, monitor))
+            ),
+            "exact_mnemonics": str(int(ExactMnemonicsFunctionHasher.INSTANCE.hash(func, monitor))),
+            "instruction_count": count,
+        }
+
+    #: BSim config template name by address size (bits). The bundled ``medium_*`` weights ship in
+    #: the pinned Ghidra install (Features/BSim/data). Only the mainstream 32/64-bit sizes map.
+    _BSIM_TEMPLATES: ClassVar[dict[int, str]] = {32: "medium_32", 64: "medium_64"}
+
+    def _gh_bsim_similarity(
+        self, function_a: str, function_b: str
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Return the BSim cosine similarity between two functions (ADR-058).
+
+        Generates each function's BSim feature signature with Ghidra's ``GenSignatures`` + bundled
+        ``medium`` weights (``FunctionDatabase.loadConfigurationTemplate`` → a configured
+        ``LSHVectorFactory``), then compares the two ``LSHVector``s (``vec.compare`` → cosine
+        similarity in ``[0, 1]``). Read-only: signature generation decompiles each function but does
+        NOT mutate the program DB; ``GenSignatures`` is disposed in a ``finally`` (ADR-002 memory
+        discipline). Bounded to exactly two functions; the worker wall-clock kill backs it.
+
+        Args:
+            function_a: First function — name or entry address (hex).
+            function_b: Second function — name or entry address (hex).
+
+        Returns:
+            ``{"address_a", "address_b", "similarity": float}`` (plain; all SAFE).
+
+        Raises:
+            WorkerError: ``not-found`` if a function does not resolve; ``analysis-failed`` on an
+                unsupported architecture or if a signature could not be generated.
+        """
+        from generic.lsh.vector import VectorCompare  # type: ignore[import-not-found]
+        from ghidra.features.bsim.query import (  # type: ignore[import-not-found]
+            FunctionDatabase,
+            GenSignatures,
+        )
+        from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+        program = self._require_program()
+        func_a = self._resolve_function(function_a)
+        func_b = self._resolve_function(function_b)
+
+        size = int(program.getAddressFactory().getDefaultAddressSpace().getSize())
+        template = self._BSIM_TEMPLATES.get(size)
+        if template is None:
+            raise WorkerError(CODE_ANALYSIS_FAILED, f"BSim: unsupported address size {size}")
+
+        config = FunctionDatabase.loadConfigurationTemplate(template)
+        factory = FunctionDatabase.generateLSHVectorFactory()
+        factory.set(config.weightfactory, config.idflookup, config.info.settings)
+
+        gensig = GenSignatures(False)
+        try:
+            gensig.setVectorFactory(factory)
+            gensig.openProgram(program, None, None, None, None, None)
+            gensig.scanFunction(func_a)
+            gensig.scanFunction(func_b)
+            manager = gensig.getDescriptionManager()
+            vectors: dict[str, Any] = {}
+            for desc in manager.listAllFunctions():
+                record = desc.getSignatureRecord()
+                if record is not None:
+                    vectors[str(desc.getFunctionName())] = record.getLSHVector()
+            vec_a = vectors.get(str(func_a.getName()))
+            vec_b = vectors.get(str(func_b.getName()))
+            if vec_a is None or vec_b is None:
+                raise WorkerError(CODE_ANALYSIS_FAILED, "BSim: could not generate a signature")
+            similarity = float(vec_a.compare(vec_b, VectorCompare()))
+        finally:
+            gensig.dispose()
+
+        return {
+            "address_a": str(func_a.getEntryPoint()),
+            "address_b": str(func_b.getEntryPoint()),
+            "similarity": similarity,
+        }
+
+    def _gh_find_similar_functions(  # noqa: C901 — one bounded BSim scan + rank
+        self, function: str, min_similarity: float, limit: int, max_scan: int
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Rank the program's functions by BSim similarity to a target (ADR-059).
+
+        One ``GenSignatures`` scan of the target + a bounded pool (``max_scan``) of the program's
+        functions, then compares the target's ``LSHVector`` to each candidate's and returns those at
+        or above ``min_similarity``, sorted high-to-low (top ``limit``). Vectors are keyed by the
+        signature description's address (collision-safe vs. duplicate function names). Read-only:
+        signature generation decompiles each scanned function but does NOT mutate the program DB;
+        ``GenSignatures`` is disposed in a ``finally`` (ADR-002). Bounded by ``max_scan`` +
+        ``limit``; the two-plus decompiles are backed by the worker wall-clock kill.
+
+        Args:
+            function: The target function — name or entry address (hex).
+            min_similarity: Minimum cosine similarity to report (``[0, 1]``).
+            limit: Maximum matches to return (top-K after sorting).
+            max_scan: Cap on candidate functions signature-scanned.
+
+        Returns:
+            ``{"target_address", "matches": [{"address", "name", "similarity"}, ...],
+            "functions_scanned", "truncated"}``.
+
+        Raises:
+            WorkerError: ``not-found`` if the target does not resolve; ``analysis-failed`` on an
+                unsupported architecture or if the target signature could not be generated.
+        """
+        from generic.lsh.vector import VectorCompare
+        from ghidra.features.bsim.query import FunctionDatabase, GenSignatures
+        from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+        program = self._require_program()
+        target = self._resolve_function(function)
+        size = int(program.getAddressFactory().getDefaultAddressSpace().getSize())
+        template = self._BSIM_TEMPLATES.get(size)
+        if template is None:
+            raise WorkerError(CODE_ANALYSIS_FAILED, f"BSim: unsupported address size {size}")
+        config = FunctionDatabase.loadConfigurationTemplate(template)
+        factory = FunctionDatabase.generateLSHVectorFactory()
+        factory.set(config.weightfactory, config.idflookup, config.info.settings)
+
+        target_off = int(target.getEntryPoint().getOffset())
+        gensig = GenSignatures(False)
+        try:
+            gensig.setVectorFactory(factory)
+            gensig.openProgram(program, None, None, None, None, None)
+            gensig.scanFunction(target)
+            candidates: list[Any] = []  # scanned functions other than the target
+            truncated = False
+            for func in program.getFunctionManager().getFunctions(True):
+                if int(func.getEntryPoint().getOffset()) == target_off:
+                    continue
+                if len(candidates) >= max_scan:
+                    truncated = True
+                    break
+                gensig.scanFunction(func)
+                candidates.append(func)
+            manager = gensig.getDescriptionManager()
+            vec_by_off: dict[int, Any] = {}
+            for desc in manager.listAllFunctions():
+                record = desc.getSignatureRecord()
+                if record is not None:
+                    vec_by_off[int(desc.getAddress())] = record.getLSHVector()
+            target_vec = vec_by_off.get(target_off)
+            if target_vec is None:
+                raise WorkerError(CODE_ANALYSIS_FAILED, "BSim: could not sign the target function")
+            matches: list[dict[str, Any]] = []
+            for func in candidates:
+                vec = vec_by_off.get(int(func.getEntryPoint().getOffset()))
+                if vec is None:
+                    continue
+                similarity = float(target_vec.compare(vec, VectorCompare()))
+                if similarity >= min_similarity:
+                    matches.append(
+                        {
+                            "address": str(func.getEntryPoint()),
+                            "name": _to_text(func.getName()),
+                            "similarity": similarity,
+                        }
+                    )
+        finally:
+            gensig.dispose()
+
+        matches.sort(key=lambda m: m["similarity"], reverse=True)
+        return {
+            "target_address": str(target.getEntryPoint()),
+            "matches": matches[:limit],
+            "functions_scanned": len(candidates),
+            "truncated": truncated,
+        }
+
+    #: Closed correlator allow-list (ADR-060 D4): client token -> Ghidra VT correlator factory
+    #: class name (in ``ghidra.feature.vt.api.correlator.program``). Mirrors the ``_VT_CORRELATORS``
+    #: schema Literal. NO arbitrary correlator class is instantiated from client input (CWE-470).
+    _VT_CORRELATOR_FACTORIES: ClassVar[dict[str, str]] = {
+        "exact_instructions": "ExactMatchInstructionsProgramCorrelatorFactory",
+        "exact_bytes": "ExactMatchBytesProgramCorrelatorFactory",
+        "exact_mnemonics": "ExactMatchMnemonicsProgramCorrelatorFactory",
+        "duplicate_function": "DuplicateFunctionMatchProgramCorrelatorFactory",
+    }
+
+    def _vt_load_program(
+        self, proj: Any, root: Any, path: str, name: str, consumer: str, monitor: Any
+    ) -> Any:  # pragma: no cover - JVM edge
+        """Load ``path`` fresh into ``proj`` as a WRITABLE, LOCKABLE program for VT (ADR-060).
+
+        ``pyghidra.open_program`` / ``program_loader().load()`` yield a program that is either
+        read-only OR carries a perpetual open transaction (``canLock()==False``) — VT needs to LOCK
+        both programs to snapshot them, so neither works. The fix (grounded live; how Ghidra's own
+        ``CreateAppliedExactMatchingSessionScript`` holds programs) is to load, SAVE as a project
+        domain file, close the transient builder handle, then reopen writable via
+        ``getDomainObject`` (no auto-transaction → ``canLock()==True``), and auto-analyze
+        (correlators need functions defined).
+
+        Args:
+            proj: The throwaway VT project.
+            root: The project's root folder.
+            path: The server-confined, size-capped binary path.
+            name: The in-project domain-file name for this program.
+            consumer: The domain-object consumer token (released in the caller's ``finally``).
+            monitor: A ``TaskMonitor`` for the load/analyze.
+
+        Returns:
+            A writable, analyzed ``Program`` held by ``consumer``.
+        """
+        import pyghidra
+
+        # ghidra.app.plugin.core.analysis is already missing-ignored at its first import (in the
+        # analyze path); a second ignore here would be flagged unused (mypy reports the missing
+        # module once per file).
+        from ghidra.app.plugin.core.analysis import AutoAnalysisManager
+
+        loaded = pyghidra.program_loader().source(path).project(proj).load()
+        try:
+            transient = loaded.getPrimaryDomainObject()
+            root.createFile(name, transient, monitor)  # persist as a project domain file
+            domain_file = transient.getDomainFile()
+        finally:
+            loaded.close()  # drop the transient builder handle (its consumer differs)
+        # Reopen writable + lockable (consumer, okToUpgrade=True, okToRecover=False, monitor).
+        program = domain_file.getDomainObject(consumer, True, False, monitor)
+        manager = AutoAnalysisManager.getAnalysisManager(program)
+        tx = program.startTransaction("vt-analyze")
+        try:
+            manager.reAnalyzeAll(None)
+            manager.startAnalysis(monitor)
+        finally:
+            program.endTransaction(tx, True)
+        return program
+
+    def _gh_version_track(
+        self,
+        source_ref_a: str,
+        source_ref_b: str,
+        correlator: str,
+        min_confidence: float,
+        limit: int,
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Correlate functions between two confined binaries via Ghidra Version Tracking (ADR-060).
+
+        Loads BOTH refs fresh into a throwaway VT project inside this worker (the session's own
+        program is NOT a participant — stronger isolation than ADR-060 D3's original "session =
+        source"), auto-analyzes both, runs the (allow-listed) correlator over the loaded+initialized
+        address sets, extracts the matches (addresses + similarity/confidence scores, all SAFE),
+        filters by ``min_confidence``, sorts by confidence high-to-low, caps at ``limit``, then
+        releases both programs + the VT session and wipes the throwaway project (ADR-002 store
+        discipline). Both loads + analyses + the correlation are backed by the worker wall-clock
+        kill + memory caps (ADR-004) — now covering two loaded programs.
+
+        Args:
+            source_ref_a: SOURCE binary (server-confined + size-capped path).
+            source_ref_b: DESTINATION binary (server-confined + size-capped path); VT writes match
+                markup into it — it is a throwaway, wiped here.
+            correlator: The client correlator token (checked against the allow-list map).
+            min_confidence: Minimum VT confidence (log-scale) to report.
+            limit: Maximum matches to return (sorted by confidence).
+
+        Returns:
+            ``{"matches": [{"source_address", "destination_address", "similarity", "confidence"},
+            ...], "match_count", "truncated"}`` (plain; all SAFE).
+
+        Raises:
+            WorkerError: ``validation`` if the correlator token is unknown (defense in depth);
+                ``analysis-failed`` if a program cannot be loaded/analyzed or VT fails.
+        """
+        import contextlib
+        import shutil
+        from pathlib import Path
+
+        import pyghidra
+
+        # VT may be the FIRST tool on a session (it loads its own binaries — no prior
+        # session_import), so the JVM may not be booted yet. Start it (idempotent) BEFORE importing
+        # any ``ghidra.*`` module — those live on the JVM classpath and are unimportable until the
+        # JVM is up (same pattern as the demangler, which also needs the JVM but no program).
+        pyghidra.start(verbose=False)
+
+        from ghidra.feature.vt.api.correlator import (  # type: ignore[import-not-found]
+            program as _vt_correlators,
+        )
+        from ghidra.feature.vt.api.db import VTSessionDB  # type: ignore[import-not-found]
+        from ghidra.util.task import TaskMonitor
+        from worker.dispatch import CODE_ANALYSIS_FAILED, CODE_INVALID_PARAMS, WorkerError
+
+        factory_name = self._VT_CORRELATOR_FACTORIES.get(correlator)
+        if factory_name is None:  # schema already closed this; belt-and-suspenders (CWE-20)
+            raise WorkerError(CODE_INVALID_PARAMS, "unknown correlator")
+
+        monitor = TaskMonitor.DUMMY
+        consumer = "vivarium-vt"
+        project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
+        vt_path = Path(project_dir) / "vt"
+        vt_path.mkdir(parents=True, exist_ok=True)
+        vt_dir = str(vt_path)  # pyghidra.open_project + shutil want a str path
+
+        proj_ctx = pyghidra.open_project(vt_dir, "vt", create=True)
+        proj = proj_ctx.__enter__()
+        source = dest = session = None
+        try:
+            root = proj.getProjectData().getRootFolder()
+            source = self._vt_load_program(proj, root, source_ref_a, "A", consumer, monitor)
+            dest = self._vt_load_program(proj, root, source_ref_b, "B", consumer, monitor)
+
+            factory = getattr(_vt_correlators, factory_name)()
+            src_set = source.getMemory().getLoadedAndInitializedAddressSet()
+            dst_set = dest.getMemory().getLoadedAndInitializedAddressSet()
+
+            session = VTSessionDB("vivarium-vt-session", source, dest, consumer)
+            corr = factory.createCorrelator(
+                source, src_set, dest, dst_set, factory.createDefaultOptions()
+            )
+            tx = session.startTransaction("correlate")
+            try:
+                match_set = corr.correlate(session, monitor)
+            finally:
+                session.endTransaction(tx, True)
+
+            match_count = int(match_set.getMatchCount())
+            matches: list[dict[str, Any]] = []
+            for match in match_set.getMatches():
+                confidence = float(match.getConfidenceScore().getScore())
+                if confidence < min_confidence:
+                    continue
+                matches.append(
+                    {
+                        "source_address": str(match.getSourceAddress()),
+                        "destination_address": str(match.getDestinationAddress()),
+                        "similarity": float(match.getSimilarityScore().getScore()),
+                        "confidence": confidence,
+                    }
+                )
+        except WorkerError:
+            raise
+        except Exception as exc:
+            # Any VT/analysis/load failure fails closed with a category-safe slug (the original is
+            # chained server-side only — never leak binary-derived detail; master §5 / ADR-005).
+            raise WorkerError(CODE_ANALYSIS_FAILED, "version tracking failed") from exc
+        finally:
+            # Release everything we hold, then wipe the throwaway project (ADR-002). Best-effort:
+            # a cleanup hiccup must not mask the result/error, and the worker store is wiped on
+            # evict regardless.
+            for obj in (session, dest, source):
+                if obj is not None:
+                    with contextlib.suppress(Exception):
+                        obj.release(consumer)
+            with contextlib.suppress(Exception):
+                proj_ctx.__exit__(None, None, None)
+            with contextlib.suppress(Exception):
+                shutil.rmtree(vt_dir, ignore_errors=True)
+
+        matches.sort(key=lambda m: m["confidence"], reverse=True)
+        return {
+            "matches": matches[:limit],
+            "match_count": match_count,
+            "truncated": len(matches) > limit,
+        }
+
+    def _bsim_sign(
+        self, program: Any, factory: Any, max_scan: int
+    ) -> list[tuple[str, str, Any]]:  # pragma: no cover - JVM edge
+        """BSim-sign a program's functions; return ``[(name, hex_address, LSHVector), ...]``.
+
+        One bounded ``GenSignatures`` scan (``<= max_scan`` functions), ADR-062. Captures each
+        function's name + canonical hex entry address BEFORE the program is released (the caller
+        releases it right after), keyed to the signature by entry offset, so the returned vectors
+        are usable after the source program is gone (grounded: BSim vectors survive release).
+
+        Args:
+            program: A loaded + analyzed program.
+            factory: The shared ``LSHVectorFactory`` (same config across the whole corpus).
+            max_scan: Cap on functions signed.
+
+        Returns:
+            ``[(name, hex_address, LSHVector), ...]`` — name is plain (the server wraps it).
+        """
+        from ghidra.features.bsim.query import GenSignatures
+
+        # Snapshot function metadata by entry offset while the program is loaded.
+        meta_by_off: dict[int, tuple[str, str]] = {}
+        for count, func in enumerate(program.getFunctionManager().getFunctions(True)):
+            if count >= max_scan:
+                break
+            meta_by_off[int(func.getEntryPoint().getOffset())] = (
+                str(func.getEntryPoint()),
+                _to_text(func.getName()),
+            )
+
+        gensig = GenSignatures(False)
+        sigs: list[tuple[str, str, Any]] = []
+        try:
+            gensig.setVectorFactory(factory)
+            gensig.openProgram(program, None, None, None, None, None)
+            for off in meta_by_off:
+                # scanFunction takes the Function; re-fetch by entry address (offset -> address).
+                addr = program.getAddressFactory().getDefaultAddressSpace().getAddress(off)
+                func = program.getFunctionManager().getFunctionAt(addr)
+                if func is not None:
+                    gensig.scanFunction(func)
+            manager = gensig.getDescriptionManager()
+            for desc in manager.listAllFunctions():
+                record = desc.getSignatureRecord()
+                if record is None:
+                    continue
+                meta = meta_by_off.get(int(desc.getAddress()))
+                if meta is not None:
+                    hex_addr, name = meta
+                    sigs.append((name, hex_addr, record.getLSHVector()))
+        finally:
+            gensig.dispose()
+        return sigs
+
+    def _gh_bsim_search_corpus(  # noqa: C901 - one bounded multi-binary sign + compare
+        self,
+        target_ref: str,
+        reference_refs: list[str],
+        min_similarity: float,
+        limit: int,
+        max_scan: int,
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Cross-binary BSim search over an ephemeral reference corpus (ADR-062).
+
+        Loads the target + each reference fresh in a throwaway project (reusing the VT lockable
+        domain-file load+analyze path), BSim-signs each with the **target's** ``medium_NN`` factory,
+        releasing each program right after signing (memory bounded to one loaded program at a time —
+        vectors survive release), then for each target function returns its best reference-corpus
+        match at similarity ``>= min_similarity``. References of a different address size than the
+        target are skipped (incomparable vectors — ADR-062 D3). Ephemeral: the corpus is exactly
+        ``reference_refs``, and everything is released + wiped at the end (ADR-002). The session's
+        own program is NOT a participant. Bounded by ``max_scan`` + ``limit`` + the wall-clock kill.
+
+        Args:
+            target_ref: The server-confined target binary path.
+            reference_refs: The server-confined reference binary paths (the corpus).
+            min_similarity: Minimum cosine similarity to report (``[0, 1]``).
+            limit: Maximum matches to return (top-K after sorting).
+            max_scan: Cap on functions signed per binary.
+
+        Returns:
+            ``{"matches": [{"target_address", "target_name", "reference_index", "reference_address",
+            "reference_name", "similarity"}, ...], "target_functions_scanned",
+            "corpus_functions_scanned", "truncated"}``.
+
+        Raises:
+            WorkerError: ``analysis-failed`` on an unsupported target address size or if a program
+                cannot be loaded/analyzed/signed.
+        """
+        import contextlib
+        import shutil
+        from pathlib import Path
+
+        import pyghidra
+
+        # BSim may be the first tool on a session (loads its own binaries — no prior import), so
+        # start the JVM (idempotent) BEFORE importing any ``ghidra.*``/``generic.*`` module (they
+        # live on the JVM classpath and are unimportable until the JVM is up).
+        pyghidra.start(verbose=False)
+
+        from generic.lsh.vector import VectorCompare
+        from ghidra.features.bsim.query import FunctionDatabase
+        from ghidra.util.task import TaskMonitor
+        from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+        monitor = TaskMonitor.DUMMY
+        consumer = "vivarium-bsim"
+        project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
+        corpus_path = Path(project_dir) / "bsim"
+        corpus_path.mkdir(parents=True, exist_ok=True)
+        bsim_dir = str(corpus_path)
+
+        proj_ctx = pyghidra.open_project(bsim_dir, "bsim", create=True)
+        proj = proj_ctx.__enter__()
+        held: list[Any] = []
+        target_sigs: list[tuple[str, str, Any]] = []
+        corpus: list[tuple[int, str, str, Any]] = []
+        try:
+            root = proj.getProjectData().getRootFolder()
+
+            target = self._vt_load_program(proj, root, target_ref, "target", consumer, monitor)
+            held.append(target)
+            size = int(target.getAddressFactory().getDefaultAddressSpace().getSize())
+            template = self._BSIM_TEMPLATES.get(size)
+            if template is None:
+                raise WorkerError(CODE_ANALYSIS_FAILED, f"BSim: unsupported address size {size}")
+            config = FunctionDatabase.loadConfigurationTemplate(template)
+            factory = FunctionDatabase.generateLSHVectorFactory()
+            factory.set(config.weightfactory, config.idflookup, config.info.settings)
+            target_sigs = self._bsim_sign(target, factory, max_scan)
+            target.release(consumer)
+            held.remove(target)
+
+            for index, ref in enumerate(reference_refs):
+                program = self._vt_load_program(proj, root, ref, f"ref{index}", consumer, monitor)
+                held.append(program)
+                try:
+                    ref_size = int(program.getAddressFactory().getDefaultAddressSpace().getSize())
+                    if ref_size == size:  # skip incomparable-arch references (ADR-062 D3)
+                        for name, addr, vec in self._bsim_sign(program, factory, max_scan):
+                            corpus.append((index, name, addr, vec))
+                finally:
+                    program.release(consumer)
+                    held.remove(program)
+
+            comparer = VectorCompare()
+            matches: list[dict[str, Any]] = []
+            for t_name, t_addr, t_vec in target_sigs:
+                best: dict[str, Any] | None = None
+                for ref_index, r_name, r_addr, r_vec in corpus:
+                    score = float(t_vec.compare(r_vec, comparer))
+                    if score >= min_similarity and (best is None or score > best["similarity"]):
+                        best = {
+                            "target_address": t_addr,
+                            "target_name": t_name,
+                            "reference_index": ref_index,
+                            "reference_address": r_addr,
+                            "reference_name": r_name,
+                            "similarity": score,
+                        }
+                if best is not None:
+                    matches.append(best)
+        except WorkerError:
+            raise
+        except Exception as exc:
+            raise WorkerError(CODE_ANALYSIS_FAILED, "cross-binary BSim search failed") from exc
+        finally:
+            for obj in held:
+                with contextlib.suppress(Exception):
+                    obj.release(consumer)
+            with contextlib.suppress(Exception):
+                proj_ctx.__exit__(None, None, None)
+            with contextlib.suppress(Exception):
+                shutil.rmtree(bsim_dir, ignore_errors=True)
+
+        matches.sort(key=lambda m: m["similarity"], reverse=True)
+        return {
+            "matches": matches[:limit],
+            "target_functions_scanned": len(target_sigs),
+            "corpus_functions_scanned": len(corpus),
+            "truncated": len(matches) > limit,
+        }
+
     def _gh_get_comments(
         self, offset: int, limit: int, address: str | None
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
@@ -1494,6 +2738,44 @@ class PyGhidraBackend:
             )
         return {"blocks": blocks}
 
+    def _get_bytes(
+        self, memory: Any, address: Any, length: int
+    ) -> tuple[bytes, int]:  # pragma: no cover - JVM edge
+        """Read up to ``length`` bytes at ``address``, returning ``(data, count_read)``.
+
+        **jpype correctness (#292):** ``Memory.getBytes(Address, byte[])`` fills the array **in
+        place**, so it MUST be a real Java ``byte[]`` (``jpype.JArray(JByte)``). Passing a Python
+        ``bytearray`` makes jpype marshal a **copy** for the call — ``getBytes`` fills the copy and
+        returns the count, but the fill never propagates back, so the Python buffer stays all-zero
+        (the caller sees the right length but zero data). That silent zero-fill is exactly the
+        correctness trap ADR-005 warns against. Java bytes are signed; mask to unsigned on the way
+        out. On ``MemoryAccessException`` (reading past initialized memory) fall back to a
+        byte-by-byte read so ``count_read < length`` is honest (drives ``truncated``).
+
+        Args:
+            memory: The program ``Memory``.
+            address: The start ``Address``.
+            length: Number of bytes to attempt (already clamped by the caller).
+
+        Returns:
+            A ``(data, count_read)`` tuple; ``data`` is exactly ``count_read`` bytes.
+        """
+        import jpype
+
+        buffer = jpype.JArray(jpype.JByte)(length)
+        try:
+            read = int(memory.getBytes(address, buffer))
+            return bytes(int(buffer[i]) & 0xFF for i in range(read)), read
+        except Exception:
+            # Past initialized memory / a block gap — read what is actually there, honestly.
+            out = bytearray()
+            for index in range(length):
+                try:
+                    out.append(int(memory.getByte(address.add(index))) & 0xFF)
+                except Exception:
+                    break
+            return bytes(out), len(out)
+
     def _gh_read_bytes(self, address: str, length: int) -> dict[str, Any]:  # pragma: no cover
         """Read a bounded byte range via Memory.getBytes (confined to the map).
 
@@ -1507,21 +2789,7 @@ class PyGhidraBackend:
         """
         program = self._require_program()
         start = self._parse_address(address)
-        memory = program.getMemory()
-        buffer = bytearray(length)
-        # integration-validate: Memory.getBytes(addr, byte[]) returns the count read and throws
-        # MemoryAccessException past initialized memory — clamp to what is actually readable.
-        try:
-            read = int(memory.getBytes(start, buffer))
-        except Exception:
-            read = 0
-            for index in range(length):
-                try:
-                    buffer[index] = int(memory.getByte(start.add(index))) & 0xFF
-                    read += 1
-                except Exception:
-                    break
-        data = bytes(buffer[:read])
+        data, read = self._get_bytes(program.getMemory(), start, length)
         return {
             "address": str(start),
             "data": data.hex(),
@@ -1852,7 +3120,8 @@ class PyGhidraBackend:
         #   model.getCodeBlocksContaining(func.getBody(), monitor) -> CodeBlock iterator;
         #   CodeBlock.getNumDestinations(monitor) counts outgoing CFG edges;
         #   ghidra.util.task.TaskMonitor.DUMMY as the no-progress monitor.
-        from ghidra.program.model.block import BasicBlockModel  # type: ignore[import-not-found]
+        # (BasicBlockModel is missing-ignored at its FIRST import in _gh_basic_blocks, above.)
+        from ghidra.program.model.block import BasicBlockModel
 
         # ghidra.util.task is already missing-ignored at its first import (in _gh_decompile); a
         # second per-line ignore on the same module would be "unused" (mypy unused-ignore).
@@ -2512,6 +3781,72 @@ class PyGhidraBackend:
             "size": applied_holder["size"],
             "applied": True,
         }
+
+    def _snapshot_function_protos(self, program: Any) -> dict[str, str]:  # pragma: no cover - JVM
+        """Map every function's entry -> its prototype string (for a before/after apply diff)."""
+        out: dict[str, str] = {}
+        it = program.getFunctionManager().getFunctions(True)
+        while it.hasNext():
+            fn = it.next()
+            out[str(fn.getEntryPoint())] = str(fn.getSignature().getPrototypeString())
+        return out
+
+    def _gh_apply_type_archive(self, archive: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Apply a bundled Ghidra Data Type archive's function signatures (ADR-051), one txn.
+
+        Resolves the allow-listed ``archive`` name to a ``.gdt`` in the pinned Ghidra install
+        (``GHIDRA_INSTALL_DIR``) — NEVER a client path (CWE-22). Opens it read-only and runs
+        ``ApplyFunctionDataTypesCmd`` over the whole program, applying each archive function proto
+        to the same-named program function (pulling in referenced types). The write is wrapped in
+        one transaction so ``session_undo`` reverts it atomically. ``functions_updated`` is a
+        before/after prototype diff. The archive is always closed.
+
+        Args:
+            archive: The allow-listed bundled-archive name (validated against ``_TYPE_ARCHIVES``).
+
+        Returns:
+            ``{"archive", "functions_updated", "applied"}`` (plain; all SAFE scalars).
+
+        Raises:
+            WorkerError: ``not-found`` if the archive name is unknown or its bundled file is absent.
+        """
+        from pathlib import Path
+
+        from ghidra.app.cmd.function import (  # type: ignore[import-not-found]
+            ApplyFunctionDataTypesCmd,
+        )
+        from ghidra.program.model.data import FileDataTypeManager
+        from ghidra.program.model.symbol import SourceType
+        from ghidra.util.task import TaskMonitor
+        from java.io import File as JFile  # type: ignore[import-not-found]
+        from java.util import ArrayList  # type: ignore[import-not-found]
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        program = self._require_program()
+        rel = self._TYPE_ARCHIVES.get(archive)
+        if rel is None:  # defense in depth — the schema Literal already closes the set
+            raise WorkerError(CODE_NOT_FOUND, f"unknown type archive: {archive}")
+        path = Path(os.environ.get("GHIDRA_INSTALL_DIR", "/opt/ghidra")) / rel
+        if not path.is_file():
+            raise WorkerError(CODE_NOT_FOUND, f"type archive not found: {archive}")
+
+        dtm = FileDataTypeManager.openFileArchive(JFile(str(path)), False)
+        try:
+            before = self._snapshot_function_protos(program)
+            managers = ArrayList()
+            managers.add(dtm)
+
+            def _write() -> None:
+                cmd = ApplyFunctionDataTypesCmd(managers, None, SourceType.IMPORTED, False, True)
+                cmd.applyTo(program, TaskMonitor.DUMMY)
+
+            self._in_transaction("apply_type_archive", _write)
+            after = self._snapshot_function_protos(program)
+        finally:
+            dtm.close()
+
+        updated = sum(1 for entry, proto in after.items() if before.get(entry) != proto)
+        return {"archive": archive, "functions_updated": updated, "applied": True}
 
     def _gh_define_struct(
         self, name: str, fields: list[dict[str, Any]], packed: bool
@@ -3211,6 +4546,160 @@ class PyGhidraBackend:
             raise WorkerError(CODE_INVALID_PARAMS, "could not parse address")
         return addr
 
+    def _gh_emulate(  # noqa: C901 — one bounded emulator loop over the p-code edge
+        self,
+        *,
+        start: str,
+        set_registers: dict[str, Any],
+        write_memory: list[dict[str, Any]],
+        max_steps: int,
+        stop_at: str | None,
+        read_registers: list[Any],
+        read_memory: list[dict[str, Any]],
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Run bounded Ghidra p-code emulation and return register/memory readbacks (ADR-049).
+
+        Ghidra's ``EmulatorHelper`` INTERPRETS lifted p-code — no native execution, no syscalls,
+        no I/O — a hostile program cannot escape; the program DB is not mutated. Seeds the PC (and
+        ``set_registers``/``write_memory``), steps up to ``max_steps`` (stopping at ``stop_at``, a
+        halt, or a fault), then reads back the requested registers/memory. The emulator is always
+        disposed. Register/memory VALUES are binary-derived — the server wraps them untrusted.
+
+        Args:
+            start: Start address (hex) — the initial PC.
+            set_registers: ``{register_name: int}`` presets.
+            write_memory: ``[{"address": hex, "data_hex": str}]`` pre-run writes.
+            max_steps: Hard p-code step cap (already server-clamped).
+            stop_at: Optional stop address (hex).
+            read_registers: Register names to read back.
+            read_memory: ``[{"address": hex, "length": int}]`` ranges to read back.
+
+        Returns:
+            ``{"steps_executed", "stop_reason", "registers": [...], "memory": [...]}``.
+
+        Raises:
+            WorkerError: ``not-found`` if a named register does not exist.
+        """
+        from ghidra.app.emulator import EmulatorHelper  # type: ignore[import-not-found]
+        from ghidra.util.task import TaskMonitor
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        program = self._require_program()
+        emu = EmulatorHelper(program)
+        try:
+            emu.writeRegister(emu.getPCRegister(), self._parse_address(start).getOffset())
+            for name, value in set_registers.items():
+                try:
+                    emu.writeRegister(str(name), int(value))
+                except Exception as exc:
+                    raise WorkerError(CODE_NOT_FOUND, f"unknown register: {name}") from exc
+            for write in write_memory:
+                emu.writeMemory(
+                    self._parse_address(str(write["address"])),
+                    bytes.fromhex(str(write["data_hex"])),
+                )
+
+            stop_addr = self._parse_address(stop_at) if stop_at is not None else None
+            steps = 0
+            stop_reason = "max-steps"
+            while steps < max_steps:
+                try:
+                    stepped = bool(emu.step(TaskMonitor.DUMMY))
+                except Exception:  # p-code fault (bad access, unimplemented op) — stop, no leak
+                    stop_reason = "fault"
+                    break
+                steps += 1
+                if not stepped:
+                    stop_reason = "halted"
+                    break
+                if stop_addr is not None and emu.getExecutionAddress() == stop_addr:
+                    stop_reason = "stop-address"
+                    break
+
+            regs: list[dict[str, Any]] = []
+            for name in read_registers:
+                try:
+                    raw = int(str(emu.readRegister(str(name))))
+                except Exception as exc:
+                    raise WorkerError(CODE_NOT_FOUND, f"unknown register: {name}") from exc
+                regs.append({"name": str(name), "value": format(raw & ((1 << 512) - 1), "x")})
+
+            mems: list[dict[str, Any]] = []
+            for read in read_memory:
+                addr = self._parse_address(str(read["address"]))
+                length = int(read["length"])
+                data, count = self._get_bytes_via(emu, addr, length)
+                mems.append({"address": str(addr), "data": data.hex(), "length": count})
+
+            return {
+                "steps_executed": steps,
+                "stop_reason": stop_reason,
+                "registers": regs,
+                "memory": mems,
+            }
+        finally:
+            emu.dispose()
+
+    def _gh_demangle(
+        self, mangled: str, scheme: str
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Demangle a C++ symbol with Ghidra's concrete demanglers (ADR-050). Program-independent.
+
+        Tries the requested ``scheme`` (``auto`` = GNU/Itanium then MSVC). Each demangler is a pure
+        string transform — no program is loaded or mutated (read-only). A string that is not a
+        mangled name in a tried scheme yields ``demangled=None`` (not an error). The JVM is started
+        idempotently since this can be the first worker call.
+
+        Args:
+            mangled: The mangled symbol string (already length-bounded by the server).
+            scheme: ``auto`` | ``gnu`` | ``msvc``.
+
+        Returns:
+            ``{"demangled": str | None, "scheme": "gnu" | "msvc" | None}``.
+        """
+        import pyghidra
+
+        pyghidra.start()  # idempotent; the demanglers need the JVM but no program.
+        from ghidra.app.util.demangler.gnu import GnuDemangler  # type: ignore[import-not-found]
+        from ghidra.app.util.demangler.microsoft import (  # type: ignore[import-not-found]
+            MicrosoftDemangler,
+        )
+
+        def _try(demangler: Any) -> str | None:
+            try:
+                result = demangler.demangle(mangled)
+            except Exception:  # a name the demangler rejects is simply "not this scheme".
+                return None
+            if result is None:
+                return None
+            signature = result.getSignature()
+            return None if signature is None else str(signature).strip()
+
+        order: list[tuple[str, Any]] = []
+        if scheme in ("auto", "gnu"):
+            order.append(("gnu", GnuDemangler()))
+        if scheme in ("auto", "msvc"):
+            order.append(("msvc", MicrosoftDemangler()))
+
+        for name, demangler in order:
+            demangled = _try(demangler)
+            if demangled:
+                return {"demangled": demangled, "scheme": name}
+        return {"demangled": None, "scheme": None}
+
+    def _get_bytes_via(self, emu: Any, address: Any, length: int) -> tuple[bytes, int]:
+        # pragma: no cover - JVM edge
+        """Read ``length`` bytes from the emulator state as unsigned bytes (jpype-correct, #292).
+
+        ``EmulatorHelper.readMemory(Address, int)`` returns a Java ``byte[]``; convert its signed
+        bytes to unsigned Python bytes. On a memory fault return what was read (honest short read).
+        """
+        try:
+            buf = emu.readMemory(address, length)
+            return bytes(int(buf[i]) & 0xFF for i in range(len(buf))), len(buf)
+        except Exception:
+            return b"", 0
+
     def _try_parse_address(self, value: str) -> Any | None:  # pragma: no cover - JVM edge
         """Parse a hex address, returning ``None`` instead of raising on failure.
 
@@ -3283,12 +4772,8 @@ class PyGhidraBackend:
         Returns:
             Lowercase hex of the bytes actually read (may be shorter at a block boundary).
         """
-        buffer = bytearray(max(1, min(length, _MAX_READ_BYTES)))
-        try:
-            read = int(memory.getBytes(address, buffer))
-        except Exception:
-            read = 0
-        return bytes(buffer[:read]).hex()
+        data, _read = self._get_bytes(memory, address, max(1, min(length, _MAX_READ_BYTES)))
+        return data.hex()
 
     def _entry_point(self, program: Any) -> Any | None:  # pragma: no cover - JVM edge
         """Return the program entry-point ``Address`` if one is defined.
@@ -3745,7 +5230,7 @@ def _fid_attach_one(writable_copy: Any) -> bool:  # pragma: no cover - JVM edge
         (``addUserFidFile`` returned ``None``) — the orchestration then skips it (fail-soft).
     """
     from ghidra.feature.fid.db import FidFileManager  # type: ignore[import-not-found]
-    from java.io import File  # type: ignore[import-not-found]
+    from java.io import File
 
     manager = FidFileManager.getInstance()
     fid_file = manager.addUserFidFile(File(str(writable_copy)))

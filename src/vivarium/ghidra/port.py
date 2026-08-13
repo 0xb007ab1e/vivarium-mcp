@@ -131,6 +131,56 @@ class GhidraPort(Protocol):
         """Disassemble a bounded range or function."""
         ...
 
+    def get_pcode(self, sid: str, a: s.GetPcodeIn) -> s.GetPcodeOut:
+        """List the lifted low p-code for a bounded range or function (read-only — ADR-052)."""
+        ...
+
+    def get_high_pcode(self, sid: str, a: s.GetHighPcodeIn) -> s.GetHighPcodeOut:
+        """Return a function's decompiler-refined high (SSA) p-code (read-only — ADR-053)."""
+        ...
+
+    def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
+        """Return a function's recovered stack-frame layout (read-only — ADR-054)."""
+        ...
+
+    def basic_blocks(self, sid: str, a: s.BasicBlocksIn) -> s.BasicBlocksOut:
+        """Return a function's basic blocks + successor edges (read-only — ADR-055)."""
+        ...
+
+    def list_data_types(self, sid: str, a: s.ListDataTypesIn) -> s.DataTypeListOut:
+        """List the program's data types, paginated (read-only — ADR-056)."""
+        ...
+
+    def function_hash(self, sid: str, a: s.FunctionHashIn) -> s.FunctionHashOut:
+        """Return a function's Ghidra match-hash fingerprints (read-only — ADR-057)."""
+        ...
+
+    def bsim_similarity(self, sid: str, a: s.BsimSimilarityIn) -> s.BsimSimilarityOut:
+        """Return the BSim cosine similarity between two functions (read-only — ADR-058)."""
+        ...
+
+    def find_similar_functions(
+        self, sid: str, a: s.FindSimilarFunctionsIn
+    ) -> s.FindSimilarFunctionsOut:
+        """Rank the program's functions by BSim similarity to a target (read-only — ADR-059)."""
+        ...
+
+    def version_track(self, sid: str, a: s.VersionTrackIn) -> s.VersionTrackOut:
+        """Correlate functions between two confined binaries (read-only — ADR-060).
+
+        Both refs are confined + size-capped server-side; the two programs are loaded fresh in the
+        session's worker, analyzed, VT-correlated, then wiped. The session program is untouched.
+        """
+        ...
+
+    def bsim_search_corpus(self, sid: str, a: s.BsimSearchCorpusIn) -> s.BsimSearchCorpusOut:
+        """Cross-binary BSim search over an ephemeral reference corpus (read-only — ADR-062).
+
+        Target + reference binaries are confined + size-capped server-side, loaded fresh (one at a
+        time), BSim-signed, compared, then wiped. No persistent DB; session program untouched.
+        """
+        ...
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         ...
@@ -177,6 +227,14 @@ class GhidraPort(Protocol):
 
     def read_bytes(self, sid: str, a: s.ReadBytesIn) -> s.ReadBytesOut:
         """Bounded raw byte read."""
+        ...
+
+    def emulate(self, sid: str, a: s.EmulateIn) -> s.EmulateOut:
+        """Bounded p-code emulation (ADR-049)."""
+        ...
+
+    def demangle(self, sid: str, a: s.DemangleIn) -> s.DemangleOut:
+        """Resolve a mangled C++ symbol to a readable name (ADR-050)."""
         ...
 
     def search_bytes(self, sid: str, a: s.SearchBytesIn) -> s.SearchBytesOut:
@@ -308,6 +366,10 @@ class GhidraPort(Protocol):
 
     def apply_data_type(self, sid: str, a: s.ApplyDataTypeIn) -> s.ApplyDataTypeResult:
         """Apply a resolvable type at an address (transaction-wrapped — ADR-014)."""
+        ...
+
+    def apply_type_archive(self, sid: str, a: s.ApplyTypeArchiveIn) -> s.ApplyTypeArchiveResult:
+        """Apply a bundled Ghidra Data Type archive (structural; transaction-wrapped — ADR-051)."""
         ...
 
     # --- composite-type creation (v1.1 — ADR-015 Phase C; structured FieldSpec input) ---

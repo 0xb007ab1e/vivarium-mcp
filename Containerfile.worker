@@ -111,7 +111,7 @@ WORKDIR /opt/ghidra-src
 # A checksum mismatch FAILS THE BUILD (fail closed — supply-chain integrity, no tampered artifact).
 RUN set -eux; \
     echo "${GHIDRA_ZIP_SHA256}  ghidra.zip" > ghidra.zip.sha256; \
-    curl -fsSL --proto '=https' --tlsv1.2 -o ghidra.zip "${GHIDRA_ZIP_URL}"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 60 --proto '=https' --tlsv1.2 -o ghidra.zip "${GHIDRA_ZIP_URL}"; \
     sha256sum -c ghidra.zip.sha256; \
     unzip -q ghidra.zip; \
     rm -f ghidra.zip ghidra.zip.sha256; \
@@ -239,6 +239,17 @@ RUN set -eux; \
     python3.12 -m pip install --no-cache-dir --no-index \
         --find-links "${PYGHIDRA_DIST}" pyghidra; \
     rm -rf /opt/vivarium/dist; \
+    # Remove the unused Ghidra BSim postgres JDBC driver: Vivarium's BSim path computes LSH vectors
+    # IN MEMORY (loadConfigurationTemplate + generateLSHVectorFactory + GenSignatures + VectorCompare)
+    # and NEVER opens a FunctionDatabase/JDBC connection, so this jar is dead weight — its removal
+    # clears Trivy CVE-2026-54291 (postgresql) with no functional impact (remove > waive).
+    rm -f /opt/ghidra/Ghidra/Features/BSim/lib/postgresql-*.jar; \
+    # Strip build-only python tooling from the SHIPPED image: the worker runs the analysis code and
+    # never installs packages at runtime, so pip (with its bundled `_vendor/msgpack`), setuptools,
+    # and wheel are dead weight — and Trivy's python-pkg scanner flags them (setuptools
+    # CVE-2025-47273, msgpack GHSA-6v7p-g79w-8964). REMOVE rather than waive; the smoke imports below
+    # then prove pyghidra + the worker still import without them (fail the build fast if not).
+    python3.12 -m pip uninstall -y pip setuptools wheel 2>/dev/null || true; \
     python -c "import vivarium.ghidra._jvm_bridge"; \
     python -c "import worker, worker.dispatch, worker.server"; \
     python -c "import pyghidra"
@@ -320,7 +331,7 @@ RUN set -eux; \
 WORKDIR /opt/zlib-src
 RUN set -eux; \
     echo "${ZLIB_TARBALL_SHA256}  zlib.tar.gz" > zlib.tar.gz.sha256; \
-    curl -fsSL --proto '=https' --tlsv1.2 -o zlib.tar.gz "${ZLIB_TARBALL_URL}"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 60 --proto '=https' --tlsv1.2 -o zlib.tar.gz "${ZLIB_TARBALL_URL}"; \
     sha256sum -c zlib.tar.gz.sha256; \
     tar -xzf zlib.tar.gz; \
     rm -f zlib.tar.gz zlib.tar.gz.sha256
@@ -427,7 +438,7 @@ RUN set -eux; \
 WORKDIR /opt/musl-src
 RUN set -eux; \
     echo "${MUSL_TARBALL_SHA256}  musl.tar.gz" > musl.tar.gz.sha256; \
-    curl -fsSL --proto '=https' --tlsv1.2 -o musl.tar.gz "${MUSL_TARBALL_URL}"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 60 --proto '=https' --tlsv1.2 -o musl.tar.gz "${MUSL_TARBALL_URL}"; \
     sha256sum -c musl.tar.gz.sha256; \
     tar -xzf musl.tar.gz; \
     rm -f musl.tar.gz musl.tar.gz.sha256
@@ -530,7 +541,7 @@ RUN set -eux; \
 WORKDIR /opt/openssl-src
 RUN set -eux; \
     echo "${OPENSSL_TARBALL_SHA256}  openssl.tar.gz" > openssl.tar.gz.sha256; \
-    curl -fsSL --proto '=https' --tlsv1.2 -o openssl.tar.gz "${OPENSSL_TARBALL_URL}"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 60 --proto '=https' --tlsv1.2 -o openssl.tar.gz "${OPENSSL_TARBALL_URL}"; \
     sha256sum -c openssl.tar.gz.sha256; \
     tar -xzf openssl.tar.gz; \
     rm -f openssl.tar.gz openssl.tar.gz.sha256
@@ -672,7 +683,7 @@ RUN set -eux; \
 WORKDIR /opt/boost-src
 RUN set -eux; \
     echo "${BOOST_TARBALL_SHA256}  boost.tar.gz" > boost.tar.gz.sha256; \
-    curl -fsSL --proto '=https' --tlsv1.2 -o boost.tar.gz "${BOOST_TARBALL_URL}"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 60 --proto '=https' --tlsv1.2 -o boost.tar.gz "${BOOST_TARBALL_URL}"; \
     sha256sum -c boost.tar.gz.sha256; \
     tar -xzf boost.tar.gz; \
     rm -f boost.tar.gz boost.tar.gz.sha256
