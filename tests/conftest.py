@@ -331,6 +331,24 @@ class FakeGhidraPort:
         ]
         return s.GetHighPcodeOut(ops=ops[: a.max_ops], truncated=a.max_ops < 2)
 
+    def data_flow_slice(self, sid: str, a: s.DataFlowSliceIn) -> s.DataFlowSliceOut:
+        """Return a deterministic def-use slice (pcode_op untrusted, ADR-064)."""
+        self._maybe_fail()
+        nodes = [
+            s.SliceNode(
+                address="0x00401000",
+                pcode_op=_ug("(register, r0, 8) COPY (const, 0x8, 8)"),
+                role="def" if a.direction == "backward" else "use",
+            ),
+            s.SliceNode(address=None, pcode_op=_ug("param_1"), role="boundary"),
+        ]
+        return s.DataFlowSliceOut(
+            seed=a.seed,
+            direction=a.direction,
+            nodes=nodes[: a.max_nodes],
+            truncated=a.max_nodes < 2,
+        )
+
     def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
         """Return a deterministic stack frame (name/type untrusted, ADR-054)."""
         self._maybe_fail()

@@ -348,6 +348,16 @@ class PyGhidraBackend:
         cap = _clamp_count(params.get("max_ops", 256))
         return self._gh_get_high_pcode(str(_require(params, "function")), cap)
 
+    def data_flow_slice(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a bounded intra-function def-use slice from a seed (read-only — ADR-064)."""
+        return self._gh_data_flow_slice(
+            str(_require(params, "function")),
+            str(_require(params, "seed")),
+            str(params.get("direction", "backward")),
+            _clamp_count(params.get("max_nodes", 256)),
+            _clamp_count(params.get("max_depth", 64)),
+        )
+
     def stack_frame(self, params: dict[str, Any]) -> dict[str, Any]:
         """Return a function's recovered stack-frame layout (read-only — ADR-054)."""
         return self._gh_stack_frame(str(_require(params, "function")))
@@ -1453,6 +1463,145 @@ class PyGhidraBackend:
         finally:
             decompiler.dispose()
         return {"ops": ops, "truncated": truncated}
+
+    @staticmethod
+    def _slice_node(op: Any, role: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Shape one def-use slice node from a ``PcodeOp`` (ADR-064).
+
+        Args:
+            op: The ``PcodeOp`` (SSA op) on the slice.
+            role: The node's role relative to the seed (``def``/``use``).
+
+        Returns:
+            ``{"address", "pcode_op", "role"}`` — ``pcode_op`` is the rendered op text
+            (decompiler-derived → the server wraps it untrusted).
+        """
+        return {
+            "address": str(op.getSeqnum().getTarget()),
+            "pcode_op": _to_text(str(op)),
+            "role": role,
+        }
+
+    def _gh_data_flow_slice(  # noqa: C901 - one bounded def-use BFS; forward/backward branches read clearer inline than split (JVM edge, live-regression-only coverage)
+        self, function: str, seed: str, direction: str, max_nodes: int, max_depth: int
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Return a bounded intra-function def-use slice from a seed address (ADR-064).
+
+        Decompiles the function to its SSA ``HighFunction`` and walks the def-use graph from the
+        p-code op(s) at ``seed`` (an address): ``backward`` follows each op's input ``Varnode``s to
+        their defining ops (where the value came from); ``forward`` follows the output ``Varnode``s'
+        descendants (where the value goes). The walk is **intra-function** — a ``Varnode`` with no
+        definition (a parameter/constant/input) is emitted as a ``boundary`` node, never followed
+        across the function edge. Read-only: the program DB is untouched; the decompiler is disposed
+        in a ``finally`` (ADR-002 memory discipline). Bounded by ``max_nodes`` + ``max_depth`` (both
+        already server-clamped); ``truncated`` is honest (ADR-005).
+
+        Args:
+            function: Function name or entry address (hex).
+            seed: The seed **address** (hex) — a p-code op at that address in the function.
+            direction: ``"backward"`` (defs feeding the seed) or ``"forward"`` (uses fed by it).
+            max_nodes: Hard cap on returned slice nodes (already clamped).
+            max_depth: Hard cap on the def-use walk depth (already clamped).
+
+        Returns:
+            ``{"seed", "direction", "nodes": [{"address", "pcode_op", "role"} | boundary],
+            "truncated"}``.
+
+        Raises:
+            WorkerError: ``not-found`` if the function or a p-code op at the seed does not resolve;
+                ``analysis-failed`` if the decompiler did not complete / produced no high function.
+        """
+        from collections import deque
+
+        from ghidra.app.decompiler import DecompInterface
+        from ghidra.util.task import ConsoleTaskMonitor
+        from worker.dispatch import CODE_ANALYSIS_FAILED, CODE_NOT_FOUND, WorkerError
+
+        program = self._require_program()
+        func = self._resolve_function(function)
+        seed_addr = str(self._parse_address(seed))
+        forward = direction == "forward"
+
+        def _drain(java_iter: Any) -> list[Any]:
+            items: list[Any] = []
+            while java_iter.hasNext():
+                items.append(java_iter.next())
+            return items
+
+        nodes: list[dict[str, Any]] = []
+        truncated = False
+        decompiler = DecompInterface()
+        try:
+            decompiler.openProgram(program)
+            results = decompiler.decompileFunction(func, 0, ConsoleTaskMonitor())
+            if results is None or not results.decompileCompleted():
+                raise WorkerError(CODE_ANALYSIS_FAILED, "decompilation did not complete")
+            high = results.getHighFunction()
+            if high is None:
+                raise WorkerError(CODE_ANALYSIS_FAILED, "no high p-code produced")
+
+            seed_ops = [
+                op
+                for op in _drain(high.getPcodeOps())
+                if str(op.getSeqnum().getTarget()) == seed_addr
+            ]
+            if not seed_ops:
+                raise WorkerError(
+                    CODE_NOT_FOUND, "no p-code op at the seed address in this function"
+                )
+
+            frontier: deque[tuple[Any, int]] = deque()
+            for op in seed_ops:
+                if forward:
+                    out = op.getOutput()
+                    if out is not None:
+                        frontier.append((out, 0))
+                else:
+                    for vn in op.getInputs():
+                        frontier.append((vn, 0))
+
+            seen: set[str] = set()
+            while frontier:
+                vn, depth = frontier.popleft()
+                if len(nodes) >= max_nodes:
+                    truncated = True
+                    break
+                if depth >= max_depth:
+                    continue
+                if forward:
+                    for use in _drain(vn.getDescendants()):
+                        key = str(use.getSeqnum())
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        nodes.append(self._slice_node(use, "use"))
+                        out = use.getOutput()
+                        if out is not None:
+                            frontier.append((out, depth + 1))
+                else:
+                    definition = vn.getDef()
+                    if definition is None:  # boundary: parameter / constant / function input
+                        high_var = vn.getHigh()
+                        nodes.append(
+                            {
+                                "address": None,
+                                "pcode_op": (
+                                    _to_text(high_var.getName()) if high_var is not None else None
+                                ),
+                                "role": "boundary",
+                            }
+                        )
+                        continue
+                    key = str(definition.getSeqnum())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    nodes.append(self._slice_node(definition, "def"))
+                    for iv in definition.getInputs():
+                        frontier.append((iv, depth + 1))
+        finally:
+            decompiler.dispose()
+        return {"seed": seed_addr, "direction": direction, "nodes": nodes, "truncated": truncated}
 
     def _gh_stack_frame(self, function: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Return a function's recovered stack-frame layout (ADR-054).

@@ -66,6 +66,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "disassemble",
     "get_pcode",
     "get_high_pcode",
+    "data_flow_slice",
     "stack_frame",
     "basic_blocks",
     "list_data_types",
@@ -523,6 +524,13 @@ def _handle_get_high_pcode(ctx: ToolContext, args: s.GetHighPcodeIn) -> s.GetHig
     ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.function)
     return ctx.port.get_high_pcode(args.session_id, args)
+
+
+def _handle_data_flow_slice(ctx: ToolContext, args: s.DataFlowSliceIn) -> s.DataFlowSliceOut:
+    """Return a bounded intra-function def-use slice from a seed (read-only — ADR-064)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    v.validate_name(args.function)
+    return ctx.port.data_flow_slice(args.session_id, args)
 
 
 def _handle_stack_frame(ctx: ToolContext, args: s.StackFrameIn) -> s.StackFrameOut:
@@ -1791,6 +1799,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "disassemble": (_handle_disassemble, s.DisassembleIn),
     "get_pcode": (_handle_get_pcode, s.GetPcodeIn),
     "get_high_pcode": (_handle_get_high_pcode, s.GetHighPcodeIn),
+    "data_flow_slice": (_handle_data_flow_slice, s.DataFlowSliceIn),
     "stack_frame": (_handle_stack_frame, s.StackFrameIn),
     "basic_blocks": (_handle_basic_blocks, s.BasicBlocksIn),
     "list_data_types": (_handle_list_data_types, s.ListDataTypesIn),

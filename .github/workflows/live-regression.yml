@@ -415,6 +415,7 @@ jobs:
             tests/integration/test_apply_type_archive.py \
             tests/integration/test_get_pcode.py \
             tests/integration/test_get_high_pcode.py \
+            tests/integration/test_data_flow_slice.py \
             tests/integration/test_stack_frame.py \
             tests/integration/test_basic_blocks.py \
             tests/integration/test_list_data_types.py \
@@ -469,13 +470,14 @@ jobs:
           # ADR-059 whole-program BSim search: find_similar ranks clone+variant, excludes unrelated (1) +
           # ADR-060 Version Tracking: two identical ARM ELFs exact-instructions-match (sim 1.0, same addr) (1) +
           # ADR-061 companion PDB: a PE imported with pdb_ref surfaces the PDB function name the_answer (1) +
-          # ADR-062 cross-binary BSim: a target function matches a separately-loaded reference (sim 1.0) (1) = 26.
+          # ADR-062 cross-binary BSim: a target function matches a separately-loaded reference (sim 1.0) (1) +
+          # ADR-064 data-flow slice: a backward def-use slice over a real function returns >=1 node (1) = 27.
           # The deterministic same-toolchain FID gate (zlib + musl, 2) is SELF-ACTIVATING: included
           # only when the worker image ships the bundled DBs (FID_DETERMINISTIC_GATE=1), so the
-          # expected floor is 28 then, 26 otherwise. When inactive the test is omitted (not skipped),
+          # expected floor is 29 then, 27 otherwise. When inactive the test is omitted (not skipped),
           # so the zero-skip rule below still holds.
           import os
-          expected = 28 if os.environ.get("FID_DETERMINISTIC_GATE", "0") == "1" else 26
+          expected = 29 if os.environ.get("FID_DETERMINISTIC_GATE", "0") == "1" else 27
           if tests < expected:
               problems.append(f"expected >={expected} hard-gate tests to run, collected {tests}")
           if skipped:

@@ -14,6 +14,15 @@ real hardened worker. Separately, the **security-hardening / gap-remediation** w
 
 ### Added
 
+- **Data-flow slicing (`data_flow_slice`, ADR-064) — v1.9.** A read-only, bounded intra-function
+  **def-use slice** over the decompiler's SSA `HighFunction`: `backward` returns the defs feeding a
+  seed address (provenance), `forward` returns the uses it feeds. Undefined inputs (parameters/
+  constants) are `boundary` nodes, never followed across the function edge; bounded by
+  `max_nodes`/`max_depth` with an honest `truncated`; op text wrapped untrusted (ADR-005),
+  worker-only (ADR-001), no new agency. The missing analysis primitive for provenance +
+  vulnerability tracing (the 70th Tier-1 tool). Also filed the v1.9 capability-gap ADR batch
+  ADR-065..072 (*Proposed*): multi-region import, emulation ergonomics, binary-diff, string
+  deobfuscation, struct recovery, extended firmware loaders, debug-info import, firmware secret scan.
 - **Broader `session_import` loader coverage.** Import **headerless raw/firmware images**
   (`loader="binary"` + `processor`/`base_addr`/`entry`, ADR-045); **Intel-HEX / Motorola-SREC**
   firmware (ADR-046); **self-describing DEX / Mach-O / APK** (force the loader, ADR-047); and select
