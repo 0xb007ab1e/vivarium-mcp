@@ -29,6 +29,9 @@ from typing import Any, ClassVar
 # Bounds the bridge enforces itself (defense-in-depth; the server also caps before calling).
 _MAX_RESULT_COUNT = 10_000
 _MAX_READ_BYTES = 1_048_576  # 1 MiB
+# Defensive per-instruction ceiling on emitted p-code ops (v1.8 — ADR-052 get_pcode). A SLEIGH
+# instruction lifts to a bounded op count, but cap it so one instruction can't balloon the response.
+_MAX_PCODE_OPS_PER_INSN = 256
 # Max FID match candidates the worker ever returns from identify_functions (v1.x — ADR-042 Phase 1;
 # mirrors rpc_client._IDENTIFY_MATCH_BUDGET). Defense-in-depth: the FID service can emit many
 # candidates per function on a large binary; the worker clamps + sets truncated, the server caps
@@ -329,6 +332,11 @@ class PyGhidraBackend:
         """Disassemble a bounded range or function."""
         cap = _clamp_count(params.get("max_instructions", 256))
         return self._gh_disassemble(params.get("start"), params.get("function"), cap)
+
+    def get_pcode(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List lifted low p-code for a bounded range or function (read-only — ADR-052)."""
+        cap = _clamp_count(params.get("max_instructions", 256))
+        return self._gh_get_pcode(params.get("start"), params.get("function"), cap)
 
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:
         """List functions (paginated/bounded)."""
@@ -1443,6 +1451,55 @@ class PyGhidraBackend:
                     "mnemonic": _to_text(instr.getMnemonicString()),
                     "operands": _to_text(_instruction_operands(instr)),
                     "bytes_hex": _bytes_to_hex(instr.getBytes()),
+                }
+            )
+        return {"instructions": instructions, "truncated": truncated}
+
+    def _gh_get_pcode(
+        self, start: str | None, function: str | None, cap: int
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """List the lifted low p-code per instruction over a bounded range/function (ADR-052).
+
+        Read-only: lifts each instruction to its raw p-code ops (``Instruction.getPcode()``) — the
+        same IR ``emulate`` interprets — and renders each op as text. NOTHING is executed and the
+        program DB is not touched. Bounded exactly like ``disassemble`` (``cap`` instructions); each
+        instruction's op list is additionally capped (a defensive per-instruction ceiling).
+
+        Args:
+            start: Optional start address (hex) for a raw range.
+            function: Optional function name/address (takes precedence over ``start``).
+            cap: Maximum instructions to return (already clamped).
+
+        Returns:
+            ``{"instructions": [{"address", "mnemonic", "pcode": [str]}, ...], "truncated": bool}``.
+
+        Raises:
+            WorkerError: ``invalid-params`` if neither ``start`` nor ``function`` is given.
+        """
+        from worker.dispatch import CODE_INVALID_PARAMS, WorkerError
+
+        program = self._require_program()
+        listing = program.getListing()
+        if function is not None:
+            func = self._resolve_function(function)
+            iterator = listing.getInstructions(func.getBody(), True)
+        elif start is not None:
+            iterator = listing.getInstructions(self._parse_address(start), True)
+        else:
+            raise WorkerError(CODE_INVALID_PARAMS, "get_pcode requires start or function")
+
+        instructions: list[dict[str, Any]] = []
+        truncated = False
+        for instr in iterator:
+            if len(instructions) >= cap:
+                truncated = True
+                break
+            ops = [_to_text(str(op)) for op in instr.getPcode()[:_MAX_PCODE_OPS_PER_INSN]]
+            instructions.append(
+                {
+                    "address": str(instr.getAddress()),
+                    "mnemonic": _to_text(instr.getMnemonicString()),
+                    "pcode": ops,
                 }
             )
         return {"instructions": instructions, "truncated": truncated}

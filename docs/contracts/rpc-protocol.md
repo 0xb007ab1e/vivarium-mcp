@@ -164,7 +164,9 @@ an in-flight `start_decompile_stream` promptly (on client `cancel_job`), the ser
   violation → kill + evict (§6).
 
 ### RPC methods (worker-facing; one per Ghidra-touching operation)
-`import_binary`, `analyze`, `decompile_function`, `disassemble`, `list_functions`, `get_function`,
+`import_binary`, `analyze`, `decompile_function`, `disassemble`, `get_pcode` (ADR-052 low p-code
+listing — read-only; lifts each instruction's raw p-code ops, no execution), `list_functions`,
+`get_function`,
 `xrefs_to`, `xrefs_from`, `list_strings`, `list_symbols`, `get_symbol`, `list_data`,
 `get_data_type`, `get_comments`, `memory_map`, `read_bytes`, `emulate` (ADR-049 p-code emulation —
 bounded, read-effect-only; interpreter, no native exec/syscalls/IO), `demangle` (ADR-050 C++

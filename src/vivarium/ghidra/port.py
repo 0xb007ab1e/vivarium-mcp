@@ -131,6 +131,10 @@ class GhidraPort(Protocol):
         """Disassemble a bounded range or function."""
         ...
 
+    def get_pcode(self, sid: str, a: s.GetPcodeIn) -> s.GetPcodeOut:
+        """List the lifted low p-code for a bounded range or function (read-only — ADR-052)."""
+        ...
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         ...

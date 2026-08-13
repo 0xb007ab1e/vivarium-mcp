@@ -308,6 +308,20 @@ class FakeGhidraPort:
         ]
         return s.DisassembleOut(instructions=instrs, truncated=a.max_instructions < 2)
 
+    def get_pcode(self, sid: str, a: s.GetPcodeIn) -> s.GetPcodeOut:
+        """Return a bounded, deterministic p-code listing (mnemonic + ops untrusted, ADR-052)."""
+        self._maybe_fail()
+        count = min(a.max_instructions, 2)
+        instrs = [
+            s.PcodeInstruction(
+                address=f"0x0040{1000 + i:04x}",
+                mnemonic=_ug("MOV"),
+                pcode=[_ug("(register, 0x0, 8) COPY (const, 0x1, 8)")],
+            )
+            for i in range(count)
+        ]
+        return s.GetPcodeOut(instructions=instrs, truncated=a.max_instructions < 2)
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """Return a bounded, deterministic function summary page."""
         self._maybe_fail()

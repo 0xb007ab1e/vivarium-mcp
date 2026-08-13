@@ -104,7 +104,7 @@ def test_catalog_count_matches_registry() -> None:
     # (ADR-040: start_decompile_stream + fetch_job_results/job_status/cancel_job) + 1 Function ID
     # library-match tool (ADR-042 Phase 1: identify_functions). The registry list is the source.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 59
+    assert len(TIER1_TOOL_NAMES) == 60
 
 
 @pytest.mark.critical
@@ -264,3 +264,25 @@ def test_apply_type_archive_closed_allowlist_and_safe_result() -> None:
     out = s.ApplyTypeArchiveResult(archive="generic_clib_64", functions_updated=7, applied=True)
     for value in out.model_dump().values():
         assert not isinstance(value, Untrusted)
+
+
+@pytest.mark.critical
+def test_get_pcode_bounds_and_untrusted_output() -> None:
+    """get_pcode is bounded like disassemble; mnemonic + each p-code op are wrapped Untrusted."""
+    from vivarium.core.envelope import DataOrigin, Untrusted
+
+    a = s.GetPcodeIn(session_id="s", start="0x1000")
+    assert a.max_instructions == 256  # conservative default
+    with pytest.raises(ValidationError):
+        s.GetPcodeIn(session_id="s", start="0x1000", max_instructions=10_001)  # > hard cap
+    with pytest.raises(ValidationError):
+        s.GetPcodeIn(session_id="s", start="0x1000", max_instructions=0)  # ge=1
+
+    out = s.PcodeInstruction(
+        address="0x401000",
+        mnemonic=Untrusted(value="ADD", origin=DataOrigin.GHIDRA),
+        pcode=[Untrusted(value="(register, 0x0, 4) INT_ADD ...", origin=DataOrigin.GHIDRA)],
+    )
+    assert isinstance(out.mnemonic, Untrusted)
+    assert all(isinstance(op, Untrusted) for op in out.pcode)
+    assert out.address == "0x401000"  # server-normalized scalar stays bare

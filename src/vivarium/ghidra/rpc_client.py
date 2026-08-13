@@ -1080,6 +1080,16 @@ class RpcGhidraAdapter:
             )
         )
 
+    def get_pcode(self, sid: str, a: s.GetPcodeIn) -> s.GetPcodeOut:
+        """List lifted low p-code for a bounded range or function (ADR-052)."""
+        return _build_get_pcode(
+            self._tool_call(
+                sid,
+                "get_pcode",
+                {"start": a.start, "function": a.function, "max_instructions": a.max_instructions},
+            )
+        )
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         return _build_function_list(
@@ -2389,6 +2399,25 @@ def _build_disassemble(r: dict[str, Any]) -> s.DisassembleOut:
     """Build :class:`DisassembleOut` from a plain result."""
     return s.DisassembleOut(
         instructions=[_build_instruction(i) for i in r.get("instructions", [])],
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
+def _build_pcode_instruction(r: dict[str, Any]) -> s.PcodeInstruction:
+    """Build a :class:`PcodeInstruction`: mnemonic + p-code ops are GHIDRA-lifted (untrusted)."""
+    return s.PcodeInstruction(
+        address=str(r["address"]),
+        mnemonic=_w(r["mnemonic"], DataOrigin.GHIDRA),
+        pcode=[_w(op, DataOrigin.GHIDRA) for op in r.get("pcode", [])],
+    )
+
+
+@_fail_closed
+def _build_get_pcode(r: dict[str, Any]) -> s.GetPcodeOut:
+    """Build :class:`GetPcodeOut` (ADR-052) from a plain result."""
+    return s.GetPcodeOut(
+        instructions=[_build_pcode_instruction(i) for i in r.get("instructions", [])],
         truncated=bool(r.get("truncated", False)),
     )
 

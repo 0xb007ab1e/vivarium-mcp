@@ -81,6 +81,7 @@ RPC_METHODS = frozenset(
         "analyze",
         "decompile_function",
         "disassemble",
+        "get_pcode",
         "list_functions",
         "get_function",
         "xrefs_to",
@@ -205,6 +206,10 @@ class GhidraBackend(Protocol):
 
     def disassemble(self, params: dict[str, Any]) -> dict[str, Any]:
         """Disassemble a bounded range or function."""
+        ...
+
+    def get_pcode(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List lifted low p-code for a bounded range or function — v1.8 (ADR-052)."""
         ...
 
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:

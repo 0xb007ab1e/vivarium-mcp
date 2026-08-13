@@ -195,6 +195,10 @@ class FakePort:
         self._rec("disassemble", sid)
         return s.DisassembleOut(instructions=[])
 
+    def get_pcode(self, sid: str, a: s.GetPcodeIn) -> s.GetPcodeOut:
+        self._rec("get_pcode", sid)
+        return s.GetPcodeOut(instructions=[])
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         self._rec("list_functions", sid)
         return s.FunctionListOut(functions=[], total=0)
@@ -425,7 +429,7 @@ def ctx() -> reg.ToolContext:
     )
 
 
-def test_catalog_is_exactly_59_unique_tools() -> None:
+def test_catalog_is_exactly_60_unique_tools() -> None:
     # 22 Tier-1 + 5 v1.1 semantic-naming (ADR-007) + 8 v1.1 Tier-2 metrics (ADR-008; READ-ONLY)
     # + 1 Function ID library-match (ADR-042 Phase 1: identify_functions; READ-ONLY)
     # + 6 v1.1 mutation/write (ADR-012) + 2 v1.1 structural mutation (ADR-013 Phase A) + 2 v1.1
@@ -437,11 +441,11 @@ def test_catalog_is_exactly_59_unique_tools() -> None:
     # job_status / cancel_job; READ-ONLY, output-only) + 1 v1.8 p-code emulation (ADR-049: emulate;
     # READ-ONLY, program DB not mutated) + 1 v1.8 C++ demangler (ADR-050: demangle; READ-ONLY,
     # program-independent) + 1 v1.8 bundled type-archive apply (ADR-051: apply_type_archive;
-    # structural WRITE) — the 15 mutation tools GATED by per-session write-consent (the structural 9
-    # additionally by allow_structural); import is GATED identically (+ allow_structural for
-    # structural entries).
-    assert len(reg.TIER1_TOOL_NAMES) == 59
-    assert len(set(reg.TIER1_TOOL_NAMES)) == 59
+    # structural WRITE) + 1 v1.8 p-code listing (ADR-052: get_pcode; read-only) — the 15 mutation
+    # tools GATED by per-session write-consent (the structural 9 additionally by allow_structural);
+    # import is GATED identically (+ allow_structural for structural entries).
+    assert len(reg.TIER1_TOOL_NAMES) == 60
+    assert len(set(reg.TIER1_TOOL_NAMES)) == 60
 
 
 def test_handler_table_matches_frozen_allow_list() -> None:
@@ -519,6 +523,28 @@ def test_disassemble_validates_function_when_provided(ctx: reg.ToolContext) -> N
     handlers = reg.build_handlers(ctx)
     out = handlers["disassemble"](session_id=_VALID_SID, function="main")
     assert isinstance(out, s.DisassembleOut)
+
+
+def test_get_pcode_validates_start_and_dispatches(ctx: reg.ToolContext) -> None:
+    """get_pcode with an explicit start runs the address validator + dispatches (ADR-052)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["get_pcode"](session_id=_VALID_SID, start="0x401000")
+    assert isinstance(out, s.GetPcodeOut)
+
+
+def test_get_pcode_validates_function_and_dispatches(ctx: reg.ToolContext) -> None:
+    """get_pcode with an explicit function runs the name validator + dispatches (ADR-052)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["get_pcode"](session_id=_VALID_SID, function="main")
+    assert isinstance(out, s.GetPcodeOut)
+
+
+def test_get_pcode_requires_start_or_function(ctx: reg.ToolContext) -> None:
+    """get_pcode with neither start nor function fails closed as VALIDATION (ADR-052)."""
+    handlers = reg.build_handlers(ctx)
+    with pytest.raises(GhidraMcpError) as ei:
+        handlers["get_pcode"](session_id=_VALID_SID)
+    assert ei.value.envelope.type is ErrorType.VALIDATION
 
 
 def test_list_functions_validates_name_contains_when_provided(ctx: reg.ToolContext) -> None:

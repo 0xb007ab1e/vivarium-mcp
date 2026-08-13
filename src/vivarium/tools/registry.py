@@ -64,6 +64,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     # code
     "decompile_function",
     "disassemble",
+    "get_pcode",
     "list_functions",
     "get_function",
     # xrefs
@@ -494,6 +495,18 @@ def _handle_disassemble(ctx: ToolContext, args: s.DisassembleIn) -> s.Disassembl
     if args.start is None and args.function is None:
         raise _require("either 'start' or 'function' must be provided")
     return ctx.port.disassemble(args.session_id, args)
+
+
+def _handle_get_pcode(ctx: ToolContext, args: s.GetPcodeIn) -> s.GetPcodeOut:
+    """List lifted low p-code for a bounded range or function (read-only — ADR-052)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    if args.start is not None:
+        v.parse_address(args.start)
+    if args.function is not None:
+        v.validate_name(args.function)
+    if args.start is None and args.function is None:
+        raise _require("either 'start' or 'function' must be provided")
+    return ctx.port.get_pcode(args.session_id, args)
 
 
 def _handle_list_functions(ctx: ToolContext, args: s.ListFunctionsIn) -> s.FunctionListOut:
@@ -1679,6 +1692,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "session_close": (_handle_session_close, s.SessionCloseIn),
     "decompile_function": (_handle_decompile_function, s.DecompileFunctionIn),
     "disassemble": (_handle_disassemble, s.DisassembleIn),
+    "get_pcode": (_handle_get_pcode, s.GetPcodeIn),
     "list_functions": (_handle_list_functions, s.ListFunctionsIn),
     "get_function": (_handle_get_function, s.GetFunctionIn),
     "xrefs_to": (_handle_xrefs_to, s.XrefsIn),

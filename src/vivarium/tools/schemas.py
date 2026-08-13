@@ -387,6 +387,49 @@ class DisassembleOut(_Out):
     truncated: bool = False
 
 
+class GetPcodeIn(_SessionScopedIn):
+    """Arguments for ``get_pcode`` — list the lifted p-code (IR) for a range/function (ADR-052).
+
+    Read-only: it lifts each instruction to its raw (low) p-code operations — the same IR the
+    ``emulate`` interpreter steps — without executing anything. Bounded like ``disassemble``.
+
+    Attributes:
+        start: Start address (hex).
+        function: Optional function name/address to lift instead of a raw range.
+        max_instructions: Cap on instructions returned (bounded).
+    """
+
+    start: str | None = Field(default=None, max_length=_MAX_NAME)
+    function: str | None = Field(default=None, max_length=_MAX_NAME)
+    max_instructions: int = Field(default=256, ge=1, le=_MAX_LIMIT)
+
+
+class PcodeInstruction(_Out):
+    """One instruction's lifted p-code (ADR-052).
+
+    Attributes:
+        address: Instruction address (hex) — server-normalized, safe.
+        mnemonic: Instruction mnemonic — untrusted (binary-derived).
+        pcode: The instruction's low p-code operations, each rendered as text — untrusted.
+    """
+
+    address: str
+    mnemonic: Untrusted[str]
+    pcode: list[Untrusted[str]]
+
+
+class GetPcodeOut(_Out):
+    """Result of ``get_pcode`` (ADR-052).
+
+    Attributes:
+        instructions: Bounded list of instructions, each with its lifted p-code.
+        truncated: Whether the ``max_instructions`` cap clipped the result.
+    """
+
+    instructions: list[PcodeInstruction]
+    truncated: bool = False
+
+
 class ListFunctionsIn(_Page):
     """Arguments for ``list_functions`` — paginated, bounded.
 
