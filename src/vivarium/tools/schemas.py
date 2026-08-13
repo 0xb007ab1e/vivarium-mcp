@@ -430,6 +430,47 @@ class GetPcodeOut(_Out):
     truncated: bool = False
 
 
+class GetHighPcodeIn(_SessionScopedIn):
+    """Arguments for ``get_high_pcode`` — the decompiler's refined (SSA) p-code for a function.
+
+    Read-only: it decompiles the function and returns its **high** p-code — the SSA, dead-code-
+    eliminated, constant-folded IR the decompiler builds (much closer to semantics than the raw low
+    p-code of ``get_pcode``, ADR-053). Function-scoped (a whole function is decompiled); bounded by
+    ``max_ops``.
+
+    Attributes:
+        function: Function name or entry address (hex) to decompile.
+        max_ops: Cap on high p-code operations returned (bounded).
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    max_ops: int = Field(default=256, ge=1, le=_MAX_LIMIT)
+
+
+class HighPcodeOp(_Out):
+    """One high (decompiler-refined) p-code operation (ADR-053).
+
+    Attributes:
+        address: The operation's sequence-number address (hex) — server-normalized, safe.
+        op: The operation rendered as text — untrusted (decompiler-derived).
+    """
+
+    address: str
+    op: Untrusted[str]
+
+
+class GetHighPcodeOut(_Out):
+    """Result of ``get_high_pcode`` (ADR-053).
+
+    Attributes:
+        ops: Bounded list of the function's high p-code operations.
+        truncated: Whether the ``max_ops`` cap clipped the result.
+    """
+
+    ops: list[HighPcodeOp]
+    truncated: bool = False
+
+
 class ListFunctionsIn(_Page):
     """Arguments for ``list_functions`` — paginated, bounded.
 

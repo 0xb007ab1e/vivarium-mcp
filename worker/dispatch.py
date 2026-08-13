@@ -82,6 +82,7 @@ RPC_METHODS = frozenset(
         "decompile_function",
         "disassemble",
         "get_pcode",
+        "get_high_pcode",
         "list_functions",
         "get_function",
         "xrefs_to",
@@ -210,6 +211,10 @@ class GhidraBackend(Protocol):
 
     def get_pcode(self, params: dict[str, Any]) -> dict[str, Any]:
         """List lifted low p-code for a bounded range or function — v1.8 (ADR-052)."""
+        ...
+
+    def get_high_pcode(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a function's decompiler-refined high (SSA) p-code — v1.8 (ADR-053)."""
         ...
 
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:

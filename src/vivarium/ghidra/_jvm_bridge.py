@@ -338,6 +338,11 @@ class PyGhidraBackend:
         cap = _clamp_count(params.get("max_instructions", 256))
         return self._gh_get_pcode(params.get("start"), params.get("function"), cap)
 
+    def get_high_pcode(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a function's decompiler-refined high (SSA) p-code (read-only — ADR-053)."""
+        cap = _clamp_count(params.get("max_ops", 256))
+        return self._gh_get_high_pcode(str(_require(params, "function")), cap)
+
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:
         """List functions (paginated/bounded)."""
         offset, limit = _page(params)
@@ -1258,6 +1263,59 @@ class PyGhidraBackend:
             "c_code": _to_text(c_code),
             "signature": _to_text(func.getPrototypeString(False, False)),
         }
+
+    def _gh_get_high_pcode(
+        self, function: str, cap: int
+    ) -> dict[str, Any]:  # pragma: no cover - JVM
+        """Return a function's decompiler-refined high (SSA) p-code (ADR-053).
+
+        Decompiles the function and iterates ``HighFunction.getPcodeOps()`` — the SSA, dead-code-
+        eliminated, constant-folded IR (e.g. ``mov eax,5; add eax,3`` collapses to a single
+        ``COPY 0x8``). Read-only: the program DB is not touched; the decompiler is disposed in a
+        ``finally`` (ADR-002 memory discipline, same lifecycle as ``_gh_decompile``). Each op's
+        seqnum address is a safe scalar; the rendered op text is decompiler-derived (server wraps it
+        untrusted). Bounded by ``cap`` ops.
+
+        Args:
+            function: Function name or entry address (hex).
+            cap: Maximum high p-code ops to return (already clamped).
+
+        Returns:
+            ``{"ops": [{"address", "op"}, ...], "truncated": bool}``.
+
+        Raises:
+            WorkerError: ``not-found`` if the function does not resolve; ``analysis-failed`` if the
+                decompiler did not complete or produced no high function.
+        """
+        # DecompInterface + ConsoleTaskMonitor are recorded missing-ignored at their first import
+        # (in _gh_decompile, above), so no per-line ignore here (a second would be "unused").
+        from ghidra.app.decompiler import DecompInterface
+        from ghidra.util.task import ConsoleTaskMonitor
+        from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+        program = self._require_program()
+        func = self._resolve_function(function)
+        decompiler = DecompInterface()
+        try:
+            decompiler.openProgram(program)
+            results = decompiler.decompileFunction(func, 0, ConsoleTaskMonitor())
+            if results is None or not results.decompileCompleted():
+                raise WorkerError(CODE_ANALYSIS_FAILED, "decompilation did not complete")
+            high = results.getHighFunction()
+            if high is None:
+                raise WorkerError(CODE_ANALYSIS_FAILED, "no high p-code produced")
+            ops: list[dict[str, Any]] = []
+            truncated = False
+            iterator = high.getPcodeOps()
+            while iterator.hasNext():
+                if len(ops) >= cap:
+                    truncated = True
+                    break
+                op = iterator.next()
+                ops.append({"address": str(op.getSeqnum().getTarget()), "op": _to_text(str(op))})
+        finally:
+            decompiler.dispose()
+        return {"ops": ops, "truncated": truncated}
 
     def _gh_decompile_stream(  # pragma: no cover - JVM edge
         self,

@@ -322,6 +322,15 @@ class FakeGhidraPort:
         ]
         return s.GetPcodeOut(instructions=instrs, truncated=a.max_instructions < 2)
 
+    def get_high_pcode(self, sid: str, a: s.GetHighPcodeIn) -> s.GetHighPcodeOut:
+        """Return a deterministic high (SSA) p-code listing (op text untrusted, ADR-053)."""
+        self._maybe_fail()
+        ops = [
+            s.HighPcodeOp(address="0x00401000", op=_ug("(register, 0x0, 8) COPY (const, 0x8, 8)")),
+            s.HighPcodeOp(address="0x00401008", op=_ug(" ---  RETURN (const, 0x0, 8)")),
+        ]
+        return s.GetHighPcodeOut(ops=ops[: a.max_ops], truncated=a.max_ops < 2)
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """Return a bounded, deterministic function summary page."""
         self._maybe_fail()

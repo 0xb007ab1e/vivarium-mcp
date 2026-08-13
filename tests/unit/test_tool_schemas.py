@@ -104,7 +104,7 @@ def test_catalog_count_matches_registry() -> None:
     # (ADR-040: start_decompile_stream + fetch_job_results/job_status/cancel_job) + 1 Function ID
     # library-match tool (ADR-042 Phase 1: identify_functions). The registry list is the source.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 60
+    assert len(TIER1_TOOL_NAMES) == 61
 
 
 @pytest.mark.critical
@@ -286,3 +286,25 @@ def test_get_pcode_bounds_and_untrusted_output() -> None:
     assert isinstance(out.mnemonic, Untrusted)
     assert all(isinstance(op, Untrusted) for op in out.pcode)
     assert out.address == "0x401000"  # server-normalized scalar stays bare
+
+
+@pytest.mark.critical
+def test_get_high_pcode_bounds_and_untrusted_output() -> None:
+    """get_high_pcode requires a function, is bounded, and wraps each op Untrusted (ADR-053)."""
+    from vivarium.core.envelope import DataOrigin, Untrusted
+
+    a = s.GetHighPcodeIn(session_id="s", function="main")
+    assert a.max_ops == 256  # conservative default
+    with pytest.raises(ValidationError):
+        s.GetHighPcodeIn(session_id="s", function="")  # function is required (min_length=1)
+    with pytest.raises(ValidationError):
+        s.GetHighPcodeIn(session_id="s", function="main", max_ops=10_001)  # > hard cap
+    with pytest.raises(ValidationError):
+        s.GetHighPcodeIn(session_id="s", function="main", max_ops=0)  # ge=1
+
+    op = s.HighPcodeOp(
+        address="0x401000",
+        op=Untrusted(value="(register, 0x0, 8) COPY (const, 0x8, 8)", origin=DataOrigin.GHIDRA),
+    )
+    assert isinstance(op.op, Untrusted)
+    assert op.address == "0x401000"  # server-normalized scalar stays bare

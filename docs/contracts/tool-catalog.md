@@ -2,17 +2,18 @@
 
 > Pydantic source of truth: [`src/vivarium/tools/schemas.py`](../../src/vivarium/tools/schemas.py).
 > Allow-list registry: [`src/vivarium/tools/registry.py`](../../src/vivarium/tools/registry.py).
-> **Read-by-default.** 44 of the 60 tools are read-only; the **16 mutation/write tools** below are
+> **Read-by-default.** 45 of the 61 tools are read-only; the **16 mutation/write tools** below are
 > **default-deny**, gated by per-session write-consent (`session_enable_writes`) — structural writes
 > additionally by `allow_structural`. **`runScript`/arbitrary script execution is permanently out of
 > scope** (PLAN §2), and the tool surface is a **fixed allow-list** (no dynamic registration).
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **60** tools (asserted in tests by
-  `len(TIER1_TOOL_NAMES) == 60`). The breakdown:
+- **Allow-list only:** the catalog is fixed; there are exactly **61** tools (asserted in tests by
+  `len(TIER1_TOOL_NAMES) == 61`). The breakdown:
   22 Tier-1 read-only (v1) + **1 p-code emulation tool (ADR-049: `emulate`; read-effect-only)** +
   **1 p-code listing tool (ADR-052: `get_pcode`; read-only)** +
+  **1 high (SSA) p-code tool (ADR-053: `get_high_pcode`; read-only)** +
   **1 C++ demangler tool (ADR-050: `demangle`; read-only, program-independent)** +
   5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
   reporting/metrics tools (ADR-008; all read-only) + **1 Function ID library-match tool (ADR-042
@@ -22,7 +23,7 @@
   streaming-extraction tools (ADR-040: `start_decompile_stream` + the generic
   `fetch_job_results`/`job_status`/`cancel_job`; read-only, output-only)** + **2 v1.2
   annotation-persistence tools (ADR-018: `session_export_annotations` read-only +
-  `session_import_annotations` GATED)**. That is **44 read-only + 16 mutation/write** (the 16 = the 6
+  `session_import_annotations` GATED)**. That is **45 read-only + 16 mutation/write** (the 16 = the 6
   ADR-012 write tools + the 9 structural-write tools + the gated `session_import_annotations`; it
   matches the `WRITE_TOOLS` frozenset in `registry.py`).
   Every write tool is GATED by per-session write-consent (structural additionally by
@@ -68,6 +69,7 @@
 | `decompile_function` | `DecompileFunctionIn{function}` | `DecompiledFunction{address, name*, c_code*, signature*}` |
 | `disassemble` | `DisassembleIn{start?, function?, max_instructions≤10000}` | `DisassembleOut{instructions[], truncated}` |
 | `get_pcode` | `GetPcodeIn{start?, function?, max_instructions≤10000}` | `GetPcodeOut{instructions[]{address, mnemonic*, pcode[]*}, truncated}` | **ADR-052** p-code (IR) listing (read-only). Lifts each instruction to its raw low p-code ops (`Instruction.getPcode()`) — the SAME IR `emulate` interprets — WITHOUT executing anything; program DB untouched. Bounded like `disassemble` (+ a per-instruction op cap). `mnemonic` + each `pcode` op are `*`=UNTRUSTED (Ghidra-lifted) |
+| `get_high_pcode` | `GetHighPcodeIn{function, max_ops≤10000}` | `GetHighPcodeOut{ops[]{address, op*}, truncated}` | **ADR-053** high (SSA) p-code (read-only). Decompiles the function and returns its REFINED IR (`HighFunction.getPcodeOps()`) — SSA + dead-code-eliminated + constant-folded (e.g. `mov eax,5; add eax,3` → a single `COPY 0x8`). Between `get_pcode` (raw IR) and `decompile_function` (C). Read-only; decompiler disposed per call. Each `op` is `*`=UNTRUSTED (decompiler-derived) |
 | `list_functions` | `ListFunctionsIn{offset, limit≤10000, name_contains?}` | `FunctionListOut{functions[], total, truncated}` |
 | `get_function` | `GetFunctionIn{function}` | `FunctionDetail{address, name*, signature*, size, is_thunk, calling_convention*?}` |
 

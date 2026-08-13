@@ -135,6 +135,10 @@ class GhidraPort(Protocol):
         """List the lifted low p-code for a bounded range or function (read-only — ADR-052)."""
         ...
 
+    def get_high_pcode(self, sid: str, a: s.GetHighPcodeIn) -> s.GetHighPcodeOut:
+        """Return a function's decompiler-refined high (SSA) p-code (read-only — ADR-053)."""
+        ...
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         ...

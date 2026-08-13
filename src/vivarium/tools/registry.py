@@ -65,6 +65,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "decompile_function",
     "disassemble",
     "get_pcode",
+    "get_high_pcode",
     "list_functions",
     "get_function",
     # xrefs
@@ -507,6 +508,13 @@ def _handle_get_pcode(ctx: ToolContext, args: s.GetPcodeIn) -> s.GetPcodeOut:
     if args.start is None and args.function is None:
         raise _require("either 'start' or 'function' must be provided")
     return ctx.port.get_pcode(args.session_id, args)
+
+
+def _handle_get_high_pcode(ctx: ToolContext, args: s.GetHighPcodeIn) -> s.GetHighPcodeOut:
+    """Return a function's decompiler-refined high (SSA) p-code (read-only — ADR-053)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    v.validate_name(args.function)
+    return ctx.port.get_high_pcode(args.session_id, args)
 
 
 def _handle_list_functions(ctx: ToolContext, args: s.ListFunctionsIn) -> s.FunctionListOut:
@@ -1693,6 +1701,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "decompile_function": (_handle_decompile_function, s.DecompileFunctionIn),
     "disassemble": (_handle_disassemble, s.DisassembleIn),
     "get_pcode": (_handle_get_pcode, s.GetPcodeIn),
+    "get_high_pcode": (_handle_get_high_pcode, s.GetHighPcodeIn),
     "list_functions": (_handle_list_functions, s.ListFunctionsIn),
     "get_function": (_handle_get_function, s.GetFunctionIn),
     "xrefs_to": (_handle_xrefs_to, s.XrefsIn),

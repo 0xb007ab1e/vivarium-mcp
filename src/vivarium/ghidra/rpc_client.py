@@ -1090,6 +1090,12 @@ class RpcGhidraAdapter:
             )
         )
 
+    def get_high_pcode(self, sid: str, a: s.GetHighPcodeIn) -> s.GetHighPcodeOut:
+        """Return a function's decompiler-refined high (SSA) p-code (ADR-053)."""
+        return _build_get_high_pcode(
+            self._tool_call(sid, "get_high_pcode", {"function": a.function, "max_ops": a.max_ops})
+        )
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         return _build_function_list(
@@ -2418,6 +2424,21 @@ def _build_get_pcode(r: dict[str, Any]) -> s.GetPcodeOut:
     """Build :class:`GetPcodeOut` (ADR-052) from a plain result."""
     return s.GetPcodeOut(
         instructions=[_build_pcode_instruction(i) for i in r.get("instructions", [])],
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
+def _build_high_pcode_op(r: dict[str, Any]) -> s.HighPcodeOp:
+    """Build one :class:`HighPcodeOp`: the rendered op is decompiler-derived (untrusted)."""
+    return s.HighPcodeOp(address=str(r["address"]), op=_w(r["op"], DataOrigin.GHIDRA))
+
+
+@_fail_closed
+def _build_get_high_pcode(r: dict[str, Any]) -> s.GetHighPcodeOut:
+    """Build :class:`GetHighPcodeOut` (ADR-053) from a plain result."""
+    return s.GetHighPcodeOut(
+        ops=[_build_high_pcode_op(o) for o in r.get("ops", [])],
         truncated=bool(r.get("truncated", False)),
     )
 
