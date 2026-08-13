@@ -301,6 +301,15 @@ A fat/universal Mach-O loads its default slice, or the slice named by an optiona
 (defense in depth). **Additive, opt-in, no new capability/agency** — read-only import, no script
 execution, tool count unchanged (ADR-001 intact).
 
+**`import_binary` — companion PDB (v1.8 — ADR-061; server → worker, OPTIONAL):** the params MAY
+carry `pdb_ref` (a second server-confined + size-capped path under `VIVARIUM_IMPORT_ROOT`), allowed
+only with the auto loader (no `loader` key). When present, after the PE is loaded the worker applies
+the Microsoft PDB's symbols/types to the fresh program via Ghidra's cross-platform `pdb2` reader +
+`DefaultPdbApplicator.applyNoAnalysisState` (inside one transaction), before analysis. Both refs are
+confined + size-capped **before** the worker (CWE-22/CWE-400); a malformed/hostile PDB fails closed
+`not-found`. Absent ⇒ no key crosses the wire (byte-for-byte the pre-ADR-061 path). Applied at load,
+NOT a write tool — no write-consent, tool count unchanged.
+
 ## 5. Error model (worker → server)
 
 The worker returns JSON-RPC errors with a `data.type` slug that the server maps to the public

@@ -120,6 +120,24 @@ def test_auto_forbids_any_loader_hint() -> None:
         s.SessionImportIn(session_id="s", source_ref="p", entry=0x1000)
 
 
+def test_pdb_ref_allowed_with_auto_default() -> None:
+    """ADR-061: a companion pdb_ref is accepted with loader='auto' (the PE case); bounded."""
+    m = s.SessionImportIn(session_id="s", source_ref="prog.exe", pdb_ref="prog.pdb")
+    assert m.loader == "auto" and m.pdb_ref == "prog.pdb"
+    with pytest.raises(ValidationError):  # over the 512-char confined-path cap
+        s.SessionImportIn(session_id="s", source_ref="p.exe", pdb_ref="x" * 513)
+
+
+def test_pdb_ref_rejected_with_non_auto_loader() -> None:
+    """ADR-061: pdb_ref pairs with an opinion-loaded PE only — any other loader is rejected."""
+    with pytest.raises(ValidationError):  # binary raw image + PDB is ambiguous
+        s.SessionImportIn.model_validate(_binary(pdb_ref="p.pdb"))
+    with pytest.raises(ValidationError):  # macho + PDB
+        s.SessionImportIn(session_id="s", source_ref="m", loader="macho", pdb_ref="p.pdb")
+    with pytest.raises(ValidationError):  # dex + PDB
+        s.SessionImportIn(session_id="s", source_ref="d", loader="dex", pdb_ref="p.pdb")
+
+
 def test_unsupported_processor_rejected() -> None:
     """A processor outside the curated allow-list fails closed."""
     with pytest.raises(ValidationError):

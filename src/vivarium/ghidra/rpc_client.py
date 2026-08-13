@@ -536,6 +536,12 @@ class RpcGhidraAdapter:
             params["loader"] = args.loader
             if args.processor is not None:
                 params["processor"] = args.processor
+        # ADR-061 companion PDB (opt-in; loader='auto' only, enforced by the schema): confine +
+        # size-cap the PDB with the SAME resolver/cap/pre-flight as the binary (no byte reaches the
+        # JVM until it passes), then thread it. Absent → no key crosses (byte-for-byte no-op).
+        if args.pdb_ref is not None:
+            self._resolve_and_cap(args.pdb_ref)
+            params["pdb_ref"] = args.pdb_ref
         result = self._call(
             session_id,
             "import_binary",

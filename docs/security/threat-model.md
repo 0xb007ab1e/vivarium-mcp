@@ -8,7 +8,8 @@
 > **structural-mutation Phase B — signature + data-type apply (TB7 structural Phase B, §10,
 > ADR-014)**, and (v1.2) the **annotation-persistence import boundary (TB8, §12, ADR-018)**. v1.8
 > adds the **Version Tracking second-binary surface (TB3 delta, ADR-060 — ACCEPTED + IMPLEMENTED
-> 2026-08-13)**.
+> 2026-08-13)** and the **companion-PDB second-file surface (TB3 delta, ADR-061 — ACCEPTED +
+> IMPLEMENTED 2026-08-13)**.
 > Source of truth: [`PLAN.md`](../../PLAN.md).
 > **Data classification:** the analyzed binary and all derived artifacts are **confidential** and
 > of **hostile origin** (master §5).
@@ -192,6 +193,32 @@ Likelihood × Impact → severity (master §7). "L/M/H".
 >   solved by opening programs from project domain files via `getDomainObject` (recipe in ADR-060);
 >   grounded end-to-end (`match_count=1`, similarity 1.0) and now shipped as tool #68, re-proven by the
 >   gated `test_version_track.py` live-regression hard gate.
+
+> **TB3 delta — v1.8 companion PDB: a second hostile file + a complex parser (ADR-061 — ACCEPTED +
+> IMPLEMENTED 2026-08-13).** `session_import` grows an optional `pdb_ref`: a Microsoft PDB applied to
+> the freshly-loaded Windows PE (recovers the real function names/types). This is **not a new
+> boundary** — it is a **second input across TB3** (binary → analyzer) — but the added surface:
+> - **A second hostile file, parsed by a complex parser.** The PDB parser (MSF container + multiple
+>   typed streams — Ghidra's cross-platform `pdb2` reader) is a real attack surface, larger than a raw
+>   loader. It runs entirely inside the **unchanged** ADR-004 isolation (no egress, ro-rootfs, dropped
+>   caps, gVisor, mem/pids/cpu caps, wall-clock kill); the reader is data-in only, **no code execution**;
+>   a parse/apply fault fails closed with a category-safe `not-found` (no leaky detail — master §5).
+> - **Confined + size-capped.** BOTH `source_ref` and `pdb_ref` are confined-root-resolved (CWE-22) and
+>   size-capped (CWE-400) **before any byte reaches the JVM** (ADR-001) — no new file-read or unbounded
+>   surface. `pdb_ref` is allowed only with `loader="auto"` (the PE case), rejected otherwise.
+> - **Applied at load to the fresh program; NOT a write tool.** The symbols land in the session's own
+>   program as intended (this IS the enrichment), during import of a fresh program — no established
+>   program is mutated, so no write-consent (gated like `session_import` — a capability). The program +
+>   worker are wiped on evict (ADR-002) like any import.
+> - **Output stays safe.** `session_import` returns only server-computed `SessionInfo` — no binary-derived
+>   field. The applied names/types surface later through the read tools, where they are **already**
+>   untrusted-enveloped (ADR-005) — this delta adds **no** new output surface.
+> - **No new egress / caps change.** The worker stays network-less, ro-rootfs, dropped-caps, gVisor.
+> - **Grounded + built.** Headless apply (`PdbParser.parse` → `deserialize` → `DefaultPdbApplicator`
+>   → `applyNoAnalysisState`) grounded end-to-end (a fixture PE+PDB import surfaced the PDB function
+>   name `the_answer`, symbols 8→10), re-proven by the gated `test_import_pdb.py` live-regression hard
+>   gate. No GUID enforcement in the initial cut (operator pairs the two files; a mismatch yields
+>   wrong-but-contained, envelope-wrapped symbols) — a future refinement.
 
 ### TB4 — Worker → Server → LLM (untrusted output)
 | STRIDE | Threat | L×I | Mitigation |

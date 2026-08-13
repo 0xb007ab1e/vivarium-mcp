@@ -217,7 +217,9 @@ class PyGhidraBackend:
                 server has already resolved/confined the path, enforced the size cap, and validated
                 the hint combination + the processor allow-list BEFORE this call; the worker
                 re-validates the language against the installed set (defense in depth, ADR-045 §D2).
-                When no ``loader`` key is present the call is byte-for-byte the pre-ADR-045 path.
+                When no ``loader`` key is present the call is byte-for-byte the pre-ADR-045 path. An
+                optional ``pdb_ref`` (ADR-061; auto path only, server-confined + size-capped)
+                applies a companion Microsoft PDB's symbols/types to the loaded PE before analysis.
 
         Returns:
             A plain ``SessionInfo``-shaped dict.
@@ -246,7 +248,10 @@ class PyGhidraBackend:
             return self._gh_import(
                 str(source_ref), loader="macho", processor=None if proc is None else str(proc)
             )
-        return self._gh_import(str(source_ref))
+        # AUTO path — plus the optional ADR-061 companion PDB (the server allows pdb_ref only with
+        # loader='auto', so it threads here and nowhere else).
+        pdb_ref = params.get("pdb_ref")
+        return self._gh_import(str(source_ref), pdb_ref=None if pdb_ref is None else str(pdb_ref))
 
     def analyze(
         self,
@@ -807,6 +812,7 @@ class PyGhidraBackend:
         processor: str | None = None,
         base_addr: int | None = None,
         entry: int | None = None,
+        pdb_ref: str | None = None,
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Import a binary file into a transient Ghidra project (PyGhidra).
 
@@ -830,6 +836,8 @@ class PyGhidraBackend:
             base_addr: The image base to rebase the raw image to (required when ``loader ==
                 "binary"``).
             entry: Optional entry-point offset to seed as an external entry point.
+            pdb_ref: Optional companion PDB path (auto path only, ADR-061); when set, its
+                symbols/types are applied to the loaded PE before analysis via :meth:`_apply_pdb`.
 
         Returns:
             A plain ``SessionInfo``-shaped dict.
@@ -880,7 +888,69 @@ class PyGhidraBackend:
             program = ctx.__enter__()
             self._project = ctx  # retain the ctx manager for the launcher to close on evict
             self._program = getattr(program, "getCurrentProgram", lambda: program)()
+            # ADR-061: apply the companion PDB to the fresh PE BEFORE analysis (auto path only;
+            # the server allows pdb_ref only with loader='auto'). Symbols/types land now so a later
+            # session_analyze benefits from them.
+            if pdb_ref is not None:
+                self._apply_pdb(pdb_ref)
         return _session_info_dict("importing", self._sha256, analysis_complete=False)
+
+    def _apply_pdb(self, pdb_ref: str) -> None:  # pragma: no cover - JVM edge
+        """Apply a companion Microsoft PDB's symbols/types to the loaded program (ADR-061).
+
+        Uses Ghidra's cross-platform ``pdb2`` reader + applicator (NOT the Windows-only native
+        ``pdb.exe``): ``PdbParser.parse`` → ``deserialize`` → ``DefaultPdbApplicator(...)`` →
+        ``applyNoAnalysisState()`` (the headless entry — ``applyDataTypesAndMainSymbolsAnalysis``
+        requires an active analysis session), inside one transaction (it mutates the program DB).
+        The ``pdb_ref`` was confined + size-capped by the server (ADR-001/CWE-22/CWE-400). A hostile
+        PDB is contained by the unchanged ADR-004 isolation; a parse/apply failure fails closed with
+        a category-safe slug (the original exception is chained server-side only — master §5).
+
+        Args:
+            pdb_ref: The server-resolved, confined path to the PDB.
+
+        Raises:
+            WorkerError: ``not-found`` if the PDB cannot be parsed or applied (defense in depth; the
+                server already resolved the path).
+        """
+        from ghidra.app.util.bin.format.pdb2.pdbreader import (  # type: ignore[import-not-found]
+            PdbParser,
+            PdbReaderOptions,
+        )
+        from ghidra.app.util.importer import MessageLog  # type: ignore[import-not-found]
+        from ghidra.app.util.pdb.pdbapplicator import (  # type: ignore[import-not-found]
+            DefaultPdbApplicator,
+            PdbApplicatorOptions,
+        )
+        from ghidra.util.task import TaskMonitor  # type: ignore[import-not-found]
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        program = self._require_program()
+        monitor = TaskMonitor.DUMMY
+        try:
+            pdb = PdbParser.parse(pdb_ref, PdbReaderOptions(), monitor)
+            try:
+                pdb.deserialize()
+                tx = program.startTransaction("session_import (pdb apply)")
+                try:
+                    applicator = DefaultPdbApplicator(
+                        pdb,
+                        program,
+                        program.getDataTypeManager(),
+                        program.getImageBase(),
+                        PdbApplicatorOptions(),
+                        monitor,
+                        MessageLog(),
+                    )
+                    applicator.applyNoAnalysisState()
+                finally:
+                    program.endTransaction(tx, True)
+            finally:
+                pdb.close()
+        except Exception as exc:
+            raise WorkerError(
+                CODE_NOT_FOUND, "companion PDB could not be parsed or applied"
+            ) from exc
 
     def _open_raw_binary(
         self,
@@ -1177,7 +1247,10 @@ class PyGhidraBackend:
         from ghidra.app.plugin.core.analysis import (  # type: ignore[import-not-found]
             AutoAnalysisManager,
         )
-        from ghidra.util.task import TaskMonitor  # type: ignore[import-not-found]
+
+        # ghidra.util.task is missing-ignored at its first in-file import (in _apply_pdb, ADR-061);
+        # a second ignore here would be flagged unused (mypy reports the missing module once/file).
+        from ghidra.util.task import TaskMonitor
 
         program = self._require_program()
 

@@ -182,6 +182,12 @@ class SessionImportIn(_SessionScopedIn):
             header to supply it); bounded to the processor's address width.
         entry: Optional entry-point hint (``binary`` only; a disassembly seed). If given, must be
             ``>= base_addr`` and within the processor's address width.
+        pdb_ref: Optional **companion Microsoft PDB** for a Windows PE (ADR-061) — a second
+            server-resolved path under ``VIVARIUM_IMPORT_ROOT`` (confined + size-capped like
+            ``source_ref``). When set, the PDB's symbols/types are applied to the freshly-loaded
+            program before analysis. Allowed **only** with ``loader="auto"`` (the opinion-loaded PE
+            case); rejected with any other loader. Omit for no PDB (byte-for-byte the pre-ADR-061
+            path).
     """
 
     source_ref: str = Field(min_length=1, max_length=512)
@@ -190,6 +196,7 @@ class SessionImportIn(_SessionScopedIn):
     processor: str | None = Field(default=None, min_length=1, max_length=128)
     base_addr: int | None = Field(default=None, ge=0)
     entry: int | None = Field(default=None, ge=0)
+    pdb_ref: str | None = Field(default=None, min_length=1, max_length=512)
 
     @model_validator(mode="after")
     def _validate_loader_hints(self) -> SessionImportIn:  # noqa: C901 — one branch per loader kind
@@ -203,6 +210,7 @@ class SessionImportIn(_SessionScopedIn):
             * ``processor`` must be in the curated allow-list (``vivarium.core.languages``).
             * ``base_addr``/``entry`` must fit the processor's address width; ``entry`` >=
               ``base_addr``.
+            * ``pdb_ref`` (ADR-061 companion PDB) is allowed only with ``loader="auto"``.
 
         Returns:
             ``self`` when the hint combination is valid.
@@ -213,6 +221,12 @@ class SessionImportIn(_SessionScopedIn):
         """
         # Import locally to keep the schema module import-light and the dependency one-directional.
         from vivarium.core import languages
+
+        # ADR-061: a companion PDB pairs with an opinion-loaded Windows PE. Applies to every loader
+        # branch (each returns early below), so gate it here up front — allowed only with
+        # loader="auto"; any other loader with pdb_ref set is ambiguous → rejected (fail closed).
+        if self.pdb_ref is not None and self.loader != "auto":
+            raise ValueError("pdb_ref (companion PDB) is only allowed with loader='auto'")
 
         def _require_supported_processor() -> None:
             if self.processor is None or not languages.is_supported_language(self.processor):
