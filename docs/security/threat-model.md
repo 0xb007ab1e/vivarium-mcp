@@ -6,7 +6,9 @@
 > network boundary (TB6, ADR-011)**, the **annotation-mutation (write) boundary (TB7, §10,
 > ADR-012)**, the **structural-mutation Phase A (TB7 structural, §10, ADR-013)**, and the
 > **structural-mutation Phase B — signature + data-type apply (TB7 structural Phase B, §10,
-> ADR-014)**, and (v1.2) the **annotation-persistence import boundary (TB8, §12, ADR-018)**.
+> ADR-014)**, and (v1.2) the **annotation-persistence import boundary (TB8, §12, ADR-018)**. v1.8
+> proposes the **Version Tracking second-binary surface (TB3 delta, ADR-060 — PROPOSED, review before
+> code)**.
 > Source of truth: [`PLAN.md`](../../PLAN.md).
 > **Data classification:** the analyzed binary and all derived artifacts are **confidential** and
 > of **hostile origin** (master §5).
@@ -160,6 +162,33 @@ Likelihood × Impact → severity (master §7). "L/M/H".
 > The new `worker.preflight_rejected` log and the reject error carry **no binary content or host
 > paths** (size + configured-MiB integers only). The profile→analyzer-option mapping is pure data;
 > the JVM option-setting is the worker-only edge.
+
+> **TB3 delta — v1.8 Version Tracking: a SECOND transient hostile binary (ADR-060 — PROPOSED, review
+> before code).** `version_track` loads a **second** binary into the session's already-hardened worker
+> to diff/match its functions against the session's program. This is **not a new boundary** — it is a
+> **second input across TB3** (binary → analyzer). The added surface, and why it stays within TB3's
+> containment:
+> - **Two hostile binaries in one worker.** VT is **static correlation** (feature comparison) — there
+>   is **no cross-binary code execution**; both binaries are inert data. Neither can act on the other
+>   or escape: the ADR-004 isolation stack (no egress, ro-rootfs, dropped caps, gVisor, tmpfs,
+>   mem/pids/cpu caps) is **unchanged byte-for-byte** and now simply contains two loaded programs
+>   instead of one; the wall-clock kill (ADR-002) backs the extra analysis + the correlation.
+> - **Session program is read-only (SOURCE); the second binary is the writable DESTINATION**
+>   (ADR-060 D3). VT writes match markup into the **destination**, which is the **throwaway** second
+>   program — so the session's program is **never mutated** (`version_track` is read-only w.r.t. the
+>   session; no write-consent). The second program + its derived matches are CONFIDENTIAL +
+>   hostile-origin (master §5 / ADR-005); the program is **released + the store wiped at end of call**,
+>   and the whole worker is killed + verified-wiped on evict (ADR-002).
+> - **Confined import + size cap.** The second binary is resolved through the **same confined import
+>   root** as `session_import` (CWE-22: no arbitrary path) and **size-capped before load** (CWE-400) —
+>   no new file-read or unbounded-input surface.
+> - **Output stays safe.** Matches are `{source_address, destination_address, similarity, confidence}`
+>   — server-normalized addresses + computed scores (SAFE); the initial cut returns **no binary-derived
+>   field**. Any future function-name field MUST be untrusted-enveloped (ADR-005/TB4).
+> - **Open item (implementation risk, called out, not hidden):** VT's headless program lifecycle is
+>   lock-sensitive (`createVTSession` raised `LockException: domain object(s) are busy/locked` in the
+>   feasibility probe) — the correct consumer/transaction sequencing is to be resolved during the build
+>   (ADR-060 D5 / open items). **No code lands until this delta + ADR-060 are reviewed.**
 
 ### TB4 — Worker → Server → LLM (untrusted output)
 | STRIDE | Threat | L×I | Mitigation |
