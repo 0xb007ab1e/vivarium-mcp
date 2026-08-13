@@ -542,6 +542,69 @@ class DataFlowSliceOut(_Out):
     truncated: bool = False
 
 
+class RecoverStructIn(_SessionScopedIn):
+    """Arguments for ``recover_struct`` — propose a struct layout from access patterns (ADR-069).
+
+    Read-only: decompiles ``function`` to its SSA ``HighFunction`` and walks the accesses off the
+    ``base`` pointer (pointer arithmetic + ``LOAD``/``STORE``) to *propose* one field per observed
+    access. **Proposes only** — it never creates, names, or applies a type; materializing a proposal
+    goes through the existing gated ``define_struct``/``apply_data_type`` writes. Intra-function: an
+    access via a value that leaves the function is not followed. Bounded by ``max_fields`` +
+    ``max_accesses``.
+
+    Attributes:
+        function: Function name or entry address (hex) containing the base pointer.
+        base: The base pointer — a high-variable name (a parameter/local), or an address (hex)
+            whose op output is the pointer.
+        max_fields: Cap on proposed fields (bounded).
+        max_accesses: Cap on HighFunction accesses examined (bounded).
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    base: str = Field(min_length=1, max_length=_MAX_NAME)
+    max_fields: int = Field(default=256, ge=1, le=_MAX_LIMIT)
+    max_accesses: int = Field(default=1024, ge=1, le=_MAX_LIMIT)
+
+
+class ProposedField(_Out):
+    """One proposed struct field from an observed access (ADR-069).
+
+    A *proposal*, not ground truth — overlapping/conflicting accesses are reported as-observed; the
+    client decides what to materialize (via the gated write tools).
+
+    Attributes:
+        offset: Byte offset from the base pointer (``>= 0``) — safe (computed).
+        size: Access width in bytes — safe (computed).
+        inferred_type: The decompiler's data-type name for the accessed value, if any — untrusted
+            (decompiler-derived); ``None`` when unavailable.
+        access: ``"load"`` (read), ``"store"`` (write), or ``"addr"`` (address taken, no deref
+            observed).
+        confidence: Evidence tier — ``"observed"`` (seen in the def-use graph).
+    """
+
+    offset: int = Field(ge=0)
+    size: int = Field(ge=0)
+    inferred_type: Untrusted[str] | None = None
+    access: Literal["load", "store", "addr"]
+    confidence: Literal["observed"] = "observed"
+
+
+class RecoverStructOut(_Out):
+    """Result of ``recover_struct`` (ADR-069) — a *proposed* layout, never applied.
+
+    Attributes:
+        base: The base pointer the layout was recovered from (echoed) — safe.
+        fields: Bounded list of proposed fields (one per observed access; may overlap).
+        total_span: The largest ``offset + size`` observed — a lower bound on the struct's size.
+        truncated: Whether the ``max_fields``/``max_accesses`` caps clipped the walk.
+    """
+
+    base: str
+    fields: list[ProposedField]
+    total_span: int = Field(ge=0, default=0)
+    truncated: bool = False
+
+
 class StackFrameIn(_SessionScopedIn):
     """Arguments for ``stack_frame`` — a function's recovered stack layout (ADR-054).
 

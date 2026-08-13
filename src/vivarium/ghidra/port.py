@@ -143,6 +143,10 @@ class GhidraPort(Protocol):
         """Return a bounded intra-function def-use slice from a seed (read-only — ADR-064)."""
         ...
 
+    def recover_struct(self, sid: str, a: s.RecoverStructIn) -> s.RecoverStructOut:
+        """Propose a struct layout from access patterns off a base pointer (read-only — ADR-069)."""
+        ...
+
     def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
         """Return a function's recovered stack-frame layout (read-only — ADR-054)."""
         ...

@@ -67,6 +67,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "get_pcode",
     "get_high_pcode",
     "data_flow_slice",
+    "recover_struct",
     "stack_frame",
     "basic_blocks",
     "list_data_types",
@@ -531,6 +532,13 @@ def _handle_data_flow_slice(ctx: ToolContext, args: s.DataFlowSliceIn) -> s.Data
     ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.function)
     return ctx.port.data_flow_slice(args.session_id, args)
+
+
+def _handle_recover_struct(ctx: ToolContext, args: s.RecoverStructIn) -> s.RecoverStructOut:
+    """Propose a struct layout from access patterns off a base pointer (read-only — ADR-069)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    v.validate_name(args.function)
+    return ctx.port.recover_struct(args.session_id, args)
 
 
 def _handle_stack_frame(ctx: ToolContext, args: s.StackFrameIn) -> s.StackFrameOut:
@@ -1800,6 +1808,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "get_pcode": (_handle_get_pcode, s.GetPcodeIn),
     "get_high_pcode": (_handle_get_high_pcode, s.GetHighPcodeIn),
     "data_flow_slice": (_handle_data_flow_slice, s.DataFlowSliceIn),
+    "recover_struct": (_handle_recover_struct, s.RecoverStructIn),
     "stack_frame": (_handle_stack_frame, s.StackFrameIn),
     "basic_blocks": (_handle_basic_blocks, s.BasicBlocksIn),
     "list_data_types": (_handle_list_data_types, s.ListDataTypesIn),

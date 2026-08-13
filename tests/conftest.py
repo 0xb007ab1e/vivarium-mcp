@@ -349,6 +349,21 @@ class FakeGhidraPort:
             truncated=a.max_nodes < 2,
         )
 
+    def recover_struct(self, sid: str, a: s.RecoverStructIn) -> s.RecoverStructOut:
+        """Return a deterministic proposed struct layout (inferred_type untrusted, ADR-069)."""
+        self._maybe_fail()
+        fields = [
+            s.ProposedField(offset=0, size=8, inferred_type=_ug("void *"), access="load"),
+            s.ProposedField(offset=8, size=4, inferred_type=_ug("int"), access="store"),
+            s.ProposedField(offset=16, size=8, inferred_type=None, access="addr"),
+        ]
+        return s.RecoverStructOut(
+            base=a.base,
+            fields=fields[: a.max_fields],
+            total_span=24,
+            truncated=a.max_fields < 3,
+        )
+
     def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
         """Return a deterministic stack frame (name/type untrusted, ADR-054)."""
         self._maybe_fail()

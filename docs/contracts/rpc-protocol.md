@@ -170,6 +170,9 @@ listing — read-only; lifts each instruction's raw p-code ops, no execution), `
 `data_flow_slice` (ADR-064 bounded intra-function def-use slice — read-only; walks the HighFunction
 SSA def-use graph backward=defs/forward=uses from a seed address, boundary nodes at params/constants,
 bounded by max_nodes/max_depth; each rendered op is untrusted),
+`recover_struct` (ADR-069 propose a struct layout from access patterns — read-only, propose-only;
+walks the HighFunction accesses off a base pointer — pointer arithmetic + LOAD/STORE unioned across
+SSA instances — proposing one field per observed access, never writing; inferred_type untrusted),
 `stack_frame` (ADR-054 recovered stack layout — read-only; the function's locals/parameters with
 offsets, types, sizes from the Stack analyzer), `basic_blocks` (ADR-055 control-flow graph —
 read-only; each basic block's address range + intraprocedural successor edges from

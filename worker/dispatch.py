@@ -84,6 +84,7 @@ RPC_METHODS = frozenset(
         "get_pcode",
         "get_high_pcode",
         "data_flow_slice",
+        "recover_struct",
         "stack_frame",
         "basic_blocks",
         "list_data_types",
@@ -228,6 +229,10 @@ class GhidraBackend(Protocol):
 
     def data_flow_slice(self, params: dict[str, Any]) -> dict[str, Any]:
         """Return a bounded intra-function def-use slice from a seed — v1.9 (ADR-064)."""
+        ...
+
+    def recover_struct(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Propose a struct layout from access patterns off a base pointer — v1.9 (ADR-069)."""
         ...
 
     def stack_frame(self, params: dict[str, Any]) -> dict[str, Any]:

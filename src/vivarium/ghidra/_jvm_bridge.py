@@ -358,6 +358,15 @@ class PyGhidraBackend:
             _clamp_count(params.get("max_depth", 64)),
         )
 
+    def recover_struct(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Propose a struct layout from access patterns off a base pointer (read-only — ADR-069)."""
+        return self._gh_recover_struct(
+            str(_require(params, "function")),
+            str(_require(params, "base")),
+            _clamp_count(params.get("max_fields", 256)),
+            _clamp_count(params.get("max_accesses", 1024)),
+        )
+
     def stack_frame(self, params: dict[str, Any]) -> dict[str, Any]:
         """Return a function's recovered stack-frame layout (read-only — ADR-054)."""
         return self._gh_stack_frame(str(_require(params, "function")))
@@ -1602,6 +1611,163 @@ class PyGhidraBackend:
         finally:
             decompiler.dispose()
         return {"seed": seed_addr, "direction": direction, "nodes": nodes, "truncated": truncated}
+
+    def _gh_recover_struct(  # noqa: C901 - one bounded HighFunction access walk; branches read clearer inline (JVM edge, live-regression-only coverage)
+        self, function: str, base: str, max_fields: int, max_accesses: int
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Propose a struct layout from accesses off ``base`` in a function (ADR-069; READ-ONLY).
+
+        Decompiles to the SSA ``HighFunction`` and walks the descendants of the ``base`` pointer
+        (a high-variable name, else an address) for pointer arithmetic (``PTRSUB``/``PTRADD``/
+        ``INT_ADD`` with a constant offset) and ``LOAD``/``STORE`` accesses, proposing one field per
+        observed access ``{offset, size, inferred_type, access, confidence}``. PROPOSES ONLY — it
+        never creates/names a type or touches the ``DataTypeManager`` (ADR-069 D2); materializing a
+        proposal goes through the existing gated ``define_struct``/``apply_data_type`` writes.
+        Overlapping/conflicting accesses are reported as-observed. Bounded by ``max_fields`` +
+        ``max_accesses`` (already server-clamped); ``truncated`` honest (ADR-005). Read-only; the
+        decompiler is disposed in a ``finally`` (ADR-002).
+
+        Args:
+            function: Function name or entry address (hex).
+            base: The base pointer — a high-variable name, or an address (hex) whose op output
+                is the pointer.
+            max_fields: Hard cap on proposed fields (already clamped).
+            max_accesses: Hard cap on HighFunction accesses examined (already clamped).
+
+        Returns:
+            ``{"base", "fields": [{"offset","size","inferred_type","access","confidence"}],
+            "truncated", "total_span"}``.
+
+        Raises:
+            WorkerError: ``not-found`` if the function or base does not resolve; ``analysis-failed``
+                if the decompiler did not complete / produced no high function.
+        """
+        from ghidra.app.decompiler import DecompInterface
+        from ghidra.util.task import ConsoleTaskMonitor
+        from worker.dispatch import CODE_ANALYSIS_FAILED, CODE_NOT_FOUND, WorkerError
+
+        program = self._require_program()
+        func = self._resolve_function(function)
+
+        def _drain(java_iter: Any) -> list[Any]:
+            items: list[Any] = []
+            while java_iter.hasNext():
+                items.append(java_iter.next())
+            return items
+
+        def _vn_type(vn: Any) -> str | None:
+            if vn is None:
+                return None
+            high_var = vn.getHigh()
+            data_type = high_var.getDataType() if high_var is not None else None
+            return None if data_type is None else _to_text(data_type.getName())
+
+        fields: list[dict[str, Any]] = []
+        truncated = False
+        total_span = 0
+        decompiler = DecompInterface()
+        try:
+            decompiler.openProgram(program)
+            results = decompiler.decompileFunction(func, 0, ConsoleTaskMonitor())
+            if results is None or not results.decompileCompleted():
+                raise WorkerError(CODE_ANALYSIS_FAILED, "decompilation did not complete")
+            high = results.getHighFunction()
+            if high is None:
+                raise WorkerError(CODE_ANALYSIS_FAILED, "no high p-code produced")
+
+            # Resolve the base to its SSA varnodes. An untyped/typed pointer high-variable can have
+            # several varnode instances (SSA); struct accesses hang off *any* instance, so union the
+            # descendants across all of them (walking getRepresentative() alone misses accesses).
+            base_varnodes: list[Any] = []
+            symbol_map = high.getLocalSymbolMap()
+            for symbol in _drain(symbol_map.getSymbols()):
+                if _to_text(symbol.getName()) == base:
+                    high_var = symbol.getHighVariable()
+                    if high_var is not None:
+                        base_varnodes = list(high_var.getInstances())
+                        break
+            if not base_varnodes:
+                try:
+                    target = str(self._parse_address(base))
+                    for op in _drain(high.getPcodeOps()):
+                        if str(op.getSeqnum().getTarget()) == target and op.getOutput() is not None:
+                            base_varnodes = [op.getOutput()]
+                            break
+                except Exception:  # a non-address base just falls through to "not found" below
+                    base_varnodes = []
+            if not base_varnodes:
+                raise WorkerError(CODE_NOT_FOUND, "base variable/address not found in the function")
+            base_set = set(base_varnodes)
+
+            descendants: list[Any] = []
+            seen_ops: set[Any] = set()
+            for vn in base_varnodes:
+                for op in _drain(vn.getDescendants()):
+                    key = op.getSeqnum()
+                    if key not in seen_ops:
+                        seen_ops.add(key)
+                        descendants.append(op)
+
+            examined = 0
+            for op in descendants:
+                if examined >= max_accesses:
+                    truncated = True
+                    break
+                examined += 1
+                mnem = str(op.getMnemonic())
+                offset: int | None = None
+                access: str | None = None
+                size = 0
+                inferred: str | None = None
+                if mnem in ("PTRSUB", "PTRADD", "INT_ADD"):
+                    for i in range(op.getNumInputs()):
+                        iv = op.getInput(i)
+                        if iv is not None and iv.isConstant() and iv not in base_set:
+                            offset = int(iv.getOffset())
+                            break
+                    if offset is None:
+                        continue
+                    out = op.getOutput()
+                    size = int(out.getSize()) if out is not None else 0
+                    inferred = _vn_type(out)
+                    access = "addr"
+                    if out is not None:
+                        for use in _drain(out.getDescendants()):
+                            um = str(use.getMnemonic())
+                            if um == "LOAD" and use.getOutput() is not None:
+                                loaded = use.getOutput()
+                                access = "load"
+                                size, inferred = int(loaded.getSize()), _vn_type(loaded)
+                                break
+                            if um == "STORE" and use.getNumInputs() > 2:
+                                sv = use.getInput(2)
+                                access, size, inferred = "store", int(sv.getSize()), _vn_type(sv)
+                                break
+                elif mnem == "LOAD" and op.getOutput() is not None:
+                    offset, access = 0, "load"
+                    size, inferred = int(op.getOutput().getSize()), _vn_type(op.getOutput())
+                elif mnem == "STORE" and op.getNumInputs() > 2:
+                    offset, access = 0, "store"
+                    sv = op.getInput(2)
+                    size, inferred = int(sv.getSize()), _vn_type(sv)
+                else:
+                    continue
+                if len(fields) >= max_fields:
+                    truncated = True
+                    break
+                fields.append(
+                    {
+                        "offset": offset,
+                        "size": size,
+                        "inferred_type": inferred,
+                        "access": access,
+                        "confidence": "observed",
+                    }
+                )
+                total_span = max(total_span, offset + size)
+        finally:
+            decompiler.dispose()
+        return {"base": base, "fields": fields, "truncated": truncated, "total_span": total_span}
 
     def _gh_stack_frame(self, function: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Return a function's recovered stack-frame layout (ADR-054).

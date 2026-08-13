@@ -1140,6 +1140,21 @@ class RpcGhidraAdapter:
             )
         )
 
+    def recover_struct(self, sid: str, a: s.RecoverStructIn) -> s.RecoverStructOut:
+        """Propose a struct layout from access patterns off a base pointer (ADR-069)."""
+        return _build_recover_struct(
+            self._tool_call(
+                sid,
+                "recover_struct",
+                {
+                    "function": a.function,
+                    "base": a.base,
+                    "max_fields": a.max_fields,
+                    "max_accesses": a.max_accesses,
+                },
+            )
+        )
+
     def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
         """Return a function's recovered stack-frame layout (ADR-054)."""
         return _build_stack_frame(self._tool_call(sid, "stack_frame", {"function": a.function}))
@@ -2635,6 +2650,29 @@ def _build_data_flow_slice(r: dict[str, Any]) -> s.DataFlowSliceOut:
         seed=str(r["seed"]),
         direction=r["direction"],
         nodes=[_build_slice_node(n) for n in r.get("nodes", [])],
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_proposed_field(r: dict[str, Any]) -> s.ProposedField:
+    """Build one :class:`ProposedField` (ADR-069): ``inferred_type`` is decompiler-derived."""
+    raw_type = r.get("inferred_type")
+    return s.ProposedField(
+        offset=int(r["offset"]),
+        size=int(r.get("size") or 0),
+        inferred_type=None if raw_type is None else _w(str(raw_type), DataOrigin.GHIDRA),
+        access=r["access"],
+        confidence=r.get("confidence", "observed"),
+    )
+
+
+@_fail_closed
+def _build_recover_struct(r: dict[str, Any]) -> s.RecoverStructOut:
+    """Build :class:`RecoverStructOut` (ADR-069) — a proposed layout, never applied."""
+    return s.RecoverStructOut(
+        base=str(r["base"]),
+        fields=[_build_proposed_field(f) for f in r.get("fields", [])],
+        total_span=int(r.get("total_span") or 0),
         truncated=bool(r.get("truncated", False)),
     )
 
