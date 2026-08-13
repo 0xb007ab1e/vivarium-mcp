@@ -347,6 +347,11 @@ class PyGhidraBackend:
         """Return a function's recovered stack-frame layout (read-only — ADR-054)."""
         return self._gh_stack_frame(str(_require(params, "function")))
 
+    def basic_blocks(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a function's basic blocks + successor edges (read-only — ADR-055)."""
+        cap = _clamp_count(params.get("max_blocks", 256))
+        return self._gh_basic_blocks(str(_require(params, "function")), cap)
+
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:
         """List functions (paginated/bounded)."""
         offset, limit = _page(params)
@@ -1357,6 +1362,61 @@ class PyGhidraBackend:
             )
         return {"frame_size": int(frame.getFrameSize()), "variables": variables}
 
+    def _gh_basic_blocks(self, function: str, cap: int) -> dict[str, Any]:  # pragma: no cover - JVM
+        """Return a function's basic blocks + intraprocedural successor edges (ADR-055).
+
+        Walks ``BasicBlockModel`` over the resolved function's body (the same model
+        :meth:`_gh_function_cfg` uses for complexity COUNTS) and emits each block's address range +
+        the start addresses of its successors that stay inside the function. Read-only: the program
+        DB is not touched. All fields are server-normalized addresses / counts (no untrusted content
+        — no instruction text is returned). Bounded by ``cap`` blocks.
+
+        Args:
+            function: Function name or entry address (hex).
+            cap: Maximum basic blocks to return (already clamped).
+
+        Returns:
+            ``{"blocks": [{"address", "end_address", "size", "successors": [hex]}, ...],
+            "truncated": bool}``.
+
+        Raises:
+            WorkerError: ``not-found`` if the function does not resolve.
+        """
+        # This is the FIRST BasicBlockModel import in the file (so it carries the missing-ignore);
+        # ghidra.util.task is already missing-ignored at its first import (in _gh_decompile), so no
+        # per-line ignore on it (a second would be "unused" — mypy unused-ignore).
+        from ghidra.program.model.block import BasicBlockModel  # type: ignore[import-not-found]
+        from ghidra.util.task import TaskMonitor
+
+        func = self._resolve_function(function)  # requires a loaded program (guards, fail-closed)
+        body = func.getBody()
+        model = BasicBlockModel(self._require_program())
+        monitor = TaskMonitor.DUMMY
+        blocks: list[dict[str, Any]] = []
+        truncated = False
+        iterator = model.getCodeBlocksContaining(body, monitor)
+        while iterator.hasNext():
+            if len(blocks) >= cap:
+                truncated = True
+                break
+            block = iterator.next()
+            successors: list[str] = []
+            destinations = block.getDestinations(monitor)
+            while destinations.hasNext():
+                dest = destinations.next().getDestinationBlock()
+                # Only intraprocedural edges (a flow leaving the function is not a CFG edge here).
+                if dest is not None and body.contains(dest.getFirstStartAddress()):
+                    successors.append(str(dest.getFirstStartAddress()))
+            blocks.append(
+                {
+                    "address": str(block.getFirstStartAddress()),
+                    "end_address": str(block.getMaxAddress()),
+                    "size": int(block.getNumAddresses()),
+                    "successors": successors,
+                }
+            )
+        return {"blocks": blocks, "truncated": truncated}
+
     def _gh_decompile_stream(  # pragma: no cover - JVM edge
         self,
         names: list[str] | None,
@@ -2314,7 +2374,8 @@ class PyGhidraBackend:
         #   model.getCodeBlocksContaining(func.getBody(), monitor) -> CodeBlock iterator;
         #   CodeBlock.getNumDestinations(monitor) counts outgoing CFG edges;
         #   ghidra.util.task.TaskMonitor.DUMMY as the no-progress monitor.
-        from ghidra.program.model.block import BasicBlockModel  # type: ignore[import-not-found]
+        # (BasicBlockModel is missing-ignored at its FIRST import in _gh_basic_blocks, above.)
+        from ghidra.program.model.block import BasicBlockModel
 
         # ghidra.util.task is already missing-ignored at its first import (in _gh_decompile); a
         # second per-line ignore on the same module would be "unused" (mypy unused-ignore).

@@ -347,6 +347,20 @@ class FakeGhidraPort:
             ],
         )
 
+    def basic_blocks(self, sid: str, a: s.BasicBlocksIn) -> s.BasicBlocksOut:
+        """Return a deterministic 2-block CFG (all fields safe addresses/counts, ADR-055)."""
+        self._maybe_fail()
+        blocks = [
+            s.BasicBlock(
+                address="0x00401000",
+                end_address="0x00401003",
+                size=4,
+                successors=["0x00401004"],
+            ),
+            s.BasicBlock(address="0x00401004", end_address="0x00401004", size=1, successors=[]),
+        ]
+        return s.BasicBlocksOut(blocks=blocks[: a.max_blocks], truncated=a.max_blocks < 2)
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """Return a bounded, deterministic function summary page."""
         self._maybe_fail()

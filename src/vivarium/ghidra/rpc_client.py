@@ -1100,6 +1100,14 @@ class RpcGhidraAdapter:
         """Return a function's recovered stack-frame layout (ADR-054)."""
         return _build_stack_frame(self._tool_call(sid, "stack_frame", {"function": a.function}))
 
+    def basic_blocks(self, sid: str, a: s.BasicBlocksIn) -> s.BasicBlocksOut:
+        """Return a function's basic blocks + successor edges (ADR-055)."""
+        return _build_basic_blocks(
+            self._tool_call(
+                sid, "basic_blocks", {"function": a.function, "max_blocks": a.max_blocks}
+            )
+        )
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         return _build_function_list(
@@ -2465,6 +2473,26 @@ def _build_stack_frame(r: dict[str, Any]) -> s.StackFrameOut:
     return s.StackFrameOut(
         frame_size=int(r["frame_size"]),
         variables=[_build_stack_variable(v) for v in r.get("variables", [])],
+    )
+
+
+@_fail_closed
+def _build_basic_block(r: dict[str, Any]) -> s.BasicBlock:
+    """Build one :class:`BasicBlock`: all fields are server-normalized addresses/counts (safe)."""
+    return s.BasicBlock(
+        address=str(r["address"]),
+        end_address=str(r["end_address"]),
+        size=int(r["size"]),
+        successors=[str(sx) for sx in r.get("successors", [])],
+    )
+
+
+@_fail_closed
+def _build_basic_blocks(r: dict[str, Any]) -> s.BasicBlocksOut:
+    """Build :class:`BasicBlocksOut` (ADR-055) from a plain result."""
+    return s.BasicBlocksOut(
+        blocks=[_build_basic_block(b) for b in r.get("blocks", [])],
+        truncated=bool(r.get("truncated", False)),
     )
 
 

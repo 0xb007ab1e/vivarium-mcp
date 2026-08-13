@@ -104,7 +104,7 @@ def test_catalog_count_matches_registry() -> None:
     # (ADR-040: start_decompile_stream + fetch_job_results/job_status/cancel_job) + 1 Function ID
     # library-match tool (ADR-042 Phase 1: identify_functions). The registry list is the source.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 62
+    assert len(TIER1_TOOL_NAMES) == 63
 
 
 @pytest.mark.critical
@@ -336,3 +336,34 @@ def test_stack_frame_requires_function_and_wraps_names_untrusted() -> None:
     assert isinstance(var.data_type, Untrusted)
     assert var.stack_offset == -12 and var.size == 4  # server/worker scalars stay bare
     assert out.frame_size == 16
+
+
+@pytest.mark.critical
+def test_basic_blocks_bounds_and_safe_scalars() -> None:
+    """basic_blocks requires a function, is bounded, and carries only SAFE address/count fields."""
+    from vivarium.core.envelope import Untrusted
+
+    a = s.BasicBlocksIn(session_id="s", function="main")
+    assert a.max_blocks == 256  # conservative default
+    with pytest.raises(ValidationError):
+        s.BasicBlocksIn(session_id="s", function="")  # function required (min_length=1)
+    with pytest.raises(ValidationError):
+        s.BasicBlocksIn(session_id="s", function="main", max_blocks=10_001)  # > hard cap
+    with pytest.raises(ValidationError):
+        s.BasicBlocksIn(session_id="s", function="main", max_blocks=0)  # ge=1
+
+    out = s.BasicBlocksOut(
+        blocks=[
+            s.BasicBlock(
+                address="0x401000",
+                end_address="0x401003",
+                size=4,
+                successors=["0x401004", "0x401006"],
+            )
+        ]
+    )
+    blk = out.blocks[0]
+    assert blk.address == "0x401000" and blk.successors == ["0x401004", "0x401006"]
+    # CFG structure is server-normalized addresses/counts — nothing untrusted.
+    for value in out.model_dump().values():
+        assert not isinstance(value, Untrusted)

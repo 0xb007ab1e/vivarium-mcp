@@ -168,7 +168,9 @@ an in-flight `start_decompile_stream` promptly (on client `cancel_job`), the ser
 listing — read-only; lifts each instruction's raw p-code ops, no execution), `get_high_pcode`
 (ADR-053 high/SSA p-code — read-only; the decompiler's refined constant-folded IR for a function),
 `stack_frame` (ADR-054 recovered stack layout — read-only; the function's locals/parameters with
-offsets, types, sizes from the Stack analyzer), `list_functions`, `get_function`,
+offsets, types, sizes from the Stack analyzer), `basic_blocks` (ADR-055 control-flow graph —
+read-only; each basic block's address range + intraprocedural successor edges from
+`BasicBlockModel`), `list_functions`, `get_function`,
 `xrefs_to`, `xrefs_from`, `list_strings`, `list_symbols`, `get_symbol`, `list_data`,
 `get_data_type`, `get_comments`, `memory_map`, `read_bytes`, `emulate` (ADR-049 p-code emulation —
 bounded, read-effect-only; interpreter, no native exec/syscalls/IO), `demangle` (ADR-050 C++

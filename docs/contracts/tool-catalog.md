@@ -2,19 +2,20 @@
 
 > Pydantic source of truth: [`src/vivarium/tools/schemas.py`](../../src/vivarium/tools/schemas.py).
 > Allow-list registry: [`src/vivarium/tools/registry.py`](../../src/vivarium/tools/registry.py).
-> **Read-by-default.** 46 of the 62 tools are read-only; the **16 mutation/write tools** below are
+> **Read-by-default.** 47 of the 63 tools are read-only; the **16 mutation/write tools** below are
 > **default-deny**, gated by per-session write-consent (`session_enable_writes`) — structural writes
 > additionally by `allow_structural`. **`runScript`/arbitrary script execution is permanently out of
 > scope** (PLAN §2), and the tool surface is a **fixed allow-list** (no dynamic registration).
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **62** tools (asserted in tests by
-  `len(TIER1_TOOL_NAMES) == 62`). The breakdown:
+- **Allow-list only:** the catalog is fixed; there are exactly **63** tools (asserted in tests by
+  `len(TIER1_TOOL_NAMES) == 63`). The breakdown:
   22 Tier-1 read-only (v1) + **1 p-code emulation tool (ADR-049: `emulate`; read-effect-only)** +
   **1 p-code listing tool (ADR-052: `get_pcode`; read-only)** +
   **1 high (SSA) p-code tool (ADR-053: `get_high_pcode`; read-only)** +
   **1 stack-frame tool (ADR-054: `stack_frame`; read-only)** +
+  **1 basic-block CFG tool (ADR-055: `basic_blocks`; read-only)** +
   **1 C++ demangler tool (ADR-050: `demangle`; read-only, program-independent)** +
   5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
   reporting/metrics tools (ADR-008; all read-only) + **1 Function ID library-match tool (ADR-042
@@ -24,7 +25,7 @@
   streaming-extraction tools (ADR-040: `start_decompile_stream` + the generic
   `fetch_job_results`/`job_status`/`cancel_job`; read-only, output-only)** + **2 v1.2
   annotation-persistence tools (ADR-018: `session_export_annotations` read-only +
-  `session_import_annotations` GATED)**. That is **46 read-only + 16 mutation/write** (the 16 = the 6
+  `session_import_annotations` GATED)**. That is **47 read-only + 16 mutation/write** (the 16 = the 6
   ADR-012 write tools + the 9 structural-write tools + the gated `session_import_annotations`; it
   matches the `WRITE_TOOLS` frozenset in `registry.py`).
   Every write tool is GATED by per-session write-consent (structural additionally by
@@ -72,6 +73,7 @@
 | `get_pcode` | `GetPcodeIn{start?, function?, max_instructions≤10000}` | `GetPcodeOut{instructions[]{address, mnemonic*, pcode[]*}, truncated}` | **ADR-052** p-code (IR) listing (read-only). Lifts each instruction to its raw low p-code ops (`Instruction.getPcode()`) — the SAME IR `emulate` interprets — WITHOUT executing anything; program DB untouched. Bounded like `disassemble` (+ a per-instruction op cap). `mnemonic` + each `pcode` op are `*`=UNTRUSTED (Ghidra-lifted) |
 | `get_high_pcode` | `GetHighPcodeIn{function, max_ops≤10000}` | `GetHighPcodeOut{ops[]{address, op*}, truncated}` | **ADR-053** high (SSA) p-code (read-only). Decompiles the function and returns its REFINED IR (`HighFunction.getPcodeOps()`) — SSA + dead-code-eliminated + constant-folded (e.g. `mov eax,5; add eax,3` → a single `COPY 0x8`). Between `get_pcode` (raw IR) and `decompile_function` (C). Read-only; decompiler disposed per call. Each `op` is `*`=UNTRUSTED (decompiler-derived) |
 | `stack_frame` | `StackFrameIn{function}` | `StackFrameOut{frame_size, variables[]{name*, stack_offset, data_type*, size, is_parameter}}` | **ADR-054** recovered stack layout (read-only). Reads `Function.getStackFrame()` — the locals + stack parameters the Stack analyzer populated during auto-analysis (offset, name, type, size). An un-analyzed function returns an empty list (not an error — `session_analyze` first). `name` + `data_type` are `*`=UNTRUSTED (Ghidra/binary-derived); offsets/sizes are safe scalars |
+| `basic_blocks` | `BasicBlocksIn{function, max_blocks≤10000}` | `BasicBlocksOut{blocks[]{address, end_address, size, successors[]}, truncated}` | **ADR-055** control-flow graph (read-only). Walks `BasicBlockModel` over the function and returns each basic block's address range + intraprocedural successor edges (the CFG STRUCTURE — vs `cyclomatic_complexity`, which returns only counts). All fields are server-normalized addresses/counts — nothing untrusted (no instruction text) |
 | `list_functions` | `ListFunctionsIn{offset, limit≤10000, name_contains?}` | `FunctionListOut{functions[], total, truncated}` |
 | `get_function` | `GetFunctionIn{function}` | `FunctionDetail{address, name*, signature*, size, is_thunk, calling_convention*?}` |
 

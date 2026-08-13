@@ -415,6 +415,7 @@ jobs:
             tests/integration/test_get_pcode.py \
             tests/integration/test_get_high_pcode.py \
             tests/integration/test_stack_frame.py \
+            tests/integration/test_basic_blocks.py \
             ${DETERMINISTIC}
 
       # --- FAIL-LOUD ON SKIP: a skipped hard gate is a FAILURE, not a silent pass ------------------
@@ -452,13 +453,14 @@ jobs:
           # ADR-051 type-archive apply: generic_clib_64 sets the strlen prototype (1) +
           # ADR-052 p-code listing: mov/add/ret lift to COPY/INT_ADD/RETURN (1) +
           # ADR-053 high (SSA) p-code: 5+3 folds to COPY 0x8 + RETURN (1) +
-          # ADR-054 stack frame: a size-4 local recovered at a negative offset after analysis (1) = 18.
+          # ADR-054 stack frame: a size-4 local recovered at a negative offset after analysis (1) +
+          # ADR-055 basic-block CFG: a branching function yields 3 blocks, entry has 2 successors (1) = 19.
           # The deterministic same-toolchain FID gate (zlib + musl, 2) is SELF-ACTIVATING: included
           # only when the worker image ships the bundled DBs (FID_DETERMINISTIC_GATE=1), so the
-          # expected floor is 20 then, 18 otherwise. When inactive the test is omitted (not skipped),
+          # expected floor is 21 then, 19 otherwise. When inactive the test is omitted (not skipped),
           # so the zero-skip rule below still holds.
           import os
-          expected = 20 if os.environ.get("FID_DETERMINISTIC_GATE", "0") == "1" else 18
+          expected = 21 if os.environ.get("FID_DETERMINISTIC_GATE", "0") == "1" else 19
           if tests < expected:
               problems.append(f"expected >={expected} hard-gate tests to run, collected {tests}")
           if skipped:

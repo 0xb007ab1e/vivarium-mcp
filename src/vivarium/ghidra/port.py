@@ -143,6 +143,10 @@ class GhidraPort(Protocol):
         """Return a function's recovered stack-frame layout (read-only — ADR-054)."""
         ...
 
+    def basic_blocks(self, sid: str, a: s.BasicBlocksIn) -> s.BasicBlocksOut:
+        """Return a function's basic blocks + successor edges (read-only — ADR-055)."""
+        ...
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         ...

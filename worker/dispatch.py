@@ -84,6 +84,7 @@ RPC_METHODS = frozenset(
         "get_pcode",
         "get_high_pcode",
         "stack_frame",
+        "basic_blocks",
         "list_functions",
         "get_function",
         "xrefs_to",
@@ -220,6 +221,10 @@ class GhidraBackend(Protocol):
 
     def stack_frame(self, params: dict[str, Any]) -> dict[str, Any]:
         """Return a function's recovered stack-frame layout — v1.8 (ADR-054)."""
+        ...
+
+    def basic_blocks(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a function's basic blocks + successor edges — v1.8 (ADR-055)."""
         ...
 
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:

@@ -516,6 +516,51 @@ class StackFrameOut(_Out):
     variables: list[StackVariable]
 
 
+class BasicBlocksIn(_SessionScopedIn):
+    """Arguments for ``basic_blocks`` — a function's control-flow graph (ADR-055).
+
+    Read-only: returns the function's basic blocks (CFG nodes) with their address ranges and
+    intraprocedural successor edges, from Ghidra's ``BasicBlockModel``. Distinct from
+    ``cyclomatic_complexity`` (which returns only block/edge COUNTS) — this returns the structure.
+    Bounded by ``max_blocks``.
+
+    Attributes:
+        function: Function name or entry address (hex).
+        max_blocks: Cap on basic blocks returned (bounded).
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    max_blocks: int = Field(default=256, ge=1, le=_MAX_LIMIT)
+
+
+class BasicBlock(_Out):
+    """One control-flow basic block (ADR-055) — all fields are server-normalized addresses/counts.
+
+    Attributes:
+        address: The block's first (start) address (hex) — server-normalized, safe.
+        end_address: The block's last address (hex) — server-normalized, safe.
+        size: Number of addresses in the block — worker scalar, safe.
+        successors: Start addresses (hex) of the block's intraprocedural successors — safe.
+    """
+
+    address: str
+    end_address: str
+    size: int
+    successors: list[str]
+
+
+class BasicBlocksOut(_Out):
+    """Result of ``basic_blocks`` (ADR-055).
+
+    Attributes:
+        blocks: Bounded list of the function's basic blocks (CFG nodes + successor edges).
+        truncated: Whether the ``max_blocks`` cap clipped the result.
+    """
+
+    blocks: list[BasicBlock]
+    truncated: bool = False
+
+
 class ListFunctionsIn(_Page):
     """Arguments for ``list_functions`` — paginated, bounded.
 
