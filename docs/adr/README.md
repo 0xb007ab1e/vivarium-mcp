@@ -1,6 +1,6 @@
 # Architecture Decision Records (ADR) index
 
-This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-044).
+This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-063).
 Each ADR captures one significant decision: its context, the decision, alternatives, and consequences.
 Records are **point-in-time** — a `Status:` of *Proposed* reflects the record when it was written; what
 actually shipped in each release is tracked in [`../../CHANGELOG.md`](../../CHANGELOG.md) and the
@@ -42,12 +42,32 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 - **ADR-036** — Dedicated `forbidden` (403) authorization-denied error type.
 - **ADR-039** — Run status reporting to the end user.
 
+### Import & loaders (v1.8)
+- **ADR-045** — `session_import` loader hints: raw/headerless binary import (`loader="binary"`).
+- **ADR-046** — Loader selection: Intel-HEX / Motorola-SREC firmware images.
+- **ADR-047** — Self-describing loaders: DEX / Mach-O / APK (force the loader).
+- **ADR-048** — Loader options: fat/universal Mach-O slice selection (DYLD-component deferred).
+- **ADR-061** — PDB companion symbols: apply a Microsoft PDB at import (`session_import` `pdb_ref`).
+- **ADR-063** — DYLD shared-cache support — **DEFERRED** (fixture-blocked; capability ready).
+
 ### Read/analysis tools
 - **ADR-007** — Semantic-naming support tools (call graph, leaf-first ordering, function context).
 - **ADR-008** — Tier-2 reporting & metrics tools (read-only analysis layer).
 - **ADR-010** — Semantic-naming reference client + naming-quality eval.
 - **ADR-042** — Library-function identification via Ghidra FunctionID (FID).
 - **ADR-043** — FID Phase 2: bundled permissive-source ELF FunctionID databases.
+- **ADR-049** — Bounded p-code `emulate` tool (interpreter; no native exec/syscalls/IO).
+- **ADR-050** — C++ symbol demangling (`demangle`; read-only, program-independent).
+- **ADR-052** — P-code (IR) listing (`get_pcode`; read-only).
+- **ADR-053** — High (SSA) p-code listing (`get_high_pcode`; read-only).
+- **ADR-054** — Recovered stack-frame layout (`stack_frame`; read-only).
+- **ADR-055** — Control-flow graph / basic blocks (`basic_blocks`; read-only).
+- **ADR-056** — Data-type enumeration (`list_data_types`; read-only).
+- **ADR-057** — Function match-hashes (`function_hash`; read-only).
+- **ADR-058** — BSim fuzzy similarity between two functions (`bsim_similarity`; read-only).
+- **ADR-059** — Whole-program BSim clone/variant search (`find_similar_functions`; read-only).
+- **ADR-060** — Version Tracking: two-program function matching (`version_track`; read-only w.r.t. the session).
+- **ADR-062** — Cross-binary BSim search over an ephemeral corpus (`bsim_search_corpus`; read-only w.r.t. the session).
 
 ### Write / mutation tools (all consent-gated)
 - **ADR-012** — Mutation (write) tools — first gated increment.
@@ -57,6 +77,7 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 - **ADR-021** — Multi-type composite batch (`define_types`) with cycle detection.
 - **ADR-031** — Gated deletion of session-authored composite types.
 - **ADR-026** — Rename name-collision handling.
+- **ADR-051** — Bundled type-archive application (`apply_type_archive`; structural write).
 
 ### Annotation persistence
 - **ADR-018** — Cross-session annotation persistence (export + import).
