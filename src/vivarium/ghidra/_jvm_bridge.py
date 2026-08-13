@@ -357,6 +357,10 @@ class PyGhidraBackend:
         offset, limit = _page(params)
         return self._gh_list_data_types(offset, limit, params.get("name_contains"))
 
+    def function_hash(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a function's Ghidra match-hash fingerprints (read-only — ADR-057)."""
+        return self._gh_function_hash(str(_require(params, "function")))
+
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:
         """List functions (paginated/bounded)."""
         offset, limit = _page(params)
@@ -1959,6 +1963,49 @@ class PyGhidraBackend:
                 }
             )
         return {"data_types": rows, "total": total, "truncated": truncated}
+
+    def _gh_function_hash(self, function: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Return a function's Ghidra match-hash fingerprints at three granularities (ADR-057).
+
+        Uses Ghidra's own ``ghidra.app.plugin.match`` function hashers (the ones behind its
+        function-match/diff feature): ``ExactBytes`` (raw bytes), ``ExactInstructions`` (operands
+        masked — catches relocated/recompiled clones), and ``ExactMnemonics`` (mnemonic sequence).
+        Read-only: the program DB is not touched. Each hash is an opaque 64-bit equality token,
+        rendered as a decimal string (SAFE — a Ghidra-computed digest, not echoed binary content).
+
+        Args:
+            function: Function name or entry address (hex).
+
+        Returns:
+            ``{"address", "exact_bytes", "exact_instructions", "exact_mnemonics",
+            "instruction_count"}`` (plain; all SAFE).
+
+        Raises:
+            WorkerError: ``not-found`` if the function does not resolve.
+        """
+        from ghidra.app.plugin.match import (  # type: ignore[import-not-found]
+            ExactBytesFunctionHasher,
+            ExactInstructionsFunctionHasher,
+            ExactMnemonicsFunctionHasher,
+        )
+
+        # ghidra.util.task is already missing-ignored at its first import (in _gh_decompile).
+        from ghidra.util.task import TaskMonitor
+
+        func = self._resolve_function(function)
+        monitor = TaskMonitor.DUMMY
+        count = 0
+        for _instr in self._require_program().getListing().getInstructions(func.getBody(), True):
+            count += 1
+        return {
+            "address": str(func.getEntryPoint()),
+            "exact_bytes": str(int(ExactBytesFunctionHasher.INSTANCE.hash(func, monitor))),
+            "exact_instructions": str(
+                int(ExactInstructionsFunctionHasher.INSTANCE.hash(func, monitor))
+            ),
+            "exact_mnemonics": str(int(ExactMnemonicsFunctionHasher.INSTANCE.hash(func, monitor))),
+            "instruction_count": count,
+        }
 
     def _gh_get_comments(
         self, offset: int, limit: int, address: str | None

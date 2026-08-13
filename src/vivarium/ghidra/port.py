@@ -151,6 +151,10 @@ class GhidraPort(Protocol):
         """List the program's data types, paginated (read-only — ADR-056)."""
         ...
 
+    def function_hash(self, sid: str, a: s.FunctionHashIn) -> s.FunctionHashOut:
+        """Return a function's Ghidra match-hash fingerprints (read-only — ADR-057)."""
+        ...
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         ...

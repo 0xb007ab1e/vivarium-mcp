@@ -86,6 +86,7 @@ RPC_METHODS = frozenset(
         "stack_frame",
         "basic_blocks",
         "list_data_types",
+        "function_hash",
         "list_functions",
         "get_function",
         "xrefs_to",
@@ -230,6 +231,10 @@ class GhidraBackend(Protocol):
 
     def list_data_types(self, params: dict[str, Any]) -> dict[str, Any]:
         """List the program's data types, paginated — v1.8 (ADR-056)."""
+        ...
+
+    def function_hash(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a function's Ghidra match-hash fingerprints — v1.8 (ADR-057)."""
         ...
 
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:

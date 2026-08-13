@@ -69,6 +69,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "stack_frame",
     "basic_blocks",
     "list_data_types",
+    "function_hash",
     "list_functions",
     "get_function",
     # xrefs
@@ -540,6 +541,13 @@ def _handle_list_data_types(ctx: ToolContext, args: s.ListDataTypesIn) -> s.Data
     if args.name_contains is not None:
         v.validate_name(args.name_contains)
     return ctx.port.list_data_types(args.session_id, args)
+
+
+def _handle_function_hash(ctx: ToolContext, args: s.FunctionHashIn) -> s.FunctionHashOut:
+    """Return a function's Ghidra match-hash fingerprints (read-only — ADR-057)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    v.validate_name(args.function)
+    return ctx.port.function_hash(args.session_id, args)
 
 
 def _handle_list_functions(ctx: ToolContext, args: s.ListFunctionsIn) -> s.FunctionListOut:
@@ -1730,6 +1738,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "stack_frame": (_handle_stack_frame, s.StackFrameIn),
     "basic_blocks": (_handle_basic_blocks, s.BasicBlocksIn),
     "list_data_types": (_handle_list_data_types, s.ListDataTypesIn),
+    "function_hash": (_handle_function_hash, s.FunctionHashIn),
     "list_functions": (_handle_list_functions, s.ListFunctionsIn),
     "get_function": (_handle_get_function, s.GetFunctionIn),
     "xrefs_to": (_handle_xrefs_to, s.XrefsIn),

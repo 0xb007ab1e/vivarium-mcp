@@ -170,7 +170,9 @@ listing — read-only; lifts each instruction's raw p-code ops, no execution), `
 `stack_frame` (ADR-054 recovered stack layout — read-only; the function's locals/parameters with
 offsets, types, sizes from the Stack analyzer), `basic_blocks` (ADR-055 control-flow graph —
 read-only; each basic block's address range + intraprocedural successor edges from
-`BasicBlockModel`), `list_functions`, `get_function`,
+`BasicBlockModel`), `function_hash` (ADR-057 function match-hashes — read-only; Ghidra's own
+exact-bytes / exact-instructions / exact-mnemonics function hashers for duplicate detection),
+`list_functions`, `get_function`,
 `xrefs_to`, `xrefs_from`, `list_strings`, `list_symbols`, `get_symbol`, `list_data`,
 `get_data_type`, `list_data_types` (ADR-056 the list-counterpart to `get_data_type` — read-only;
 paginated summary rows over the program's DataTypeManager), `get_comments`, `memory_map`, `read_bytes`,

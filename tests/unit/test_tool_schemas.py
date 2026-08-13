@@ -104,7 +104,7 @@ def test_catalog_count_matches_registry() -> None:
     # (ADR-040: start_decompile_stream + fetch_job_results/job_status/cancel_job) + 1 Function ID
     # library-match tool (ADR-042 Phase 1: identify_functions). The registry list is the source.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 64
+    assert len(TIER1_TOOL_NAMES) == 65
 
 
 @pytest.mark.critical
@@ -391,3 +391,25 @@ def test_list_data_types_paginated_and_name_untrusted() -> None:
     assert isinstance(dt.name, Untrusted)
     assert dt.kind == "struct" and dt.size == 8  # server/worker scalars stay bare
     assert out.total == 1
+
+
+@pytest.mark.critical
+def test_function_hash_requires_function_and_is_all_safe() -> None:
+    """function_hash requires a function; all result fields are SAFE (opaque digests/scalars)."""
+    from vivarium.core.envelope import Untrusted
+
+    s.FunctionHashIn(session_id="s", function="main")  # ok
+    with pytest.raises(ValidationError):
+        s.FunctionHashIn(session_id="s", function="")  # function required (min_length=1)
+
+    out = s.FunctionHashOut(
+        address="0x401000",
+        exact_bytes="-74093867017437165",
+        exact_instructions="4495632401614105116",
+        exact_mnemonics="8291194091361135616",
+        instruction_count=2,
+    )
+    # The three hashes are opaque equality tokens; no field is binary-derived content.
+    for value in out.model_dump().values():
+        assert not isinstance(value, Untrusted)
+    assert out.exact_instructions == "4495632401614105116"

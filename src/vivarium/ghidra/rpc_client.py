@@ -1118,6 +1118,10 @@ class RpcGhidraAdapter:
             )
         )
 
+    def function_hash(self, sid: str, a: s.FunctionHashIn) -> s.FunctionHashOut:
+        """Return a function's Ghidra match-hash fingerprints (ADR-057)."""
+        return _build_function_hash(self._tool_call(sid, "function_hash", {"function": a.function}))
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         return _build_function_list(
@@ -2521,6 +2525,18 @@ def _build_data_type_list(r: dict[str, Any]) -> s.DataTypeListOut:
         data_types=[_build_data_type_summary(d) for d in r.get("data_types", [])],
         total=int(r["total"]),
         truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
+def _build_function_hash(r: dict[str, Any]) -> s.FunctionHashOut:
+    """Build :class:`FunctionHashOut` (ADR-057) — all fields SAFE (opaque digests / scalars)."""
+    return s.FunctionHashOut(
+        address=str(r["address"]),
+        exact_bytes=str(r["exact_bytes"]),
+        exact_instructions=str(r["exact_instructions"]),
+        exact_mnemonics=str(r["exact_mnemonics"]),
+        instruction_count=int(r["instruction_count"]),
     )
 
 

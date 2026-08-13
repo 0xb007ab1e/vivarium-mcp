@@ -372,6 +372,17 @@ class FakeGhidraPort:
             data_types=rows[: a.limit], total=len(rows), truncated=a.limit < len(rows)
         )
 
+    def function_hash(self, sid: str, a: s.FunctionHashIn) -> s.FunctionHashOut:
+        """Return deterministic function match-hash fingerprints (all safe scalars, ADR-057)."""
+        self._maybe_fail()
+        return s.FunctionHashOut(
+            address="0x00401000",
+            exact_bytes="-74093867017437165",
+            exact_instructions="4495632401614105116",
+            exact_mnemonics="8291194091361135616",
+            instruction_count=2,
+        )
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """Return a bounded, deterministic function summary page."""
         self._maybe_fail()

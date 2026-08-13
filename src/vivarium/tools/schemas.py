@@ -859,6 +859,43 @@ class DataTypeListOut(_Out):
     truncated: bool = False
 
 
+class FunctionHashIn(_SessionScopedIn):
+    """Arguments for ``function_hash`` — Ghidra's function-match fingerprints (ADR-057).
+
+    Read-only: returns a function's Ghidra-native match hashes at three granularities (the same
+    hashers behind Ghidra's function-match/diff feature). Two functions sharing a hash are dupes
+    at that granularity — the basis for finding statically-linked library copies, repeated routines,
+    or relocated/recompiled clones.
+
+    Attributes:
+        function: Function name or entry address (hex).
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class FunctionHashOut(_Out):
+    """Result of ``function_hash`` (ADR-057) — all fields SAFE (opaque digests / server scalars).
+
+    The three hashes are opaque equality tokens (Ghidra-computed 64-bit values, rendered as decimal
+    strings). Compare them across functions: equal hash ⇒ duplicate at that granularity.
+
+    Attributes:
+        address: The function's entry address (hex) — server-normalized, safe.
+        exact_bytes: Hash of the raw bytes — matches identical code WITH identical operands.
+        exact_instructions: Hash with OPERANDS MASKED — matches the same code with different
+            immediates/addresses (relocated/recompiled clones).
+        exact_mnemonics: Hash of the mnemonic sequence only — the loosest of the three.
+        instruction_count: Number of instructions hashed — worker scalar, safe.
+    """
+
+    address: str
+    exact_bytes: str
+    exact_instructions: str
+    exact_mnemonics: str
+    instruction_count: int
+
+
 # =====================================================================================
 # Comments
 # =====================================================================================
