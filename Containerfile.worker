@@ -239,6 +239,17 @@ RUN set -eux; \
     python3.12 -m pip install --no-cache-dir --no-index \
         --find-links "${PYGHIDRA_DIST}" pyghidra; \
     rm -rf /opt/vivarium/dist; \
+    # Remove the unused Ghidra BSim postgres JDBC driver: Vivarium's BSim path computes LSH vectors
+    # IN MEMORY (loadConfigurationTemplate + generateLSHVectorFactory + GenSignatures + VectorCompare)
+    # and NEVER opens a FunctionDatabase/JDBC connection, so this jar is dead weight — its removal
+    # clears Trivy CVE-2026-54291 (postgresql) with no functional impact (remove > waive).
+    rm -f /opt/ghidra/Ghidra/Features/BSim/lib/postgresql-*.jar; \
+    # Strip build-only python tooling from the SHIPPED image: the worker runs the analysis code and
+    # never installs packages at runtime, so pip (with its bundled `_vendor/msgpack`), setuptools,
+    # and wheel are dead weight — and Trivy's python-pkg scanner flags them (setuptools
+    # CVE-2025-47273, msgpack GHSA-6v7p-g79w-8964). REMOVE rather than waive; the smoke imports below
+    # then prove pyghidra + the worker still import without them (fail the build fast if not).
+    python3.12 -m pip uninstall -y pip setuptools wheel 2>/dev/null || true; \
     python -c "import vivarium.ghidra._jvm_bridge"; \
     python -c "import worker, worker.dispatch, worker.server"; \
     python -c "import pyghidra"
