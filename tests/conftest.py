@@ -602,8 +602,11 @@ class FakeGhidraPort:
     def demangle(self, sid: str, a: s.DemangleIn) -> s.DemangleOut:
         """Return a deterministic demangle result (demangled name untrusted, ADR-050)."""
         self._maybe_fail()
-        scheme = "msvc" if a.scheme == "msvc" or a.mangled.startswith("?") else "gnu"
-        return s.DemangleOut(demangled=_u("ns::fn(int)"), scheme=scheme)
+        # Return the scheme as a bare Literal (not a str-typed variable) so it satisfies
+        # DemangleOut.scheme's ``Literal['gnu', 'msvc'] | None`` under mypy --strict.
+        if a.scheme == "msvc" or a.mangled.startswith("?"):
+            return s.DemangleOut(demangled=_u("ns::fn(int)"), scheme="msvc")
+        return s.DemangleOut(demangled=_u("ns::fn(int)"), scheme="gnu")
 
     def search_bytes(self, sid: str, a: s.SearchBytesIn) -> s.SearchBytesOut:
         """Return deterministic bounded byte-search matches (untrusted context)."""
