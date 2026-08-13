@@ -1,6 +1,6 @@
 # ADR-068: String / constant deobfuscation (read-only stack-string + single-pass decode recovery)
 
-- **Status:** **Proposed** (awaiting human ratification; v1.9). Item 5 of the post-v1.8 capability-gap
+- **Status:** **Accepted** (ratified by the human operator 2026-08-13; v1.9). Item 5 of the post-v1.8 capability-gap
   batch (ADR-064..072).
 - **Date:** 2026-08-13
 - **Deciders:** Human operator (ratification pending); drafted by the assistant from the post-v1.8

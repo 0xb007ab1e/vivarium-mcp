@@ -1,6 +1,6 @@
 # ADR-065: Multi-region / scatter-load raw import
 
-- **Status:** **Proposed** (awaiting human ratification; targets v1.9). Second of the ADR-064..072
+- **Status:** **Accepted** (ratified by the human operator 2026-08-13; targets v1.9). Second of the ADR-064..072
   post-v1.8 capability-gap batch.
 - **Date:** 2026-08-13
 - **Deciders:** Human operator (to ratify); drafted by the assistant from the post-v1.8

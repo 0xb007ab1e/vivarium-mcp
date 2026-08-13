@@ -1,6 +1,6 @@
 # ADR-070: Extended firmware container unwrap + loaders
 
-- **Status:** **Proposed** (awaiting human ratification; targets v1.9). Item 7 of the ADR-064..072
+- **Status:** **Accepted** (ratified by the human operator 2026-08-13; targets v1.9). Item 7 of the ADR-064..072
   post-v1.8 capability-gap batch.
 - **Date:** 2026-08-13
 - **Deciders:** Human operator (to ratify); drafted by the assistant from the post-v1.8
