@@ -29,6 +29,26 @@ is the central security control.
   persistence/export (new trust boundary), deeper behavioral-equivalence eval. See
   [`docs/roadmap-v1.2.md`](docs/roadmap-v1.2.md). Not committed scope; promoted via design ADR →
   ratify → implement → review → merge.
+- **v1.2 – v1.7:** ✅ **shipped** — each tracked in its own findings/roadmap doc
+  ([`docs/roadmap-v1.2.md`](docs/roadmap-v1.2.md) … [`docs/roadmap-v1.7.md`](docs/roadmap-v1.7.md)):
+  mTLS/OAuth identity + scopes + reverse-proxy mTLS (ADR-019/020/033/034), composite type
+  define/delete + batch (ADR-021/031/032), annotation persistence (ADR-018), progress + streaming
+  partial results + cancellation (ADR-030/040/041), operational observability + health probes
+  (ADR-044), large-binary analysis controls (ADR-023/029/035/037), the recurring live-regression /
+  behavioral-equivalence harness (ADR-016/022/028), and Function ID library matching (ADR-042/043).
+- **v1.8:** ✅ **COMPLETE** (shipped in **PR #293**, `feat/session-import-loader-hints`; verified
+  green by a full local CI run — CI pending the account-wide GitHub Actions billing lock). Broadened
+  Ghidra **loader coverage** (raw/headerless `binary`, Intel-HEX/SREC, self-describing DEX/Mach-O/APK,
+  fat-Mach-O slice — ADR-045/046/047/048) plus **companion PDB symbols at import** (`pdb_ref` —
+  ADR-061); a set of **read-only analysis tools** (p-code `emulate` ADR-049; `demangle` ADR-050;
+  `get_pcode`/`get_high_pcode`/`stack_frame`/`basic_blocks`/`list_data_types` ADR-052–056;
+  `function_hash`/`bsim_similarity`/`find_similar_functions` ADR-057/058/059); two **cross-binary
+  tools** read-only w.r.t. the session (`version_track` two-program Version Tracking ADR-060;
+  `bsim_search_corpus` cross-binary BSim over an **ephemeral** corpus — no persistent DB, the
+  stateless-worker mandate kept — ADR-062); and one consent-gated **structural write**
+  (`apply_type_archive` ADR-051). **Catalog 56 → 69 tools.** Every tool proven live against a real
+  hardened worker (gated live-regression tests). **DYLD shared-cache support scoped + DEFERRED**
+  (ADR-063 — fixture-blocked, capability ready). Detail: [`docs/roadmap-v1.8-findings.md`](docs/roadmap-v1.8-findings.md).
 - **Transport:** design **configurable (stdio + HTTP)**; **build/harden stdio in v1**. ✅ **HTTP
   DONE** — shipped as a gated, separately threat-modeled (TB6) v1.1 increment (ADR-011, slices 1–6,
   merged 2026-06-12; stdio remains the default).
