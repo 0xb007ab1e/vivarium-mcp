@@ -13,9 +13,15 @@ from __future__ import annotations
 import io
 
 import pytest
-from elftools.elf.elffile import ELFFile
 
 from tests._fixtures import binaries
+
+# pyelftools is a ground-truth-only dependency (not in the lean unit/dev lockfile — see the note in
+# pyproject.toml), so skip this fast fixture-parse guard when it is absent (CI's unit/quality job).
+# The synthetic ELFs are also validated end-to-end by a real worker in test_import_synthetic_elf.py,
+# and this test runs wherever pyelftools is installed (locally + the ground-truth job). Using
+# importorskip (rather than a bare import) keeps mypy happy without a groundtruth-only stub.
+ELFFile = pytest.importorskip("elftools.elf.elffile").ELFFile
 
 _EM_ARM = 40
 
