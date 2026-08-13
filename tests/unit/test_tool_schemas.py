@@ -104,7 +104,7 @@ def test_catalog_count_matches_registry() -> None:
     # (ADR-040: start_decompile_stream + fetch_job_results/job_status/cancel_job) + 1 Function ID
     # library-match tool (ADR-042 Phase 1: identify_functions). The registry list is the source.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 58
+    assert len(TIER1_TOOL_NAMES) == 59
 
 
 @pytest.mark.critical
@@ -246,3 +246,21 @@ def test_demangle_output_wraps_name_untrusted_and_allows_no_match() -> None:
     unmatched = s.DemangleOut()  # nothing matched — both fields default to None
     assert unmatched.demangled is None
     assert unmatched.scheme is None
+
+
+@pytest.mark.critical
+def test_apply_type_archive_closed_allowlist_and_safe_result() -> None:
+    """apply_type_archive accepts only allow-listed archive names; result carries no Untrusted."""
+    from vivarium.core.envelope import Untrusted
+
+    a = s.ApplyTypeArchiveIn(session_id="s", archive="generic_clib_64")
+    assert a.archive == "generic_clib_64"
+    with pytest.raises(ValidationError):
+        s.ApplyTypeArchiveIn(session_id="s", archive="/etc/passwd")  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        s.ApplyTypeArchiveIn(session_id="s", archive="glibc")  # type: ignore[arg-type]  # not on the list
+
+    # No arbitrary path can slip through; result fields are all SAFE scalars (no binary echo).
+    out = s.ApplyTypeArchiveResult(archive="generic_clib_64", functions_updated=7, applied=True)
+    for value in out.model_dump().values():
+        assert not isinstance(value, Untrusted)

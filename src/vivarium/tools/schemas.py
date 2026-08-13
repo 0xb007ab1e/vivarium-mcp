@@ -1925,6 +1925,45 @@ class ApplyDataTypeResult(_Out):
     applied: bool
 
 
+# --- bundled type-archive application (v1.8 — ADR-051; structural write, GATED by allow_structural)
+# The `archive` name is a CLOSED allow-list (no arbitrary path — CWE-22): the worker maps the name
+# to a GDT bundled in the pinned Ghidra install. Applies library function signatures to same-named
+# functions (pulling in referenced types). All result fields are SAFE (server/worker scalars — the
+# applied prototypes live in the program DB, not echoed back), so NO field is Untrusted.
+_TYPE_ARCHIVE_NAMES = Literal[
+    "generic_clib", "generic_clib_64", "windows_vs12_32", "windows_vs12_64", "mac_osx"
+]
+
+
+class ApplyTypeArchiveIn(_SessionScopedIn):
+    """Arguments for ``apply_type_archive`` — apply a bundled Ghidra Data Type archive (ADR-051).
+
+    A **structural write**: it applies library function prototypes to same-named functions (and
+    pulls in the referenced types), so it is gated by write-consent + ``allow_structural`` and
+    captured by ``session_undo``. ``archive`` is a closed allow-list — the worker resolves it to a
+    ``.gdt`` in the pinned Ghidra install; **no client-supplied path** is ever opened (CWE-22).
+
+    Attributes:
+        archive: Which bundled type library to apply (closed allow-list).
+    """
+
+    archive: _TYPE_ARCHIVE_NAMES
+
+
+class ApplyTypeArchiveResult(_Out):
+    """Result of ``apply_type_archive`` (ADR-051) — all fields SAFE (no binary-derived echo).
+
+    Attributes:
+        archive: The applied archive name — safe (the allow-listed name we validated).
+        functions_updated: Count of functions whose signature the archive changed — worker scalar.
+        applied: Whether the write committed — safe.
+    """
+
+    archive: str
+    functions_updated: int
+    applied: bool
+
+
 # --- composite-type creation (v1.1 — ADR-015 Phase C; GATED by allow_structural) ---------------
 #
 # Reuses the merged Phase-B TypeRef (above) — a FieldSpec.type is a flat TypeRef (NO nested define —

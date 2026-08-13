@@ -318,6 +318,10 @@ class GhidraPort(Protocol):
         """Apply a resolvable type at an address (transaction-wrapped — ADR-014)."""
         ...
 
+    def apply_type_archive(self, sid: str, a: s.ApplyTypeArchiveIn) -> s.ApplyTypeArchiveResult:
+        """Apply a bundled Ghidra Data Type archive (structural; transaction-wrapped — ADR-051)."""
+        ...
+
     # --- composite-type creation (v1.1 — ADR-015 Phase C; structured FieldSpec input) ---
     # The server checks structural write consent + validates the composite (validate_composite:
     # bounded FieldSpec list of resolved TypeRefs, no duplicate/self-embed) BEFORE calling these;

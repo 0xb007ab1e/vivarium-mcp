@@ -624,6 +624,18 @@ class PyGhidraBackend:
         clear_existing = bool(params.get("clear_existing", False))
         return self._gh_apply_data_type(address, type_ref, clear_existing)
 
+    def apply_type_archive(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Apply a bundled Ghidra Data Type archive (write; one txn — ADR-051).
+
+        Args:
+            params: ``{"archive": str}`` — an allow-listed bundled-GDT name. The worker maps it to a
+                ``.gdt`` inside the pinned Ghidra install; NO client path is opened (CWE-22).
+
+        Returns:
+            ``{"archive", "functions_updated", "applied"}`` (plain; all fields SAFE).
+        """
+        return self._gh_apply_type_archive(str(_require(params, "archive")))
+
     def define_struct(self, params: dict[str, Any]) -> dict[str, Any]:
         """Create a new struct from a resolved field list (write; one txn — ADR-015 §3).
 
@@ -877,6 +889,17 @@ class PyGhidraBackend:
         "dex": "ghidra.app.util.opinion.DexLoader",
         "macho": "ghidra.app.util.opinion.MachoLoader",
         "apk": "ghidra.app.util.opinion.ApkLoader",
+    }
+
+    #: Allow-listed type-archive name -> path RELATIVE to ``GHIDRA_INSTALL_DIR`` (ADR-051). The name
+    #: is a closed set (mirrored by the ``_TYPE_ARCHIVE_NAMES`` schema Literal); NO client path is
+    #: ever opened (CWE-22). These ship inside the pinned Ghidra install.
+    _TYPE_ARCHIVES: ClassVar[dict[str, str]] = {
+        "generic_clib": "Ghidra/Features/Base/data/typeinfo/generic/generic_clib.gdt",
+        "generic_clib_64": "Ghidra/Features/Base/data/typeinfo/generic/generic_clib_64.gdt",
+        "windows_vs12_32": "Ghidra/Features/Base/data/typeinfo/win32/windows_vs12_32.gdt",
+        "windows_vs12_64": "Ghidra/Features/Base/data/typeinfo/win32/windows_vs12_64.gdt",
+        "mac_osx": "Ghidra/Features/Base/data/typeinfo/mac_10.9/mac_osx.gdt",
     }
 
     def _open_named_loader(
@@ -2797,6 +2820,72 @@ class PyGhidraBackend:
             "applied": True,
         }
 
+    def _snapshot_function_protos(self, program: Any) -> dict[str, str]:  # pragma: no cover - JVM
+        """Map every function's entry -> its prototype string (for a before/after apply diff)."""
+        out: dict[str, str] = {}
+        it = program.getFunctionManager().getFunctions(True)
+        while it.hasNext():
+            fn = it.next()
+            out[str(fn.getEntryPoint())] = str(fn.getSignature().getPrototypeString())
+        return out
+
+    def _gh_apply_type_archive(self, archive: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Apply a bundled Ghidra Data Type archive's function signatures (ADR-051), one txn.
+
+        Resolves the allow-listed ``archive`` name to a ``.gdt`` in the pinned Ghidra install
+        (``GHIDRA_INSTALL_DIR``) — NEVER a client path (CWE-22). Opens it read-only and runs
+        ``ApplyFunctionDataTypesCmd`` over the whole program, applying each archive function proto
+        to the same-named program function (pulling in referenced types). The write is wrapped in
+        one transaction so ``session_undo`` reverts it atomically. ``functions_updated`` is a
+        before/after prototype diff. The archive is always closed.
+
+        Args:
+            archive: The allow-listed bundled-archive name (validated against ``_TYPE_ARCHIVES``).
+
+        Returns:
+            ``{"archive", "functions_updated", "applied"}`` (plain; all SAFE scalars).
+
+        Raises:
+            WorkerError: ``not-found`` if the archive name is unknown or its bundled file is absent.
+        """
+        from pathlib import Path
+
+        from ghidra.app.cmd.function import (  # type: ignore[import-not-found]
+            ApplyFunctionDataTypesCmd,
+        )
+        from ghidra.program.model.data import FileDataTypeManager
+        from ghidra.program.model.symbol import SourceType
+        from ghidra.util.task import TaskMonitor
+        from java.io import File as JFile  # type: ignore[import-not-found]
+        from java.util import ArrayList  # type: ignore[import-not-found]
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        program = self._require_program()
+        rel = self._TYPE_ARCHIVES.get(archive)
+        if rel is None:  # defense in depth — the schema Literal already closes the set
+            raise WorkerError(CODE_NOT_FOUND, f"unknown type archive: {archive}")
+        path = Path(os.environ.get("GHIDRA_INSTALL_DIR", "/opt/ghidra")) / rel
+        if not path.is_file():
+            raise WorkerError(CODE_NOT_FOUND, f"type archive not found: {archive}")
+
+        dtm = FileDataTypeManager.openFileArchive(JFile(str(path)), False)
+        try:
+            before = self._snapshot_function_protos(program)
+            managers = ArrayList()
+            managers.add(dtm)
+
+            def _write() -> None:
+                cmd = ApplyFunctionDataTypesCmd(managers, None, SourceType.IMPORTED, False, True)
+                cmd.applyTo(program, TaskMonitor.DUMMY)
+
+            self._in_transaction("apply_type_archive", _write)
+            after = self._snapshot_function_protos(program)
+        finally:
+            dtm.close()
+
+        updated = sum(1 for entry, proto in after.items() if before.get(entry) != proto)
+        return {"archive": archive, "functions_updated": updated, "applied": True}
+
     def _gh_define_struct(
         self, name: str, fields: list[dict[str, Any]], packed: bool
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
@@ -4179,7 +4268,7 @@ def _fid_attach_one(writable_copy: Any) -> bool:  # pragma: no cover - JVM edge
         (``addUserFidFile`` returned ``None``) — the orchestration then skips it (fail-soft).
     """
     from ghidra.feature.fid.db import FidFileManager  # type: ignore[import-not-found]
-    from java.io import File  # type: ignore[import-not-found]
+    from java.io import File
 
     manager = FidFileManager.getInstance()
     fid_file = manager.addUserFidFile(File(str(writable_copy)))

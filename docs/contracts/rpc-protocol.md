@@ -186,7 +186,10 @@ write-consent and validates the inputs first), the v1.1 **structural-write primi
 **name-only**, gated additionally by `allow_structural`; same one-transaction + rollback semantics),
 `set_function_signature` and `apply_data_type` (ADR-014 Phase B — **structured** input: each `TypeRef`
 is RESOLVED against the program's `DataTypeManager` / a closed base vocab, **never parsed from a C
-string**; an unresolvable ref fails closed; same gate + transaction semantics), the v1.1
+string**; an unresolvable ref fails closed; same gate + transaction semantics), the v1.8
+**bundled type-archive apply** `apply_type_archive` (ADR-051 — applies a CLOSED-allow-list bundled
+`.gdt`'s function signatures to same-named functions; the worker resolves the archive name to a path
+in the pinned Ghidra install, NEVER a client path — CWE-22; structural, one transaction), the v1.1
 **composite-creation primitives** `define_struct` and `define_union` (ADR-015 Phase C — the empty
 composite is pre-registered in the DTM at the start of the transaction so self-`named` pointers
 resolve; a by-value self-embed is rejected, a name collision is fail-closed rejected, and the

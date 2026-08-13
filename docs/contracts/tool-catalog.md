@@ -2,27 +2,28 @@
 
 > Pydantic source of truth: [`src/vivarium/tools/schemas.py`](../../src/vivarium/tools/schemas.py).
 > Allow-list registry: [`src/vivarium/tools/registry.py`](../../src/vivarium/tools/registry.py).
-> **Read-by-default.** 43 of the 58 tools are read-only; the **15 mutation/write tools** below are
+> **Read-by-default.** 43 of the 59 tools are read-only; the **16 mutation/write tools** below are
 > **default-deny**, gated by per-session write-consent (`session_enable_writes`) — structural writes
 > additionally by `allow_structural`. **`runScript`/arbitrary script execution is permanently out of
 > scope** (PLAN §2), and the tool surface is a **fixed allow-list** (no dynamic registration).
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **58** tools (asserted in tests by
-  `len(TIER1_TOOL_NAMES) == 58`). The breakdown:
+- **Allow-list only:** the catalog is fixed; there are exactly **59** tools (asserted in tests by
+  `len(TIER1_TOOL_NAMES) == 59`). The breakdown:
   22 Tier-1 read-only (v1) + **1 p-code emulation tool (ADR-049: `emulate`; read-effect-only)** +
   **1 C++ demangler tool (ADR-050: `demangle`; read-only, program-independent)** +
   5 v1.1 semantic-naming support tools (ADR-007) + 8 v1.1 Tier-2
   reporting/metrics tools (ADR-008; all read-only) + **1 Function ID library-match tool (ADR-042
-  Phase 1: `identify_functions`; read-only)** + **6 v1.1 mutation/write tools (ADR-012) + 8
+  Phase 1: `identify_functions`; read-only)** + **6 v1.1 mutation/write tools (ADR-012) + 9
   structural-write tools (ADR-013 Phase A + ADR-014 Phase B + ADR-015 Phase C + ADR-021 batch
-  `define_types` + ADR-031 `delete_type`)** + **4 v1.x streaming-extraction tools (ADR-040:
-  `start_decompile_stream` + the generic `fetch_job_results`/`job_status`/`cancel_job`;
-  read-only, output-only)** + **2 v1.2 annotation-persistence tools (ADR-018:
-  `session_export_annotations` read-only + `session_import_annotations` GATED)**. That is **43
-  read-only + 15 mutation/write** (the 15 = the 6 ADR-012 write tools + the 8 structural-write tools
-  + the gated `session_import_annotations`; it matches the `WRITE_TOOLS` frozenset in `registry.py`).
+  `define_types` + ADR-031 `delete_type` + ADR-051 `apply_type_archive`)** + **4 v1.x
+  streaming-extraction tools (ADR-040: `start_decompile_stream` + the generic
+  `fetch_job_results`/`job_status`/`cancel_job`; read-only, output-only)** + **2 v1.2
+  annotation-persistence tools (ADR-018: `session_export_annotations` read-only +
+  `session_import_annotations` GATED)**. That is **43 read-only + 16 mutation/write** (the 16 = the 6
+  ADR-012 write tools + the 9 structural-write tools + the gated `session_import_annotations`; it
+  matches the `WRITE_TOOLS` frozenset in `registry.py`).
   Every write tool is GATED by per-session write-consent (structural additionally by
   `allow_structural`); import is GATED identically (and additionally by `allow_structural` when any
   imported entry is structural).
@@ -179,6 +180,7 @@ identifier allow-list / `validate_comment_text` normalization — stored-injecti
 | `rename_parameter` | `RenameParameterIn{function, parameter, new_name}` | `StructuralRenameResult{address, function*, old_name*, new_name, applied}` | **structural**; name-only; gated by `allow_structural` |
 | `set_function_signature` | `SetFunctionSignatureIn{function, return_type: TypeRef, parameters: [ParamSpec], calling_convention?}` | `SetFunctionSignatureResult{address, function*, old_signature*, new_signature*, applied}` | **structural** (ADR-014 Phase B); structured input; gated by `allow_structural` |
 | `apply_data_type` | `ApplyDataTypeIn{address, type: TypeRef, clear_existing=false}` | `ApplyDataTypeResult{address, type_name*, size, applied}` | **structural** (ADR-014 Phase B); applies an EXISTING/resolvable type; gated by `allow_structural` |
+| `apply_type_archive` | `ApplyTypeArchiveIn{archive: generic_clib\|generic_clib_64\|windows_vs12_32\|windows_vs12_64\|mac_osx}` | `ApplyTypeArchiveResult{archive, functions_updated, applied}` | **structural** (ADR-051); applies a BUNDLED Ghidra type-archive's function signatures to same-named functions (resolves libc/Win32 API prototypes). `archive` is a CLOSED allow-list — the worker maps it to a `.gdt` in the pinned install; NO client path (CWE-22). One transaction (`session_undo` reverts). All result fields SAFE. Gated by `allow_structural` |
 | `define_struct` | `DefineStructIn{name, fields: [FieldSpec], packed=false}` | `DefineStructResult{name, kind, size, field_count, applied}` | **structural** (ADR-015 Phase C); creates a NEW struct; gated by `allow_structural` |
 | `define_union` | `DefineUnionIn{name, fields: [FieldSpec]}` | `DefineUnionResult{name, kind, size, field_count, applied}` | **structural** (ADR-015 Phase C); creates a NEW union; gated by `allow_structural` |
 | `define_types` | `DefineTypesIn{types: [CompositeSpec]}` | `DefineTypesResult{types: [{name, kind, size, field_count}], applied}` | **structural** (ADR-021); creates a BATCH of interdependent NEW composites in ONE transaction (a field may reference another batch member); GATED by write-consent + `allow_structural`; **by-value cycles rejected, pointer cycles allowed** |

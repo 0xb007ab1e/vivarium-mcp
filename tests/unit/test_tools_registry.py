@@ -253,6 +253,10 @@ class FakePort:
         self._rec("demangle", sid)
         return s.DemangleOut(demangled=_u("ns::fn(int)"), scheme="gnu")
 
+    def apply_type_archive(self, sid: str, a: s.ApplyTypeArchiveIn) -> s.ApplyTypeArchiveResult:
+        self._rec("apply_type_archive", sid)
+        return s.ApplyTypeArchiveResult(archive=a.archive, functions_updated=0, applied=True)
+
     def search_bytes(self, sid: str, a: s.SearchBytesIn) -> s.SearchBytesOut:
         self._rec("search_bytes", sid)
         return s.SearchBytesOut(matches=[], total=0)
@@ -421,7 +425,7 @@ def ctx() -> reg.ToolContext:
     )
 
 
-def test_catalog_is_exactly_58_unique_tools() -> None:
+def test_catalog_is_exactly_59_unique_tools() -> None:
     # 22 Tier-1 + 5 v1.1 semantic-naming (ADR-007) + 8 v1.1 Tier-2 metrics (ADR-008; READ-ONLY)
     # + 1 Function ID library-match (ADR-042 Phase 1: identify_functions; READ-ONLY)
     # + 6 v1.1 mutation/write (ADR-012) + 2 v1.1 structural mutation (ADR-013 Phase A) + 2 v1.1
@@ -432,11 +436,12 @@ def test_catalog_is_exactly_58_unique_tools() -> None:
     # + 4 v1.x streaming-extraction tools (ADR-040: start_decompile_stream + fetch_job_results /
     # job_status / cancel_job; READ-ONLY, output-only) + 1 v1.8 p-code emulation (ADR-049: emulate;
     # READ-ONLY, program DB not mutated) + 1 v1.8 C++ demangler (ADR-050: demangle; READ-ONLY,
-    # program-independent) — the 14 mutation tools GATED by per-session write-consent (structural
-    # 8 additionally by allow_structural); import is GATED identically (+ allow_structural for
+    # program-independent) + 1 v1.8 bundled type-archive apply (ADR-051: apply_type_archive;
+    # structural WRITE) — the 15 mutation tools GATED by per-session write-consent (the structural 9
+    # additionally by allow_structural); import is GATED identically (+ allow_structural for
     # structural entries).
-    assert len(reg.TIER1_TOOL_NAMES) == 58
-    assert len(set(reg.TIER1_TOOL_NAMES)) == 58
+    assert len(reg.TIER1_TOOL_NAMES) == 59
+    assert len(set(reg.TIER1_TOOL_NAMES)) == 59
 
 
 def test_handler_table_matches_frozen_allow_list() -> None:
@@ -968,6 +973,7 @@ _EXPECTED_WRITE_TOOLS = frozenset(
         "rename_parameter",
         "set_function_signature",
         "apply_data_type",
+        "apply_type_archive",
         "define_struct",
         "define_union",
         "define_types",
@@ -1011,7 +1017,7 @@ def test_write_tools_is_subset_of_catalog() -> None:
 def test_write_tools_is_exactly_the_expected_set() -> None:
     """Pin the exact write set so a new mutator (or a misclassified read tool) trips a test."""
     assert reg.WRITE_TOOLS == _EXPECTED_WRITE_TOOLS
-    assert len(reg.WRITE_TOOLS) == 15
+    assert len(reg.WRITE_TOOLS) == 16
 
 
 @pytest.mark.parametrize(
@@ -1106,6 +1112,7 @@ _GATED_WRITE_CALLS = [
     ("session_undo", {"session_id": _VALID_SID}),
     ("rename_function", {"session_id": _VALID_SID, "function": "main", "new_name": "parse"}),
     ("define_struct", {"session_id": _VALID_SID, "name": "S", "fields": []}),
+    ("apply_type_archive", {"session_id": _VALID_SID, "archive": "generic_clib_64"}),
     ("delete_type", {"session_id": _VALID_SID, "name": "S"}),
     ("session_import_annotations", {"session_id": _VALID_SID, "annotations": {}}),
 ]

@@ -116,6 +116,8 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     # structural type-aware writes (v1.1 — ADR-014 Phase B; additionally GATED by allow_structural)
     "set_function_signature",
     "apply_data_type",
+    # bundled type-archive application (v1.8 — ADR-051; additionally GATED by allow_structural)
+    "apply_type_archive",
     # composite-type creation (v1.1 — ADR-015 Phase C; additionally GATED by allow_structural)
     "define_struct",
     "define_union",
@@ -228,6 +230,7 @@ WRITE_TOOLS: frozenset[str] = frozenset(
         "rename_parameter",
         "set_function_signature",
         "apply_data_type",
+        "apply_type_archive",
         "define_struct",
         "define_union",
         "define_types",
@@ -1043,6 +1046,34 @@ def _handle_apply_data_type(ctx: ToolContext, args: s.ApplyDataTypeIn) -> s.Appl
     return result
 
 
+def _handle_apply_type_archive(
+    ctx: ToolContext, args: s.ApplyTypeArchiveIn
+) -> s.ApplyTypeArchiveResult:
+    """Apply a bundled type archive's signatures (structural; gated by allow_structural — ADR-051).
+
+    A whole-program structural write: it applies a bundled GDT library's function prototypes to the
+    same-named functions. The ``archive`` name is a closed Literal (no arbitrary path — CWE-22); the
+    worker resolves it to a ``.gdt`` in the pinned Ghidra install and wraps the apply in one txn
+    (``session_undo`` reverts it). No binary-derived value is echoed back (only a count).
+    """
+    ctx.sessions.require_write_consent(args.session_id, structural=True, caller=ctx.caller_id)
+    _log.info(
+        "tool.apply_type_archive.intent",
+        extra={"tool": "apply_type_archive", "session": args.session_id, "archive": args.archive},
+    )
+    result = ctx.port.apply_type_archive(args.session_id, args)
+    _log.info(
+        "tool.apply_type_archive.outcome",
+        extra={
+            "tool": "apply_type_archive",
+            "session": args.session_id,
+            "applied": result.applied,
+            "functions_updated": result.functions_updated,
+        },
+    )
+    return result
+
+
 # --- composite-type creation (v1.1 — ADR-015 Phase C). Same gate as Phase B (the allow_structural
 # opt-in) PLUS structured-input validation: a composite is validated as a bounded FieldSpec list of
 # resolved TypeRefs BEFORE the worker — NO C string is parsed (validate_composite; ADR-015 §2/§4).
@@ -1693,6 +1724,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     # structural type-aware writes (v1.1 — ADR-014 Phase B; gated additionally by allow_structural)
     "set_function_signature": (_handle_set_function_signature, s.SetFunctionSignatureIn),
     "apply_data_type": (_handle_apply_data_type, s.ApplyDataTypeIn),
+    "apply_type_archive": (_handle_apply_type_archive, s.ApplyTypeArchiveIn),
     # composite-type creation (v1.1 — ADR-015 Phase C; gated additionally by allow_structural)
     "define_struct": (_handle_define_struct, s.DefineStructIn),
     "define_union": (_handle_define_union, s.DefineUnionIn),

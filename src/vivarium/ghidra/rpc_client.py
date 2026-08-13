@@ -1685,6 +1685,12 @@ class RpcGhidraAdapter:
             )
         )
 
+    def apply_type_archive(self, sid: str, a: s.ApplyTypeArchiveIn) -> s.ApplyTypeArchiveResult:
+        """Apply a bundled Ghidra Data Type archive (structural — ADR-051)."""
+        return _build_apply_type_archive_result(
+            self._tool_call(sid, "apply_type_archive", {"archive": a.archive})
+        )
+
     # --- composite-type creation (v1.1 — ADR-015 Phase C; structured FieldSpec params) ---
     # The server has already checked structural consent and validated the composite payload
     # (validate_composite: bounded FieldSpec list of resolved TypeRefs, no duplicate/self-embed).
@@ -2986,6 +2992,16 @@ def _build_apply_data_type_result(r: dict[str, Any]) -> s.ApplyDataTypeResult:
         address=str(r["address"]),
         type_name=_w(r["type_name"], DataOrigin.BINARY),
         size=int(r["size"]),
+        applied=bool(r["applied"]),
+    )
+
+
+@_fail_closed
+def _build_apply_type_archive_result(r: dict[str, Any]) -> s.ApplyTypeArchiveResult:
+    """Build an ``ApplyTypeArchiveResult`` (ADR-051) — all fields SAFE scalars (no Untrusted)."""
+    return s.ApplyTypeArchiveResult(
+        archive=str(r["archive"]),
+        functions_updated=int(r["functions_updated"]),
         applied=bool(r["applied"]),
     )
 

@@ -666,6 +666,10 @@ class FakeGhidraPort:
         """Reserved structural type-aware stub (ADR-014)."""
         raise NotImplementedError("RESERVED (v1.1 ADR-014): apply_data_type")
 
+    def apply_type_archive(self, sid: str, a: s.ApplyTypeArchiveIn) -> s.ApplyTypeArchiveResult:
+        """Reserved bundled type-archive stub (ADR-051; mutation tests use a dedicated fake)."""
+        raise NotImplementedError("RESERVED (v1.8 ADR-051): apply_type_archive")
+
     def define_struct(self, sid: str, a: s.DefineStructIn) -> s.DefineStructResult:
         """Reserved composite-creation stub (ADR-015; mutation tests use a dedicated fake)."""
         raise NotImplementedError("RESERVED (v1.1 ADR-015): define_struct")
