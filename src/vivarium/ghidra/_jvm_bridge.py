@@ -343,6 +343,10 @@ class PyGhidraBackend:
         cap = _clamp_count(params.get("max_ops", 256))
         return self._gh_get_high_pcode(str(_require(params, "function")), cap)
 
+    def stack_frame(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a function's recovered stack-frame layout (read-only — ADR-054)."""
+        return self._gh_stack_frame(str(_require(params, "function")))
+
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:
         """List functions (paginated/bounded)."""
         offset, limit = _page(params)
@@ -1316,6 +1320,42 @@ class PyGhidraBackend:
         finally:
             decompiler.dispose()
         return {"ops": ops, "truncated": truncated}
+
+    def _gh_stack_frame(self, function: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Return a function's recovered stack-frame layout (ADR-054).
+
+        Reads ``Function.getStackFrame()`` — the locals + stack parameters the Stack analyzer
+        populated during auto-analysis (each with its frame offset, name, type, and size).
+        Read-only: the program DB is not touched. A not-yet-analyzed function has an empty variable
+        list (not an error — ``session_analyze`` first). Names/types are Ghidra/binary-derived
+        (server wraps them untrusted); offsets/sizes are safe scalars.
+
+        Args:
+            function: Function name or entry address (hex).
+
+        Returns:
+            ``{"frame_size": int, "variables": [{"name", "stack_offset", "data_type", "size",
+            "is_parameter"}, ...]}``.
+
+        Raises:
+            WorkerError: ``not-found`` if the function does not resolve.
+        """
+        func = self._resolve_function(function)  # requires a loaded program (guards, fail-closed)
+        frame = func.getStackFrame()
+        variables: list[dict[str, Any]] = []
+        for var in frame.getStackVariables():
+            offset = int(var.getStackOffset())
+            data_type = var.getDataType()
+            variables.append(
+                {
+                    "name": _to_text(var.getName()),
+                    "stack_offset": offset,
+                    "data_type": _to_text(data_type.getName()) if data_type is not None else "",
+                    "size": int(var.getLength()),
+                    "is_parameter": bool(frame.isParameterOffset(offset)),
+                }
+            )
+        return {"frame_size": int(frame.getFrameSize()), "variables": variables}
 
     def _gh_decompile_stream(  # pragma: no cover - JVM edge
         self,

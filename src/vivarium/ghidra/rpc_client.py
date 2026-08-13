@@ -1096,6 +1096,10 @@ class RpcGhidraAdapter:
             self._tool_call(sid, "get_high_pcode", {"function": a.function, "max_ops": a.max_ops})
         )
 
+    def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
+        """Return a function's recovered stack-frame layout (ADR-054)."""
+        return _build_stack_frame(self._tool_call(sid, "stack_frame", {"function": a.function}))
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         return _build_function_list(
@@ -2440,6 +2444,27 @@ def _build_get_high_pcode(r: dict[str, Any]) -> s.GetHighPcodeOut:
     return s.GetHighPcodeOut(
         ops=[_build_high_pcode_op(o) for o in r.get("ops", [])],
         truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
+def _build_stack_variable(r: dict[str, Any]) -> s.StackVariable:
+    """Build one :class:`StackVariable`: name + data_type are binary/Ghidra-derived (untrusted)."""
+    return s.StackVariable(
+        name=_w(r["name"], DataOrigin.GHIDRA),
+        stack_offset=int(r["stack_offset"]),
+        data_type=_w(r["data_type"], DataOrigin.BINARY),
+        size=int(r["size"]),
+        is_parameter=bool(r["is_parameter"]),
+    )
+
+
+@_fail_closed
+def _build_stack_frame(r: dict[str, Any]) -> s.StackFrameOut:
+    """Build :class:`StackFrameOut` (ADR-054) from a plain result."""
+    return s.StackFrameOut(
+        frame_size=int(r["frame_size"]),
+        variables=[_build_stack_variable(v) for v in r.get("variables", [])],
     )
 
 

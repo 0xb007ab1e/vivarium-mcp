@@ -331,6 +331,22 @@ class FakeGhidraPort:
         ]
         return s.GetHighPcodeOut(ops=ops[: a.max_ops], truncated=a.max_ops < 2)
 
+    def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
+        """Return a deterministic stack frame (name/type untrusted, ADR-054)."""
+        self._maybe_fail()
+        return s.StackFrameOut(
+            frame_size=16,
+            variables=[
+                s.StackVariable(
+                    name=_ug("local_c"),
+                    stack_offset=-12,
+                    data_type=_u("undefined4"),
+                    size=4,
+                    is_parameter=False,
+                )
+            ],
+        )
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """Return a bounded, deterministic function summary page."""
         self._maybe_fail()

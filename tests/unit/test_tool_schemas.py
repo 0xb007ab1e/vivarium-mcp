@@ -104,7 +104,7 @@ def test_catalog_count_matches_registry() -> None:
     # (ADR-040: start_decompile_stream + fetch_job_results/job_status/cancel_job) + 1 Function ID
     # library-match tool (ADR-042 Phase 1: identify_functions). The registry list is the source.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 61
+    assert len(TIER1_TOOL_NAMES) == 62
 
 
 @pytest.mark.critical
@@ -308,3 +308,31 @@ def test_get_high_pcode_bounds_and_untrusted_output() -> None:
     )
     assert isinstance(op.op, Untrusted)
     assert op.address == "0x401000"  # server-normalized scalar stays bare
+
+
+@pytest.mark.critical
+def test_stack_frame_requires_function_and_wraps_names_untrusted() -> None:
+    """stack_frame requires a function; recovered name + type are Untrusted, offsets/sizes bare."""
+    from vivarium.core.envelope import DataOrigin, Untrusted
+
+    s.StackFrameIn(session_id="s", function="main")  # ok
+    with pytest.raises(ValidationError):
+        s.StackFrameIn(session_id="s", function="")  # function required (min_length=1)
+
+    out = s.StackFrameOut(
+        frame_size=16,
+        variables=[
+            s.StackVariable(
+                name=Untrusted(value="local_c", origin=DataOrigin.GHIDRA),
+                stack_offset=-12,
+                data_type=Untrusted(value="undefined4", origin=DataOrigin.BINARY),
+                size=4,
+                is_parameter=False,
+            )
+        ],
+    )
+    var = out.variables[0]
+    assert isinstance(var.name, Untrusted)
+    assert isinstance(var.data_type, Untrusted)
+    assert var.stack_offset == -12 and var.size == 4  # server/worker scalars stay bare
+    assert out.frame_size == 16

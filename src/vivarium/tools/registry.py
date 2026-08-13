@@ -66,6 +66,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "disassemble",
     "get_pcode",
     "get_high_pcode",
+    "stack_frame",
     "list_functions",
     "get_function",
     # xrefs
@@ -515,6 +516,13 @@ def _handle_get_high_pcode(ctx: ToolContext, args: s.GetHighPcodeIn) -> s.GetHig
     ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.function)
     return ctx.port.get_high_pcode(args.session_id, args)
+
+
+def _handle_stack_frame(ctx: ToolContext, args: s.StackFrameIn) -> s.StackFrameOut:
+    """Return a function's recovered stack-frame layout (read-only — ADR-054)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    v.validate_name(args.function)
+    return ctx.port.stack_frame(args.session_id, args)
 
 
 def _handle_list_functions(ctx: ToolContext, args: s.ListFunctionsIn) -> s.FunctionListOut:
@@ -1702,6 +1710,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "disassemble": (_handle_disassemble, s.DisassembleIn),
     "get_pcode": (_handle_get_pcode, s.GetPcodeIn),
     "get_high_pcode": (_handle_get_high_pcode, s.GetHighPcodeIn),
+    "stack_frame": (_handle_stack_frame, s.StackFrameIn),
     "list_functions": (_handle_list_functions, s.ListFunctionsIn),
     "get_function": (_handle_get_function, s.GetFunctionIn),
     "xrefs_to": (_handle_xrefs_to, s.XrefsIn),

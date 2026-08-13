@@ -139,6 +139,10 @@ class GhidraPort(Protocol):
         """Return a function's decompiler-refined high (SSA) p-code (read-only — ADR-053)."""
         ...
 
+    def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
+        """Return a function's recovered stack-frame layout (read-only — ADR-054)."""
+        ...
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         ...

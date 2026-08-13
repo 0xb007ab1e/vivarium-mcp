@@ -471,6 +471,51 @@ class GetHighPcodeOut(_Out):
     truncated: bool = False
 
 
+class StackFrameIn(_SessionScopedIn):
+    """Arguments for ``stack_frame`` — a function's recovered stack layout (ADR-054).
+
+    Read-only: returns the function's stack-frame variables (locals + stack parameters) with their
+    offsets, names, types, and sizes, as populated by Ghidra's Stack analyzer during auto-analysis.
+    A function that has not been analyzed yet returns an empty variable list (not an error) —
+    ``session_analyze`` first for a populated frame.
+
+    Attributes:
+        function: Function name or entry address (hex).
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+
+
+class StackVariable(_Out):
+    """One stack-frame variable (ADR-054).
+
+    Attributes:
+        name: The variable name — untrusted (Ghidra-recovered, e.g. ``local_c``).
+        stack_offset: The variable's frame offset — server-side scalar, safe.
+        data_type: The variable's type name — untrusted (binary-derived).
+        size: The variable size in bytes — worker scalar, safe.
+        is_parameter: Whether the offset is in the parameter region — safe.
+    """
+
+    name: Untrusted[str]
+    stack_offset: int
+    data_type: Untrusted[str]
+    size: int
+    is_parameter: bool
+
+
+class StackFrameOut(_Out):
+    """Result of ``stack_frame`` (ADR-054).
+
+    Attributes:
+        frame_size: The total stack-frame size in bytes — worker scalar, safe.
+        variables: The frame's stack variables (locals + stack parameters).
+    """
+
+    frame_size: int
+    variables: list[StackVariable]
+
+
 class ListFunctionsIn(_Page):
     """Arguments for ``list_functions`` — paginated, bounded.
 
