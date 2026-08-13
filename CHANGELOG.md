@@ -48,6 +48,14 @@ trust identity tightened to tag builds, plus CI-drift tripwires, workflow lintin
 required gate, and CI/docs/threat-model currency.
 
 ### Fixed
+- **`set_function_signature` applies against a real worker (#291).** The worker's `updateFunction`
+  JVM-overload call passed a bare Python `None` for the calling-convention slot and a raw `DataType`
+  where a `Variable` (return parameter) is required, so JPype matched no overload → `TypeError` →
+  the tool always failed `analysis-failed`. Now passes a `String`-typed Java null for the unchanged
+  convention, wraps the return type in `ReturnParameterImpl`, and passes an explicit `Variable[]`; a
+  new gated live-regression happy-path test (`test_set_function_signature.py`) guards it — every
+  other test for the tool mocked the worker or asserted rejection, so both signature bugs shipped
+  undetected.
 - **Cancelling a stream frees the session at once (#260, gap V1).** `cancel_job` now drains the
   cancelled producer so the adapter's in-flight flag is cleared and the socket left clean —
   previously a cancelled stream left the session rejecting every plain call with "session busy"
