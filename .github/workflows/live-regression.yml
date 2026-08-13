@@ -402,6 +402,7 @@ jobs:
             tests/integration/test_export_annotations_after_rename.py \
             tests/integration/test_export_known_count.py \
             tests/integration/test_analyze_profiles.py \
+            tests/integration/test_set_function_signature.py \
             tests/integration/test_identify_functions_fid.py \
             tests/integration/test_identify_functions_selfmatch.py \
             tests/integration/test_import_raw_binary.py \
