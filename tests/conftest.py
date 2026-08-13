@@ -388,6 +388,20 @@ class FakeGhidraPort:
         self._maybe_fail()
         return s.BsimSimilarityOut(address_a="0x00401000", address_b="0x00401010", similarity=0.75)
 
+    def find_similar_functions(
+        self, sid: str, a: s.FindSimilarFunctionsIn
+    ) -> s.FindSimilarFunctionsOut:
+        """Return a deterministic BSim similarity ranking (name untrusted, ADR-059)."""
+        self._maybe_fail()
+        matches = [
+            s.SimilarFunction(address="0x00401010", name=_u("clone_fn"), similarity=1.0),
+            s.SimilarFunction(address="0x00401020", name=_u("variant_fn"), similarity=0.82),
+        ]
+        keep = [m for m in matches if m.similarity >= a.min_similarity][: a.limit]
+        return s.FindSimilarFunctionsOut(
+            target_address="0x00401000", matches=keep, functions_scanned=2, truncated=False
+        )
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """Return a bounded, deterministic function summary page."""
         self._maybe_fail()

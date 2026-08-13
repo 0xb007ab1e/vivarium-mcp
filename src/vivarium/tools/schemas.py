@@ -927,6 +927,58 @@ class BsimSimilarityOut(_Out):
     similarity: float
 
 
+class FindSimilarFunctionsIn(_SessionScopedIn):
+    """Arguments for ``find_similar_functions`` — rank functions by BSim similarity (ADR-059).
+
+    Read-only: generates BSim feature signatures for the target and a bounded pool of the program's
+    functions (one ``GenSignatures`` scan), then returns the ones whose cosine similarity to the
+    target is ``>= min_similarity``, sorted high-to-low. This is the whole-program clone/variant
+    search built on ``bsim_similarity`` (ADR-058). NOTE: it decompiles each scanned function — cost
+    grows with ``max_scan``; the worker wall-clock kill backs it.
+
+    Attributes:
+        function: The target function — name or entry address (hex).
+        min_similarity: Minimum cosine similarity to report, in ``[0, 1]`` (default 0.7).
+        limit: Maximum matches to return (top-K after sorting).
+        max_scan: Cap on candidate functions signature-scanned (bounds the decompile cost).
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    min_similarity: float = Field(default=0.7, ge=0.0, le=1.0)
+    limit: int = Field(default=20, ge=1, le=_MAX_LIMIT)
+    max_scan: int = Field(default=500, ge=1, le=_MAX_LIMIT)
+
+
+class SimilarFunction(_Out):
+    """One BSim-similar function (ADR-059).
+
+    Attributes:
+        address: The function's entry address (hex) — server-normalized, safe.
+        name: The function name — untrusted (Ghidra-recovered / binary-derived).
+        similarity: BSim cosine similarity to the target in ``[0, 1]`` — a computed scalar, safe.
+    """
+
+    address: str
+    name: Untrusted[str]
+    similarity: float
+
+
+class FindSimilarFunctionsOut(_Out):
+    """Result of ``find_similar_functions`` (ADR-059).
+
+    Attributes:
+        target_address: The target function's entry address (hex) — safe.
+        matches: Functions with similarity ``>= min_similarity``, sorted high-to-low (capped).
+        functions_scanned: How many candidate functions were signature-scanned — safe.
+        truncated: Whether ``max_scan`` clipped the candidate pool.
+    """
+
+    target_address: str
+    matches: list[SimilarFunction]
+    functions_scanned: int
+    truncated: bool = False
+
+
 # =====================================================================================
 # Comments
 # =====================================================================================

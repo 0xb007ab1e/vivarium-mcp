@@ -174,7 +174,8 @@ read-only; each basic block's address range + intraprocedural successor edges fr
 exact-bytes / exact-instructions / exact-mnemonics function hashers for duplicate detection),
 `bsim_similarity` (ADR-058 BSim fuzzy similarity — read-only; cosine similarity between two
 functions' BSim feature signatures via GenSignatures + the bundled medium weights),
-`list_functions`, `get_function`,
+`find_similar_functions` (ADR-059 whole-program BSim clone/variant search — read-only; ranks up to
+`max_scan` functions by BSim similarity to a target), `list_functions`, `get_function`,
 `xrefs_to`, `xrefs_from`, `list_strings`, `list_symbols`, `get_symbol`, `list_data`,
 `get_data_type`, `list_data_types` (ADR-056 the list-counterpart to `get_data_type` — read-only;
 paginated summary rows over the program's DataTypeManager), `get_comments`, `memory_map`, `read_bytes`,

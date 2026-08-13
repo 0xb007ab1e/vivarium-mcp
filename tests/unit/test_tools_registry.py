@@ -229,6 +229,12 @@ class FakePort:
         self._rec("bsim_similarity", sid)
         return s.BsimSimilarityOut(address_a="0x401000", address_b="0x401010", similarity=1.0)
 
+    def find_similar_functions(
+        self, sid: str, a: s.FindSimilarFunctionsIn
+    ) -> s.FindSimilarFunctionsOut:
+        self._rec("find_similar_functions", sid)
+        return s.FindSimilarFunctionsOut(target_address="0x401000", matches=[], functions_scanned=0)
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         self._rec("list_functions", sid)
         return s.FunctionListOut(functions=[], total=0)
@@ -459,7 +465,7 @@ def ctx() -> reg.ToolContext:
     )
 
 
-def test_catalog_is_exactly_66_unique_tools() -> None:
+def test_catalog_is_exactly_67_unique_tools() -> None:
     # 22 Tier-1 + 5 v1.1 semantic-naming (ADR-007) + 8 v1.1 Tier-2 metrics (ADR-008; READ-ONLY)
     # + 1 Function ID library-match (ADR-042 Phase 1: identify_functions; READ-ONLY)
     # + 6 v1.1 mutation/write (ADR-012) + 2 v1.1 structural mutation (ADR-013 Phase A) + 2 v1.1
@@ -475,11 +481,12 @@ def test_catalog_is_exactly_66_unique_tools() -> None:
     # p-code (ADR-053: get_high_pcode; read-only) + 1 v1.8 stack-frame layout (ADR-054: stack_frame;
     # read-only) + 1 v1.8 basic-block CFG (ADR-055: basic_blocks; read-only) + 1 v1.8 data-type
     # listing (ADR-056: list_data_types; read-only) + 1 v1.8 function match-hash (ADR-057:
-    # function_hash; read-only) + 1 v1.8 BSim similarity (ADR-058: bsim_similarity; read-only) — the
-    # 15 mutation tools GATED by per-session write-consent (the structural 9 additionally by
+    # function_hash; read-only) + 1 v1.8 BSim similarity (ADR-058: bsim_similarity; read-only) + 1
+    # v1.8 whole-program BSim find-similar (ADR-059: find_similar_functions; read-only) — the 15
+    # mutation tools GATED by per-session write-consent (the structural 9 additionally by
     # allow_structural); import is GATED identically (+ allow_struct for structural entries).
-    assert len(reg.TIER1_TOOL_NAMES) == 66
-    assert len(set(reg.TIER1_TOOL_NAMES)) == 66
+    assert len(reg.TIER1_TOOL_NAMES) == 67
+    assert len(set(reg.TIER1_TOOL_NAMES)) == 67
 
 
 def test_handler_table_matches_frozen_allow_list() -> None:
@@ -628,6 +635,13 @@ def test_bsim_similarity_validates_both_functions_and_dispatches(ctx: reg.ToolCo
     handlers = reg.build_handlers(ctx)
     out = handlers["bsim_similarity"](session_id=_VALID_SID, function_a="a", function_b="b")
     assert isinstance(out, s.BsimSimilarityOut)
+
+
+def test_find_similar_functions_validates_function_and_dispatches(ctx: reg.ToolContext) -> None:
+    """find_similar_functions validates the target name + dispatches (ADR-059)."""
+    handlers = reg.build_handlers(ctx)
+    out = handlers["find_similar_functions"](session_id=_VALID_SID, function="main")
+    assert isinstance(out, s.FindSimilarFunctionsOut)
 
 
 def test_list_functions_validates_name_contains_when_provided(ctx: reg.ToolContext) -> None:

@@ -367,6 +367,15 @@ class PyGhidraBackend:
             str(_require(params, "function_a")), str(_require(params, "function_b"))
         )
 
+    def find_similar_functions(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rank the program's functions by BSim similarity to a target (read-only — ADR-059)."""
+        return self._gh_find_similar_functions(
+            function=str(_require(params, "function")),
+            min_similarity=float(params.get("min_similarity", 0.7)),
+            limit=_clamp_count(params.get("limit", 20)),
+            max_scan=_clamp_count(params.get("max_scan", 500)),
+        )
+
     def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:
         """List functions (paginated/bounded)."""
         offset, limit = _page(params)
@@ -2084,6 +2093,97 @@ class PyGhidraBackend:
             "address_a": str(func_a.getEntryPoint()),
             "address_b": str(func_b.getEntryPoint()),
             "similarity": similarity,
+        }
+
+    def _gh_find_similar_functions(  # noqa: C901 — one bounded BSim scan + rank
+        self, function: str, min_similarity: float, limit: int, max_scan: int
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Rank the program's functions by BSim similarity to a target (ADR-059).
+
+        One ``GenSignatures`` scan of the target + a bounded pool (``max_scan``) of the program's
+        functions, then compares the target's ``LSHVector`` to each candidate's and returns those at
+        or above ``min_similarity``, sorted high-to-low (top ``limit``). Vectors are keyed by the
+        signature description's address (collision-safe vs. duplicate function names). Read-only:
+        signature generation decompiles each scanned function but does NOT mutate the program DB;
+        ``GenSignatures`` is disposed in a ``finally`` (ADR-002). Bounded by ``max_scan`` +
+        ``limit``; the two-plus decompiles are backed by the worker wall-clock kill.
+
+        Args:
+            function: The target function — name or entry address (hex).
+            min_similarity: Minimum cosine similarity to report (``[0, 1]``).
+            limit: Maximum matches to return (top-K after sorting).
+            max_scan: Cap on candidate functions signature-scanned.
+
+        Returns:
+            ``{"target_address", "matches": [{"address", "name", "similarity"}, ...],
+            "functions_scanned", "truncated"}``.
+
+        Raises:
+            WorkerError: ``not-found`` if the target does not resolve; ``analysis-failed`` on an
+                unsupported architecture or if the target signature could not be generated.
+        """
+        from generic.lsh.vector import VectorCompare
+        from ghidra.features.bsim.query import FunctionDatabase, GenSignatures
+        from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+        program = self._require_program()
+        target = self._resolve_function(function)
+        size = int(program.getAddressFactory().getDefaultAddressSpace().getSize())
+        template = self._BSIM_TEMPLATES.get(size)
+        if template is None:
+            raise WorkerError(CODE_ANALYSIS_FAILED, f"BSim: unsupported address size {size}")
+        config = FunctionDatabase.loadConfigurationTemplate(template)
+        factory = FunctionDatabase.generateLSHVectorFactory()
+        factory.set(config.weightfactory, config.idflookup, config.info.settings)
+
+        target_off = int(target.getEntryPoint().getOffset())
+        gensig = GenSignatures(False)
+        try:
+            gensig.setVectorFactory(factory)
+            gensig.openProgram(program, None, None, None, None, None)
+            gensig.scanFunction(target)
+            candidates: list[Any] = []  # scanned functions other than the target
+            truncated = False
+            for func in program.getFunctionManager().getFunctions(True):
+                if int(func.getEntryPoint().getOffset()) == target_off:
+                    continue
+                if len(candidates) >= max_scan:
+                    truncated = True
+                    break
+                gensig.scanFunction(func)
+                candidates.append(func)
+            manager = gensig.getDescriptionManager()
+            vec_by_off: dict[int, Any] = {}
+            for desc in manager.listAllFunctions():
+                record = desc.getSignatureRecord()
+                if record is not None:
+                    vec_by_off[int(desc.getAddress())] = record.getLSHVector()
+            target_vec = vec_by_off.get(target_off)
+            if target_vec is None:
+                raise WorkerError(CODE_ANALYSIS_FAILED, "BSim: could not sign the target function")
+            matches: list[dict[str, Any]] = []
+            for func in candidates:
+                vec = vec_by_off.get(int(func.getEntryPoint().getOffset()))
+                if vec is None:
+                    continue
+                similarity = float(target_vec.compare(vec, VectorCompare()))
+                if similarity >= min_similarity:
+                    matches.append(
+                        {
+                            "address": str(func.getEntryPoint()),
+                            "name": _to_text(func.getName()),
+                            "similarity": similarity,
+                        }
+                    )
+        finally:
+            gensig.dispose()
+
+        matches.sort(key=lambda m: m["similarity"], reverse=True)
+        return {
+            "target_address": str(target.getEntryPoint()),
+            "matches": matches[:limit],
+            "functions_scanned": len(candidates),
+            "truncated": truncated,
         }
 
     def _gh_get_comments(

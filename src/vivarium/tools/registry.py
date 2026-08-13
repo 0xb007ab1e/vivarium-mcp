@@ -71,6 +71,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "list_data_types",
     "function_hash",
     "bsim_similarity",
+    "find_similar_functions",
     "list_functions",
     "get_function",
     # xrefs
@@ -557,6 +558,15 @@ def _handle_bsim_similarity(ctx: ToolContext, args: s.BsimSimilarityIn) -> s.Bsi
     v.validate_name(args.function_a)
     v.validate_name(args.function_b)
     return ctx.port.bsim_similarity(args.session_id, args)
+
+
+def _handle_find_similar_functions(
+    ctx: ToolContext, args: s.FindSimilarFunctionsIn
+) -> s.FindSimilarFunctionsOut:
+    """Rank the program's functions by BSim similarity to a target (read-only — ADR-059)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    v.validate_name(args.function)
+    return ctx.port.find_similar_functions(args.session_id, args)
 
 
 def _handle_list_functions(ctx: ToolContext, args: s.ListFunctionsIn) -> s.FunctionListOut:
@@ -1749,6 +1759,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "list_data_types": (_handle_list_data_types, s.ListDataTypesIn),
     "function_hash": (_handle_function_hash, s.FunctionHashIn),
     "bsim_similarity": (_handle_bsim_similarity, s.BsimSimilarityIn),
+    "find_similar_functions": (_handle_find_similar_functions, s.FindSimilarFunctionsIn),
     "list_functions": (_handle_list_functions, s.ListFunctionsIn),
     "get_function": (_handle_get_function, s.GetFunctionIn),
     "xrefs_to": (_handle_xrefs_to, s.XrefsIn),

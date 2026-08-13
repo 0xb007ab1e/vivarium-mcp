@@ -104,7 +104,7 @@ def test_catalog_count_matches_registry() -> None:
     # (ADR-040: start_decompile_stream + fetch_job_results/job_status/cancel_job) + 1 Function ID
     # library-match tool (ADR-042 Phase 1: identify_functions). The registry list is the source.
     assert len(TIER1_TOOL_NAMES) == len(set(TIER1_TOOL_NAMES))  # no dupes
-    assert len(TIER1_TOOL_NAMES) == 66
+    assert len(TIER1_TOOL_NAMES) == 67
 
 
 @pytest.mark.critical
@@ -430,3 +430,36 @@ def test_bsim_similarity_requires_both_functions_and_is_all_safe() -> None:
     for value in out.model_dump().values():
         assert not isinstance(value, Untrusted)
     assert out.similarity == 1.0
+
+
+@pytest.mark.critical
+def test_find_similar_functions_bounds_and_untrusted_name() -> None:
+    """find_similar_functions is bounded; each match name is Untrusted, addr/score bare."""
+    from vivarium.core.envelope import DataOrigin, Untrusted
+
+    a = s.FindSimilarFunctionsIn(session_id="s", function="main")
+    assert a.min_similarity == 0.7 and a.limit == 20 and a.max_scan == 500  # safe defaults
+    with pytest.raises(ValidationError):
+        s.FindSimilarFunctionsIn(session_id="s", function="")  # target required
+    with pytest.raises(ValidationError):
+        s.FindSimilarFunctionsIn(session_id="s", function="m", min_similarity=1.5)  # > 1.0
+    with pytest.raises(ValidationError):
+        s.FindSimilarFunctionsIn(session_id="s", function="m", limit=10_001)  # > hard cap
+    with pytest.raises(ValidationError):
+        s.FindSimilarFunctionsIn(session_id="s", function="m", max_scan=10_001)  # > hard cap
+
+    out = s.FindSimilarFunctionsOut(
+        target_address="0x401000",
+        matches=[
+            s.SimilarFunction(
+                address="0x401010",
+                name=Untrusted(value="clone_fn", origin=DataOrigin.BINARY),
+                similarity=0.95,
+            )
+        ],
+        functions_scanned=42,
+    )
+    match = out.matches[0]
+    assert isinstance(match.name, Untrusted)
+    assert match.address == "0x401010" and match.similarity == 0.95  # scalars stay bare
+    assert out.functions_scanned == 42 and out.target_address == "0x401000"

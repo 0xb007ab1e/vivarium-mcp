@@ -159,6 +159,12 @@ class GhidraPort(Protocol):
         """Return the BSim cosine similarity between two functions (read-only — ADR-058)."""
         ...
 
+    def find_similar_functions(
+        self, sid: str, a: s.FindSimilarFunctionsIn
+    ) -> s.FindSimilarFunctionsOut:
+        """Rank the program's functions by BSim similarity to a target (read-only — ADR-059)."""
+        ...
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         ...

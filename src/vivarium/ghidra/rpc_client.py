@@ -1130,6 +1130,23 @@ class RpcGhidraAdapter:
             )
         )
 
+    def find_similar_functions(
+        self, sid: str, a: s.FindSimilarFunctionsIn
+    ) -> s.FindSimilarFunctionsOut:
+        """Rank the program's functions by BSim similarity to a target (ADR-059)."""
+        return _build_find_similar_functions(
+            self._tool_call(
+                sid,
+                "find_similar_functions",
+                {
+                    "function": a.function,
+                    "min_similarity": a.min_similarity,
+                    "limit": a.limit,
+                    "max_scan": a.max_scan,
+                },
+            )
+        )
+
     def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
         """List functions (paginated/bounded)."""
         return _build_function_list(
@@ -2555,6 +2572,27 @@ def _build_bsim_similarity(r: dict[str, Any]) -> s.BsimSimilarityOut:
         address_a=str(r["address_a"]),
         address_b=str(r["address_b"]),
         similarity=float(r["similarity"]),
+    )
+
+
+@_fail_closed
+def _build_similar_function(r: dict[str, Any]) -> s.SimilarFunction:
+    """Build one :class:`SimilarFunction`: name is binary-derived (untrusted); score/addr safe."""
+    return s.SimilarFunction(
+        address=str(r["address"]),
+        name=_w(r["name"], DataOrigin.BINARY),
+        similarity=float(r["similarity"]),
+    )
+
+
+@_fail_closed
+def _build_find_similar_functions(r: dict[str, Any]) -> s.FindSimilarFunctionsOut:
+    """Build :class:`FindSimilarFunctionsOut` (ADR-059) from a plain result."""
+    return s.FindSimilarFunctionsOut(
+        target_address=str(r["target_address"]),
+        matches=[_build_similar_function(m) for m in r.get("matches", [])],
+        functions_scanned=int(r["functions_scanned"]),
+        truncated=bool(r.get("truncated", False)),
     )
 
 
