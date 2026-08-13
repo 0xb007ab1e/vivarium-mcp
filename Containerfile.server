@@ -83,6 +83,13 @@ RUN set -eux; \
     /venv/bin/pip install --no-cache-dir --require-hashes -r requirements.lock; \
     # ...then the project itself with --no-deps (its deps were just installed, pinned, above).
     /venv/bin/pip install --no-cache-dir --no-deps .; \
+    # Strip build-only tooling from the SHIPPED venv: the runtime runs the console script and NEVER
+    # installs packages, so pip (with its bundled `_vendor/msgpack`), setuptools, and wheel are dead
+    # weight — and Trivy's python-pkg scanner flags their vendored/old versions (e.g. setuptools
+    # CVE-2025-47273, msgpack GHSA-6v7p-g79w-8964) even though they are never imported at runtime.
+    # REMOVE rather than waive (workflow-cve-management: upgrade/patch/remove > waiver). The smoke
+    # test below then proves the app still imports + resolves its console script without them.
+    /venv/bin/python -m pip uninstall -y pip setuptools wheel 2>/dev/null || true; \
     # Bake the per-session socket-dir mount point with the runtime user's ownership: the runtime
     # stage is shell-free (cannot mkdir), and deploy/ tmpfs-mounts over this path at run time.
     mkdir -p /run/vivarium; \
