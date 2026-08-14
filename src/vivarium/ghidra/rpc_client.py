@@ -38,6 +38,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
@@ -485,7 +486,9 @@ class RpcGhidraAdapter:
         self._preflight_check(size_bytes)
         return size_bytes
 
-    def import_binary(self, session_id: str, args: s.SessionImportIn) -> s.SessionInfo:
+    def import_binary(  # noqa: C901 - one branch per loader kind + the ADR-065 region resolution
+        self, session_id: str, args: s.SessionImportIn
+    ) -> s.SessionInfo:
         """Import the binary into the session's worker, enforcing the size cap FIRST.
 
         The binary-size cap is checked server-side and pre-Ghidra (DoS first line — PLAN §3 F7,
@@ -517,11 +520,50 @@ class RpcGhidraAdapter:
             "source_ref": args.source_ref,
             "expected_sha256": args.expected_sha256,
         }
+        # ADR-065: a multi-region (scatter-load) raw import. Resolve + confine + size-cap EACH
+        # region BEFORE the worker (per-region CWE-22/CWE-400), reject overlapping ranges with the
+        # full known lengths, then thread a resolved region list. The schema already enforced
+        # loader='binary', the shared processor, the mutual-exclusion with base_addr/entry, the
+        # per-region address-width, and slice-region overlap; here we add the source_ref-region
+        # size resolution + the full overlap check. `regions=None` skips this branch entirely.
+        if args.regions is not None:
+            params["loader"] = "binary"
+            params["processor"] = args.processor
+            resolved_regions: list[dict[str, object]] = []
+            spans: list[tuple[int, int]] = []
+            for region in args.regions:
+                if region.source_ref is not None:
+                    region_size = self._resolve_and_cap(region.source_ref)
+                    region_path, region_offset, region_length = region.source_ref, 0, region_size
+                else:
+                    # A slice of the (already resolved + capped) parent source_ref.
+                    region_offset = int(region.offset or 0)
+                    region_length = int(region.length or 0)
+                    if region_offset + region_length > size_bytes:
+                        raise _errors.make_error(
+                            ErrorType.VALIDATION, "a region slice exceeds the source length"
+                        )
+                    region_path = args.source_ref
+                resolved_regions.append(
+                    {
+                        "source_ref": region_path,
+                        "offset": region_offset,
+                        "length": region_length,
+                        "base_addr": region.base_addr,
+                        "entry": region.entry,
+                    }
+                )
+                spans.append((region.base_addr, region.base_addr + region_length))
+            spans.sort()
+            for (_a0, a_end), (b_start, _b1) in pairwise(spans):
+                if b_start < a_end:
+                    raise _errors.make_error(ErrorType.VALIDATION, "region address ranges overlap")
+            params["regions"] = resolved_regions
         # Loader hints: only attach when explicitly opted in (loader != 'auto'). When loader='auto'
         # (the default) NO extra key crosses the wire — params are byte-for-byte identical to the
         # pre-ADR-045 auto path (the ADR-029/030 no-op guarantee). The schema has already validated
         # the hint combination + the processor allow-list server-side.
-        if args.loader == "binary":
+        elif args.loader == "binary":
             params["loader"] = args.loader
             params["processor"] = args.processor
             params["base_addr"] = args.base_addr

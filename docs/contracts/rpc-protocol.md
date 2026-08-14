@@ -312,6 +312,16 @@ A fat/universal Mach-O loads its default slice, or the slice named by an optiona
 (defense in depth). **Additive, opt-in, no new capability/agency** — read-only import, no script
 execution, tool count unchanged (ADR-001 intact).
 
+**`import_binary` — multi-region scatter-load (v1.9 — ADR-065; server → worker, OPTIONAL):** the
+params MAY carry `regions` — a resolved list `[{source_ref, offset, length, base_addr, entry?}]`
+(each `source_ref` a server-confined path, `offset`/`length` the exact byte slice) — with
+`loader="binary"` + one shared `processor`. The worker opens ONE program at the Language (via
+`BinaryLoader` on the parent ref), drops the loader's default block, and creates one initialized
+memory block per region (`Memory.createInitializedBlock` from `path[offset:offset+length]`) at its
+`base_addr`, seeding each region's `entry`. The server resolves + confines + size-caps EVERY region
+and rejects overlapping address ranges **before** the worker (per-region CWE-22/CWE-400, D2/D3);
+absent ⇒ byte-for-byte the single-region path. Additive/opt-in, read-only, tool count unchanged.
+
 **`import_binary` — companion PDB (v1.8 — ADR-061; server → worker, OPTIONAL):** the params MAY
 carry `pdb_ref` (a second server-confined + size-capped path under `VIVARIUM_IMPORT_ROOT`), allowed
 only with the auto loader (no `loader` key). When present, after the PE is loaded the worker applies

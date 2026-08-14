@@ -23,6 +23,7 @@ numeric values are mirrored from :mod:`vivarium.core.validation` / ``security.li
 
 from __future__ import annotations
 
+from itertools import pairwise
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -140,6 +141,60 @@ class SessionInfo(_Out):
     allow_structural: bool = False
 
 
+#: Hard cap on the number of scatter-load regions in one multi-region raw import (ADR-065 D3 — a
+#: client cannot request thousands of memory blocks; the per-region size cap + wall-clock kill back
+#: this).
+_MAX_IMPORT_REGIONS = 64
+
+
+class RegionSpec(_In):
+    """One memory region of a multi-region (scatter-load) raw import (ADR-065).
+
+    Each region is an untrusted input: its bytes come either from its own confined ``source_ref`` or
+    as an ``offset``/``length`` slice of the parent import's ``source_ref``. The server confines +
+    size-caps every region BEFORE the worker; the worker creates one initialized memory block per
+    region at ``base_addr``. All regions in a set share the one top-level ``processor`` (Language) —
+    a differing architecture is a separate session (ADR-065 D5), not a region.
+
+    Attributes:
+        source_ref: The region's bytes as a confined reference (under ``VIVARIUM_IMPORT_ROOT``); OR
+            omit and use ``offset``/``length`` to carve the region from the parent ``source_ref``.
+        offset: In-file byte offset into the parent ``source_ref`` (with ``length``) — the carve
+            start; mutually exclusive with a region ``source_ref``.
+        length: Byte length of the carved slice (required with ``offset``); each region is
+            independently size-capped server-side.
+        base_addr: Load/base address for this region's memory block (required; bounded to the shared
+            processor's address width).
+        entry: Optional per-region entry-point hint (a disassembly seed; ``>= base_addr``).
+    """
+
+    source_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    offset: int | None = Field(default=None, ge=0)
+    length: int | None = Field(default=None, ge=1)
+    base_addr: int = Field(ge=0)
+    entry: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_region_source(self) -> RegionSpec:
+        """A region's bytes come from EXACTLY one of ``source_ref`` or an offset/length slice.
+
+        Returns:
+            ``self`` when the source specification is well-formed.
+
+        Raises:
+            ValueError: If both/neither byte-source forms are given, or ``offset`` lacks ``length``.
+        """
+        has_ref = self.source_ref is not None
+        has_slice = self.offset is not None or self.length is not None
+        if has_ref and has_slice:
+            raise ValueError("a region takes either source_ref OR offset/length, not both")
+        if not has_ref and not has_slice:
+            raise ValueError("a region needs a source_ref or an offset/length slice")
+        if has_slice and (self.offset is None or self.length is None):
+            raise ValueError("a region offset/length slice needs both offset and length")
+        return self
+
+
 class SessionImportIn(_SessionScopedIn):
     """Arguments for ``session_import`` — load a binary into the session.
 
@@ -197,6 +252,7 @@ class SessionImportIn(_SessionScopedIn):
     base_addr: int | None = Field(default=None, ge=0)
     entry: int | None = Field(default=None, ge=0)
     pdb_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    regions: list[RegionSpec] | None = Field(default=None, max_length=_MAX_IMPORT_REGIONS)
 
     @model_validator(mode="after")
     def _validate_loader_hints(self) -> SessionImportIn:  # noqa: C901 — one branch per loader kind
@@ -236,6 +292,42 @@ class SessionImportIn(_SessionScopedIn):
                     "(e.g. ARM:LE:32:Cortex, x86:LE:64:default, MIPS:BE:32:default, "
                     "RISCV:LE:32:default) — see the vivarium://docs/importing resource"
                 )
+
+        # ADR-065: a multi-region (scatter-load) raw import. `regions` is additive/opt-in — when it
+        # is None the rest of this validator (and the worker call) is byte-for-byte the
+        # single-region path. When set it governs the whole import: loader must be 'binary', one
+        # shared processor, and the top-level single-region base_addr/entry are mutually exclusive
+        # with it (D1). Placed after `_require_supported_processor` so it can reuse it.
+        if self.regions is not None:
+            if self.loader != "binary":
+                raise ValueError("regions (multi-region import) requires loader='binary'")
+            if self.base_addr is not None or self.entry is not None:
+                raise ValueError(
+                    "regions is mutually exclusive with the top-level base_addr/entry hints"
+                )
+            if not self.regions:
+                raise ValueError("regions must be non-empty when provided")
+            _require_supported_processor()
+            max_addr = 1 << languages.address_bits(self.processor)  # type: ignore[arg-type]
+            spans: list[tuple[int, int]] = []
+            for i, region in enumerate(self.regions):
+                if region.base_addr >= max_addr:
+                    raise ValueError(f"region[{i}].base_addr exceeds the address width")
+                if region.entry is not None:
+                    if region.entry >= max_addr:
+                        raise ValueError(f"region[{i}].entry exceeds the address width")
+                    if region.entry < region.base_addr:
+                        raise ValueError(f"region[{i}].entry must be >= its base_addr")
+                # Overlap is checkable here only for offset/length regions (length known); a region
+                # sourced from its own file has its length resolved server-side, where the full
+                # overlap check (D2) also runs before the worker.
+                if region.length is not None:
+                    spans.append((region.base_addr, region.base_addr + region.length))
+            spans.sort()
+            for (_a0, a_end), (b_start, _b1) in pairwise(spans):
+                if b_start < a_end:
+                    raise ValueError("region address ranges overlap")
+            return self
 
         # `auto` and the self-describing container loaders (ADR-047: dex/apk — the format carries
         # its own processor + layout) take NO hints; auto lets opinion pick the loader, the named

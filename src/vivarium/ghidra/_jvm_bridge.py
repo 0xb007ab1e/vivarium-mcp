@@ -226,6 +226,14 @@ class PyGhidraBackend:
         """
         source_ref = _require(params, "source_ref")
         loader = params.get("loader")
+        regions = params.get("regions")
+        if regions is not None:
+            # ADR-065: multi-region scatter-load. The server resolved/confined/size-capped every
+            # region and rejected overlap; the worker opens one program at the shared processor and
+            # creates one memory block per region.
+            return self._gh_import_regions(
+                str(source_ref), str(_require(params, "processor")), list(regions)
+            )
         if loader == "binary":
             return self._gh_import(
                 str(source_ref),
@@ -1046,6 +1054,98 @@ class PyGhidraBackend:
                 prog.getSymbolTable().addExternalEntryPoint(space.getAddress(entry))
 
         self._in_transaction("session_import (raw layout)", _rebase)
+
+    def _gh_import_regions(
+        self, source_ref: str, processor: str, regions: list[dict[str, Any]]
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Import a multi-region (scatter-load) raw image as one program, N blocks (ADR-065).
+
+        All regions share the one ``processor`` ``LanguageID`` (a differing arch is a separate
+        session — ADR-065 D5). The server has already resolved/confined/size-capped every region and
+        rejected overlapping address ranges (D2/D3). The worker opens one program at the Language
+        (via ``BinaryLoader`` on the parent ref, reusing the eviction-safe context), drops the
+        loader's default block, then creates one initialized memory block per region from its exact
+        bytes (``path[offset:offset+length]``) at its ``base_addr`` — optionally seeding each
+        region's entry point — inside one transaction (ADR-012 §4). Read-only wrt the source bytes;
+        the program DB is the fresh session's own.
+
+        Args:
+            source_ref: The confined parent path (opens the program at the Language + digest).
+            processor: The shared allow-listed ``LanguageID``.
+            regions: Server-resolved dicts ``{source_ref, offset, length, base_addr, entry?}``.
+
+        Returns:
+            A plain ``SessionInfo``-shaped dict.
+
+        Raises:
+            WorkerError: ``not-found`` if the language is absent or a region cannot be mapped.
+        """
+        import hashlib
+
+        import jpype
+        import pyghidra
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        sha256 = hashlib.sha256()
+        with open(source_ref, "rb") as handle:  # noqa: PTH123 — confined path from the server
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                sha256.update(chunk)
+        self._sha256 = sha256.hexdigest()
+        self._analyzed = False
+        project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
+
+        try:
+            ctx = pyghidra.open_program(
+                source_ref,
+                project_location=project_dir,
+                project_name="session",
+                analyze=False,
+                language=processor,
+                loader="ghidra.app.util.opinion.BinaryLoader",
+            )
+            program = ctx.__enter__()
+        except Exception as exc:
+            raise WorkerError(
+                CODE_NOT_FOUND, "processor language not installed or raw image could not be loaded"
+            ) from exc
+
+        self._project = ctx  # retain the ctx manager for the launcher to close on evict
+        prog = getattr(program, "getCurrentProgram", lambda: program)()
+        self._program = prog
+        # The JVM is now up (open_program started it) — safe to resolve Java classes.
+        from ghidra.util.task import TaskMonitor
+
+        space = prog.getAddressFactory().getDefaultAddressSpace()
+        memory = prog.getMemory()
+        byte_array_input_stream = jpype.JClass("java.io.ByteArrayInputStream")
+
+        def _build() -> None:
+            # Drop the BinaryLoader's default whole-file block(s); the regions define the real map.
+            for block in list(memory.getBlocks()):
+                memory.removeBlock(block, TaskMonitor.DUMMY)
+            for i, region in enumerate(regions):
+                path = str(region["source_ref"])
+                offset = int(region["offset"])
+                length = int(region["length"])
+                with open(path, "rb") as handle:  # noqa: PTH123 — confined path from the server
+                    handle.seek(offset)
+                    data = handle.read(length)
+                start = space.getAddress(int(region["base_addr"]))
+                # jpype converts the Python bytes to a Java byte[] for the stream constructor.
+                memory.createInitializedBlock(
+                    f"region_{i}",
+                    start,
+                    byte_array_input_stream(data),
+                    len(data),
+                    TaskMonitor.DUMMY,
+                    False,
+                )
+                entry = region.get("entry")
+                if entry is not None:
+                    prog.getSymbolTable().addExternalEntryPoint(space.getAddress(int(entry)))
+
+        self._in_transaction("session_import (scatter-load regions)", _build)
+        return _session_info_dict("importing", self._sha256, analysis_complete=False)
 
     #: Client loader hint -> Ghidra loader class. Hex formats (ADR-046) take a ``processor``;
     #: self-describing container formats (ADR-047) take none (the format carries it).
