@@ -1298,6 +1298,30 @@ class RpcGhidraAdapter:
             )
         )
 
+    def binary_diff(self, sid: str, a: s.BinaryDiffIn) -> s.BinaryDiffOut:
+        """Function-granularity diff of two confined binaries (session read-only — ADR-067).
+
+        Both refs are confined + size-capped server-side BEFORE the worker (reusing the
+        ``import_binary`` resolver/cap/pre-flight); the worker loads both fresh, analyzes both,
+        diffs, and wipes them. Bounded by the (longer) analysis timeout (two loads + two
+        analyses).
+        """
+        self._resolve_and_cap(a.program_a)
+        self._resolve_and_cap(a.program_b)
+        return _build_binary_diff(
+            self._call(
+                sid,
+                "binary_diff",
+                {
+                    "program_a": a.program_a,
+                    "program_b": a.program_b,
+                    "match_by": a.match_by,
+                    "max_entries": a.max_entries,
+                },
+                timeout_s=self._analysis_timeout_s,
+            )
+        )
+
     def bsim_search_corpus(self, sid: str, a: s.BsimSearchCorpusIn) -> s.BsimSearchCorpusOut:
         """Cross-binary BSim search over an ephemeral reference corpus (ADR-062).
 
@@ -2891,6 +2915,38 @@ def _build_version_track(r: dict[str, Any]) -> s.VersionTrackOut:
     return s.VersionTrackOut(
         matches=[_build_version_match(m) for m in r.get("matches", [])],
         match_count=int(r["match_count"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_diff_function(r: dict[str, Any]) -> s.DiffFunction:
+    """Build one added/removed :class:`DiffFunction` (ADR-067): the name is binary-derived."""
+    return s.DiffFunction(address=str(r["address"]), name=_w(str(r["name"]), DataOrigin.BINARY))
+
+
+def _build_changed_function(r: dict[str, Any]) -> s.ChangedFunction:
+    """Build one :class:`ChangedFunction` (ADR-067): the shared name is binary-derived."""
+    return s.ChangedFunction(
+        address_a=str(r["address_a"]),
+        address_b=str(r["address_b"]),
+        name=_w(str(r["name"]), DataOrigin.BINARY),
+        change=r["change"],
+    )
+
+
+@_fail_closed
+def _build_binary_diff(r: dict[str, Any]) -> s.BinaryDiffOut:
+    """Build :class:`BinaryDiffOut` (ADR-067); names are UNTRUSTED, addresses/counts SAFE."""
+    summary = r["summary"]
+    return s.BinaryDiffOut(
+        added=[_build_diff_function(f) for f in r.get("added", [])],
+        removed=[_build_diff_function(f) for f in r.get("removed", [])],
+        changed=[_build_changed_function(f) for f in r.get("changed", [])],
+        summary=s.DiffSummary(
+            added=int(summary["added"]),
+            removed=int(summary["removed"]),
+            changed=int(summary["changed"]),
+        ),
         truncated=bool(r.get("truncated", False)),
     )
 

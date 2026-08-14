@@ -92,6 +92,7 @@ RPC_METHODS = frozenset(
         "bsim_similarity",
         "find_similar_functions",
         "version_track",
+        "binary_diff",
         "bsim_search_corpus",
         "list_functions",
         "get_function",
@@ -261,6 +262,10 @@ class GhidraBackend(Protocol):
 
     def version_track(self, params: dict[str, Any]) -> dict[str, Any]:
         """Correlate functions between two confined binaries via Ghidra VT — v1.8 (ADR-060)."""
+        ...
+
+    def binary_diff(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Function-granularity diff of two confined binaries — v1.9 (ADR-067)."""
         ...
 
     def bsim_search_corpus(self, params: dict[str, Any]) -> dict[str, Any]:

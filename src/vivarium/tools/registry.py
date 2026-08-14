@@ -75,6 +75,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "bsim_similarity",
     "find_similar_functions",
     "version_track",
+    "binary_diff",
     "bsim_search_corpus",
     "list_functions",
     "get_function",
@@ -604,6 +605,21 @@ def _handle_version_track(ctx: ToolContext, args: s.VersionTrackIn) -> s.Version
     # exist yet. Idempotent when a worker is already running for the session.
     ctx.sessions.ensure_worker(args.session_id, caller=ctx.caller_id)
     return ctx.port.version_track(args.session_id, args)
+
+
+def _handle_binary_diff(ctx: ToolContext, args: s.BinaryDiffIn) -> s.BinaryDiffOut:
+    """Function-granularity diff of two confined binaries (read-only — ADR-067).
+
+    Loads + analyzes TWO binaries in the session's worker (a capability, gated exactly like
+    ``session_import``/``version_track``: confined import root + size cap, worker-only per ADR-001).
+    Like version_track it ensures the owning principal's worker is spawned (it loads its own
+    binaries, no prior session_import needed) and does NOT touch the session's own program (refs
+    are loaded fresh + wiped), so it needs no write-consent. The two refs are confined + size-capped
+    server-side in the adapter (CWE-22/CWE-400).
+    """
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    ctx.sessions.ensure_worker(args.session_id, caller=ctx.caller_id)
+    return ctx.port.binary_diff(args.session_id, args)
 
 
 def _handle_bsim_search_corpus(
@@ -1823,6 +1839,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "bsim_similarity": (_handle_bsim_similarity, s.BsimSimilarityIn),
     "find_similar_functions": (_handle_find_similar_functions, s.FindSimilarFunctionsIn),
     "version_track": (_handle_version_track, s.VersionTrackIn),
+    "binary_diff": (_handle_binary_diff, s.BinaryDiffIn),
     "bsim_search_corpus": (_handle_bsim_search_corpus, s.BsimSearchCorpusIn),
     "list_functions": (_handle_list_functions, s.ListFunctionsIn),
     "get_function": (_handle_get_function, s.GetFunctionIn),

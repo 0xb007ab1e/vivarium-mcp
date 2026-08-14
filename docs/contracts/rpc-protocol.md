@@ -186,7 +186,12 @@ Tracking — read-only w.r.t. the session; confines + size-caps two refs server-
 fresh in the worker via the lockable domain-file path, auto-analyzes both, runs an allow-listed VT
 correlator, returns `{matches[]{source_address, destination_address, similarity, confidence},
 match_count, truncated}`, then releases + wipes both — the session's own program is never a
-participant), `bsim_search_corpus` (ADR-062 cross-binary BSim search over an EPHEMERAL corpus —
+participant), `binary_diff` (ADR-067 function-granularity two-program diff — read-only w.r.t. the
+session; confines + size-caps two refs server-side, loads BOTH fresh in the worker, auto-analyzes
+both, indexes functions by name, classifies added/removed/changed by name-pairing + the `match_by`
+signal (`name`=body size + instruction count, `function_hash`=Ghidra ExactInstructions hash),
+returns `{added[], removed[], changed[], summary, truncated}` — names UNTRUSTED, then releases +
+wipes both), `bsim_search_corpus` (ADR-062 cross-binary BSim search over an EPHEMERAL corpus —
 read-only w.r.t. the session; confines + size-caps the target + up to 16 reference refs, loads each
 fresh one at a time, BSim-signs, returns each target function's best reference-corpus match
 `{matches[]{target_address, target_name, reference_index, reference_address, reference_name,

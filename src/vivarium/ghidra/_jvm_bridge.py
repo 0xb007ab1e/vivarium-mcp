@@ -432,6 +432,20 @@ class PyGhidraBackend:
             limit=_clamp_count(params.get("limit", 100)),
         )
 
+    def binary_diff(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Function-granularity diff of two confined binaries (read-only — ADR-067).
+
+        Both refs are loaded fresh in a throwaway project inside this worker, analyzed, diffed
+        (added/removed/changed by name-pairing + the ``match_by`` change signal), then released +
+        wiped. The paths were confined + size-capped by the server (ADR-001 / CWE-22 / CWE-400).
+        """
+        return self._gh_binary_diff(
+            source_ref_a=str(_require(params, "program_a")),
+            source_ref_b=str(_require(params, "program_b")),
+            match_by=str(params.get("match_by", "name")),
+            max_entries=_clamp_count(params.get("max_entries", 1000)),
+        )
+
     def bsim_search_corpus(self, params: dict[str, Any]) -> dict[str, Any]:
         """Cross-binary BSim search over an ephemeral reference corpus (read-only — ADR-062).
 
@@ -2967,6 +2981,138 @@ class PyGhidraBackend:
             "match_count": match_count,
             "truncated": len(matches) > limit,
         }
+
+    def _gh_binary_diff(  # noqa: C901 - one bounded two-program pair-and-classify; the branches read clearer inline (JVM edge)
+        self, source_ref_a: str, source_ref_b: str, match_by: str, max_entries: int
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Function-granularity diff of two confined binaries (ADR-067; session read-only).
+
+        Loads BOTH refs FRESH into a throwaway project in this worker (the session's own program is
+        NOT a participant — same isolation as ``version_track``), auto-analyzes both, indexes each
+        program's functions by name, pairs by name, and classifies: ADDED (in B, not A), REMOVED
+        (in A, not B), CHANGED (same name, differing per the ``match_by`` signal — ``function_hash``
+        compares Ghidra's operand-masked ExactInstructions hash, ``name`` compares body size +
+        instruction count). ``summary`` counts are HONEST (full counts even when the entry lists are
+        capped at ``max_entries``). Both programs + the project are released + WIPED (ADR-002). All
+        fields are SAFE (names + addresses + computed change kinds). Bounded by ``max_entries`` +
+        the worker wall-clock/memory caps (ADR-004, two loaded programs).
+
+        (``match_by="bsim"`` — content pairing for STRIPPED binaries via the ADR-058 BSim / VT
+        correlators — and ``include_unchanged`` are tracked follow-ups; the schema does not yet
+        accept them.)
+
+        Args:
+            source_ref_a: Baseline binary (server-confined + size-capped path).
+            source_ref_b: Comparison binary (server-confined + size-capped path).
+            match_by: ``"name"`` or ``"function_hash"`` — the change-detection signal.
+            max_entries: Hard cap per entry list (already server-clamped).
+
+        Returns:
+            ``{"added": [...], "removed": [...], "changed": [...], "summary": {...}, "truncated"}``.
+
+        Raises:
+            WorkerError: ``analysis-failed`` if a program cannot be loaded/analyzed.
+        """
+        import contextlib
+        import shutil
+        from pathlib import Path
+
+        import pyghidra
+
+        pyghidra.start(verbose=False)
+
+        from ghidra.app.plugin.match import ExactInstructionsFunctionHasher
+        from ghidra.util.task import TaskMonitor
+        from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+        monitor = TaskMonitor.DUMMY
+        consumer = "vivarium-diff"
+        project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
+        diff_path = Path(project_dir) / "diff"
+        diff_path.mkdir(parents=True, exist_ok=True)
+        diff_dir = str(diff_path)
+
+        def _index(program: Any) -> dict[str, dict[str, Any]]:
+            index: dict[str, dict[str, Any]] = {}
+            for func in program.getFunctionManager().getFunctions(True):
+                if func.isExternal():
+                    continue
+                name = str(func.getName())
+                if name in index:
+                    continue  # first occurrence per name (deterministic)
+                sig: dict[str, Any] = {
+                    "address": str(func.getEntryPoint()),
+                    "size": int(func.getBody().getNumAddresses()),
+                }
+                if match_by == "function_hash":
+                    sig["hash"] = str(
+                        int(ExactInstructionsFunctionHasher.INSTANCE.hash(func, monitor))
+                    )
+                else:
+                    count = 0
+                    for _instr in program.getListing().getInstructions(func.getBody(), True):
+                        count += 1
+                    sig["instr"] = count
+                index[name] = sig
+            return index
+
+        proj_ctx = pyghidra.open_project(diff_dir, "diff", create=True)
+        proj = proj_ctx.__enter__()
+        prog_a = prog_b = None
+        try:
+            root = proj.getProjectData().getRootFolder()
+            prog_a = self._vt_load_program(proj, root, source_ref_a, "A", consumer, monitor)
+            prog_b = self._vt_load_program(proj, root, source_ref_b, "B", consumer, monitor)
+            idx_a = _index(prog_a)
+            idx_b = _index(prog_b)
+            names_a, names_b = set(idx_a), set(idx_b)
+
+            added = [{"address": idx_b[n]["address"], "name": n} for n in sorted(names_b - names_a)]
+            removed = [
+                {"address": idx_a[n]["address"], "name": n} for n in sorted(names_a - names_b)
+            ]
+            changed: list[dict[str, Any]] = []
+            for name in sorted(names_a & names_b):
+                a_sig, b_sig = idx_a[name], idx_b[name]
+                if match_by == "function_hash":
+                    differs = a_sig["hash"] != b_sig["hash"]
+                    change_kind = "body"
+                else:
+                    differs = a_sig["size"] != b_sig["size"] or a_sig["instr"] != b_sig["instr"]
+                    change_kind = "body"
+                if differs:
+                    changed.append(
+                        {
+                            "address_a": a_sig["address"],
+                            "address_b": b_sig["address"],
+                            "name": name,
+                            "change": change_kind,
+                        }
+                    )
+            summary = {"added": len(added), "removed": len(removed), "changed": len(changed)}
+            truncated = (
+                len(added) > max_entries or len(removed) > max_entries or len(changed) > max_entries
+            )
+            return {
+                "added": added[:max_entries],
+                "removed": removed[:max_entries],
+                "changed": changed[:max_entries],
+                "summary": summary,
+                "truncated": truncated,
+            }
+        except WorkerError:
+            raise
+        except Exception as exc:
+            raise WorkerError(CODE_ANALYSIS_FAILED, "binary diff failed") from exc
+        finally:
+            for obj in (prog_a, prog_b):
+                if obj is not None:
+                    with contextlib.suppress(Exception):
+                        obj.release(consumer)
+            with contextlib.suppress(Exception):
+                proj_ctx.__exit__(None, None, None)
+            with contextlib.suppress(Exception):
+                shutil.rmtree(diff_dir, ignore_errors=True)
 
     def _bsim_sign(
         self, program: Any, factory: Any, max_scan: int

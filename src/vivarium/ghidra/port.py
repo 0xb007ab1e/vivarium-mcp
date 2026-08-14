@@ -173,6 +173,14 @@ class GhidraPort(Protocol):
         """Rank the program's functions by BSim similarity to a target (read-only — ADR-059)."""
         ...
 
+    def binary_diff(self, sid: str, a: s.BinaryDiffIn) -> s.BinaryDiffOut:
+        """Function-granularity diff of two confined binaries (read-only — ADR-067).
+
+        Both refs are confined + size-capped server-side; the two programs are loaded fresh in the
+        session's worker, analyzed, diffed (added/removed/changed), then wiped. Session untouched.
+        """
+        ...
+
     def version_track(self, sid: str, a: s.VersionTrackIn) -> s.VersionTrackOut:
         """Correlate functions between two confined binaries (read-only — ADR-060).
 

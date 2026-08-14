@@ -1384,6 +1384,94 @@ class VersionTrackOut(_Out):
     truncated: bool = False
 
 
+class BinaryDiffIn(_SessionScopedIn):
+    """Arguments for ``binary_diff`` — function-granularity two-program diff (ADR-067).
+
+    Diffs **two** binaries (patch-diffing OTA builds / build-to-build correspondence). Both are
+    loaded **fresh** in the session's already-hardened worker via a throwaway project,
+    auto-analyzed,
+    diffed, then released + wiped — the session's own program is NOT a participant. The
+    ``session_id``
+    supplies auth/scoping + the worker, not a program. Both refs resolve through the **same confined
+    import root** as ``session_import`` (CWE-22) and are size-capped (CWE-400) before any
+    byte reaches Ghidra. Bounded by ``max_entries`` + the worker wall-clock/memory caps (two loaded
+    programs).
+
+    Attributes:
+        program_a: Baseline binary — a path under ``VIVARIUM_IMPORT_ROOT`` (confined + size-capped).
+        program_b: Comparison binary — a confined + size-capped path under ``VIVARIUM_IMPORT_ROOT``.
+        match_by: The change-detection signal — ``"name"`` (body size + instruction count) or
+            ``"function_hash"`` (Ghidra's operand-masked ExactInstructions hash). Functions are
+            paired by name; a ``"bsim"`` content-pairing mode for stripped binaries is a follow-up.
+        max_entries: Hard cap per entry list (bounded; ``summary`` stays honest when clipped).
+    """
+
+    program_a: str = Field(min_length=1, max_length=512)
+    program_b: str = Field(min_length=1, max_length=512)
+    match_by: Literal["name", "function_hash"] = "name"
+    max_entries: int = Field(default=1000, ge=1, le=_MAX_LIMIT)
+
+
+class DiffFunction(_Out):
+    """One added/removed function in a ``binary_diff`` (ADR-067).
+
+    Attributes:
+        address: Entry address (hex) in the program it belongs to — server-normalized, safe.
+        name: The function name — UNTRUSTED (binary-derived; ADR-005).
+    """
+
+    address: str
+    name: Untrusted[str]
+
+
+class ChangedFunction(_Out):
+    """One changed (name-paired but differing) function in a ``binary_diff`` (ADR-067).
+
+    Attributes:
+        address_a: Entry address (hex) in ``program_a`` — safe.
+        address_b: Entry address (hex) in ``program_b`` — safe.
+        name: The shared function name — UNTRUSTED (binary-derived; ADR-005).
+        change: What differs — ``"signature"`` / ``"body"`` / ``"both"`` (MVP reports ``"body"``).
+    """
+
+    address_a: str
+    address_b: str
+    name: Untrusted[str]
+    change: Literal["signature", "body", "both"]
+
+
+class DiffSummary(_Out):
+    """Per-category counts for a ``binary_diff`` — HONEST even when entry lists are truncated.
+
+    Attributes:
+        added: Total functions present in B but not A — safe.
+        removed: Total functions present in A but not B — safe.
+        changed: Total name-paired functions that differ — safe.
+    """
+
+    added: int
+    removed: int
+    changed: int
+
+
+class BinaryDiffOut(_Out):
+    """Result of ``binary_diff`` (ADR-067) — a bounded structured diff.
+
+    Attributes:
+        added: Functions in B with no A pairing (bounded).
+        removed: Functions in A with no B pairing (bounded).
+        changed: Name-paired functions that differ (bounded).
+        summary: Full per-category counts (honest even when lists are clipped).
+        truncated: Whether ``max_entries`` clipped any list.
+    """
+
+    added: list[DiffFunction]
+    removed: list[DiffFunction]
+    changed: list[ChangedFunction]
+    summary: DiffSummary
+    truncated: bool = False
+
+
 # =====================================================================================
 # Comments
 # =====================================================================================

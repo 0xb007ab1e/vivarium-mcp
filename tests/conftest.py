@@ -458,6 +458,27 @@ class FakeGhidraPort:
             matches=keep[: a.limit], match_count=len(matches), truncated=len(keep) > a.limit
         )
 
+    def binary_diff(self, sid: str, a: s.BinaryDiffIn) -> s.BinaryDiffOut:
+        """Return a deterministic two-program diff (names untrusted, ADR-067)."""
+        self._maybe_fail()
+        added = [s.DiffFunction(address="0x00401100", name=_u("new_fn"))]
+        removed = [s.DiffFunction(address="0x00401200", name=_u("gone_fn"))]
+        changed = [
+            s.ChangedFunction(
+                address_a="0x00401000",
+                address_b="0x00401000",
+                name=_u("patched_fn"),
+                change="body",
+            )
+        ]
+        return s.BinaryDiffOut(
+            added=added[: a.max_entries],
+            removed=removed[: a.max_entries],
+            changed=changed[: a.max_entries],
+            summary=s.DiffSummary(added=1, removed=1, changed=1),
+            truncated=False,
+        )
+
     def bsim_search_corpus(self, sid: str, a: s.BsimSearchCorpusIn) -> s.BsimSearchCorpusOut:
         """Return a deterministic cross-binary BSim match set (names untrusted, ADR-062)."""
         self._maybe_fail()
