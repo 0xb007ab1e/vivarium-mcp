@@ -147,6 +147,10 @@ class GhidraPort(Protocol):
         """Propose a struct layout from access patterns off a base pointer (read-only — ADR-069)."""
         ...
 
+    def deobfuscate_strings(self, sid: str, a: s.DeobfuscateStringsIn) -> s.DeobfuscateStringsOut:
+        """Recover hidden (stack-string) strings from a function/program scan — ADR-068."""
+        ...
+
     def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
         """Return a function's recovered stack-frame layout (read-only — ADR-054)."""
         ...

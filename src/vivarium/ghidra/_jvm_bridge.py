@@ -32,6 +32,10 @@ _MAX_READ_BYTES = 1_048_576  # 1 MiB
 # Defensive per-instruction ceiling on emitted p-code ops (v1.8 — ADR-052 get_pcode). A SLEIGH
 # instruction lifts to a bounded op count, but cap it so one instruction can't balloon the response.
 _MAX_PCODE_OPS_PER_INSN = 256
+#: Cap on functions scanned in a whole-program `deobfuscate_strings` scan (ADR-068 D5) — bounds the
+#: raw-p-code walk so an adversarial binary cannot force an unbounded scan; the per-call wall-clock
+#: kill backs it. A `function`-scoped call ignores this (one function).
+_DEOBFUSCATE_FUNCTION_SCAN_CAP = 2_000
 # Max FID match candidates the worker ever returns from identify_functions (v1.x — ADR-042 Phase 1;
 # mirrors rpc_client._IDENTIFY_MATCH_BUDGET). Defense-in-depth: the FID service can emit many
 # candidates per function on a large binary; the worker clamps + sets truncated, the server caps
@@ -382,6 +386,18 @@ class PyGhidraBackend:
             str(_require(params, "base")),
             _clamp_count(params.get("max_fields", 256)),
             _clamp_count(params.get("max_accesses", 1024)),
+        )
+
+    def deobfuscate_strings(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Recover hidden (stack-string) strings from a function/program scan — ADR-068."""
+        function = params.get("function")
+        techniques = params.get("techniques") or ["stack_string"]
+        return self._gh_deobfuscate_strings(
+            None if function is None else str(function),
+            [str(t) for t in techniques],
+            _clamp_count(params.get("min_length", 4)),
+            _clamp_count(params.get("max_results", 256)),
+            _clamp_count(params.get("max_bytes", 256)),
         )
 
     def stack_frame(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1959,6 +1975,136 @@ class PyGhidraBackend:
         finally:
             decompiler.dispose()
         return {"base": base, "fields": fields, "truncated": truncated, "total_span": total_span}
+
+    def _gh_deobfuscate_strings(  # noqa: C901 - one bounded raw-p-code stack-store walk; branches read clearer inline (JVM edge)
+        self,
+        function: str | None,
+        techniques: list[str],
+        min_length: int,
+        max_results: int,
+        max_bytes: int,
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Recover hidden (stack-string) strings from a function or bounded program scan (ADR-068).
+
+        The ``stack_string`` technique walks each function's RAW per-instruction p-code (NOT the
+        decompiler's ``HighFunction`` — dead-code elimination removes stack stores that are never
+        read, which is exactly how these hide) for runs of constant stores to adjacent stack slots:
+        an ``INT_ADD(frame/stack register, const)`` computes the slot address, a ``COPY(const)`` (or
+        a direct constant) is the value, and a ``STORE`` writes it. Constant slot bytes are
+        collected by stack offset and reassembled by the pure
+        :func:`core.stackstring.reassemble_stack_strings` (contiguous runs, NUL-split,
+        printable-ratio + ``min_length`` filter). Pure static analysis —
+        no execution (ADR-068 D2), read-only, program DB untouched. Bounded by ``max_results`` +
+        ``max_bytes`` + a function-scan cap; ``truncated`` honest (ADR-005).
+
+        (``xor_decode`` — bounded emulation of a local decode loop via the ADR-049 engine — is a
+        tracked follow-up; the schema does not yet accept it.)
+
+        Args:
+            function: A function (name or entry address) to scope the scan; ``None`` scans a bounded
+                set of the program's functions.
+            techniques: Requested passes (this increment supports ``"stack_string"``).
+            min_length: Minimum recovered-string length (already server-clamped).
+            max_results: Cap on recovered strings returned (already server-clamped).
+            max_bytes: Cap on the length of any single recovered string (already server-clamped).
+
+        Returns:
+            ``{"strings": [{"address", "technique", "text", "length"}], "truncated"}``.
+
+        Raises:
+            WorkerError: ``not-found`` if a named ``function`` does not resolve.
+        """
+        from vivarium.core.stackstring import reassemble_stack_strings
+
+        program = self._require_program()
+        listing = program.getListing()
+        want_stack = "stack_string" in techniques
+
+        if function is not None:
+            functions = [self._resolve_function(function)]
+        else:
+            functions = []
+            for count, func in enumerate(program.getFunctionManager().getFunctions(True)):
+                if count >= _DEOBFUSCATE_FUNCTION_SCAN_CAP:
+                    break
+                functions.append(func)
+
+        def _def_in(ops: list[Any], varnode: Any) -> Any | None:
+            for op in ops:
+                out = op.getOutput()
+                if out is not None and out.equals(varnode):
+                    return op
+            return None
+
+        results: list[dict[str, Any]] = []
+        truncated = False
+        for func in functions:
+            if not want_stack:
+                break
+            slots: dict[int, int] = {}
+            for instruction in listing.getInstructions(func.getBody(), True):
+                ops = list(instruction.getPcode())
+                for op in ops:
+                    if str(op.getMnemonic()) != "STORE":
+                        continue
+                    addr_vn = op.getInput(1)
+                    val_vn = op.getInput(2)
+                    size = int(val_vn.getSize())
+                    value: int | None = None
+                    if val_vn.isConstant():
+                        value = int(val_vn.getOffset())
+                    else:
+                        def_op = _def_in(ops, val_vn)
+                        if (
+                            def_op is not None
+                            and str(def_op.getMnemonic()) == "COPY"
+                            and def_op.getInput(0).isConstant()
+                        ):
+                            value = int(def_op.getInput(0).getOffset())
+                            size = int(def_op.getOutput().getSize())
+                    if value is None:
+                        continue
+                    addr_def = _def_in(ops, addr_vn)
+                    offset: int | None = None
+                    if addr_def is not None and str(addr_def.getMnemonic()) == "INT_ADD":
+                        in0, in1 = addr_def.getInput(0), addr_def.getInput(1)
+                        if in1.isConstant() and in0.isRegister():
+                            const_vn = in1
+                        elif in0.isConstant() and in1.isRegister():
+                            const_vn = in0
+                        else:
+                            const_vn = None
+                        if const_vn is not None:
+                            raw = int(const_vn.getOffset())
+                            bits = int(const_vn.getSize()) * 8
+                            offset = raw - (1 << bits) if raw >= (1 << (bits - 1)) else raw
+                    if offset is None:
+                        continue
+                    for i, byte_value in enumerate(
+                        (value & ((1 << (8 * size)) - 1)).to_bytes(size, "little")
+                    ):
+                        slots[offset + i] = byte_value
+
+            entry = str(func.getEntryPoint())
+            for text in reassemble_stack_strings(
+                slots, min_length=min_length, min_printable_ratio=0.8
+            ):
+                clipped = text[:max_bytes]
+                if len(results) >= max_results:
+                    truncated = True
+                    break
+                results.append(
+                    {
+                        "address": entry,
+                        "technique": "stack_string",
+                        "text": clipped,
+                        "length": len(clipped),
+                    }
+                )
+            if truncated:
+                break
+
+        return {"strings": results, "truncated": truncated}
 
     def _gh_stack_frame(self, function: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Return a function's recovered stack-frame layout (ADR-054).

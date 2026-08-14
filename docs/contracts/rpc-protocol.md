@@ -173,6 +173,11 @@ bounded by max_nodes/max_depth; each rendered op is untrusted),
 `recover_struct` (ADR-069 propose a struct layout from access patterns — read-only, propose-only;
 walks the HighFunction accesses off a base pointer — pointer arithmetic + LOAD/STORE unioned across
 SSA instances — proposing one field per observed access, never writing; inferred_type untrusted),
+`deobfuscate_strings` (ADR-068 recover hidden strings — read-only; the `stack_string` technique
+walks a function's RAW per-instruction p-code for runs of constant stores to adjacent stack slots
+and reassembles them via the pure core — invisible to the HighFunction because dead-code elimination
+removes stores never read; function-scoped or a bounded program scan; recovered text untrusted;
+`xor_decode` deferred),
 `stack_frame` (ADR-054 recovered stack layout — read-only; the function's locals/parameters with
 offsets, types, sizes from the Stack analyzer), `basic_blocks` (ADR-055 control-flow graph —
 read-only; each basic block's address range + intraprocedural successor edges from

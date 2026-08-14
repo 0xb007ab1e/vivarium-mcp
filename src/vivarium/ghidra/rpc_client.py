@@ -1207,6 +1207,22 @@ class RpcGhidraAdapter:
             )
         )
 
+    def deobfuscate_strings(self, sid: str, a: s.DeobfuscateStringsIn) -> s.DeobfuscateStringsOut:
+        """Recover hidden (stack-string) strings from a function/program scan (ADR-068)."""
+        return _build_deobfuscate_strings(
+            self._tool_call(
+                sid,
+                "deobfuscate_strings",
+                {
+                    "function": a.function,
+                    "techniques": a.techniques,
+                    "min_length": a.min_length,
+                    "max_results": a.max_results,
+                    "max_bytes": a.max_bytes,
+                },
+            )
+        )
+
     def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
         """Return a function's recovered stack-frame layout (ADR-054)."""
         return _build_stack_frame(self._tool_call(sid, "stack_frame", {"function": a.function}))
@@ -2792,6 +2808,25 @@ def _build_recover_struct(r: dict[str, Any]) -> s.RecoverStructOut:
         base=str(r["base"]),
         fields=[_build_proposed_field(f) for f in r.get("fields", [])],
         total_span=int(r.get("total_span") or 0),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_recovered_string(r: dict[str, Any]) -> s.RecoveredString:
+    """Build one :class:`RecoveredString` (ADR-068): the recovered text is binary-derived."""
+    return s.RecoveredString(
+        address=str(r["address"]),
+        technique=r["technique"],
+        text=_w(str(r["text"]), DataOrigin.BINARY),
+        length=int(r["length"]),
+    )
+
+
+@_fail_closed
+def _build_deobfuscate_strings(r: dict[str, Any]) -> s.DeobfuscateStringsOut:
+    """Build :class:`DeobfuscateStringsOut` (ADR-068); each recovered text is UNTRUSTED."""
+    return s.DeobfuscateStringsOut(
+        strings=[_build_recovered_string(x) for x in r.get("strings", [])],
         truncated=bool(r.get("truncated", False)),
     )
 

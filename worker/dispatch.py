@@ -85,6 +85,7 @@ RPC_METHODS = frozenset(
         "get_high_pcode",
         "data_flow_slice",
         "recover_struct",
+        "deobfuscate_strings",
         "stack_frame",
         "basic_blocks",
         "list_data_types",
@@ -234,6 +235,10 @@ class GhidraBackend(Protocol):
 
     def recover_struct(self, params: dict[str, Any]) -> dict[str, Any]:
         """Propose a struct layout from access patterns off a base pointer — v1.9 (ADR-069)."""
+        ...
+
+    def deobfuscate_strings(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Recover hidden (stack-string) strings from a function/program scan — v1.9 (ADR-068)."""
         ...
 
     def stack_frame(self, params: dict[str, Any]) -> dict[str, Any]:

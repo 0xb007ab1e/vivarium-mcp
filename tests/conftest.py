@@ -364,6 +364,18 @@ class FakeGhidraPort:
             truncated=a.max_fields < 3,
         )
 
+    def deobfuscate_strings(self, sid: str, a: s.DeobfuscateStringsIn) -> s.DeobfuscateStringsOut:
+        """Return a deterministic recovered stack-string (text untrusted, ADR-068)."""
+        self._maybe_fail()
+        strings = [
+            s.RecoveredString(
+                address="0x00401000", technique="stack_string", text=_ug("Hello!"), length=6
+            )
+        ]
+        return s.DeobfuscateStringsOut(
+            strings=strings[: a.max_results], truncated=a.max_results < 1
+        )
+
     def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
         """Return a deterministic stack frame (name/type untrusted, ADR-054)."""
         self._maybe_fail()

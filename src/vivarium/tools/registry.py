@@ -68,6 +68,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "get_high_pcode",
     "data_flow_slice",
     "recover_struct",
+    "deobfuscate_strings",
     "stack_frame",
     "basic_blocks",
     "list_data_types",
@@ -541,6 +542,16 @@ def _handle_recover_struct(ctx: ToolContext, args: s.RecoverStructIn) -> s.Recov
     ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.function)
     return ctx.port.recover_struct(args.session_id, args)
+
+
+def _handle_deobfuscate_strings(
+    ctx: ToolContext, args: s.DeobfuscateStringsIn
+) -> s.DeobfuscateStringsOut:
+    """Recover hidden (stack-string) strings from a function/program scan (read-only — ADR-068)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    if args.function is not None:
+        v.validate_name(args.function)
+    return ctx.port.deobfuscate_strings(args.session_id, args)
 
 
 def _handle_stack_frame(ctx: ToolContext, args: s.StackFrameIn) -> s.StackFrameOut:
@@ -1832,6 +1843,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "get_high_pcode": (_handle_get_high_pcode, s.GetHighPcodeIn),
     "data_flow_slice": (_handle_data_flow_slice, s.DataFlowSliceIn),
     "recover_struct": (_handle_recover_struct, s.RecoverStructIn),
+    "deobfuscate_strings": (_handle_deobfuscate_strings, s.DeobfuscateStringsIn),
     "stack_frame": (_handle_stack_frame, s.StackFrameIn),
     "basic_blocks": (_handle_basic_blocks, s.BasicBlocksIn),
     "list_data_types": (_handle_list_data_types, s.ListDataTypesIn),

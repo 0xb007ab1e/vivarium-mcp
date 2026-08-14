@@ -713,6 +713,60 @@ class RecoverStructOut(_Out):
     truncated: bool = False
 
 
+class DeobfuscateStringsIn(_SessionScopedIn):
+    """Arguments for ``deobfuscate_strings`` — recover hidden strings (ADR-068).
+
+    Read-only static recovery of strings the ordinary string scan misses. This increment supports
+    the ``stack_string`` technique: the worker walks a function's RAW per-instruction p-code for
+    of constant stores to adjacent stack slots and reassembles them (these are invisible to the
+    decompiler's ``HighFunction`` — dead-code elimination removes stores never read). Bounded by
+    ``max_results``/``max_bytes`` + a whole-program function-scan cap; ``truncated`` honest.
+
+    Attributes:
+        function: Optional function (address or name) to scope the scan; omit for a bounded
+            whole-program scan (server-clamped).
+        techniques: Recovery passes to run (this increment: ``"stack_string"``); default all
+            supported. (``"xor_decode"`` — bounded decode-loop emulation — is a tracked follow-up.)
+        min_length: Minimum recovered-string length to report (noise floor; bounded).
+        max_results: Cap on recovered strings returned (bounded).
+        max_bytes: Cap on the length of any single recovered string (bounded).
+    """
+
+    function: str | None = Field(default=None, min_length=1, max_length=_MAX_NAME)
+    techniques: list[Literal["stack_string"]] | None = Field(default=None, max_length=4)
+    min_length: int = Field(default=4, ge=1, le=_MAX_LIMIT)
+    max_results: int = Field(default=256, ge=1, le=_MAX_LIMIT)
+    max_bytes: int = Field(default=256, ge=1, le=_MAX_LIMIT)
+
+
+class RecoveredString(_Out):
+    """One recovered (deobfuscated) string (ADR-068).
+
+    Attributes:
+        address: Where the string is constructed — the function entry (hex) — safe.
+        technique: How it was recovered (``"stack_string"``) — safe (closed vocabulary).
+        text: The recovered string — UNTRUSTED (binary-derived; ADR-005).
+        length: Recovered length in bytes — safe.
+    """
+
+    address: str
+    technique: Literal["stack_string"]
+    text: Untrusted[str]
+    length: int
+
+
+class DeobfuscateStringsOut(_Out):
+    """Result of ``deobfuscate_strings`` (ADR-068).
+
+    Attributes:
+        strings: Bounded list of recovered strings.
+        truncated: Whether ``max_results`` (or the scan cap) clipped the result.
+    """
+
+    strings: list[RecoveredString]
+    truncated: bool = False
+
+
 class StackFrameIn(_SessionScopedIn):
     """Arguments for ``stack_frame`` — a function's recovered stack layout (ADR-054).
 
