@@ -322,6 +322,15 @@ memory block per region (`Memory.createInitializedBlock` from `path[offset:offse
 and rejects overlapping address ranges **before** the worker (per-region CWE-22/CWE-400, D2/D3);
 absent ⇒ byte-for-byte the single-region path. Additive/opt-in, read-only, tool count unchanged.
 
+**`import_binary` — companion debug map (v1.9 — ADR-071; server → worker, OPTIONAL):** the params
+MAY carry `debug_ref` (a second server-confined + size-capped path under `VIVARIUM_IMPORT_ROOT`) +
+`debug_format` (`"map"`), allowed only with the auto loader and mutually exclusive with `pdb_ref`
+(a program takes one companion). When present, after the ELF is loaded the worker parses the map
+with the pure `core.debugmap.parse_symbol_map` and creates one `IMPORTED` label per name→address
+symbol (inside a transaction), before analysis. The ref is confined + size-capped **before** the
+worker; a malformed map fails closed `not-found`; out-of-space addresses are skipped honestly.
+Additive/opt-in, read-only, tool count unchanged. (`debug_format="dwarf"` is a tracked follow-up.)
+
 **`import_binary` — companion PDB (v1.8 — ADR-061; server → worker, OPTIONAL):** the params MAY
 carry `pdb_ref` (a second server-confined + size-capped path under `VIVARIUM_IMPORT_ROOT`), allowed
 only with the auto loader (no `loader` key). When present, after the PE is loaded the worker applies

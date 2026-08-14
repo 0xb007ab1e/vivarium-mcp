@@ -256,10 +256,19 @@ class PyGhidraBackend:
             return self._gh_import(
                 str(source_ref), loader="macho", processor=None if proc is None else str(proc)
             )
-        # AUTO path — plus the optional ADR-061 companion PDB (the server allows pdb_ref only with
-        # loader='auto', so it threads here and nowhere else).
+        # AUTO path — plus the optional ADR-061 companion PDB / ADR-071 companion debug map (the
+        # server allows pdb_ref/debug_ref only with loader='auto', so they thread here and nowhere
+        # else; the schema makes them mutually exclusive).
         pdb_ref = params.get("pdb_ref")
-        return self._gh_import(str(source_ref), pdb_ref=None if pdb_ref is None else str(pdb_ref))
+        debug_ref = params.get("debug_ref")
+        return self._gh_import(
+            str(source_ref),
+            pdb_ref=None if pdb_ref is None else str(pdb_ref),
+            debug_ref=None if debug_ref is None else str(debug_ref),
+            debug_format=None
+            if params.get("debug_format") is None
+            else str(params["debug_format"]),
+        )
 
     def analyze(
         self,
@@ -856,6 +865,8 @@ class PyGhidraBackend:
         base_addr: int | None = None,
         entry: int | None = None,
         pdb_ref: str | None = None,
+        debug_ref: str | None = None,
+        debug_format: str | None = None,
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Import a binary file into a transient Ghidra project (PyGhidra).
 
@@ -881,6 +892,10 @@ class PyGhidraBackend:
             entry: Optional entry-point offset to seed as an external entry point.
             pdb_ref: Optional companion PDB path (auto path only, ADR-061); when set, its
                 symbols/types are applied to the loaded PE before analysis via :meth:`_apply_pdb`.
+            debug_ref: Optional companion detached debug/map path (auto path only, ADR-071); when
+                set, its symbols are applied to the loaded program before analysis via
+                :meth:`_apply_debug`.
+            debug_format: The companion debug format (``"map"``) — required with ``debug_ref``.
 
         Returns:
             A plain ``SessionInfo``-shaped dict.
@@ -936,7 +951,69 @@ class PyGhidraBackend:
             # session_analyze benefits from them.
             if pdb_ref is not None:
                 self._apply_pdb(pdb_ref)
+            # ADR-071: apply a companion detached debug map to the fresh program BEFORE analysis
+            # (auto path only; the server allows debug_ref only with loader='auto', and the schema
+            # makes it mutually exclusive with pdb_ref). Names land now so a later session_analyze
+            # (and every read tool) sees the recovered symbols.
+            if debug_ref is not None:
+                self._apply_debug(debug_ref, str(debug_format))
         return _session_info_dict("importing", self._sha256, analysis_complete=False)
+
+    def _apply_debug(
+        self, debug_ref: str, debug_format: str
+    ) -> None:  # pragma: no cover - JVM edge
+        """Apply a companion detached debug source's symbols to the loaded program (ADR-071).
+
+        For ``debug_format="map"`` (a linker/``nm``/``.sym`` name→address dump), parses the file
+        with the pure :func:`core.debugmap.parse_symbol_map` and creates one ``IMPORTED`` label per
+        symbol inside a transaction (it mutates the fresh program DB). The ``debug_ref`` was
+        confined + size-capped by the server (ADR-001/CWE-22/CWE-400); a hostile map is contained
+        by the unchanged ADR-004 isolation, and a parse/apply failure fails closed with a
+        category-safe slug (the original exception is chained server-side only — master §5).
+        Addresses outside the program's address space are skipped honestly, not fatally.
+
+        (``debug_format="dwarf"`` — detached DWARF via Ghidra's DWARF analyzer + external-debug
+        service — is a tracked follow-up increment; the schema does not yet accept it.)
+
+        Args:
+            debug_ref: The server-resolved, confined path to the debug/map file.
+            debug_format: The companion format — ``"map"``.
+
+        Raises:
+            WorkerError: ``not-found`` if the map cannot be read/parsed or applied.
+        """
+        import contextlib
+
+        from ghidra.program.model.symbol import SourceType  # type: ignore[import-not-found]
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        from vivarium.core.debugmap import parse_symbol_map
+
+        program = self._require_program()
+        try:
+            with open(debug_ref, encoding="utf-8", errors="ignore") as handle:  # noqa: PTH123
+                text = handle.read()
+            symbols = parse_symbol_map(text, max_symbols=100_000)
+            if not symbols:
+                raise WorkerError(CODE_NOT_FOUND, "companion debug map yielded no symbols")
+            space = program.getAddressFactory().getDefaultAddressSpace()
+            symbol_table = program.getSymbolTable()
+
+            def _apply() -> None:
+                for sym in symbols:
+                    with contextlib.suppress(Exception):
+                        # A bad/out-of-space address is skipped, not fatal (honest partial apply).
+                        symbol_table.createLabel(
+                            space.getAddress(sym.address), sym.name, SourceType.IMPORTED
+                        )
+
+            self._in_transaction("session_import (debug map apply)", _apply)
+        except WorkerError:
+            raise
+        except Exception as exc:
+            raise WorkerError(
+                CODE_NOT_FOUND, "companion debug map could not be parsed or applied"
+            ) from exc
 
     def _apply_pdb(self, pdb_ref: str) -> None:  # pragma: no cover - JVM edge
         """Apply a companion Microsoft PDB's symbols/types to the loaded program (ADR-061).
@@ -3758,7 +3835,7 @@ class PyGhidraBackend:
             WorkerError: ``not-found`` if the function does not resolve; ``analysis-failed`` if the
                 rename raised (the transaction is rolled back first — fail closed).
         """
-        from ghidra.program.model.symbol import SourceType  # type: ignore[import-not-found]
+        from ghidra.program.model.symbol import SourceType
 
         func = self._resolve_function(function)
         old_name = _to_text(func.getName())

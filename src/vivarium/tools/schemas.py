@@ -253,6 +253,8 @@ class SessionImportIn(_SessionScopedIn):
     entry: int | None = Field(default=None, ge=0)
     pdb_ref: str | None = Field(default=None, min_length=1, max_length=512)
     regions: list[RegionSpec] | None = Field(default=None, max_length=_MAX_IMPORT_REGIONS)
+    debug_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    debug_format: Literal["map"] | None = None
 
     @model_validator(mode="after")
     def _validate_loader_hints(self) -> SessionImportIn:  # noqa: C901 — one branch per loader kind
@@ -283,6 +285,20 @@ class SessionImportIn(_SessionScopedIn):
         # loader="auto"; any other loader with pdb_ref set is ambiguous → rejected (fail closed).
         if self.pdb_ref is not None and self.loader != "auto":
             raise ValueError("pdb_ref (companion PDB) is only allowed with loader='auto'")
+
+        # ADR-071: a companion detached debug source (a name→address symbol map). Additive/opt-in —
+        # None ⇒ byte-for-byte the pre-ADR-071 path. `debug_ref` + `debug_format` come as a pair,
+        # apply only to the ELF/auto-loaded case (like pdb_ref → PE), and are mutually exclusive
+        # with pdb_ref (a program takes ONE companion). Fail closed on a half/misplaced set.
+        if (self.debug_ref is None) != (self.debug_format is None):
+            raise ValueError("debug_ref and debug_format must be provided together")
+        if self.debug_ref is not None:
+            if self.loader != "auto":
+                raise ValueError(
+                    "debug_ref (companion debug info) is only allowed with loader='auto'"
+                )
+            if self.pdb_ref is not None:
+                raise ValueError("debug_ref and pdb_ref are mutually exclusive (one companion)")
 
         def _require_supported_processor() -> None:
             if self.processor is None or not languages.is_supported_language(self.processor):

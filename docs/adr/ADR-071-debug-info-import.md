@@ -165,3 +165,17 @@ Additive + opt-in → no migration; `debug_ref=None` is byte-for-byte the pre-AD
 change → needs a worker rebuild + `.github/worker-image.pin` bump (per the worker-change-validation-recipe)
 before the live gate exercises the DWARF/map apply. Contract delta (D6) lands atomically through the PM
 (frozen-contract mandate). Merge stays gated.
+
+## Increment status (2026-08-14)
+
+**Shipped:** `debug_format="map"` — the detached name→address symbol map (linker/`nm`/`.sym`),
+applied as `IMPORTED` labels at import via the pure `core.debugmap.parse_symbol_map` + worker
+`_apply_debug`. Live-proven (src-mount): a companion `.map` naming a symbol at an ELF's `e_entry`
+applies and is visible via `list_symbols`.
+
+**Deferred (tracked follow-up):** `debug_format="dwarf"` — detached DWARF via Ghidra's DWARF
+analyzer + the external-debug-files service. Deferred because it needs (a) the DWARF external-debug
+wiring (build-id/`.gnu_debuglink` resolution + `DWARFProgram`/importer) and (b) a hermetic
+stripped-ELF + detached-`.debug` fixture to live-prove — the same fixture-blocked posture as DYLD
+(ADR-063). The schema advertises only `Literal["map"]` until `dwarf` lands (no value that always
+errors). D2's map applicator is delivered; the DWARF applicator is the next increment.

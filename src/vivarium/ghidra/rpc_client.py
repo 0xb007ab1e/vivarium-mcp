@@ -587,6 +587,13 @@ class RpcGhidraAdapter:
         if args.pdb_ref is not None:
             self._resolve_and_cap(args.pdb_ref)
             params["pdb_ref"] = args.pdb_ref
+        # ADR-071 companion debug info (opt-in; loader='auto' only, enforced by the schema): confine
+        # + size-cap the debug file with the SAME resolver/cap/pre-flight as the binary, then thread
+        # it with its format. Absent → no key crosses (byte-for-byte no-op).
+        if args.debug_ref is not None:
+            self._resolve_and_cap(args.debug_ref)
+            params["debug_ref"] = args.debug_ref
+            params["debug_format"] = args.debug_format
         result = self._call(
             session_id,
             "import_binary",
