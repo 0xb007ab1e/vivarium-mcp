@@ -309,6 +309,10 @@ class GhidraPort(Protocol):
         """Heuristic crypto-constant search (pure signature table over the search_bytes RPC)."""
         ...
 
+    def secret_scan(self, sid: str, a: s.SecretScanIn) -> s.SecretScanOut:
+        """Heuristic firmware-secret scan over defined strings (pure, redacted — ADR-072)."""
+        ...
+
     def call_graph_metrics(self, sid: str, a: s.CallGraphMetricsIn) -> s.CallGraphMetricsOut:
         """Structural call-graph metrics (pure core over the call_graph RPC)."""
         ...

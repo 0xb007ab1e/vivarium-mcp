@@ -2028,6 +2028,65 @@ class CryptoConstantScanOut(_Out):
     truncated: bool = False
 
 
+class SecretScanIn(_Page):
+    """Arguments for ``secret_scan`` — heuristic firmware-secret scan over strings (ADR-072).
+
+    A curated, read-only pass over the program's extracted strings for hardcoded credentials,
+    key material, format magic, and secret-implying property names. HEURISTIC (leads, not proof) and
+    REDACTED (ADR-072 D3): a finding never carries the raw secret — only a masked preview + a salted
+    correlation hash. Paginated like the other scanners.
+
+    Attributes:
+        categories: Restrict to these categories (subset of the closed set
+            (``hardcoded_credential`` / ``key_material`` / ``format_magic`` /
+            ``property_secret_name``);
+            omit to scan all.
+        min_length: Skip strings shorter than this (noise filter).
+        entropy_threshold: Shannon-entropy floor (bits/byte) for a high-entropy blob to count as a
+            hardcoded credential (server-bounded).
+    """
+
+    categories: list[str] | None = Field(default=None, max_length=8)
+    min_length: int = Field(default=4, ge=1, le=4096)
+    entropy_threshold: float = Field(default=4.0, ge=0.0, le=8.0)
+
+
+class SecretFinding(_Out):
+    """One heuristic secret finding — REDACTED (ADR-072 D3): never the raw value.
+
+    Attributes:
+        address: Address of the source string (hex) — safe (``None`` if unknown).
+        category: One of the closed category set — safe.
+        pattern_id: Which pattern fired (e.g. ``"keyword:password"``, ``"pem_private_key"``) — safe.
+        masked_preview: The value with its middle masked — UNTRUSTED (binary-derived); not the raw
+            secret.
+        preview_hash: Salted, truncated digest of the raw value — safe (non-disclosing correlation
+            handle).
+        entropy: Shannon entropy (bits/byte) when entropy drove the match, else ``None`` — safe.
+    """
+
+    address: str | None = None
+    category: str
+    pattern_id: str
+    masked_preview: Untrusted[str]
+    preview_hash: str
+    entropy: float | None = None
+
+
+class SecretScanOut(_Out):
+    """Result of ``secret_scan`` (ADR-072).
+
+    Attributes:
+        findings: Bounded page of redacted secret findings.
+        total: Total findings in the scanned set — safe.
+        truncated: Whether the scanned string set or the page was capped.
+    """
+
+    findings: list[SecretFinding]
+    total: int
+    truncated: bool = False
+
+
 class CallGraphMetricsIn(CallGraphIn):
     """Arguments for ``call_graph_metrics`` — structural metrics over the (bounded) call graph.
 

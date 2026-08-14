@@ -149,6 +149,9 @@ _DEFAULT_SOURCE_REF_DETAIL = "input reference could not be resolved"
 #: How many defined strings ``ioc_scan`` pulls in one bounded page before scanning (the worker also
 #: clamps; ``truncated`` is honest when more exist). Sized to a generous-but-bounded triage window.
 _IOC_STRING_BUDGET = 10_000
+#: Max strings pulled for the ``secret_scan`` pass (ADR-072); bounds the scanned set + feeds
+#: ``truncated`` when the program has more strings than the budget.
+_SECRET_STRING_BUDGET = 10_000
 #: Max ``search_bytes`` matches requested per crypto signature (each search is already bounded; this
 #: caps the per-signature contribution to the aggregate and feeds ``truncated``).
 _CRYPTO_MATCH_BUDGET = 1_000
@@ -1626,6 +1629,49 @@ class RpcGhidraAdapter:
         return s.CryptoConstantScanOut(
             findings=[
                 s.CryptoConstantFinding(algorithm=h.algorithm, kind=h.kind, address=h.address)
+                for h in page
+            ],
+            total=total,
+            truncated=truncated,
+        )
+
+    def secret_scan(self, sid: str, a: s.SecretScanIn) -> s.SecretScanOut:
+        """Heuristic firmware-secret scan over defined strings (PURE core over ``list_strings``).
+
+        Fetches a bounded page of strings, runs the pure REDACTED
+        :func:`core.secretscan.scan_secrets` (ADR-072 D3 — no raw secret leaves that core), then
+        paginates. Only the masked preview is binary-derived and wrapped BINARY-origin (ADR-005);
+        ``preview_hash``/``address``/``category``
+        are safe. Redaction is first-class: this adapter logs NOTHING about the values (no raw, no
+        full preview) — the pure core already reduced each value to a masked preview + hash.
+        """
+        from vivarium.core import secretscan
+
+        strings = _build_string_list(
+            self._tool_call(
+                sid,
+                "list_strings",
+                {"offset": 0, "limit": _SECRET_STRING_BUDGET, "min_length": a.min_length},
+            )
+        )
+        rows = [(ds.address, ds.value.value) for ds in strings.strings]
+        categories = tuple(a.categories) if a.categories else None
+        hits = secretscan.scan_secrets(
+            rows, categories=categories, entropy_threshold=a.entropy_threshold
+        )
+        total = len(hits)
+        page = hits[a.offset : a.offset + a.limit]
+        truncated = strings.truncated or (a.offset + a.limit < total)
+        return s.SecretScanOut(
+            findings=[
+                s.SecretFinding(
+                    address=h.address,
+                    category=h.category,
+                    pattern_id=h.pattern_id,
+                    masked_preview=_w(h.masked_preview, DataOrigin.BINARY),
+                    preview_hash=h.preview_hash,
+                    entropy=h.entropy,
+                )
                 for h in page
             ],
             total=total,

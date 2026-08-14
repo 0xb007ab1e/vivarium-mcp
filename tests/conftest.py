@@ -801,6 +801,10 @@ class FakeGhidraPort:
         """Reserved Tier-2 stub."""
         raise NotImplementedError("RESERVED (v1.1 ADR-008): crypto_constant_scan")
 
+    def secret_scan(self, sid: str, a: s.SecretScanIn) -> s.SecretScanOut:
+        """Reserved Tier-2 stub (ADR-072; the pure core + adapter are unit-tested directly)."""
+        raise NotImplementedError("RESERVED (ADR-072): secret_scan")
+
     def call_graph_metrics(self, sid: str, a: s.CallGraphMetricsIn) -> s.CallGraphMetricsOut:
         """Reserved Tier-2 stub."""
         raise NotImplementedError("RESERVED (v1.1 ADR-008): call_graph_metrics")

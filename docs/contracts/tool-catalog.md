@@ -33,7 +33,8 @@
   annotation-persistence tools (ADR-018: `session_export_annotations` read-only +
   `session_import_annotations` GATED)** — plus **1 data-flow slicing tool (ADR-064:
   `data_flow_slice`; read-only)** — plus **1 struct-recovery tool (ADR-069: `recover_struct`;
-  read-only, propose-only)**. That is **55 read-only + 16 mutation/write** (the 16 = the 6
+  read-only, propose-only)** — plus **1 firmware-secret scan tool (ADR-072: `secret_scan`;
+  read-only, heuristic, REDACTED)**. That is **56 read-only + 16 mutation/write** (the 16 = the 6
   ADR-012 write tools + the 9 structural-write tools + the gated `session_import_annotations`; it
   matches the `WRITE_TOOLS` frozenset in `registry.py`).
   Every write tool is GATED by per-session write-consent (structural additionally by
@@ -160,6 +161,7 @@ node `name`s and decompiled C stay `Untrusted` (ADR-005). Bounded (`max_nodes �
 | `coverage` | `CoverageIn{}` | `CoverageOut{total_bytes, defined_code_bytes, defined_data_bytes, undefined_bytes, code_ratio, data_ratio, function_count}` |
 | `ioc_scan` | `IocScanIn{offset, limit, categories?, min_length}` | `IocScanOut{matches[{category, value*, source_address?}], total, truncated}` |
 | `crypto_constant_scan` | `CryptoConstantScanIn{offset, limit}` | `CryptoConstantScanOut{findings[{algorithm, kind, address}], total, truncated}` |
+| `secret_scan` | `SecretScanIn{offset, limit, categories?, min_length, entropy_threshold}` | `SecretScanOut{findings[{address?, category, pattern_id, masked_preview*, preview_hash, entropy?}], total, truncated}` | **ADR-072** firmware-secret scan (read-only, heuristic, **REDACTED**). Pure core over `list_strings` (like `ioc_scan`) — flags `hardcoded_credential` (keyword-adjacent + high-entropy blob), `key_material` (PEM/OpenSSH/PGP headers), `format_magic` (bootloader/container magic), `property_secret_name` (secret-implying key names, the T19 `WIFI_PWD` case). **Never emits the raw secret** (ADR-072 D3): `masked_preview` masks the middle (`*`=UNTRUSTED), `preview_hash` is a salted 12-hex correlation handle; server logs carry only address/category/pattern_id/hash. HEURISTIC — leads, not proof |
 | `call_graph_metrics` | `CallGraphMetricsIn{root?, max_depth, max_nodes, max_edges, top_n}` | `CallGraphMetricsOut{function_count, edge_count, leaf_count, root_count, recursive_component_count, self_recursive_count, unresolved_caller_count, top_fan_in[{address, name*, count}], top_fan_out[…], truncated}` |
 | `program_summary` | `ProgramSummaryIn{max_complex_functions, max_iocs, include_call_graph}` | `ProgramSummary{metadata, function_count, import_count, export_count, string_count, coverage?, call_graph_metrics?, top_complex_functions[], ioc_counts[{category, count}], crypto_algorithms[], truncated}` |
 

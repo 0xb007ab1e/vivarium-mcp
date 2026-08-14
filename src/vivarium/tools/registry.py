@@ -111,6 +111,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "coverage",
     "ioc_scan",
     "crypto_constant_scan",
+    "secret_scan",
     "call_graph_metrics",
     "program_summary",
     # Function ID library-match identification (ADR-042 Phase 1; READ-ONLY)
@@ -866,6 +867,12 @@ def _handle_crypto_constant_scan(
     """Heuristic crypto-constant search (signature table over search_bytes)."""
     ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     return ctx.port.crypto_constant_scan(args.session_id, args)
+
+
+def _handle_secret_scan(ctx: ToolContext, args: s.SecretScanIn) -> s.SecretScanOut:
+    """Heuristic firmware-secret scan over defined strings (pure, redacted — ADR-072)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    return ctx.port.secret_scan(args.session_id, args)
 
 
 def _handle_call_graph_metrics(
@@ -1845,6 +1852,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "coverage": (_handle_coverage, s.CoverageIn),
     "ioc_scan": (_handle_ioc_scan, s.IocScanIn),
     "crypto_constant_scan": (_handle_crypto_constant_scan, s.CryptoConstantScanIn),
+    "secret_scan": (_handle_secret_scan, s.SecretScanIn),
     "call_graph_metrics": (_handle_call_graph_metrics, s.CallGraphMetricsIn),
     "program_summary": (_handle_program_summary, s.ProgramSummaryIn),
     # Function ID library-match identification (ADR-042 Phase 1; READ-ONLY)
