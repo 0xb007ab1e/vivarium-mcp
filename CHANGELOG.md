@@ -23,6 +23,34 @@ real hardened worker. Separately, the **security-hardening / gap-remediation** w
   vulnerability tracing (the 70th Tier-1 tool). Also filed the v1.9 capability-gap ADR batch
   ADR-065..072 (*Proposed*): multi-region import, emulation ergonomics, binary-diff, string
   deobfuscation, struct recovery, extended firmware loaders, debug-info import, firmware secret scan.
+- **v1.9 capability batch — first five (ADR-065/067/069/071/072).** The ADR-065..072 batch was
+  ratified (*Accepted*); the first five landed, growing the Tier-1 catalog **70 → 73**. Each is
+  read-only (or propose-only), enforces the standard confinement + size caps before the worker
+  (ADR-001), wraps binary-derived output untrusted (ADR-005), and was proven live against a real
+  hardened worker:
+  - **`recover_struct` (ADR-069)** — propose a struct layout from access patterns off a base
+    pointer (pointer arithmetic + `LOAD`/`STORE` over the SSA `HighFunction`, unioned across all
+    SSA instances). **Propose-only** — never writes; materializing a proposal goes through the
+    gated `define_struct`/`apply_data_type`. `inferred_type` untrusted; offsets/sizes safe.
+  - **`secret_scan` (ADR-072)** — heuristic firmware-secret pass over defined strings
+    (hardcoded_credential / key_material / format_magic / property_secret_name, the T19 `WIFI_PWD`
+    case). **Redacted** (ADR-072 D3): a finding never carries the raw secret — only a masked
+    preview + a salted correlation hash; server logs stay redacted. Pure server-side (no JVM edge).
+  - **`binary_diff` (ADR-067)** — function-granularity two-program diff (added/removed/changed +
+    honest summary) by name-pairing + a `match_by` signal (`name` = body size + instruction count,
+    `function_hash` = Ghidra ExactInstructions hash). Loads both refs fresh + wipes them (the
+    session's own program is untouched); names untrusted. `bsim` pairing + `include_unchanged` are
+    tracked follow-ups.
+  - **Multi-region scatter-load import (ADR-065)** — an optional `regions` list on `session_import`
+    loads a headerless raw image into one program with N memory blocks (each region its own
+    confined ref or an `offset`/`length` slice of the parent, at its `base_addr`; overlap rejected
+    server-side). Additive/opt-in; a differing arch is a separate session (D5).
+  - **Companion debug map import (ADR-071)** — an optional `debug_ref` + `debug_format="map"` on
+    `session_import` applies a detached name→address symbol map (linker/`nm`/`.sym`) as `IMPORTED`
+    labels to the loaded ELF before analysis (mirrors the ADR-061 PDB companion; mutually exclusive
+    with `pdb_ref`). Additive/opt-in. `debug_format="dwarf"` (detached DWARF) is a tracked
+    follow-up (fixture-blocked). *Remaining batch tools — string deobfuscation (068), container
+    unwrap (070), emulation ergonomics (066) — are in progress.*
 - **Broader `session_import` loader coverage.** Import **headerless raw/firmware images**
   (`loader="binary"` + `processor`/`base_addr`/`entry`, ADR-045); **Intel-HEX / Motorola-SREC**
   firmware (ADR-046); **self-describing DEX / Mach-O / APK** (force the loader, ADR-047); and select
