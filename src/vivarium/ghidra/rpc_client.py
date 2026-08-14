@@ -149,6 +149,13 @@ _DEFAULT_SOURCE_REF_DETAIL = "input reference could not be resolved"
 # --- Tier-2 internal scan budgets (ADR-008; bounded BEFORE the worker — std-cwe CWE-400) -----
 #: How many defined strings ``ioc_scan`` pulls in one bounded page before scanning (the worker also
 #: clamps; ``truncated`` is honest when more exist). Sized to a generous-but-bounded triage window.
+#: Hard ceiling on a decompressed container payload (ADR-070 D3 zip-bomb defense). The worker
+#: streams the decompress against this and aborts on overflow — a bomb never materializes a large
+#: buffer. Paired with the ratio cap (whichever binds first).
+_MAX_DECOMPRESSED_BYTES = 512 * 1024 * 1024  # 512 MiB
+#: Hard ceiling on output ÷ input for a container decompress (ADR-070 D3). A stream exceeding this
+#: ratio is a bomb → aborted, fail closed.
+_MAX_DECOMPRESSION_RATIO = 200
 _IOC_STRING_BUDGET = 10_000
 #: Max strings pulled for the ``secret_scan`` pass (ADR-072); bounds the scanned set + feeds
 #: ``truncated`` when the program has more strings than the budget.
@@ -594,6 +601,14 @@ class RpcGhidraAdapter:
             self._resolve_and_cap(args.debug_ref)
             params["debug_ref"] = args.debug_ref
             params["debug_format"] = args.debug_format
+        # ADR-070 container unwrap (opt-in): the compressed input already passed the standard size
+        # cap above (as source_ref). Thread the token + the two zip-bomb caps (absolute output +
+        # ratio); the WORKER streams the decompress against them and fails closed on overflow (the
+        # server never parses container bytes — ADR-001/D4). Absent → no key crosses (no-op).
+        if args.container is not None:
+            params["container"] = args.container
+            params["max_decompressed_bytes"] = _MAX_DECOMPRESSED_BYTES
+            params["max_decompression_ratio"] = _MAX_DECOMPRESSION_RATIO
         result = self._call(
             session_id,
             "import_binary",

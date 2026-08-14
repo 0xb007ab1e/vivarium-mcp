@@ -341,6 +341,16 @@ symbol (inside a transaction), before analysis. The ref is confined + size-cappe
 worker; a malformed map fails closed `not-found`; out-of-space addresses are skipped honestly.
 Additive/opt-in, read-only, tool count unchanged. (`debug_format="dwarf"` is a tracked follow-up.)
 
+**`import_binary` — container unwrap (v1.9 — ADR-070; server → worker, OPTIONAL):** the params MAY
+carry `container` (`"gzip"`/`"xz"`/`"lzma"`) + `max_decompressed_bytes` + `max_decompression_ratio`.
+When present the worker DECOMPRESSES `source_ref` first (via the stdlib decompressor for the token),
+streaming the output against `min(max_decompressed_bytes, input_size × max_decompression_ratio)` and
+ABORTING on overflow (`limit-exceeded` — a zip-bomb never materializes a large buffer, ADR-070 D3),
+then loads the decompressed payload with the loader hints. Parsed in the worker, never the server
+(ADR-001/D4); a corrupt stream fails closed `not-found`. Mutually exclusive with `regions`. Absent ⇒
+byte-for-byte the pre-ADR-070 path. Additive/opt-in, read-only, tool count unchanged. (uImage /
+androidboot header formats are a tracked follow-up.)
+
 **`import_binary` — companion PDB (v1.8 — ADR-061; server → worker, OPTIONAL):** the params MAY
 carry `pdb_ref` (a second server-confined + size-capped path under `VIVARIUM_IMPORT_ROOT`), allowed
 only with the auto loader (no `loader` key). When present, after the PE is loaded the worker applies

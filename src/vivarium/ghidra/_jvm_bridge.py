@@ -229,6 +229,17 @@ class PyGhidraBackend:
             A plain ``SessionInfo``-shaped dict.
         """
         source_ref = _require(params, "source_ref")
+        container = params.get("container")
+        if container is not None:
+            # ADR-070: unwrap the compressed container FIRST (streamed, zip-bomb-capped), then load
+            # the decompressed payload with the loader hints below. Parsing hostile container bytes
+            # happens here in the worker, never the server (ADR-001/D4).
+            source_ref = self._decompress_container(
+                str(source_ref),
+                str(container),
+                int(params.get("max_decompressed_bytes", 512 * 1024 * 1024)),
+                int(params.get("max_decompression_ratio", 200)),
+            )
         loader = params.get("loader")
         regions = params.get("regions")
         if regions is not None:
@@ -885,6 +896,67 @@ class PyGhidraBackend:
     #     (pyghidra helper vs AutoAnalysisManager.reAnalyzeAll) is the last symbol to pin.
     # Each helper converts every Ghidra object to a plain str/int/bool before returning (no Java
     # object leaks the boundary); addresses render via ``str(addr)`` (Ghidra's canonical hex form).
+
+    def _decompress_container(
+        self, source_ref: str, container: str, max_output: int, max_ratio: int
+    ) -> str:  # pragma: no cover - worker filesystem edge
+        """Unwrap a compressed container to a payload file, zip-bomb-bounded (ADR-070; JVM-free).
+
+        Streams the (server-confined + size-capped) compressed ``source_ref`` through the stdlib
+        decompressor for ``container`` (``gzip``/``xz``/``lzma``) into a payload file in the
+        worker store, aborting the moment the running output exceeds ``min(max_output,
+        input_size * max_ratio)`` — a bomb never materializes a large buffer (ADR-070 D3, streamed
+        not decompress-then-check). Runs inside the worker container, never the server (ADR-001/D4);
+        a corrupt/hostile stream fails closed with a category-safe slug (master §5). No JVM.
+
+        Args:
+            source_ref: The confined compressed input path.
+            container: ``"gzip"`` | ``"xz"`` | ``"lzma"`` (schema-closed; re-checked here).
+            max_output: Absolute cap on decompressed bytes.
+            max_ratio: Cap on output ÷ input bytes.
+
+        Returns:
+            The path to the decompressed payload file (loaded by the caller's loader dispatch).
+
+        Raises:
+            WorkerError: ``limit-exceeded`` on a bomb (output over the cap); ``not-found`` if the
+                stream is not a valid ``container`` archive.
+        """
+        import gzip
+        import lzma
+
+        from worker.dispatch import CODE_LIMIT_EXCEEDED, CODE_NOT_FOUND, WorkerError
+
+        input_size = os.path.getsize(source_ref)  # noqa: PTH202 — confined path from the server
+        limit = min(max_output, max(input_size, 1) * max_ratio)
+        project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
+        payload_path = os.path.join(project_dir, "payload.bin")  # noqa: PTH118
+
+        def _open(path: str) -> Any:
+            if container == "gzip":
+                return gzip.open(path, "rb")
+            if container == "xz":
+                return lzma.open(path, "rb", format=lzma.FORMAT_XZ)
+            return lzma.open(path, "rb", format=lzma.FORMAT_ALONE)  # lzma (legacy .lzma/alone)
+
+        total = 0
+        try:
+            with _open(source_ref) as src, open(payload_path, "wb") as dst:  # noqa: PTH123
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > limit:
+                        raise WorkerError(
+                            CODE_LIMIT_EXCEEDED, "decompressed output exceeds the cap"
+                        )
+                    dst.write(chunk)
+        except WorkerError:
+            raise
+        except Exception as exc:  # bad/hostile stream — fail closed, category-safe
+            raise WorkerError(CODE_NOT_FOUND, "container could not be decompressed") from exc
+        return payload_path
 
     def _gh_import(
         self,

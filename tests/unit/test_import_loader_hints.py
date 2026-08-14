@@ -532,3 +532,45 @@ def test_region_slice_beyond_parent_rejected_before_worker() -> None:
         adapter.import_binary("s", args)  # type: ignore[attr-defined]
     assert ei.value.envelope.type is ErrorType.VALIDATION
     assert captured == []
+
+
+# --- ADR-070: container unwrap -------------------------------------------------------------------
+def test_container_valid_with_auto_and_binary() -> None:
+    """A container token is accepted with the auto path and combines with binary loader hints."""
+    m = s.SessionImportIn(session_id="s", source_ref="fw.gz", container="gzip")
+    assert m.container == "gzip"
+    m2 = s.SessionImportIn.model_validate(_binary(source_ref="fw.gz", container="xz"))
+    assert m2.container == "xz"
+
+
+def test_container_unknown_rejected() -> None:
+    """A container outside the closed set (e.g. the deferred 'uimage') fails closed."""
+    with pytest.raises(ValidationError):
+        s.SessionImportIn(session_id="s", source_ref="fw", container="uimage")  # type: ignore[arg-type]
+
+
+def test_container_mutually_exclusive_with_regions() -> None:
+    """container (single compressed stream) and regions (scatter-load) cannot combine."""
+    with pytest.raises(ValidationError):
+        s.SessionImportIn.model_validate(_regions(source_ref="fw.gz", container="gzip"))
+
+
+def test_container_threads_token_and_caps_to_worker() -> None:
+    """A container import threads the token + the two zip-bomb caps to the worker."""
+    adapter, captured = _adapter_capturing_call()
+    args = s.SessionImportIn.model_validate(_binary(source_ref="fw.gz", container="gzip"))
+    adapter.import_binary("s", args)  # type: ignore[attr-defined]
+    params = captured[0]
+    assert params["container"] == "gzip"
+    out_cap = params["max_decompressed_bytes"]
+    ratio_cap = params["max_decompression_ratio"]
+    assert isinstance(out_cap, int) and out_cap > 0
+    assert isinstance(ratio_cap, int) and ratio_cap > 0
+
+
+def test_no_container_is_byte_for_byte_noop() -> None:
+    """Absent container ⇒ no container/caps keys cross the wire (the ADR-070 no-op guarantee)."""
+    adapter, captured = _adapter_capturing_call()
+    adapter.import_binary("s", s.SessionImportIn(session_id="s", source_ref="p.elf"))  # type: ignore[attr-defined]
+    assert "container" not in captured[0]
+    assert "max_decompressed_bytes" not in captured[0]
