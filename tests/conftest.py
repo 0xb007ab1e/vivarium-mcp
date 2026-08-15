@@ -652,7 +652,7 @@ class FakeGhidraPort:
         self._maybe_fail()
         return s.EmulateOut(
             steps_executed=3,
-            stop_reason="stop-address" if a.stop_at else "max-steps",
+            stop_reason="stop-address" if (a.stop_at or a.call) else "max-steps",
             registers=[
                 s.RegisterValue(name=n, value=_u("08", encoding="hex"))
                 for n in (a.read_registers or [])
@@ -663,6 +663,7 @@ class FakeGhidraPort:
                 )
                 for r in (a.read_memory or [])
             ],
+            return_value=_u("0c", encoding="hex") if a.call else None,
         )
 
     def demangle(self, sid: str, a: s.DemangleIn) -> s.DemangleOut:

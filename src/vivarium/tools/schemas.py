@@ -1683,6 +1683,13 @@ class EmulateIn(_SessionScopedIn):
         stop_at: Optional address (hex); execution stops when the PC reaches it.
         read_registers: Optional register names to return after the run.
         read_memory: Optional memory ranges to return after the run.
+        call: **Call convenience (ADR-066).** When ``True``, ``start`` is treated as a function to
+            *call*: the worker sets up a scratch stack + a sentinel return address (at the stack
+            pointer and, on link-register arches, in LR), runs to the return (an implicit
+            ``stop_at``), and reads the ABI return register into ``return_value``. Arguments + input
+            buffers stay caller-provided via ``set_registers``/``write_memory`` (the raw calling
+            convention is not auto-resolved — proven unreliable; ADR-066 thin scope); outputs via
+            ``read_memory``. Automates only the sentinel-return + return-value dance.
     """
 
     start: str = Field(min_length=1, max_length=_MAX_NAME)
@@ -1692,6 +1699,7 @@ class EmulateIn(_SessionScopedIn):
     stop_at: str | None = Field(default=None, max_length=_MAX_NAME)
     read_registers: list[str] | None = None
     read_memory: list[MemRead] | None = None
+    call: bool = False
 
     @model_validator(mode="after")
     def _bound_emulate(self) -> EmulateIn:
@@ -1752,12 +1760,15 @@ class EmulateOut(_Out):
         stop_reason: Why emulation stopped (closed vocabulary) — safe.
         registers: Requested register values (each ``value`` UNTRUSTED).
         memory: Requested memory ranges (each ``data`` UNTRUSTED).
+        return_value: The ABI return-register value, hex-encoded — UNTRUSTED (emulation output);
+            populated only when ``call=True`` (ADR-066), else ``None``.
     """
 
     steps_executed: int
     stop_reason: Literal["stop-address", "max-steps", "halted", "fault"]
     registers: list[RegisterValue]
     memory: list[MemoryRegion]
+    return_value: Untrusted[str] | None = None
 
 
 class DemangleIn(_SessionScopedIn):

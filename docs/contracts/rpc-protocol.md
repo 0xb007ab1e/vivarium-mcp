@@ -206,7 +206,10 @@ persistent DB, session program untouched), `list_functions`, `get_function`,
 `get_data_type`, `list_data_types` (ADR-056 the list-counterpart to `get_data_type` — read-only;
 paginated summary rows over the program's DataTypeManager), `get_comments`, `memory_map`, `read_bytes`,
 `emulate` (ADR-049 p-code emulation —
-bounded, read-effect-only; interpreter, no native exec/syscalls/IO), `demangle` (ADR-050 C++
+bounded, read-effect-only; interpreter, no native exec/syscalls/IO; ADR-066 `call=true` adds the
+call convenience — the worker sets up a scratch stack + sentinel return address, runs to the return,
+and reads the ABI return register into `return_value`; args/buffers stay caller-provided via
+set_registers/write_memory), `demangle` (ADR-050 C++
 demangler — read-only, program-independent; GNU/Itanium + MSVC), `search_bytes`, `search_strings`,
 `program_metadata`, the v1.1 semantic-naming extraction primitives `call_graph` and
 `referenced_strings` (ADR-007), the v1.1 Tier-2 extraction primitives `function_cfg`, `imports`,

@@ -555,6 +555,7 @@ class PyGhidraBackend:
             stop_at=(None if params.get("stop_at") is None else str(params["stop_at"])),
             read_registers=list(params.get("read_registers") or []),
             read_memory=list(params.get("read_memory") or []),
+            call=bool(params.get("call", False)),
         )
 
     def demangle(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -5434,6 +5435,7 @@ class PyGhidraBackend:
         stop_at: str | None,
         read_registers: list[Any],
         read_memory: list[dict[str, Any]],
+        call: bool = False,
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Run bounded Ghidra p-code emulation and return register/memory readbacks (ADR-049).
 
@@ -5451,9 +5453,11 @@ class PyGhidraBackend:
             stop_at: Optional stop address (hex).
             read_registers: Register names to read back.
             read_memory: ``[{"address": hex, "length": int}]`` ranges to read back.
+            call: When ``True`` (ADR-066), set up a scratch stack + sentinel return, run to the
+                return, and read the ABI return register into ``return_value``.
 
         Returns:
-            ``{"steps_executed", "stop_reason", "registers": [...], "memory": [...]}``.
+            ``{"steps_executed", "stop_reason", "registers", "memory", "return_value"}``.
 
         Raises:
             WorkerError: ``not-found`` if a named register does not exist.
@@ -5476,6 +5480,47 @@ class PyGhidraBackend:
                     self._parse_address(str(write["address"])),
                     bytes.fromhex(str(write["data_hex"])),
                 )
+
+            # ADR-066 call convenience: set up a scratch stack + a sentinel return address so the
+            # function returns to a known STOP address (the fiddly part callers keep re-deriving).
+            # Args/buffers are still caller-provided via set_registers/write_memory (the raw ABI is
+            # not auto-resolved — proven unreliable). Reads the ABI return register.
+            return_reg_name: str | None = None
+            if call:
+                space = program.getAddressFactory().getDefaultAddressSpace()
+                bits = int(space.getSize())
+                ptr_bytes = bits // 8
+                sentinel_offset = min(0xDEAD0000, (1 << bits) - 1)
+                cspec = program.getCompilerSpec()
+                sp_reg = cspec.getStackPointer()
+                # Respect a caller-set stack pointer; else point SP at a high, aligned scratch stack
+                # (near the canonical userspace stack top — away from low firmware load addresses).
+                if sp_reg is not None and str(sp_reg.getName()) not in set_registers:
+                    scratch_top = min((1 << bits) - 0x1000, 0x00007FFFFFFFF000)
+                    scratch_sp = scratch_top & ~0xF
+                    emu.writeRegister(str(sp_reg.getName()), scratch_sp)
+                else:
+                    scratch_sp = int(str(emu.readRegister(str(sp_reg.getName())))) if sp_reg else 0
+                # Stack-return arches (x86/...): the RET pops [SP] → write the sentinel there.
+                emu.writeMemory(
+                    space.getAddress(scratch_sp),
+                    sentinel_offset.to_bytes(ptr_bytes, "little"),
+                )
+                # Link-register arches (ARM/AArch64/...): the return jumps to LR → seed it too.
+                for lr_name in ("lr", "LR", "x30", "ra"):
+                    lr_reg = program.getLanguage().getRegister(lr_name)
+                    if lr_reg is not None:
+                        emu.writeRegister(str(lr_reg.getName()), sentinel_offset)
+                        break
+                stop_at = format(sentinel_offset, "x")  # implicit stop at the sentinel
+                # Resolve the ABI return register (the return LOCATION is resolvable even when the
+                # arg convention is not — proven: EAX/RAX for x86).
+                from ghidra.program.model.data import Undefined
+
+                ret_dt = Undefined.getUndefinedDataType(max(ptr_bytes, 1))
+                ret_loc = cspec.getDefaultCallingConvention().getReturnLocation(ret_dt, program)
+                ret_reg = ret_loc.getRegister() if ret_loc is not None else None
+                return_reg_name = str(ret_reg.getName()) if ret_reg is not None else None
 
             stop_addr = self._parse_address(stop_at) if stop_at is not None else None
             steps = 0
@@ -5509,11 +5554,20 @@ class PyGhidraBackend:
                 data, count = self._get_bytes_via(emu, addr, length)
                 mems.append({"address": str(addr), "data": data.hex(), "length": count})
 
+            return_value: str | None = None
+            if call and return_reg_name is not None:
+                try:
+                    raw = int(str(emu.readRegister(return_reg_name)))
+                    return_value = format(raw & ((1 << 512) - 1), "x")
+                except Exception:  # a missing return register just yields no value (honest None)
+                    return_value = None
+
             return {
                 "steps_executed": steps,
                 "stop_reason": stop_reason,
                 "registers": regs,
                 "memory": mems,
+                "return_value": return_value,
             }
         finally:
             emu.dispose()

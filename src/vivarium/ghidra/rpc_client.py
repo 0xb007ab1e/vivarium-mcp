@@ -1489,6 +1489,7 @@ class RpcGhidraAdapter:
                     "read_memory": [
                         {"address": r.address, "length": r.length} for r in (a.read_memory or [])
                     ],
+                    "call": a.call,
                 },
             )
         )
@@ -3205,6 +3206,11 @@ def _build_emulate(r: dict[str, Any]) -> s.EmulateOut:
             )
             for x in r.get("memory", [])
         ],
+        return_value=(
+            None
+            if r.get("return_value") is None
+            else _w(str(r["return_value"]), DataOrigin.BINARY, encoding="hex")
+        ),
     )
 
 
