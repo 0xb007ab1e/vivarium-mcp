@@ -1490,6 +1490,7 @@ class RpcGhidraAdapter:
                         {"address": r.address, "length": r.length} for r in (a.read_memory or [])
                     ],
                     "call": a.call,
+                    "stubs": [{"target": st.target, "action": st.action} for st in (a.stubs or [])],
                 },
             )
         )
@@ -3186,9 +3187,9 @@ def _build_read_bytes(r: dict[str, Any]) -> s.ReadBytesOut:
 def _build_emulate(r: dict[str, Any]) -> s.EmulateOut:
     """Build :class:`EmulateOut` (ADR-049): register/memory VALUES are BINARY (emulation output)."""
     sr = str(r["stop_reason"])
-    if sr not in ("stop-address", "max-steps", "halted", "fault"):
+    if sr not in ("stop-address", "max-steps", "halted", "fault", "stub-limit"):
         sr = "fault"  # fail closed on an unexpected worker stop_reason
-    stop_reason = cast('Literal["stop-address", "max-steps", "halted", "fault"]', sr)
+    stop_reason = cast('Literal["stop-address", "max-steps", "halted", "fault", "stub-limit"]', sr)
     return s.EmulateOut(
         steps_executed=int(r["steps_executed"]),
         stop_reason=stop_reason,

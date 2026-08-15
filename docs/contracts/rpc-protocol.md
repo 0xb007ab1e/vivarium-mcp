@@ -209,7 +209,10 @@ paginated summary rows over the program's DataTypeManager), `get_comments`, `mem
 bounded, read-effect-only; interpreter, no native exec/syscalls/IO; ADR-066 `call=true` adds the
 call convenience — the worker sets up a scratch stack + sentinel return address, runs to the return,
 and reads the ABI return register into `return_value`; args/buffers stay caller-provided via
-set_registers/write_memory), `demangle` (ADR-050 C++
+set_registers/write_memory; ADR-066 D2 `stubs=[{target, action=return_const:N|skip}]` substitutes
+an external call the routine makes — returning to the caller instead of executing/halting, never
+running real code or touching the host — with a `stub-limit` stop_reason when the budget is
+exhausted), `demangle` (ADR-050 C++
 demangler — read-only, program-independent; GNU/Itanium + MSVC), `search_bytes`, `search_strings`,
 `program_metadata`, the v1.1 semantic-naming extraction primitives `call_graph` and
 `referenced_strings` (ADR-007), the v1.1 Tier-2 extraction primitives `function_cfg`, `imports`,

@@ -49,6 +49,9 @@ _DEFAULT_EMULATE_STEPS = 100_000  # default step budget when the client omits ma
 _MAX_EMULATE_REGISTERS = 64  # cap on set_registers / read_registers list length
 _MAX_EMULATE_MEM_WRITE = 65_536  # cap on total pre-run memory-write bytes
 _MAX_EMULATE_MEM_REGIONS = 16  # cap on write_memory / read_memory region count
+_MAX_EMULATE_STUBS = 64  # cap on the library-call stub table (ADR-066 D2/D3)
+#: A stub action: substitute the ABI return register with a constant, or skip the call as a no-op.
+_STUB_ACTION_RE = r"^(?:return_const:-?(?:0x[0-9A-Fa-f]+|\d+)|skip)$"
 _MAX_EMULATE_MEM_READ = 65_536  # cap on a single read_memory region length
 
 # --- demangler bound (ADR-050; a hostile mangled name is untrusted input — CWE-400/CWE-20) ---
@@ -1668,6 +1671,24 @@ class MemRead(_In):
     length: int = Field(ge=1, le=_MAX_EMULATE_MEM_READ)
 
 
+class EmulateStub(_In):
+    """One library-call stub for ``emulate`` — substitute an external call (ADR-066 D2).
+
+    A stub NEVER runs real library code, loads a host library, or touches the host — it only asserts
+    a return value / skips the call frame so a self-contained routine that calls out mid-way (e.g.
+    ``memcpy``/``strlen``/a ROM thunk) completes instead of halting. The substituted value is
+    client-asserted (untrusted like any input); the ADR-049 sandbox is intact.
+
+    Attributes:
+        target: The callee to stub — an address (hex) or an import/function name.
+        action: ``"return_const:<int>"`` (set the ABI return register to the constant and continue
+            past the call) or ``"skip"`` (step over the call as a no-op).
+    """
+
+    target: str = Field(min_length=1, max_length=_MAX_NAME)
+    action: str = Field(min_length=1, max_length=64, pattern=_STUB_ACTION_RE)
+
+
 class EmulateIn(_SessionScopedIn):
     """Arguments for ``emulate`` — bounded Ghidra p-code emulation (ADR-049).
 
@@ -1690,6 +1711,13 @@ class EmulateIn(_SessionScopedIn):
             buffers stay caller-provided via ``set_registers``/``write_memory`` (the raw calling
             convention is not auto-resolved — proven unreliable; ADR-066 thin scope); outputs via
             ``read_memory``. Automates only the sentinel-return + return-value dance.
+        stubs: **Library-call stubs (ADR-066 D2).** A bounded table substituting external calls the
+            routine makes: each ``{target, action}`` where ``target`` is a callee (address or import
+            name) and ``action`` is ``"return_const:<int>"`` (set the return register + continue)
+            or ``"skip"`` (no-op past the call). A stub never runs real code / touches the host — it
+            lets a routine that calls ``memcpy``/``strlen``/a ROM thunk complete instead of halting.
+            An unstubbed unresolved call still halts (opt-in). Exhausting the budget →
+            ``stop_reason="stub-limit"``.
     """
 
     start: str = Field(min_length=1, max_length=_MAX_NAME)
@@ -1700,6 +1728,7 @@ class EmulateIn(_SessionScopedIn):
     read_registers: list[str] | None = None
     read_memory: list[MemRead] | None = None
     call: bool = False
+    stubs: list[EmulateStub] | None = Field(default=None, max_length=_MAX_EMULATE_STUBS)
 
     @model_validator(mode="after")
     def _bound_emulate(self) -> EmulateIn:
@@ -1765,7 +1794,7 @@ class EmulateOut(_Out):
     """
 
     steps_executed: int
-    stop_reason: Literal["stop-address", "max-steps", "halted", "fault"]
+    stop_reason: Literal["stop-address", "max-steps", "halted", "fault", "stub-limit"]
     registers: list[RegisterValue]
     memory: list[MemoryRegion]
     return_value: Untrusted[str] | None = None

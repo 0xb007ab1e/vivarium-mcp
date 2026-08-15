@@ -36,6 +36,10 @@ _MAX_PCODE_OPS_PER_INSN = 256
 #: raw-p-code walk so an adversarial binary cannot force an unbounded scan; the per-call wall-clock
 #: kill backs it. A `function`-scoped call ignores this (one function).
 _DEOBFUSCATE_FUNCTION_SCAN_CAP = 2_000
+#: Cap on library-call stub APPLICATIONS during one `emulate` call (ADR-066 D2). A hostile routine
+#: that calls a stubbed target in a tight loop is already bounded by `max_steps`; this bounds the
+#: substitutions and surfaces `stop_reason="stub-limit"` honestly when exceeded (CWE-400).
+_MAX_EMULATE_STUB_APPLICATIONS = 100_000
 # Max FID match candidates the worker ever returns from identify_functions (v1.x — ADR-042 Phase 1;
 # mirrors rpc_client._IDENTIFY_MATCH_BUDGET). Defense-in-depth: the FID service can emit many
 # candidates per function on a large binary; the worker clamps + sets truncated, the server caps
@@ -556,6 +560,7 @@ class PyGhidraBackend:
             read_registers=list(params.get("read_registers") or []),
             read_memory=list(params.get("read_memory") or []),
             call=bool(params.get("call", False)),
+            stubs=list(params.get("stubs") or []),
         )
 
     def demangle(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -5436,6 +5441,7 @@ class PyGhidraBackend:
         read_registers: list[Any],
         read_memory: list[dict[str, Any]],
         call: bool = False,
+        stubs: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Run bounded Ghidra p-code emulation and return register/memory readbacks (ADR-049).
 
@@ -5455,6 +5461,8 @@ class PyGhidraBackend:
             read_memory: ``[{"address": hex, "length": int}]`` ranges to read back.
             call: When ``True`` (ADR-066), set up a scratch stack + sentinel return, run to the
                 return, and read the ABI return register into ``return_value``.
+            stubs: ``[{"target", "action"}]`` library-call stubs (ADR-066 D2) — a CALL landing on a
+                stubbed target is substituted (return_const/skip) + returned to the caller.
 
         Returns:
             ``{"steps_executed", "stop_reason", "registers", "memory", "return_value"}``.
@@ -5481,46 +5489,62 @@ class PyGhidraBackend:
                     bytes.fromhex(str(write["data_hex"])),
                 )
 
-            # ADR-066 call convenience: set up a scratch stack + a sentinel return address so the
-            # function returns to a known STOP address (the fiddly part callers keep re-deriving).
-            # Args/buffers are still caller-provided via set_registers/write_memory (the raw ABI is
-            # not auto-resolved — proven unreliable). Reads the ABI return register.
+            # ADR-066: shared arch info for the call convenience (D1) + library-call stubs (D2).
+            space = program.getAddressFactory().getDefaultAddressSpace()
+            bits = int(space.getSize())
+            ptr_bytes = max(bits // 8, 1)
+            cspec = program.getCompilerSpec()
+            sp_reg = cspec.getStackPointer()
+            lr_reg = None
+            for lr_name in ("lr", "LR", "x30", "ra"):
+                candidate = program.getLanguage().getRegister(lr_name)
+                if candidate is not None:
+                    lr_reg = candidate
+                    break
             return_reg_name: str | None = None
-            if call:
-                space = program.getAddressFactory().getDefaultAddressSpace()
-                bits = int(space.getSize())
-                ptr_bytes = bits // 8
-                sentinel_offset = min(0xDEAD0000, (1 << bits) - 1)
-                cspec = program.getCompilerSpec()
-                sp_reg = cspec.getStackPointer()
-                # Respect a caller-set stack pointer; else point SP at a high, aligned scratch stack
-                # (near the canonical userspace stack top — away from low firmware load addresses).
-                if sp_reg is not None and str(sp_reg.getName()) not in set_registers:
-                    scratch_top = min((1 << bits) - 0x1000, 0x00007FFFFFFFF000)
-                    scratch_sp = scratch_top & ~0xF
-                    emu.writeRegister(str(sp_reg.getName()), scratch_sp)
-                else:
-                    scratch_sp = int(str(emu.readRegister(str(sp_reg.getName())))) if sp_reg else 0
-                # Stack-return arches (x86/...): the RET pops [SP] → write the sentinel there.
-                emu.writeMemory(
-                    space.getAddress(scratch_sp),
-                    sentinel_offset.to_bytes(ptr_bytes, "little"),
-                )
-                # Link-register arches (ARM/AArch64/...): the return jumps to LR → seed it too.
-                for lr_name in ("lr", "LR", "x30", "ra"):
-                    lr_reg = program.getLanguage().getRegister(lr_name)
-                    if lr_reg is not None:
-                        emu.writeRegister(str(lr_reg.getName()), sentinel_offset)
-                        break
-                stop_at = format(sentinel_offset, "x")  # implicit stop at the sentinel
-                # Resolve the ABI return register (the return LOCATION is resolvable even when the
-                # arg convention is not — proven: EAX/RAX for x86).
+            if call or stubs:
+                # The ABI return LOCATION is resolvable even when the arg convention is not
+                # (proven: EAX/RAX for x86) — used for `return_value` (D1) + `return_const` (D2).
                 from ghidra.program.model.data import Undefined
 
-                ret_dt = Undefined.getUndefinedDataType(max(ptr_bytes, 1))
+                ret_dt = Undefined.getUndefinedDataType(ptr_bytes)
                 ret_loc = cspec.getDefaultCallingConvention().getReturnLocation(ret_dt, program)
                 ret_reg = ret_loc.getRegister() if ret_loc is not None else None
                 return_reg_name = str(ret_reg.getName()) if ret_reg is not None else None
+
+            # D1 call convenience: scratch stack + sentinel return so the function returns to a
+            # known STOP address (the fiddly part callers re-derive). Args stay caller-provided.
+            if call:
+                sentinel_offset = min(0xDEAD0000, (1 << bits) - 1)
+                if sp_reg is not None and str(sp_reg.getName()) not in set_registers:
+                    scratch_sp = min((1 << bits) - 0x1000, 0x00007FFFFFFFF000) & ~0xF
+                    emu.writeRegister(str(sp_reg.getName()), scratch_sp)
+                else:
+                    scratch_sp = int(str(emu.readRegister(str(sp_reg.getName())))) if sp_reg else 0
+                emu.writeMemory(
+                    space.getAddress(scratch_sp), sentinel_offset.to_bytes(ptr_bytes, "little")
+                )
+                if lr_reg is not None:
+                    emu.writeRegister(str(lr_reg.getName()), sentinel_offset)
+                stop_at = format(sentinel_offset, "x")  # implicit stop at the sentinel
+
+            # D2 stub table: {target_offset: ("return_const", int) | ("skip", None)}. A CALL landing
+            # on a stubbed target is SUBSTITUTED (a value the client asserts) — never real library
+            # code, no host effect (the interpreter still makes no syscalls; ADR-066 D2 sandbox).
+            stub_map: dict[int, tuple[str, int | None]] = {}
+            for stub in stubs or []:
+                target, action = str(stub["target"]), str(stub["action"])
+                try:
+                    target_off: int | None = int(self._parse_address(target).getOffset())
+                except Exception:  # not an address — try a symbol name
+                    target_off = self._first_symbol_offset(target)
+                if target_off is None:
+                    continue
+                if action.startswith("return_const:"):
+                    stub_map[target_off] = ("return_const", int(action.split(":", 1)[1], 0))
+                elif action == "skip":
+                    stub_map[target_off] = ("skip", None)
+            stub_applications = 0
 
             stop_addr = self._parse_address(stop_at) if stop_at is not None else None
             steps = 0
@@ -5535,6 +5559,35 @@ class PyGhidraBackend:
                 if not stepped:
                     stop_reason = "halted"
                     break
+                # D2: a CALL that landed on a stubbed target — substitute + return to the caller.
+                if stub_map:
+                    action_entry = stub_map.get(int(emu.getExecutionAddress().getOffset()))
+                    if action_entry is not None:
+                        kind, value = action_entry
+                        if (
+                            kind == "return_const"
+                            and return_reg_name is not None
+                            and value is not None
+                        ):
+                            emu.writeRegister(return_reg_name, value)
+                        if lr_reg is not None:  # LR arches: return address is in the link register
+                            ret_addr = int(str(emu.readRegister(str(lr_reg.getName()))))
+                        else:  # stack arches: pop the return address off [SP]
+                            sp_val = (
+                                int(str(emu.readRegister(str(sp_reg.getName())))) if sp_reg else 0
+                            )
+                            raw_ra, _ = self._get_bytes_via(
+                                emu, space.getAddress(sp_val), ptr_bytes
+                            )
+                            ret_addr = int.from_bytes(raw_ra.ljust(ptr_bytes, b"\x00"), "little")
+                            if sp_reg is not None:
+                                emu.writeRegister(str(sp_reg.getName()), sp_val + ptr_bytes)
+                        emu.writeRegister(emu.getPCRegister(), ret_addr)
+                        stub_applications += 1
+                        if stub_applications > _MAX_EMULATE_STUB_APPLICATIONS:
+                            stop_reason = "stub-limit"
+                            break
+                        continue
                 if stop_addr is not None and emu.getExecutionAddress() == stop_addr:
                     stop_reason = "stop-address"
                     break
@@ -5647,6 +5700,21 @@ class PyGhidraBackend:
             return self._parse_address(value)
         except WorkerError:
             return None
+
+    def _first_symbol_offset(self, name: str) -> int | None:  # pragma: no cover - JVM edge
+        """Return the offset of the first symbol named ``name``, or ``None`` (ADR-066 stub targets).
+
+        Lets a stub target be given by import/function NAME (e.g. ``memcpy``) instead of an address.
+        Read-only symbol-table lookup; a name resolving to no symbol yields ``None`` (the stub is
+        simply not installed — fail safe).
+        """
+        try:
+            symbols = self._require_program().getSymbolTable().getSymbols(name)
+            if symbols.hasNext():
+                return int(symbols.next().getAddress().getOffset())
+        except Exception:  # a lookup miss just means "no such stub target"
+            return None
+        return None
 
     def _resolve_function(self, function: str) -> Any:  # pragma: no cover - JVM edge
         """Resolve a function by entry address (hex) or by name.
