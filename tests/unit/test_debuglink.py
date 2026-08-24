@@ -9,10 +9,97 @@ must never crash or hang — only a filename or ``None``.
 
 from __future__ import annotations
 
+import struct
+
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
 from vivarium.core.debuglink import parse_gnu_debuglink
+
+
+def _build_elf(
+    *,
+    name: bytes = b"c.dbg",
+    is64: bool = True,
+    little: bool = True,
+    e_shoff: int | None = None,
+    e_shentsize: int | None = None,
+    e_shnum: int | None = None,
+    e_shstrndx: int = 0,
+    str_size_override: int | None = None,
+    debuglink_sh_size_override: int | None = None,
+    debuglink_sh_name_override: int | None = None,
+) -> bytes:
+    """Synthesize a minimal ELF with a `.gnu_debuglink` section, for branch coverage.
+
+    Two sections: [0] the section-header string table (holds `\\0.gnu_debuglink\\0`), [1] the
+    `.gnu_debuglink` section (`name` + NUL). Knobs force each fail-closed branch of the parser
+    (bad offsets/sizes, 32-bit + big-endian layouts). Not a runnable ELF — just enough header +
+    section shape for `parse_gnu_debuglink`.
+    """
+    endian = "<" if little else ">"
+    ehsize = 64
+    # Real layout always uses a valid entsize + 2 sections so the buffer is well-formed; the
+    # e_shentsize / e_shnum overrides only change what gets STAMPED into the header (to drive the
+    # parser's fail-closed branches), never the buffer construction.
+    entsize = 0x40 if is64 else 0x28
+    # shstrtab bytes: index 0 = NUL, then ".gnu_debuglink\0"
+    shstr = b"\x00" + b".gnu_debuglink\x00"
+    debuglink_name_off = 1  # ".gnu_debuglink" starts at offset 1
+    hdr = bytearray(ehsize)
+    hdr[0:4] = b"\x7fELF"
+    hdr[4] = 2 if is64 else 1
+    hdr[5] = 1 if little else 2
+    # section table placed right after the header; shstr + debuglink content after the table.
+    shoff = ehsize
+    n = 2
+    table_len = n * entsize
+    shstr_off = shoff + table_len
+    debug_content = name + b"\x00"
+    debug_off = shstr_off + len(shstr)
+    total = debug_off + len(debug_content)
+    buf = bytearray(hdr) + bytearray(total - ehsize)
+
+    # section [0] = shstrtab, [1] = .gnu_debuglink
+    def _put_section(idx: int, sh_name: int, sh_off: int, sh_size: int) -> None:
+        base = shoff + idx * entsize
+        struct.pack_into(endian + "I", buf, base + 0x00, sh_name)
+        if is64:
+            struct.pack_into(endian + "Q", buf, base + 0x18, sh_off)
+            struct.pack_into(endian + "Q", buf, base + 0x20, sh_size)
+        else:
+            struct.pack_into(endian + "I", buf, base + 0x10, sh_off)
+            struct.pack_into(endian + "I", buf, base + 0x14, sh_size)
+
+    str_size = str_size_override if str_size_override is not None else len(shstr)
+    _put_section(0, 0, shstr_off, str_size)
+    dl_size = (
+        debuglink_sh_size_override if debuglink_sh_size_override is not None else len(debug_content)
+    )
+    dl_name = (
+        debuglink_sh_name_override if debuglink_sh_name_override is not None else debuglink_name_off
+    )
+    if n >= 2:
+        _put_section(1, dl_name, debug_off, dl_size)
+    buf[shstr_off : shstr_off + len(shstr)] = shstr
+    buf[debug_off : debug_off + len(debug_content)] = debug_content
+    # header fields (offsets differ by class); overrides stamp the parser-visible values.
+    off = e_shoff if e_shoff is not None else shoff
+    stamp_entsize = e_shentsize if e_shentsize is not None else entsize
+    stamp_n = e_shnum if e_shnum is not None else n
+    if is64:
+        struct.pack_into(endian + "Q", buf, 0x28, off)
+        struct.pack_into(endian + "H", buf, 0x3A, stamp_entsize)
+        struct.pack_into(endian + "H", buf, 0x3C, stamp_n)
+        struct.pack_into(endian + "H", buf, 0x3E, e_shstrndx)
+    else:
+        struct.pack_into(endian + "I", buf, 0x20, off)
+        struct.pack_into(endian + "H", buf, 0x2E, stamp_entsize)
+        struct.pack_into(endian + "H", buf, 0x30, stamp_n)
+        struct.pack_into(endian + "H", buf, 0x32, e_shstrndx)
+    return bytes(buf)
+
 
 #: A real 1016-byte stripped x86-64 ELF carrying a `.gnu_debuglink` naming "dw.debug" (built with
 #: gcc -g -nostdlib ... + objcopy --strip-all --add-gnu-debuglink; see test_import_debug_map).
@@ -86,6 +173,51 @@ def test_path_traversal_debuglink_name_rejected() -> None:
         assert parse_gnu_debuglink(_elf_with_debuglink_name(hostile)) is None, hostile
     # Control: the benign in-place substitution still parses (proves the harness itself is sound).
     assert parse_gnu_debuglink(_elf_with_debuglink_name(b"ok.dbg")) == "ok.dbg"
+
+
+def test_synthetic_64_le_parses() -> None:
+    """The synthetic builder round-trips (proves the harness) — 64-bit LE."""
+    assert parse_gnu_debuglink(_build_elf(name=b"a.dbg")) == "a.dbg"
+
+
+def test_32bit_elf_parses() -> None:
+    """The 32-bit section-header layout (offsets 0x20/0x2E/0x30/0x32, 0x10/0x14) is walked."""
+    assert parse_gnu_debuglink(_build_elf(name=b"b.dbg", is64=False)) == "b.dbg"
+
+
+def test_big_endian_elf_parses() -> None:
+    """Big-endian ELFs are decoded with the `>` struct order (both classes)."""
+    assert parse_gnu_debuglink(_build_elf(name=b"be64", little=False)) == "be64"
+    assert parse_gnu_debuglink(_build_elf(name=b"be32", is64=False, little=False)) == "be32"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "why"),
+    [
+        ({"e_shoff": 0}, "e_shoff == 0"),
+        ({"e_shentsize": 0}, "e_shentsize == 0"),
+        ({"e_shnum": 0}, "e_shnum == 0"),
+        ({"e_shstrndx": 5, "e_shnum": 2}, "e_shstrndx >= e_shnum"),
+        ({"str_size_override": 1 << 30}, "str_off + str_size > len(data)"),
+        ({"debuglink_sh_size_override": 0}, "debuglink sh_size == 0"),
+        ({"debuglink_sh_size_override": 1 << 30}, "debuglink sh_off + sh_size > len"),
+        ({"name": b""}, "empty name → nul <= 0"),
+        ({"name": b"x" * 300}, "name longer than _MAX_NAME"),
+        ({"name": b"\xff\xfe"}, "non-ASCII name → UnicodeDecodeError"),
+        ({"e_shoff": 1 << 40, "e_shnum": 2}, "section unpack past EOF → wrapper except"),
+    ],
+)
+def test_malformed_debuglink_fails_closed(kwargs: dict[str, object], why: str) -> None:
+    """Every malformation returns None (fail closed), never raises — one per parser branch."""
+    assert parse_gnu_debuglink(_build_elf(**kwargs)) is None, why  # type: ignore[arg-type]
+
+
+def test_section_name_out_of_range_is_skipped() -> None:
+    """A section whose `sh_name` points past the string table is skipped, not crashed (then the
+    real debuglink is still found)."""
+    # 3 sections: [0]=shstrtab, [1]=.gnu_debuglink (name off past shstr → skipped by the sh_name
+    # guard), so the lookup finds nothing → None (exercises the `sh_name >= len(shstr)` continue).
+    assert parse_gnu_debuglink(_build_elf(debuglink_sh_name_override=9999)) is None
 
 
 @given(st.binary(min_size=0, max_size=512))

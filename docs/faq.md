@@ -9,7 +9,7 @@ Short answers to the questions people ask first. See [getting-started](getting-s
 A secure [MCP](https://modelcontextprotocol.io) server that lets an AI assistant (or any MCP client)
 use [Ghidra](https://ghidra-sre.org/) to **statically analyze a program binary** — decompile,
 disassemble, cross-reference, list strings/symbols/imports, recover types, and more — exposed as a
-fixed allow-list of **56 tools**. The name: a *vivarium* is a sealed enclosure for safely keeping and
+fixed allow-list of **74 tools**. The name: a *vivarium* is a sealed enclosure for safely keeping and
 observing a live, dangerous specimen — which is exactly how it treats a binary (contain, then reveal).
 
 ## Does it *run* / execute the binary?
@@ -45,7 +45,7 @@ analysis output. Server-computed scalars (addresses, counts, sizes, the sha256) 
 
 ## Is it read-only?
 
-**Read-by-default.** Most tools are read-only — 41 of the 56. There are **15 gated mutation/write
+**Read-by-default.** Most tools are read-only — 58 of the 74. There are **16 gated mutation/write
 tools** (write-consent toggles + undo, rename, comment, set signature, apply/define/delete types,
 annotation import) — but a session mutates *nothing*
 until you call `session_enable_writes` (the single human-in-the-loop consent gate), and structural
