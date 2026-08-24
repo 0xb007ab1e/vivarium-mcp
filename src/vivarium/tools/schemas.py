@@ -1719,10 +1719,16 @@ class EmulateIn(_SessionScopedIn):
         call: **Call convenience (ADR-066).** When ``True``, ``start`` is treated as a function to
             *call*: the worker sets up a scratch stack + a sentinel return address (at the stack
             pointer and, on link-register arches, in LR), runs to the return (an implicit
-            ``stop_at``), and reads the ABI return register into ``return_value``. Arguments + input
-            buffers stay caller-provided via ``set_registers``/``write_memory`` (the raw calling
-            convention is not auto-resolved — proven unreliable; ADR-066 thin scope); outputs via
-            ``read_memory``. Automates only the sentinel-return + return-value dance.
+            ``stop_at``), and reads the ABI return register into ``return_value``. Input buffers
+            stay caller-provided via ``write_memory``; outputs via ``read_memory``. Automates the
+            sentinel-return + return-value dance.
+        args: **Auto arg-placement (ADR-066 follow-up).** With ``call=True``, an ordered list of
+            integer argument values placed into the target function's parameter storage per its
+            RESOLVED calling convention (``set_function_signature`` it first — a raw binary's
+            convention is not auto-resolved, proven). Register-passed parameters are supported;
+            a parameter the ABI passes on the STACK fails closed (``analysis-failed``) — stage it
+            via ``write_memory`` instead. Requires ``call=True``. Bounded to
+            ``_MAX_EMULATE_REGISTERS`` entries; ``set_registers`` still overrides a given register.
         stubs: **Library-call stubs (ADR-066 D2).** A bounded table substituting external calls the
             routine makes: each ``{target, action}`` where ``target`` is a callee (address or import
             name) and ``action`` is ``"return_const:<int>"`` (set the return register + continue)
@@ -1741,6 +1747,7 @@ class EmulateIn(_SessionScopedIn):
     read_memory: list[MemRead] | None = None
     call: bool = False
     stubs: list[EmulateStub] | None = Field(default=None, max_length=_MAX_EMULATE_STUBS)
+    args: list[int] | None = Field(default=None, max_length=_MAX_EMULATE_REGISTERS)
 
     @model_validator(mode="after")
     def _bound_emulate(self) -> EmulateIn:
@@ -1764,6 +1771,12 @@ class EmulateIn(_SessionScopedIn):
             total = sum(len(w.data_hex) // 2 for w in self.write_memory)
             if total > _MAX_EMULATE_MEM_WRITE:
                 raise ValueError(f"write_memory total exceeds {_MAX_EMULATE_MEM_WRITE} bytes")
+        if self.args is not None and not self.call:
+            # Auto arg-placement is only meaningful for a call (it targets the function's parameter
+            # storage) — reject args without call rather than silently ignoring them (fail closed).
+            raise ValueError(
+                "args requires call=True (auto arg-placement targets a called function)"
+            )
         return self
 
 

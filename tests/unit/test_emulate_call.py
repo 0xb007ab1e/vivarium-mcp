@@ -26,6 +26,34 @@ def test_call_can_be_set() -> None:
     assert m.call is True
 
 
+# --- ADR-066 follow-up: auto arg-placement -------------------------------------------------------
+def test_args_requires_call() -> None:
+    """`args` (auto arg-placement) without `call=True` fails closed — no silent ignore."""
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        s.EmulateIn(session_id="s", start="0x1000", args=[1, 2])
+
+
+def test_args_with_call_accepted() -> None:
+    """`args` is accepted alongside `call=True` and preserves order."""
+    m = s.EmulateIn(session_id="s", start="0x1000", call=True, args=[5, 7])
+    assert m.args == [5, 7]
+
+
+def test_args_capped() -> None:
+    """The args list is bounded (CWE-400)."""
+    import pytest
+    from pydantic import ValidationError
+
+    from vivarium.tools.schemas import _MAX_EMULATE_REGISTERS
+
+    over = list(range(_MAX_EMULATE_REGISTERS + 1))
+    with pytest.raises(ValidationError):
+        s.EmulateIn(session_id="s", start="0x1000", call=True, args=over)
+
+
 # --- result builder ------------------------------------------------------------------------------
 
 

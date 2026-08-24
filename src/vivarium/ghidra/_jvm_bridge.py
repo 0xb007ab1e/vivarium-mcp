@@ -562,6 +562,7 @@ class PyGhidraBackend:
             read_memory=list(params.get("read_memory") or []),
             call=bool(params.get("call", False)),
             stubs=list(params.get("stubs") or []),
+            args=None if params.get("args") is None else [int(a) for a in params["args"]],
         )
 
     def demangle(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -5532,6 +5533,7 @@ class PyGhidraBackend:
         read_memory: list[dict[str, Any]],
         call: bool = False,
         stubs: list[dict[str, Any]] | None = None,
+        args: list[int] | None = None,
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Run bounded Ghidra p-code emulation and return register/memory readbacks (ADR-049).
 
@@ -5553,6 +5555,9 @@ class PyGhidraBackend:
                 return, and read the ABI return register into ``return_value``.
             stubs: ``[{"target", "action"}]`` library-call stubs (ADR-066 D2) — a CALL landing on a
                 stubbed target is substituted (return_const/skip) + returned to the caller.
+            args: ``[int, ...]`` auto arg-placement (ADR-066 follow-up; ``call`` only) — each value
+                is written to its parameter's register storage per the function's resolved calling
+                convention (register params only; a stack-passed param fails closed).
 
         Returns:
             ``{"steps_executed", "stop_reason", "registers", "memory", "return_value"}``.
@@ -5562,7 +5567,7 @@ class PyGhidraBackend:
         """
         from ghidra.app.emulator import EmulatorHelper  # type: ignore[import-not-found]
         from ghidra.util.task import TaskMonitor
-        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+        from worker.dispatch import CODE_ANALYSIS_FAILED, CODE_NOT_FOUND, WorkerError
 
         program = self._require_program()
         emu = EmulatorHelper(program)
@@ -5617,6 +5622,40 @@ class PyGhidraBackend:
                 if lr_reg is not None:
                     emu.writeRegister(str(lr_reg.getName()), sentinel_offset)
                 stop_at = format(sentinel_offset, "x")  # implicit stop at the sentinel
+
+                # ADR-066 follow-up: auto arg-placement. Place each integer arg into the target
+                # function's parameter storage per its RESOLVED calling convention (the caller set a
+                # signature — a raw binary's convention is null, proven). Register params only; a
+                # stack-passed param fails closed (stage it via write_memory). An explicit
+                # `set_registers` value for that register wins (already applied above).
+                if args:
+                    func = program.getFunctionManager().getFunctionAt(self._parse_address(start))
+                    if func is None:
+                        raise WorkerError(
+                            CODE_NOT_FOUND, "args requires a defined function at the start address"
+                        )
+                    params = list(func.getParameters())
+                    if len(args) > len(params):
+                        raise WorkerError(
+                            CODE_ANALYSIS_FAILED,
+                            "more args than the function's resolved parameters "
+                            "(set a matching signature first)",
+                        )
+                    if not params:
+                        raise WorkerError(
+                            CODE_ANALYSIS_FAILED,
+                            "function has no resolved parameters — set a signature first",
+                        )
+                    for i, value in enumerate(args):
+                        storage = params[i].getVariableStorage()
+                        reg = storage.getRegister() if storage is not None else None
+                        if reg is None:
+                            raise WorkerError(
+                                CODE_ANALYSIS_FAILED,
+                                f"parameter {i} is not register-passed; stage it via write_memory",
+                            )
+                        if str(reg.getName()) not in set_registers:
+                            emu.writeRegister(str(reg.getName()), int(value))
 
             # D2 stub table: {target_offset: ("return_const", int) | ("skip", None)}. A CALL landing
             # on a stubbed target is SUBSTITUTED (a value the client asserts) — never real library

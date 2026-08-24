@@ -68,9 +68,12 @@ real hardened worker. Separately, the **security-hardening / gap-remediation** w
     ABI return register into `return_value`. `stubs=[{target, action}]` substitutes an external
     `CALL` (`return_const:<int>` / `skip`) so a routine that calls `memcpy`/`strlen`/a ROM thunk
     completes instead of halting — never running real code (ADR-049 sandbox intact), opt-in, capped
-    (`_MAX_EMULATE_STUBS` table + application cap → `stop_reason="stub-limit"`). Args/buffers stay
-    caller-provided (a raw binary's calling convention is unresolvable — proven). Auto arg-placement
-    is a tracked follow-up.
+    (`_MAX_EMULATE_STUBS` table + application cap → `stop_reason="stub-limit"`). An optional
+    `args=[int, ...]` (with `call=true`) auto-places each integer into the target function's
+    parameter storage per its RESOLVED calling convention (`set_function_signature` it first — a raw
+    binary's convention is null, proven); register-passed params are supported, a stack-passed param
+    fails closed (stage it via `write_memory`). Input buffers stay caller-provided. Live-proven:
+    `add(5, 7) == 12` placed into the resolved param registers.
   - **Live-regression gating for the v1.9 worker tools.** The six worker-touching v1.9 tools now
     each have a gated in-container integration test proving them against a freshly rebuilt worker —
     `recover_struct` (069), `binary_diff` (067, two identical ELFs diff to 0/0/0), multi-region
