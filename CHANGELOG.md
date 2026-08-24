@@ -14,6 +14,14 @@ real hardened worker. Separately, the **security-hardening / gap-remediation** w
 
 ### Security
 
+- **`.gnu_debuglink` path-traversal write fixed (AA1, CWE-22; round-11 gap sweep).** When applying
+  detached DWARF (`debug_format="dwarf"`, ADR-071), the companion filename came from the **hostile
+  binary's** `.gnu_debuglink` section and was used as the staging copy destination via
+  `os.path.join(stage_dir, name)` — an absolute or `..`-bearing name escaped the staging dir (a
+  worker-contained hostile-input-controlled write). Now fixed in depth: the pure
+  `core.debuglink.parse_gnu_debuglink` rejects any non-basename name (a debuglink value is a bare
+  filename by spec) and the worker staging step re-confines to a bare basename, both failing closed.
+  Regression + fuzz-invariant tests added (`tests/unit/test_debuglink.py`).
 - **Base-image HIGH CVEs — upgraded, not waived.** The image Trivy gate caught new HIGHs from base
   drift; all fixed by upgrade (`workflow-cve-management`), base digests still pinned:
   - **CVE-2026-14456** (openssl) — `libcrypto3`/`libssl3` fixed in `3.6.3-r5`. **Server** base bumped

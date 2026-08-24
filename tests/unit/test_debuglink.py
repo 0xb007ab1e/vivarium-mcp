@@ -63,8 +63,42 @@ def test_elf_without_debuglink_returns_none() -> None:
     assert out is None
 
 
+def _elf_with_debuglink_name(name: bytes) -> bytes:
+    """Return the real stripped ELF with its `.gnu_debuglink` name overwritten in place.
+
+    ``name`` MUST be <= 8 bytes; it is right-padded with NULs to exactly 8 so every section
+    offset/size in the file is preserved (the original name ``dw.debug`` is 8 bytes and unique).
+    """
+    assert len(name) <= 8
+    raw = bytes.fromhex(_STRIPPED_ELF_HEX)
+    assert raw.count(b"dw.debug") == 1
+    return raw.replace(b"dw.debug", name.ljust(8, b"\x00"))
+
+
+def test_path_traversal_debuglink_name_rejected() -> None:
+    """AA1 (CWE-22): a `.gnu_debuglink` naming a PATH — absolute, ``..``, or a separator — is
+    rejected (None), so it can never steer the worker's staging copy destination out of stage_dir.
+
+    A `.gnu_debuglink` value is a bare filename by spec; anything else is hostile/malformed and
+    fails closed (indistinguishable from "no debuglink" — the safe branch).
+    """
+    for hostile in (b"../../x", b"/tmp/xy", b"a/b", b"..", b".", b"..\\x"):
+        assert parse_gnu_debuglink(_elf_with_debuglink_name(hostile)) is None, hostile
+    # Control: the benign in-place substitution still parses (proves the harness itself is sound).
+    assert parse_gnu_debuglink(_elf_with_debuglink_name(b"ok.dbg")) == "ok.dbg"
+
+
 @given(st.binary(min_size=0, max_size=512))
 def test_fuzz_never_crashes(data: bytes) -> None:
     """Hostile fuzz: arbitrary bytes yield either a filename or None — never a crash/hang."""
     out = parse_gnu_debuglink(data)
     assert out is None or (isinstance(out, str) and 0 < len(out) <= 256)
+
+
+@given(st.binary(min_size=0, max_size=512))
+def test_fuzz_returned_name_is_a_bare_basename(data: bytes) -> None:
+    """AA1 invariant under fuzz: any name the parser DOES return is a bare basename — never a
+    path — so the staging join can't escape (defense the `os.path.join` destination relies on)."""
+    out = parse_gnu_debuglink(data)
+    if out is not None:
+        assert "/" not in out and "\\" not in out and out not in {".", ".."}
