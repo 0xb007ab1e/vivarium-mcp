@@ -39,8 +39,10 @@ real hardened worker. Separately, the **security-hardening / gap-remediation** w
   - **`binary_diff` (ADR-067)** — function-granularity two-program diff (added/removed/changed +
     honest summary) by name-pairing + a `match_by` signal (`name` = body size + instruction count,
     `function_hash` = Ghidra ExactInstructions hash). Loads both refs fresh + wipes them (the
-    session's own program is untouched); names untrusted. `bsim` pairing + `include_unchanged` are
-    tracked follow-ups.
+    session's own program is untouched); names untrusted. An optional `include_unchanged` also
+    returns the name-paired non-differing functions (the `unchanged` correspondence list +
+    `summary.unchanged` count) — a full map, not just deltas; default off is byte-for-byte the
+    deltas-only result. `bsim` content-pairing (for stripped binaries) is a tracked follow-up.
   - **Multi-region scatter-load import (ADR-065)** — an optional `regions` list on `session_import`
     loads a headerless raw image into one program with N memory blocks (each region its own
     confined ref or an `offset`/`length` slice of the parent, at its `base_addr`; overlap rejected

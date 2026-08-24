@@ -475,6 +475,7 @@ class PyGhidraBackend:
             source_ref_b=str(_require(params, "program_b")),
             match_by=str(params.get("match_by", "name")),
             max_entries=_clamp_count(params.get("max_entries", 1000)),
+            include_unchanged=bool(params.get("include_unchanged", False)),
         )
 
     def bsim_search_corpus(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -3207,7 +3208,12 @@ class PyGhidraBackend:
         }
 
     def _gh_binary_diff(  # noqa: C901 - one bounded two-program pair-and-classify; the branches read clearer inline (JVM edge)
-        self, source_ref_a: str, source_ref_b: str, match_by: str, max_entries: int
+        self,
+        source_ref_a: str,
+        source_ref_b: str,
+        match_by: str,
+        max_entries: int,
+        include_unchanged: bool = False,
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Function-granularity diff of two confined binaries (ADR-067; session read-only).
 
@@ -3221,15 +3227,19 @@ class PyGhidraBackend:
         fields are SAFE (names + addresses + computed change kinds). Bounded by ``max_entries`` +
         the worker wall-clock/memory caps (ADR-004, two loaded programs).
 
+        When ``include_unchanged`` is set, the name-paired functions that do NOT differ are also
+        returned (``unchanged`` list + ``summary.unchanged`` count) — a full correspondence map, not
+        just the deltas; default off keeps the byte-for-byte deltas-only result.
+
         (``match_by="bsim"`` — content pairing for STRIPPED binaries via the ADR-058 BSim / VT
-        correlators — and ``include_unchanged`` are tracked follow-ups; the schema does not yet
-        accept them.)
+        correlators — is a tracked follow-up; the schema does not yet accept it.)
 
         Args:
             source_ref_a: Baseline binary (server-confined + size-capped path).
             source_ref_b: Comparison binary (server-confined + size-capped path).
             match_by: ``"name"`` or ``"function_hash"`` — the change-detection signal.
             max_entries: Hard cap per entry list (already server-clamped).
+            include_unchanged: Also return name-paired non-differing functions (default off).
 
         Returns:
             ``{"added": [...], "removed": [...], "changed": [...], "summary": {...}, "truncated"}``.
@@ -3296,6 +3306,7 @@ class PyGhidraBackend:
                 {"address": idx_a[n]["address"], "name": n} for n in sorted(names_a - names_b)
             ]
             changed: list[dict[str, Any]] = []
+            unchanged: list[dict[str, Any]] = []
             for name in sorted(names_a & names_b):
                 a_sig, b_sig = idx_a[name], idx_b[name]
                 if match_by == "function_hash":
@@ -3313,14 +3324,27 @@ class PyGhidraBackend:
                             "change": change_kind,
                         }
                     )
-            summary = {"added": len(added), "removed": len(removed), "changed": len(changed)}
+                elif include_unchanged:
+                    # A full correspondence map when asked: the name-paired functions that match on
+                    # the selected signal. Carries the program_b address (mirrors added/removed).
+                    unchanged.append({"address": b_sig["address"], "name": name})
+            summary = {
+                "added": len(added),
+                "removed": len(removed),
+                "changed": len(changed),
+                "unchanged": len(unchanged),
+            }
             truncated = (
-                len(added) > max_entries or len(removed) > max_entries or len(changed) > max_entries
+                len(added) > max_entries
+                or len(removed) > max_entries
+                or len(changed) > max_entries
+                or len(unchanged) > max_entries
             )
             return {
                 "added": added[:max_entries],
                 "removed": removed[:max_entries],
                 "changed": changed[:max_entries],
+                "unchanged": unchanged[:max_entries],
                 "summary": summary,
                 "truncated": truncated,
             }

@@ -1347,6 +1347,7 @@ class RpcGhidraAdapter:
                     "program_a": a.program_a,
                     "program_b": a.program_b,
                     "match_by": a.match_by,
+                    "include_unchanged": a.include_unchanged,
                     "max_entries": a.max_entries,
                 },
                 timeout_s=self._analysis_timeout_s,
@@ -2994,10 +2995,12 @@ def _build_binary_diff(r: dict[str, Any]) -> s.BinaryDiffOut:
         added=[_build_diff_function(f) for f in r.get("added", [])],
         removed=[_build_diff_function(f) for f in r.get("removed", [])],
         changed=[_build_changed_function(f) for f in r.get("changed", [])],
+        unchanged=[_build_diff_function(f) for f in r.get("unchanged", [])],
         summary=s.DiffSummary(
             added=int(summary["added"]),
             removed=int(summary["removed"]),
             changed=int(summary["changed"]),
+            unchanged=int(summary.get("unchanged", 0)),
         ),
         truncated=bool(r.get("truncated", False)),
     )

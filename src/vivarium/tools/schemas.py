@@ -1470,12 +1470,17 @@ class BinaryDiffIn(_SessionScopedIn):
         match_by: The change-detection signal — ``"name"`` (body size + instruction count) or
             ``"function_hash"`` (Ghidra's operand-masked ExactInstructions hash). Functions are
             paired by name; a ``"bsim"`` content-pairing mode for stripped binaries is a follow-up.
+        include_unchanged: When ``True``, also return the name-paired functions that did NOT differ
+            (the ``unchanged`` list + ``summary.unchanged`` count) — a full correspondence map, not
+            just the deltas. Default ``False`` (byte-for-byte the pre-follow-up behavior: an empty
+            ``unchanged`` list and a zero count). Bounded by ``max_entries`` like the delta lists.
         max_entries: Hard cap per entry list (bounded; ``summary`` stays honest when clipped).
     """
 
     program_a: str = Field(min_length=1, max_length=512)
     program_b: str = Field(min_length=1, max_length=512)
     match_by: Literal["name", "function_hash"] = "name"
+    include_unchanged: bool = False
     max_entries: int = Field(default=1000, ge=1, le=_MAX_LIMIT)
 
 
@@ -1514,11 +1519,14 @@ class DiffSummary(_Out):
         added: Total functions present in B but not A — safe.
         removed: Total functions present in A but not B — safe.
         changed: Total name-paired functions that differ — safe.
+        unchanged: Total name-paired functions that did NOT differ — safe. Always ``0`` unless
+            ``include_unchanged`` was requested (the worker only counts them then).
     """
 
     added: int
     removed: int
     changed: int
+    unchanged: int = 0
 
 
 class BinaryDiffOut(_Out):
@@ -1528,6 +1536,8 @@ class BinaryDiffOut(_Out):
         added: Functions in B with no A pairing (bounded).
         removed: Functions in A with no B pairing (bounded).
         changed: Name-paired functions that differ (bounded).
+        unchanged: Name-paired functions that did NOT differ (bounded) — populated only when
+            ``include_unchanged`` was requested, else empty. Each carries its ``program_b`` address.
         summary: Full per-category counts (honest even when lists are clipped).
         truncated: Whether ``max_entries`` clipped any list.
     """
@@ -1535,6 +1545,7 @@ class BinaryDiffOut(_Out):
     added: list[DiffFunction]
     removed: list[DiffFunction]
     changed: list[ChangedFunction]
+    unchanged: list[DiffFunction] = Field(default_factory=list)
     summary: DiffSummary
     truncated: bool = False
 

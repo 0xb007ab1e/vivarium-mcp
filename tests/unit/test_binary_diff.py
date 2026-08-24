@@ -37,6 +37,13 @@ def test_unknown_match_by_rejected() -> None:
         s.BinaryDiffIn(session_id="s", program_a="a", program_b="b", match_by="bsim")  # type: ignore[arg-type]
 
 
+def test_include_unchanged_defaults_off_and_accepts_true() -> None:
+    """`include_unchanged` defaults False (deltas-only) and accepts an explicit True."""
+    assert s.BinaryDiffIn(session_id="s", program_a="a", program_b="b").include_unchanged is False
+    m = s.BinaryDiffIn(session_id="s", program_a="a", program_b="b", include_unchanged=True)
+    assert m.include_unchanged is True
+
+
 def test_both_programs_required() -> None:
     """program_a and program_b are required, non-empty."""
     with pytest.raises(ValidationError):
@@ -95,4 +102,25 @@ def test_builder_tolerates_empty_diff() -> None:
     )
     assert out.added == [] and out.removed == [] and out.changed == []
     assert (out.summary.added, out.summary.removed, out.summary.changed) == (0, 0, 0)
+    # A pre-follow-up payload without `unchanged` maps to an empty list + zero count (back-compat).
+    assert out.unchanged == [] and out.summary.unchanged == 0
     assert out.truncated is False
+
+
+def test_builder_maps_unchanged_when_present() -> None:
+    """An `unchanged` payload maps to the correspondence list + honest count; names UNTRUSTED."""
+    out = _build_binary_diff(
+        {
+            "added": [],
+            "removed": [],
+            "changed": [],
+            "unchanged": [
+                {"address": "0x00401000", "name": "same_fn"},
+                {"address": "0x00401050", "name": "also_same"},
+            ],
+            "summary": {"added": 0, "removed": 0, "changed": 0, "unchanged": 2},
+        }
+    )
+    assert out.summary.unchanged == 2
+    assert [u.address for u in out.unchanged] == ["0x00401000", "0x00401050"]
+    assert all(isinstance(u.name, Untrusted) for u in out.unchanged)

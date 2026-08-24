@@ -85,6 +85,7 @@ def main():
             "program_a": path_a,
             "program_b": path_b,
             "match_by": "name",
+            "include_unchanged": True,
             "max_entries": 100,
         }
     )
@@ -228,4 +229,10 @@ def test_binary_diff_identical_programs_on_real_worker(worker_image: str) -> Non
     )
     assert (data.get("changed") or []) == [], (
         f"non-empty changed list on identical inputs: {data!r}"
+    )
+    # include_unchanged=True: the shared function(s) are name-paired + non-differing, so the
+    # correspondence map is non-empty and its honest count matches the returned list.
+    assert int(summary.get("unchanged", 0)) >= 1, f"expected >=1 unchanged name-pair: {data!r}"
+    assert len(data.get("unchanged") or []) >= 1, (
+        f"empty unchanged list despite the count: {data!r}"
     )
