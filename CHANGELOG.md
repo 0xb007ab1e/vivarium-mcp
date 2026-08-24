@@ -58,11 +58,21 @@ real hardened worker. Separately, the **security-hardening / gap-remediation** w
     decompresses the input before loading, **streamed against hard zip-bomb caps** (absolute output +
     ratio; aborts on overflow) in the worker, never the server. Mutually exclusive with `regions`;
     additive/opt-in. uImage/androidboot header formats are a tracked follow-up.
-  - **`emulate` call convenience (ADR-066)** — an additive `call=true` sets up a scratch stack +
-    sentinel return address, runs a function to its return, and reads the ABI return register into
-    `return_value`. Args/buffers stay caller-provided (a raw binary's calling convention is
-    unresolvable — proven); automates the sentinel-return + return-value dance. Auto arg-placement +
-    library-call stubs are tracked follow-ups.
+  - **`emulate` call convenience + library-call stubs (ADR-066 D1+D2)** — an additive `call=true`
+    sets up a scratch stack + sentinel return address, runs a function to its return, and reads the
+    ABI return register into `return_value`. `stubs=[{target, action}]` substitutes an external
+    `CALL` (`return_const:<int>` / `skip`) so a routine that calls `memcpy`/`strlen`/a ROM thunk
+    completes instead of halting — never running real code (ADR-049 sandbox intact), opt-in, capped
+    (`_MAX_EMULATE_STUBS` table + application cap → `stop_reason="stub-limit"`). Args/buffers stay
+    caller-provided (a raw binary's calling convention is unresolvable — proven). Auto arg-placement
+    is a tracked follow-up.
+  - **Live-regression gating for the v1.9 worker tools.** The six worker-touching v1.9 tools now
+    each have a gated in-container integration test proving them against a freshly rebuilt worker —
+    `recover_struct` (069), `binary_diff` (067, two identical ELFs diff to 0/0/0), multi-region
+    scatter-load import (065, two regions → two blocks), companion debug map (071, a `.map` symbol
+    applied), `deobfuscate_strings` (068, a byte-by-byte x86-64 stack-string recovers `"Hello!"`),
+    and `emulate` (066) — added to the `live-regression` hard-gate list (collection floor 27 → 33,
+    or 35 with the self-activating FID gate) so a worker regression fails CI, not just review.
 - **Broader `session_import` loader coverage.** Import **headerless raw/firmware images**
   (`loader="binary"` + `processor`/`base_addr`/`entry`, ADR-045); **Intel-HEX / Motorola-SREC**
   firmware (ADR-046); **self-describing DEX / Mach-O / APK** (force the loader, ADR-047); and select
