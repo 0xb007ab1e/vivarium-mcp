@@ -1,18 +1,18 @@
 """Integration: stack-string recovery via `deobfuscate_strings` on a real worker (ADR-068).
 
 Regression + capability gate for the ``deobfuscate_strings`` tool (``stack_string`` technique): the
-worker walks a function's RAW per-instruction p-code for constant stores to adjacent stack slots and
-reassembles the runs into strings. Proven live:
+worker recovers strings the ordinary scan misses via two techniques. Proven live:
 
-    * write a tiny x86-64 blob that stores ``"Hello!"`` byte-by-byte to adjacent stack slots
-      (``mov byte [rsp-N], imm8`` x6, then ``ret``); import it raw, analyze, then
-      ``deobfuscate_strings(function=entry, techniques=["stack_string"])`` recovers ``"Hello!"``. A
-      regression in the p-code walk / reassembly re-surfaces as ``ok=False`` or the string missing.
+    * ``stack_string`` — write a tiny x86-64 blob that stores ``"Hello!"`` byte-by-byte to adjacent
+      stack slots (``mov byte [rsp-N], imm8`` x6, then ``ret``); recover it from the raw p-code.
+    * ``xor_decode`` (ADR-068 D3) — write an in-place single-pass XOR decoder over a ciphertext
+      buffer; the worker detects it + recovers the plaintext by bounded emulation (see the second
+      test). A regression re-surfaces as ``ok=False`` or the string missing.
 
-Why a gated in-container test (not a unit test): the p-code walk is the JVM/PyGhidra edge (TB3,
-ADR-001) — excluded from server unit coverage and only validatable against a real Ghidra worker; the
-pure reassembly core (``core.stackstring``) is covered by unit tests. ``xor_decode`` is DEFERRED
-(ADR-068); only ``stack_string`` is exercised here. Gating + fixture posture mirror
+Why a gated in-container test (not a unit test): the p-code walk + the decode-loop emulation are the
+JVM/PyGhidra edge (TB3, ADR-001) — excluded from server unit coverage and only validatable against a
+real Ghidra worker; the pure cores (``core.stackstring``) + schema/builder are covered by unit
+tests. Gating + fixture posture mirror
 ``test_import_raw_binary.py``: ``integration``-marked (the default unit run SKIPS it), runs only
 when ``VIVARIUM_INTEGRATION`` is truthy AND a real worker image + engine are available. No real
 malware — the input is a tiny synthetic x86-64 code blob written in-container (master §5).
@@ -127,8 +127,58 @@ def _engine_available(engine: str) -> bool:
     return shutil.which(engine) is not None
 
 
-def _build_command(engine: str, image: str) -> list[str]:
-    """Build the network-isolated container-run argv driving the recovery in ``image``."""
+# A tiny headerless x86-64 in-place XOR decoder (ADR-068 D3): mov edx,0x1020; xor ecx,ecx;
+# L: mov al,[rdx+rcx]; xor al,0x41; mov [rdx+rcx],al; inc ecx; cmp ecx,6; jl L; ret; pad;
+# then the ciphertext at 0x1020 = "Hello!" ^ 0x41 = 09 24 2d 2d 2e 60. Emulating the function
+# decodes the buffer in place; the buffer's WRITE data refs locate it, the INT_XOR const is the key.
+_XOR_BLOB_HEX = "ba2010000031c98a040a344188040affc183f9067cf1c300000000000000000009242d2d2e60"
+
+_DRIVER_XOR = r"""
+import json, os, sys, traceback
+
+MARKER = "VIVARIUM_INTEGRATION_RESULT:"
+BLOB = bytes.fromhex("__XOR_BLOB_HEX__")
+PROCESSOR = os.environ.get("VIVARIUM_DRIVER_PROCESSOR", "x86:LE:64:default")
+BASE_ADDR = int(os.environ.get("VIVARIUM_DRIVER_BASE_ADDR", "0x1000"), 0)
+
+
+def main():
+    from vivarium.ghidra._jvm_bridge import PyGhidraBackend
+
+    project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
+    path = os.path.join(project_dir, "xordec.bin")
+    with open(path, "wb") as handle:
+        handle.write(BLOB)
+
+    backend = PyGhidraBackend()
+    backend.import_binary(
+        {"source_ref": path, "loader": "binary", "processor": PROCESSOR,
+         "base_addr": BASE_ADDR, "entry": BASE_ADDR}
+    )
+    backend.analyze({"timeout_seconds": 120})
+    out = backend.deobfuscate_strings(
+        {"function": hex(BASE_ADDR), "techniques": ["xor_decode"], "min_length": 4}
+    )
+    return {"strings": out.get("strings") or []}
+
+
+try:
+    result = {"ok": True, "data": main()}
+except Exception as exc:  # surface ANY failure as a parseable, fail-closed envelope.
+    result = {
+        "ok": False,
+        "error": "{}: {}".format(type(exc).__name__, exc),
+        "traceback": traceback.format_exc(),
+    }
+
+sys.stdout.write("\n" + MARKER + json.dumps(result) + "\n")
+sys.stdout.flush()
+os._exit(0)
+""".replace("__XOR_BLOB_HEX__", _XOR_BLOB_HEX)
+
+
+def _build_command(engine: str, image: str, driver: str) -> list[str]:
+    """Build the network-isolated container-run argv driving ``driver`` in ``image``."""
     cmd = [
         engine,
         "run",
@@ -151,7 +201,7 @@ def _build_command(engine: str, image: str) -> list[str]:
             "--env",
             "PYTHONPATH=/host-repo/src:/host-repo",
         ]
-    cmd += ["--entrypoint", "python", image, "-c", _DRIVER]
+    cmd += ["--entrypoint", "python", image, "-c", driver]
     return cmd
 
 
@@ -182,7 +232,7 @@ def test_deobfuscate_stack_string_on_real_worker(worker_image: str) -> None:
     if not _engine_available(engine):
         pytest.skip(f"container engine {engine!r} not found on PATH (set {_ENGINE_ENV})")
 
-    cmd = _build_command(engine, worker_image)
+    cmd = _build_command(engine, worker_image, _DRIVER)
 
     try:
         proc = subprocess.run(  # noqa: S603 — argv list (no shell); engine + image are operator-set.
@@ -211,3 +261,57 @@ def test_deobfuscate_stack_string_on_real_worker(worker_image: str) -> None:
     assert _EXPECTED in texts, (
         f"expected {_EXPECTED!r} among recovered stack-strings; got {texts!r}"
     )
+
+
+def test_deobfuscate_xor_decode_on_real_worker(worker_image: str) -> None:
+    """``deobfuscate_strings`` (xor_decode) recovers a single-pass XOR-decoded string (ADR-068 D3).
+
+    Drives the in-container backend: write an x86-64 in-place XOR decoder over a ciphertext buffer
+    (``"Hello!" ^ 0x41``), import it raw, analyze, then run ``xor_decode``. The worker detects the
+    decoder (INT_XOR const + STORE + WRITE data ref), emulates the function via the ADR-049 sandbox,
+    and reads back the decoded buffer. Asserts ``ok`` and a recovered ``"Hello!"`` carrying
+    ``encoding="xor"`` + a ``decode_key``. A regression in the detect-or-emulate path re-surfaces as
+    ``ok=False`` or no recovered string.
+
+    Args:
+        worker_image: The pinned worker image reference (conftest fixture; skips if unset).
+    """
+    engine = _engine()
+    if not _engine_available(engine):
+        pytest.skip(f"container engine {engine!r} not found on PATH (set {_ENGINE_ENV})")
+
+    cmd = _build_command(engine, worker_image, _DRIVER_XOR)
+
+    try:
+        proc = subprocess.run(  # noqa: S603 — argv list (no shell); engine + image are operator-set.
+            cmd, capture_output=True, text=True, timeout=_RUN_TIMEOUT_SECONDS, check=False
+        )
+    except subprocess.TimeoutExpired as exc:
+        captured = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+        pytest.fail(
+            f"xor_decode run timed out after {_RUN_TIMEOUT_SECONDS}s "
+            f"(engine={engine}, image={worker_image})\n--- stderr tail ---\n{captured[-2000:]}"
+        )
+
+    if proc.returncode != 0:
+        pytest.fail(
+            f"worker run exited {proc.returncode} (engine={engine}, image={worker_image})\n"
+            f"--- stderr tail ---\n{proc.stderr[-2000:]}\n"
+            f"--- stdout tail ---\n{proc.stdout[-1000:]}"
+        )
+
+    envelope = _parse_marker_json(proc.stdout)
+    assert envelope.get("ok") is True, (
+        f"xor_decode reported failure (ADR-068 D3 regression?): {envelope.get('error')!r}\n"
+        f"{envelope.get('traceback', '')[-2000:]}"
+    )
+    strings = envelope["data"].get("strings") or []
+    hits = [
+        s
+        for s in strings
+        if s.get("technique") == "xor_decode" and _EXPECTED in str(s.get("text", ""))
+    ]
+    assert hits, f"expected an xor_decode recovery of {_EXPECTED!r}; got {strings!r}"
+    rec = hits[0]
+    assert rec.get("encoding") == "xor", f"expected encoding='xor'; got {rec!r}"
+    assert rec.get("decode_key"), f"expected a recovered decode_key; got {rec!r}"

@@ -75,11 +75,11 @@ def test_defaults_bounded() -> None:
 
 
 def test_technique_enum_closed() -> None:
-    """techniques is a closed set — the deferred 'xor_decode' is rejected."""
+    """techniques is a closed set — stack_string + xor_decode accepted, anything else rejected."""
     with pytest.raises(ValidationError):
-        s.DeobfuscateStringsIn(session_id="s", techniques=["xor_decode"])  # type: ignore[list-item]
-    m = s.DeobfuscateStringsIn(session_id="s", techniques=["stack_string"])
-    assert m.techniques == ["stack_string"]
+        s.DeobfuscateStringsIn(session_id="s", techniques=["rot13"])  # type: ignore[list-item]
+    m = s.DeobfuscateStringsIn(session_id="s", techniques=["stack_string", "xor_decode"])
+    assert m.techniques == ["stack_string", "xor_decode"]
 
 
 def test_caps_bounded() -> None:
@@ -113,6 +113,31 @@ def test_builder_wraps_text_untrusted() -> None:
     rec = out.strings[0]
     assert rec.address == "0x00401000" and rec.technique == "stack_string" and rec.length == 6
     assert isinstance(rec.text, Untrusted)
+    # stack_string carries no xor metadata (back-compat: absent keys map to None).
+    assert rec.encoding is None and rec.decode_key is None
+
+
+def test_builder_xor_decode_wraps_key_and_keeps_encoding() -> None:
+    """`xor_decode` results carry a safe `encoding` + an UNTRUSTED `decode_key`."""
+    out = _build_deobfuscate_strings(
+        {
+            "strings": [
+                {
+                    "address": "0x00401000",
+                    "technique": "xor_decode",
+                    "text": "Hello!",
+                    "length": 6,
+                    "encoding": "xor",
+                    "decode_key": "0x41",
+                }
+            ],
+            "truncated": False,
+        }
+    )
+    rec = out.strings[0]
+    assert rec.technique == "xor_decode" and rec.encoding == "xor"
+    assert isinstance(rec.text, Untrusted)
+    assert isinstance(rec.decode_key, Untrusted) and rec.decode_key.value == "0x41"
 
 
 def test_builder_tolerates_empty() -> None:

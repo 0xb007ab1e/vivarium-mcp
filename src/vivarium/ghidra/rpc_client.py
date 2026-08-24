@@ -1234,6 +1234,7 @@ class RpcGhidraAdapter:
                     "min_length": a.min_length,
                     "max_results": a.max_results,
                     "max_bytes": a.max_bytes,
+                    "max_steps": a.max_steps,
                 },
             )
         )
@@ -2832,12 +2833,15 @@ def _build_recover_struct(r: dict[str, Any]) -> s.RecoverStructOut:
 
 
 def _build_recovered_string(r: dict[str, Any]) -> s.RecoveredString:
-    """Build one :class:`RecoveredString` (ADR-068): the recovered text is binary-derived."""
+    """Build one :class:`RecoveredString` (ADR-068): the recovered text + key are binary-derived."""
+    decode_key = r.get("decode_key")
     return s.RecoveredString(
         address=str(r["address"]),
         technique=r["technique"],
         text=_w(str(r["text"]), DataOrigin.BINARY),
         length=int(r["length"]),
+        encoding=r.get("encoding"),
+        decode_key=None if decode_key is None else _w(str(decode_key), DataOrigin.BINARY),
     )
 
 

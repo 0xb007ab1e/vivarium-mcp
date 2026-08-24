@@ -730,27 +730,37 @@ class RecoverStructOut(_Out):
 class DeobfuscateStringsIn(_SessionScopedIn):
     """Arguments for ``deobfuscate_strings`` — recover hidden strings (ADR-068).
 
-    Read-only static recovery of strings the ordinary string scan misses. This increment supports
-    the ``stack_string`` technique: the worker walks a function's RAW per-instruction p-code for
-    of constant stores to adjacent stack slots and reassembles them (these are invisible to the
-    decompiler's ``HighFunction`` — dead-code elimination removes stores never read). Bounded by
-    ``max_results``/``max_bytes`` + a whole-program function-scan cap; ``truncated`` honest.
+    Read-only recovery of strings the ordinary string scan misses. Two techniques:
+    ``stack_string`` — the worker walks a function's RAW per-instruction p-code for runs of constant
+    stores to adjacent stack slots and reassembles them (invisible to the decompiler's
+    ``HighFunction`` — dead-code elimination removes stores never read); and ``xor_decode`` — the
+    worker detects a single-pass XOR/ADD-const in-place decode loop, then recovers the plaintext by
+    **bounded p-code emulation** of that function (ADR-068 D3, reusing the ADR-049 sandboxed
+    emulator — no native execution, program DB untouched) and reading back the decoded buffer.
+    Bounded by ``max_results``/``max_bytes``/``max_steps`` + a whole-program function-scan cap;
+    ``truncated`` honest.
 
     Attributes:
         function: Optional function (address or name) to scope the scan; omit for a bounded
             whole-program scan (server-clamped).
-        techniques: Recovery passes to run (this increment: ``"stack_string"``); default all
-            supported. (``"xor_decode"`` — bounded decode-loop emulation — is a tracked follow-up.)
+        techniques: Recovery passes to run (``"stack_string"`` and/or ``"xor_decode"``); default
+            all supported.
         min_length: Minimum recovered-string length to report (noise floor; bounded).
         max_results: Cap on recovered strings returned (bounded).
-        max_bytes: Cap on the length of any single recovered string (bounded).
+        max_bytes: Cap on the length of any single recovered string / decoded buffer window
+            (bounded).
+        max_steps: ``xor_decode`` only — the p-code step budget for the decode-loop emulation
+            (inherits the ADR-049 clamp ``[1, 1_000_000]``); ignored by ``stack_string``.
     """
 
     function: str | None = Field(default=None, min_length=1, max_length=_MAX_NAME)
-    techniques: list[Literal["stack_string"]] | None = Field(default=None, max_length=4)
+    techniques: list[Literal["stack_string", "xor_decode"]] | None = Field(
+        default=None, max_length=4
+    )
     min_length: int = Field(default=4, ge=1, le=_MAX_LIMIT)
     max_results: int = Field(default=256, ge=1, le=_MAX_LIMIT)
     max_bytes: int = Field(default=256, ge=1, le=_MAX_LIMIT)
+    max_steps: int = Field(default=100_000, ge=1, le=1_000_000)
 
 
 class RecoveredString(_Out):
@@ -758,15 +768,22 @@ class RecoveredString(_Out):
 
     Attributes:
         address: Where the string is constructed — the function entry (hex) — safe.
-        technique: How it was recovered (``"stack_string"``) — safe (closed vocabulary).
+        technique: How it was recovered (``"stack_string"`` / ``"xor_decode"``) — safe (closed
+            vocabulary).
         text: The recovered string — UNTRUSTED (binary-derived; ADR-005).
         length: Recovered length in bytes — safe.
+        encoding: For ``xor_decode``, the decode operation — ``"xor"`` / ``"add"`` (safe, closed
+            vocabulary); ``None`` for ``stack_string``.
+        decode_key: For ``xor_decode``, the recovered single-byte key (hex) — UNTRUSTED
+            (binary-derived); ``None`` for ``stack_string``.
     """
 
     address: str
-    technique: Literal["stack_string"]
+    technique: Literal["stack_string", "xor_decode"]
     text: Untrusted[str]
     length: int
+    encoding: Literal["xor", "add"] | None = None
+    decode_key: Untrusted[str] | None = None
 
 
 class DeobfuscateStringsOut(_Out):

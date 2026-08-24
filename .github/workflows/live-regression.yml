@@ -485,16 +485,17 @@ jobs:
           # ADR-071 debug_ref map: a companion .map symbol is applied to the loaded ELF as a label (1) +
           # ADR-068 deobfuscate_strings: a byte-by-byte x86-64 stack-string recovers "Hello!" (1) +
           # ADR-070 uImage unwrap: a gzip-payload uImage strips + nested-decompresses + loads (1) +
-          # ADR-066 auto arg-placement: emulate(call, args=[5,7]) places into resolved storage -> 12 (1).
-          # The non-FID base collects 35 (empirically: 32 single-test files + analyze_profiles's 3
-          # parametrized cases; the floor is a >= collection minimum, kept in lock-step with
-          # `--collect-only`). The deterministic
+          # ADR-066 auto arg-placement: emulate(call, args=[5,7]) places into resolved storage -> 12 (1) +
+          # ADR-068 xor_decode: an in-place XOR decoder is detected + emulated -> "Hello!" (1).
+          # The non-FID base collects 36 (empirically, via `--collect-only`: 31 single-test files +
+          # analyze_profiles's 3 parametrized cases + test_deobfuscate_strings's 2 [stack_string +
+          # xor_decode]; the floor is a >= collection minimum kept in lock-step). The deterministic
           # same-toolchain FID gate (zlib + musl, 2) is SELF-ACTIVATING: included only when the
           # worker image ships the bundled DBs (FID_DETERMINISTIC_GATE=1), so the expected floor is
-          # 37 then, 35 otherwise. When inactive the test is omitted (not skipped), so the zero-skip
+          # 38 then, 36 otherwise. When inactive the test is omitted (not skipped), so the zero-skip
           # rule below still holds.
           import os
-          expected = 37 if os.environ.get("FID_DETERMINISTIC_GATE", "0") == "1" else 35
+          expected = 38 if os.environ.get("FID_DETERMINISTIC_GATE", "0") == "1" else 36
           if tests < expected:
               problems.append(f"expected >={expected} hard-gate tests to run, collected {tests}")
           if skipped:
