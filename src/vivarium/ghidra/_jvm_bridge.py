@@ -904,7 +904,7 @@ class PyGhidraBackend:
     # Each helper converts every Ghidra object to a plain str/int/bool before returning (no Java
     # object leaks the boundary); addresses render via ``str(addr)`` (Ghidra's canonical hex form).
 
-    def _decompress_container(
+    def _decompress_container(  # noqa: C901 - one bounded unwrap dispatch (stream/uimage branches read clearer inline; worker edge)
         self, source_ref: str, container: str, max_output: int, max_ratio: int
     ) -> str:  # pragma: no cover - worker filesystem edge
         """Unwrap a compressed container to a payload file, zip-bomb-bounded (ADR-070; JVM-free).
@@ -918,7 +918,9 @@ class PyGhidraBackend:
 
         Args:
             source_ref: The confined compressed input path.
-            container: ``"gzip"`` | ``"xz"`` | ``"lzma"`` (schema-closed; re-checked here).
+            container: ``"gzip"`` | ``"xz"`` | ``"lzma"`` | ``"uimage"`` (schema-closed; re-checked
+                here). ``"uimage"`` strips the 64-byte U-Boot legacy header, then unwraps the
+                payload per its ``ih_comp`` field (none/gzip/lzma) under the same caps.
             max_output: Absolute cap on decompressed bytes.
             max_ratio: Cap on output ÷ input bytes.
 
@@ -939,18 +941,20 @@ class PyGhidraBackend:
         project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
         payload_path = os.path.join(project_dir, "payload.bin")  # noqa: PTH118
 
-        def _open(path: str) -> Any:
-            if container == "gzip":
+        def _open_comp(path: str, comp: str) -> Any:
+            if comp == "gzip":
                 return gzip.open(path, "rb")
-            if container == "xz":
+            if comp == "xz":
                 return lzma.open(path, "rb", format=lzma.FORMAT_XZ)
-            return lzma.open(path, "rb", format=lzma.FORMAT_ALONE)  # lzma (legacy .lzma/alone)
+            return lzma.open(path, "rb", format=lzma.FORMAT_AUTO)  # legacy .lzma (alone) / auto
 
-        total = 0
-        try:
-            with _open(source_ref) as src, open(payload_path, "wb") as dst:  # noqa: PTH123
+        def _stream_to_payload(reader: Any) -> None:
+            # Copy a chunked reader into payload_path, aborting the moment the running output
+            # exceeds the cap (a bomb never materializes — ADR-070 D3, streamed not buffered).
+            total = 0
+            with open(payload_path, "wb") as dst:  # noqa: PTH123
                 while True:
-                    chunk = src.read(1024 * 1024)
+                    chunk = reader.read(1024 * 1024)
                     if not chunk:
                         break
                     total += len(chunk)
@@ -959,11 +963,73 @@ class PyGhidraBackend:
                             CODE_LIMIT_EXCEEDED, "decompressed output exceeds the cap"
                         )
                     dst.write(chunk)
+
+        try:
+            if container == "uimage":
+                self._unwrap_uimage(source_ref, limit, _open_comp, _stream_to_payload)
+            else:
+                with _open_comp(source_ref, container) as src:
+                    _stream_to_payload(src)
         except WorkerError:
             raise
         except Exception as exc:  # bad/hostile stream — fail closed, category-safe
             raise WorkerError(CODE_NOT_FOUND, "container could not be decompressed") from exc
         return payload_path
+
+    def _unwrap_uimage(
+        self,
+        source_ref: str,
+        limit: int,
+        open_comp: Callable[[str, str], Any],
+        stream_to_payload: Callable[[Any], None],
+    ) -> None:  # pragma: no cover - worker filesystem edge
+        """Strip a uImage legacy envelope + unwrap its payload, bomb-bounded (ADR-070 follow-up).
+
+        Parses the 64-byte header with the PURE :func:`vivarium.core.uimage.parse_uimage_header`
+        (hostile bytes, hermetically fuzzed), slices the declared payload window (clamped to the
+        real file size — a header claiming more than exists never over-reads), then either writes
+        the raw payload (``ih_comp`` = none) or streams it through the matching decompressor — all
+        under the shared output cap.
+
+        Args:
+            source_ref: The confined uImage path.
+            limit: The already-computed absolute output cap (min of the abs cap + the ratio cap).
+            open_comp: The compressor opener (path, comp-name) → chunked reader.
+            stream_to_payload: The bounded chunk-copier into the payload file.
+        """
+        from vivarium.core.uimage import UIMAGE_HEADER_SIZE, parse_uimage_header
+
+        with open(source_ref, "rb") as handle:  # noqa: PTH123 — confined path from the server
+            meta = parse_uimage_header(handle.read(UIMAGE_HEADER_SIZE), max_payload_size=limit)
+        file_size = os.path.getsize(source_ref)  # noqa: PTH202
+        payload_len = min(meta.payload_size, max(0, file_size - UIMAGE_HEADER_SIZE))
+        if payload_len <= 0:
+            raise ValueError("uImage payload window is empty")
+
+        project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
+        # Extract the exact payload window to a temp (bounded by payload_len, already <= limit).
+        envelope_path = os.path.join(project_dir, "uimage_payload.bin")  # noqa: PTH118
+        with (
+            open(source_ref, "rb") as src,  # noqa: PTH123 — confined path
+            open(envelope_path, "wb") as dst,  # noqa: PTH123
+        ):
+            src.seek(UIMAGE_HEADER_SIZE)
+            remaining = payload_len
+            while remaining > 0:
+                chunk = src.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                dst.write(chunk)
+                remaining -= len(chunk)
+
+        if meta.comp == "none":
+            # No nested compression: rewrite the raw payload out under the cap (identity stream).
+            with open(envelope_path, "rb") as src:  # noqa: PTH123
+                stream_to_payload(src)
+            return
+        # Nested-compressed payload: stream-decompress the extracted window under the same cap.
+        with open_comp(envelope_path, meta.comp) as src:
+            stream_to_payload(src)
 
     def _gh_import(
         self,

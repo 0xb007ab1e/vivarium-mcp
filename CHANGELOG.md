@@ -56,10 +56,13 @@ real hardened worker. Separately, the **security-hardening / gap-remediation** w
     RAW per-instruction p-code for runs of constant stores to adjacent stack slots (invisible to the
     decompiler's `HighFunction` — dead-code elimination removes stores never read). Pure static
     analysis; recovered text untrusted. `xor_decode` (decode-loop emulation) is a tracked follow-up.
-  - **Container unwrap (ADR-070)** — an optional `container` (`gzip`/`xz`/`lzma`) on `session_import`
-    decompresses the input before loading, **streamed against hard zip-bomb caps** (absolute output +
-    ratio; aborts on overflow) in the worker, never the server. Mutually exclusive with `regions`;
-    additive/opt-in. uImage/androidboot header formats are a tracked follow-up.
+  - **Container unwrap (ADR-070)** — an optional `container` (`gzip`/`xz`/`lzma`/`uimage`) on
+    `session_import` decompresses the input before loading, **streamed against hard zip-bomb caps**
+    (absolute output + ratio; aborts on overflow) in the worker, never the server. `uimage` strips
+    the 64-byte U-Boot legacy header (parsed by the pure, fuzzed `core.uimage`) and unwraps its
+    payload per the header's own compression (none/gzip/lzma) under the same caps. Mutually
+    exclusive with `regions`; additive/opt-in. The `androidboot` (Android boot image) format is a
+    tracked follow-up.
   - **`emulate` call convenience + library-call stubs (ADR-066 D1+D2)** — an additive `call=true`
     sets up a scratch stack + sentinel return address, runs a function to its return, and reads the
     ABI return register into `return_value`. `stubs=[{target, action}]` substitutes an external

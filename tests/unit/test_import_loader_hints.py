@@ -541,12 +541,15 @@ def test_container_valid_with_auto_and_binary() -> None:
     assert m.container == "gzip"
     m2 = s.SessionImportIn.model_validate(_binary(source_ref="fw.gz", container="xz"))
     assert m2.container == "xz"
+    # ADR-070 follow-up: the U-Boot uImage envelope is now an accepted container.
+    m3 = s.SessionImportIn(session_id="s", source_ref="fw.uimg", container="uimage")
+    assert m3.container == "uimage"
 
 
 def test_container_unknown_rejected() -> None:
-    """A container outside the closed set (e.g. the deferred 'uimage') fails closed."""
+    """A container outside the closed set (e.g. the deferred 'androidboot') fails closed."""
     with pytest.raises(ValidationError):
-        s.SessionImportIn(session_id="s", source_ref="fw", container="uimage")  # type: ignore[arg-type]
+        s.SessionImportIn(session_id="s", source_ref="fw", container="androidboot")  # type: ignore[arg-type]
 
 
 def test_container_mutually_exclusive_with_regions() -> None:
