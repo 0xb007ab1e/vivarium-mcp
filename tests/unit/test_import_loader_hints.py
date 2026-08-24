@@ -397,3 +397,183 @@ def test_macho_slice_import_params_thread_loader_and_processor() -> None:
             "processor": "x86:LE:64:default",
         }
     ]
+
+
+# --- ADR-065: multi-region (scatter-load) import -------------------------------------------------
+def _regions(**over: object) -> dict[str, object]:
+    """A valid multi-region loader='binary' kwargs baseline; override per test."""
+    base: dict[str, object] = {
+        "session_id": "s",
+        "source_ref": "fw.bin",
+        "loader": "binary",
+        "processor": "ARM:LE:32:Cortex",
+        "regions": [
+            {"source_ref": "r0.bin", "base_addr": 0x1000},
+            {"offset": 0, "length": 8, "base_addr": 0x2000},
+        ],
+    }
+    base.update(over)
+    return base
+
+
+def test_regions_valid_accepted() -> None:
+    """A well-formed two-region set (one own-file, one slice) validates."""
+    m = s.SessionImportIn.model_validate(_regions())
+    assert m.regions is not None and len(m.regions) == 2
+    assert m.regions[0].source_ref == "r0.bin" and m.regions[0].offset is None
+    assert m.regions[1].offset == 0 and m.regions[1].length == 8
+
+
+def test_regions_requires_binary_loader() -> None:
+    """regions is only valid with loader='binary'."""
+    with pytest.raises(ValidationError):
+        s.SessionImportIn.model_validate(_regions(loader="auto", processor=None))
+
+
+def test_regions_mutually_exclusive_with_top_level_base_addr() -> None:
+    """Supplying regions AND a top-level base_addr/entry is ambiguous → rejected."""
+    with pytest.raises(ValidationError):
+        s.SessionImportIn.model_validate(_regions(base_addr=0x1000))
+    with pytest.raises(ValidationError):
+        s.SessionImportIn.model_validate(_regions(entry=0x1000))
+
+
+def test_region_source_xor_slice() -> None:
+    """A region takes EITHER source_ref OR offset/length — not both/neither/half."""
+    with pytest.raises(ValidationError):  # both
+        s.SessionImportIn.model_validate(
+            _regions(
+                regions=[{"source_ref": "r.bin", "offset": 0, "length": 4, "base_addr": 0x1000}]
+            )
+        )
+    with pytest.raises(ValidationError):  # neither
+        s.SessionImportIn.model_validate(_regions(regions=[{"base_addr": 0x1000}]))
+    with pytest.raises(ValidationError):  # offset without length
+        s.SessionImportIn.model_validate(_regions(regions=[{"offset": 0, "base_addr": 0x1000}]))
+
+
+def test_regions_slice_overlap_rejected_by_schema() -> None:
+    """Two known-length (slice) regions with overlapping address ranges are rejected in-schema."""
+    with pytest.raises(ValidationError):
+        s.SessionImportIn.model_validate(
+            _regions(
+                regions=[
+                    {"offset": 0, "length": 0x100, "base_addr": 0x1000},
+                    {"offset": 0x100, "length": 0x100, "base_addr": 0x1080},  # 0x1080 < 0x1100
+                ]
+            )
+        )
+
+
+def test_region_base_addr_and_entry_width_bounded() -> None:
+    """A region base_addr/entry beyond the processor's address width, or entry<base, is rejected."""
+    with pytest.raises(ValidationError):
+        s.SessionImportIn.model_validate(
+            _regions(regions=[{"source_ref": "r.bin", "base_addr": 1 << 32}])  # ARM32
+        )
+    with pytest.raises(ValidationError):
+        s.SessionImportIn.model_validate(
+            _regions(regions=[{"source_ref": "r.bin", "base_addr": 0x2000, "entry": 0x1000}])
+        )
+
+
+def test_regions_params_resolve_and_reach_worker() -> None:
+    """A valid multi-region import resolves each region and threads a `regions` param list."""
+    adapter, captured = _adapter_capturing_call()
+    args = s.SessionImportIn.model_validate(_regions())
+    adapter.import_binary("s", args)  # type: ignore[attr-defined]
+    assert len(captured) == 1
+    params = captured[0]
+    assert params["loader"] == "binary"
+    assert params["processor"] == "ARM:LE:32:Cortex"
+    regions = params["regions"]
+    assert isinstance(regions, list) and len(regions) == 2
+    # own-file region: resolved to (its ref, offset 0, its size 16 from the fake resolver).
+    assert regions[0] == {
+        "source_ref": "r0.bin",
+        "offset": 0,
+        "length": 16,
+        "base_addr": 0x1000,
+        "entry": None,
+    }
+    # slice region: carved from the parent source_ref at the given offset/length.
+    assert regions[1]["source_ref"] == "fw.bin"
+    assert regions[1]["offset"] == 0 and regions[1]["length"] == 8
+
+
+def test_regions_source_ref_overlap_rejected_before_worker() -> None:
+    """Overlap between own-file regions (lengths only known server-side) fails closed pre-worker."""
+    from vivarium.core.errors import ErrorType, GhidraMcpError
+
+    adapter, captured = _adapter_capturing_call()  # resolver sizes every ref to 16 bytes
+    args = s.SessionImportIn.model_validate(
+        _regions(
+            regions=[
+                {"source_ref": "a.bin", "base_addr": 0x1000},  # [0x1000, 0x1010)
+                {"source_ref": "b.bin", "base_addr": 0x1008},  # [0x1008, 0x1018) — overlaps
+            ]
+        )
+    )
+    with pytest.raises(GhidraMcpError) as ei:
+        adapter.import_binary("s", args)  # type: ignore[attr-defined]
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+    assert captured == []  # rejected before any RPC reached the worker
+
+
+def test_region_slice_beyond_parent_rejected_before_worker() -> None:
+    """A slice whose offset+length exceeds the parent source length fails closed pre-worker."""
+    from vivarium.core.errors import ErrorType, GhidraMcpError
+
+    adapter, captured = _adapter_capturing_call()  # parent resolves to 16 bytes
+    args = s.SessionImportIn.model_validate(
+        _regions(regions=[{"offset": 8, "length": 100, "base_addr": 0x1000}])  # 108 > 16
+    )
+    with pytest.raises(GhidraMcpError) as ei:
+        adapter.import_binary("s", args)  # type: ignore[attr-defined]
+    assert ei.value.envelope.type is ErrorType.VALIDATION
+    assert captured == []
+
+
+# --- ADR-070: container unwrap -------------------------------------------------------------------
+def test_container_valid_with_auto_and_binary() -> None:
+    """A container token is accepted with the auto path and combines with binary loader hints."""
+    m = s.SessionImportIn(session_id="s", source_ref="fw.gz", container="gzip")
+    assert m.container == "gzip"
+    m2 = s.SessionImportIn.model_validate(_binary(source_ref="fw.gz", container="xz"))
+    assert m2.container == "xz"
+    # ADR-070 follow-up: the U-Boot uImage envelope is now an accepted container.
+    m3 = s.SessionImportIn(session_id="s", source_ref="fw.uimg", container="uimage")
+    assert m3.container == "uimage"
+
+
+def test_container_unknown_rejected() -> None:
+    """A container outside the closed set (e.g. the deferred 'androidboot') fails closed."""
+    with pytest.raises(ValidationError):
+        s.SessionImportIn(session_id="s", source_ref="fw", container="androidboot")  # type: ignore[arg-type]
+
+
+def test_container_mutually_exclusive_with_regions() -> None:
+    """container (single compressed stream) and regions (scatter-load) cannot combine."""
+    with pytest.raises(ValidationError):
+        s.SessionImportIn.model_validate(_regions(source_ref="fw.gz", container="gzip"))
+
+
+def test_container_threads_token_and_caps_to_worker() -> None:
+    """A container import threads the token + the two zip-bomb caps to the worker."""
+    adapter, captured = _adapter_capturing_call()
+    args = s.SessionImportIn.model_validate(_binary(source_ref="fw.gz", container="gzip"))
+    adapter.import_binary("s", args)  # type: ignore[attr-defined]
+    params = captured[0]
+    assert params["container"] == "gzip"
+    out_cap = params["max_decompressed_bytes"]
+    ratio_cap = params["max_decompression_ratio"]
+    assert isinstance(out_cap, int) and out_cap > 0
+    assert isinstance(ratio_cap, int) and ratio_cap > 0
+
+
+def test_no_container_is_byte_for_byte_noop() -> None:
+    """Absent container ⇒ no container/caps keys cross the wire (the ADR-070 no-op guarantee)."""
+    adapter, captured = _adapter_capturing_call()
+    adapter.import_binary("s", s.SessionImportIn(session_id="s", source_ref="p.elf"))  # type: ignore[attr-defined]
+    assert "container" not in captured[0]
+    assert "max_decompressed_bytes" not in captured[0]

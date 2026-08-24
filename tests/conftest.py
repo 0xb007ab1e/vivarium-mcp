@@ -349,6 +349,33 @@ class FakeGhidraPort:
             truncated=a.max_nodes < 2,
         )
 
+    def recover_struct(self, sid: str, a: s.RecoverStructIn) -> s.RecoverStructOut:
+        """Return a deterministic proposed struct layout (inferred_type untrusted, ADR-069)."""
+        self._maybe_fail()
+        fields = [
+            s.ProposedField(offset=0, size=8, inferred_type=_ug("void *"), access="load"),
+            s.ProposedField(offset=8, size=4, inferred_type=_ug("int"), access="store"),
+            s.ProposedField(offset=16, size=8, inferred_type=None, access="addr"),
+        ]
+        return s.RecoverStructOut(
+            base=a.base,
+            fields=fields[: a.max_fields],
+            total_span=24,
+            truncated=a.max_fields < 3,
+        )
+
+    def deobfuscate_strings(self, sid: str, a: s.DeobfuscateStringsIn) -> s.DeobfuscateStringsOut:
+        """Return a deterministic recovered stack-string (text untrusted, ADR-068)."""
+        self._maybe_fail()
+        strings = [
+            s.RecoveredString(
+                address="0x00401000", technique="stack_string", text=_ug("Hello!"), length=6
+            )
+        ]
+        return s.DeobfuscateStringsOut(
+            strings=strings[: a.max_results], truncated=a.max_results < 1
+        )
+
     def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
         """Return a deterministic stack frame (name/type untrusted, ADR-054)."""
         self._maybe_fail()
@@ -441,6 +468,27 @@ class FakeGhidraPort:
         keep.sort(key=lambda m: m.confidence, reverse=True)
         return s.VersionTrackOut(
             matches=keep[: a.limit], match_count=len(matches), truncated=len(keep) > a.limit
+        )
+
+    def binary_diff(self, sid: str, a: s.BinaryDiffIn) -> s.BinaryDiffOut:
+        """Return a deterministic two-program diff (names untrusted, ADR-067)."""
+        self._maybe_fail()
+        added = [s.DiffFunction(address="0x00401100", name=_u("new_fn"))]
+        removed = [s.DiffFunction(address="0x00401200", name=_u("gone_fn"))]
+        changed = [
+            s.ChangedFunction(
+                address_a="0x00401000",
+                address_b="0x00401000",
+                name=_u("patched_fn"),
+                change="body",
+            )
+        ]
+        return s.BinaryDiffOut(
+            added=added[: a.max_entries],
+            removed=removed[: a.max_entries],
+            changed=changed[: a.max_entries],
+            summary=s.DiffSummary(added=1, removed=1, changed=1),
+            truncated=False,
         )
 
     def bsim_search_corpus(self, sid: str, a: s.BsimSearchCorpusIn) -> s.BsimSearchCorpusOut:
@@ -604,7 +652,7 @@ class FakeGhidraPort:
         self._maybe_fail()
         return s.EmulateOut(
             steps_executed=3,
-            stop_reason="stop-address" if a.stop_at else "max-steps",
+            stop_reason="stop-address" if (a.stop_at or a.call) else "max-steps",
             registers=[
                 s.RegisterValue(name=n, value=_u("08", encoding="hex"))
                 for n in (a.read_registers or [])
@@ -615,6 +663,7 @@ class FakeGhidraPort:
                 )
                 for r in (a.read_memory or [])
             ],
+            return_value=_u("0c", encoding="hex") if a.call else None,
         )
 
     def demangle(self, sid: str, a: s.DemangleIn) -> s.DemangleOut:
@@ -785,6 +834,10 @@ class FakeGhidraPort:
     def crypto_constant_scan(self, sid: str, a: s.CryptoConstantScanIn) -> s.CryptoConstantScanOut:
         """Reserved Tier-2 stub."""
         raise NotImplementedError("RESERVED (v1.1 ADR-008): crypto_constant_scan")
+
+    def secret_scan(self, sid: str, a: s.SecretScanIn) -> s.SecretScanOut:
+        """Reserved Tier-2 stub (ADR-072; the pure core + adapter are unit-tested directly)."""
+        raise NotImplementedError("RESERVED (ADR-072): secret_scan")
 
     def call_graph_metrics(self, sid: str, a: s.CallGraphMetricsIn) -> s.CallGraphMetricsOut:
         """Reserved Tier-2 stub."""

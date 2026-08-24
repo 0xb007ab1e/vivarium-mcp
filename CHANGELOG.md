@@ -12,6 +12,18 @@ new tool is read-only (or, for `apply_type_archive`, a consent-gated structural 
 the standard confinement + size caps before the worker (ADR-001); each was proven live against a
 real hardened worker. Separately, the **security-hardening / gap-remediation** work continues below.
 
+### Security
+
+- **Base-image HIGH CVEs — upgraded, not waived.** The image Trivy gate caught new HIGHs from base
+  drift; all fixed by upgrade (`workflow-cve-management`), base digests still pinned:
+  - **CVE-2026-14456** (openssl) — `libcrypto3`/`libssl3` fixed in `3.6.3-r5`. **Server** base bumped
+    to the current Chainguard `python` digests (`:latest` + `:latest-dev`, which ship `r5`).
+    **Worker** pins BOTH `libcrypto3>=3.6.3-r5` and `libssl3>=3.6.3-r5` in its runtime `apk add`
+    (its `wolfi-base` baked `r1`; the two are separate apk packages — one constraint does not drag
+    the other).
+  - **CVE-2026-38753 + CVE-2026-38754** (busybox, worker) — `wolfi-base` baked `1.37.0-r60`; the
+    worker pins `busybox>=1.38.0-r0`.
+
 ### Added
 
 - **Data-flow slicing (`data_flow_slice`, ADR-064) — v1.9.** A read-only, bounded intra-function
@@ -23,6 +35,64 @@ real hardened worker. Separately, the **security-hardening / gap-remediation** w
   vulnerability tracing (the 70th Tier-1 tool). Also filed the v1.9 capability-gap ADR batch
   ADR-065..072 (*Proposed*): multi-region import, emulation ergonomics, binary-diff, string
   deobfuscation, struct recovery, extended firmware loaders, debug-info import, firmware secret scan.
+- **v1.9 capability batch — ALL EIGHT (ADR-065..072).** The ADR-065..072 batch was ratified
+  (*Accepted*) and fully landed, growing the Tier-1 catalog **70 → 74** (four new tools;
+  ADR-065/066/070/071 extend `session_import`/`emulate`, no count change). Each is read-only (or
+  propose-only), enforces the standard confinement + size caps before the worker (ADR-001), wraps
+  binary-derived output untrusted (ADR-005), and was proven live against a real hardened worker:
+  - **`recover_struct` (ADR-069)** — propose a struct layout from access patterns off a base
+    pointer (pointer arithmetic + `LOAD`/`STORE` over the SSA `HighFunction`, unioned across all
+    SSA instances). **Propose-only** — never writes; materializing a proposal goes through the
+    gated `define_struct`/`apply_data_type`. `inferred_type` untrusted; offsets/sizes safe.
+  - **`secret_scan` (ADR-072)** — heuristic firmware-secret pass over defined strings
+    (hardcoded_credential / key_material / format_magic / property_secret_name, the T19 `WIFI_PWD`
+    case). **Redacted** (ADR-072 D3): a finding never carries the raw secret — only a masked
+    preview + a salted correlation hash; server logs stay redacted. Pure server-side (no JVM edge).
+  - **`binary_diff` (ADR-067)** — function-granularity two-program diff (added/removed/changed +
+    honest summary) by name-pairing + a `match_by` signal (`name` = body size + instruction count,
+    `function_hash` = Ghidra ExactInstructions hash). Loads both refs fresh + wipes them (the
+    session's own program is untouched); names untrusted. An optional `include_unchanged` also
+    returns the name-paired non-differing functions (the `unchanged` correspondence list +
+    `summary.unchanged` count) — a full map, not just deltas; default off is byte-for-byte the
+    deltas-only result. `bsim` content-pairing (for stripped binaries) is a tracked follow-up.
+  - **Multi-region scatter-load import (ADR-065)** — an optional `regions` list on `session_import`
+    loads a headerless raw image into one program with N memory blocks (each region its own
+    confined ref or an `offset`/`length` slice of the parent, at its `base_addr`; overlap rejected
+    server-side). Additive/opt-in; a differing arch is a separate session (D5).
+  - **Companion debug map import (ADR-071)** — an optional `debug_ref` + `debug_format="map"` on
+    `session_import` applies a detached name→address symbol map (linker/`nm`/`.sym`) as `IMPORTED`
+    labels to the loaded ELF before analysis (mirrors the ADR-061 PDB companion; mutually exclusive
+    with `pdb_ref`). Additive/opt-in. `debug_format="dwarf"` (detached DWARF) is a tracked
+    follow-up (fixture-blocked).
+  - **`deobfuscate_strings` (ADR-068)** — recover hidden **stack-strings** by walking a function's
+    RAW per-instruction p-code for runs of constant stores to adjacent stack slots (invisible to the
+    decompiler's `HighFunction` — dead-code elimination removes stores never read). Pure static
+    analysis; recovered text untrusted. `xor_decode` (decode-loop emulation) is a tracked follow-up.
+  - **Container unwrap (ADR-070)** — an optional `container` (`gzip`/`xz`/`lzma`/`uimage`) on
+    `session_import` decompresses the input before loading, **streamed against hard zip-bomb caps**
+    (absolute output + ratio; aborts on overflow) in the worker, never the server. `uimage` strips
+    the 64-byte U-Boot legacy header (parsed by the pure, fuzzed `core.uimage`) and unwraps its
+    payload per the header's own compression (none/gzip/lzma) under the same caps. Mutually
+    exclusive with `regions`; additive/opt-in. The `androidboot` (Android boot image) format is a
+    tracked follow-up.
+  - **`emulate` call convenience + library-call stubs (ADR-066 D1+D2)** — an additive `call=true`
+    sets up a scratch stack + sentinel return address, runs a function to its return, and reads the
+    ABI return register into `return_value`. `stubs=[{target, action}]` substitutes an external
+    `CALL` (`return_const:<int>` / `skip`) so a routine that calls `memcpy`/`strlen`/a ROM thunk
+    completes instead of halting — never running real code (ADR-049 sandbox intact), opt-in, capped
+    (`_MAX_EMULATE_STUBS` table + application cap → `stop_reason="stub-limit"`). An optional
+    `args=[int, ...]` (with `call=true`) auto-places each integer into the target function's
+    parameter storage per its RESOLVED calling convention (`set_function_signature` it first — a raw
+    binary's convention is null, proven); register-passed params are supported, a stack-passed param
+    fails closed (stage it via `write_memory`). Input buffers stay caller-provided. Live-proven:
+    `add(5, 7) == 12` placed into the resolved param registers.
+  - **Live-regression gating for the v1.9 worker tools.** The six worker-touching v1.9 tools now
+    each have a gated in-container integration test proving them against a freshly rebuilt worker —
+    `recover_struct` (069), `binary_diff` (067, two identical ELFs diff to 0/0/0), multi-region
+    scatter-load import (065, two regions → two blocks), companion debug map (071, a `.map` symbol
+    applied), `deobfuscate_strings` (068, a byte-by-byte x86-64 stack-string recovers `"Hello!"`),
+    and `emulate` (066) — added to the `live-regression` hard-gate list (collection floor 27 → 33,
+    or 35 with the self-activating FID gate) so a worker regression fails CI, not just review.
 - **Broader `session_import` loader coverage.** Import **headerless raw/firmware images**
   (`loader="binary"` + `processor`/`base_addr`/`entry`, ADR-045); **Intel-HEX / Motorola-SREC**
   firmware (ADR-046); **self-describing DEX / Mach-O / APK** (force the loader, ADR-047); and select

@@ -38,6 +38,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
@@ -148,7 +149,17 @@ _DEFAULT_SOURCE_REF_DETAIL = "input reference could not be resolved"
 # --- Tier-2 internal scan budgets (ADR-008; bounded BEFORE the worker — std-cwe CWE-400) -----
 #: How many defined strings ``ioc_scan`` pulls in one bounded page before scanning (the worker also
 #: clamps; ``truncated`` is honest when more exist). Sized to a generous-but-bounded triage window.
+#: Hard ceiling on a decompressed container payload (ADR-070 D3 zip-bomb defense). The worker
+#: streams the decompress against this and aborts on overflow — a bomb never materializes a large
+#: buffer. Paired with the ratio cap (whichever binds first).
+_MAX_DECOMPRESSED_BYTES = 512 * 1024 * 1024  # 512 MiB
+#: Hard ceiling on output ÷ input for a container decompress (ADR-070 D3). A stream exceeding this
+#: ratio is a bomb → aborted, fail closed.
+_MAX_DECOMPRESSION_RATIO = 200
 _IOC_STRING_BUDGET = 10_000
+#: Max strings pulled for the ``secret_scan`` pass (ADR-072); bounds the scanned set + feeds
+#: ``truncated`` when the program has more strings than the budget.
+_SECRET_STRING_BUDGET = 10_000
 #: Max ``search_bytes`` matches requested per crypto signature (each search is already bounded; this
 #: caps the per-signature contribution to the aggregate and feeds ``truncated``).
 _CRYPTO_MATCH_BUDGET = 1_000
@@ -482,7 +493,9 @@ class RpcGhidraAdapter:
         self._preflight_check(size_bytes)
         return size_bytes
 
-    def import_binary(self, session_id: str, args: s.SessionImportIn) -> s.SessionInfo:
+    def import_binary(  # noqa: C901 - one branch per loader kind + the ADR-065 region resolution
+        self, session_id: str, args: s.SessionImportIn
+    ) -> s.SessionInfo:
         """Import the binary into the session's worker, enforcing the size cap FIRST.
 
         The binary-size cap is checked server-side and pre-Ghidra (DoS first line — PLAN §3 F7,
@@ -514,11 +527,50 @@ class RpcGhidraAdapter:
             "source_ref": args.source_ref,
             "expected_sha256": args.expected_sha256,
         }
+        # ADR-065: a multi-region (scatter-load) raw import. Resolve + confine + size-cap EACH
+        # region BEFORE the worker (per-region CWE-22/CWE-400), reject overlapping ranges with the
+        # full known lengths, then thread a resolved region list. The schema already enforced
+        # loader='binary', the shared processor, the mutual-exclusion with base_addr/entry, the
+        # per-region address-width, and slice-region overlap; here we add the source_ref-region
+        # size resolution + the full overlap check. `regions=None` skips this branch entirely.
+        if args.regions is not None:
+            params["loader"] = "binary"
+            params["processor"] = args.processor
+            resolved_regions: list[dict[str, object]] = []
+            spans: list[tuple[int, int]] = []
+            for region in args.regions:
+                if region.source_ref is not None:
+                    region_size = self._resolve_and_cap(region.source_ref)
+                    region_path, region_offset, region_length = region.source_ref, 0, region_size
+                else:
+                    # A slice of the (already resolved + capped) parent source_ref.
+                    region_offset = int(region.offset or 0)
+                    region_length = int(region.length or 0)
+                    if region_offset + region_length > size_bytes:
+                        raise _errors.make_error(
+                            ErrorType.VALIDATION, "a region slice exceeds the source length"
+                        )
+                    region_path = args.source_ref
+                resolved_regions.append(
+                    {
+                        "source_ref": region_path,
+                        "offset": region_offset,
+                        "length": region_length,
+                        "base_addr": region.base_addr,
+                        "entry": region.entry,
+                    }
+                )
+                spans.append((region.base_addr, region.base_addr + region_length))
+            spans.sort()
+            for (_a0, a_end), (b_start, _b1) in pairwise(spans):
+                if b_start < a_end:
+                    raise _errors.make_error(ErrorType.VALIDATION, "region address ranges overlap")
+            params["regions"] = resolved_regions
         # Loader hints: only attach when explicitly opted in (loader != 'auto'). When loader='auto'
         # (the default) NO extra key crosses the wire — params are byte-for-byte identical to the
         # pre-ADR-045 auto path (the ADR-029/030 no-op guarantee). The schema has already validated
         # the hint combination + the processor allow-list server-side.
-        if args.loader == "binary":
+        elif args.loader == "binary":
             params["loader"] = args.loader
             params["processor"] = args.processor
             params["base_addr"] = args.base_addr
@@ -542,6 +594,21 @@ class RpcGhidraAdapter:
         if args.pdb_ref is not None:
             self._resolve_and_cap(args.pdb_ref)
             params["pdb_ref"] = args.pdb_ref
+        # ADR-071 companion debug info (opt-in; loader='auto' only, enforced by the schema): confine
+        # + size-cap the debug file with the SAME resolver/cap/pre-flight as the binary, then thread
+        # it with its format. Absent → no key crosses (byte-for-byte no-op).
+        if args.debug_ref is not None:
+            self._resolve_and_cap(args.debug_ref)
+            params["debug_ref"] = args.debug_ref
+            params["debug_format"] = args.debug_format
+        # ADR-070 container unwrap (opt-in): the compressed input already passed the standard size
+        # cap above (as source_ref). Thread the token + the two zip-bomb caps (absolute output +
+        # ratio); the WORKER streams the decompress against them and fails closed on overflow (the
+        # server never parses container bytes — ADR-001/D4). Absent → no key crosses (no-op).
+        if args.container is not None:
+            params["container"] = args.container
+            params["max_decompressed_bytes"] = _MAX_DECOMPRESSED_BYTES
+            params["max_decompression_ratio"] = _MAX_DECOMPRESSION_RATIO
         result = self._call(
             session_id,
             "import_binary",
@@ -1140,6 +1207,37 @@ class RpcGhidraAdapter:
             )
         )
 
+    def recover_struct(self, sid: str, a: s.RecoverStructIn) -> s.RecoverStructOut:
+        """Propose a struct layout from access patterns off a base pointer (ADR-069)."""
+        return _build_recover_struct(
+            self._tool_call(
+                sid,
+                "recover_struct",
+                {
+                    "function": a.function,
+                    "base": a.base,
+                    "max_fields": a.max_fields,
+                    "max_accesses": a.max_accesses,
+                },
+            )
+        )
+
+    def deobfuscate_strings(self, sid: str, a: s.DeobfuscateStringsIn) -> s.DeobfuscateStringsOut:
+        """Recover hidden (stack-string) strings from a function/program scan (ADR-068)."""
+        return _build_deobfuscate_strings(
+            self._tool_call(
+                sid,
+                "deobfuscate_strings",
+                {
+                    "function": a.function,
+                    "techniques": a.techniques,
+                    "min_length": a.min_length,
+                    "max_results": a.max_results,
+                    "max_bytes": a.max_bytes,
+                },
+            )
+        )
+
     def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
         """Return a function's recovered stack-frame layout (ADR-054)."""
         return _build_stack_frame(self._tool_call(sid, "stack_frame", {"function": a.function}))
@@ -1226,6 +1324,31 @@ class RpcGhidraAdapter:
                     "correlator": a.correlator,
                     "min_confidence": a.min_confidence,
                     "limit": a.limit,
+                },
+                timeout_s=self._analysis_timeout_s,
+            )
+        )
+
+    def binary_diff(self, sid: str, a: s.BinaryDiffIn) -> s.BinaryDiffOut:
+        """Function-granularity diff of two confined binaries (session read-only — ADR-067).
+
+        Both refs are confined + size-capped server-side BEFORE the worker (reusing the
+        ``import_binary`` resolver/cap/pre-flight); the worker loads both fresh, analyzes both,
+        diffs, and wipes them. Bounded by the (longer) analysis timeout (two loads + two
+        analyses).
+        """
+        self._resolve_and_cap(a.program_a)
+        self._resolve_and_cap(a.program_b)
+        return _build_binary_diff(
+            self._call(
+                sid,
+                "binary_diff",
+                {
+                    "program_a": a.program_a,
+                    "program_b": a.program_b,
+                    "match_by": a.match_by,
+                    "include_unchanged": a.include_unchanged,
+                    "max_entries": a.max_entries,
                 },
                 timeout_s=self._analysis_timeout_s,
             )
@@ -1367,6 +1490,9 @@ class RpcGhidraAdapter:
                     "read_memory": [
                         {"address": r.address, "length": r.length} for r in (a.read_memory or [])
                     ],
+                    "call": a.call,
+                    "stubs": [{"target": st.target, "action": st.action} for st in (a.stubs or [])],
+                    "args": a.args,
                 },
             )
         )
@@ -1611,6 +1737,49 @@ class RpcGhidraAdapter:
         return s.CryptoConstantScanOut(
             findings=[
                 s.CryptoConstantFinding(algorithm=h.algorithm, kind=h.kind, address=h.address)
+                for h in page
+            ],
+            total=total,
+            truncated=truncated,
+        )
+
+    def secret_scan(self, sid: str, a: s.SecretScanIn) -> s.SecretScanOut:
+        """Heuristic firmware-secret scan over defined strings (PURE core over ``list_strings``).
+
+        Fetches a bounded page of strings, runs the pure REDACTED
+        :func:`core.secretscan.scan_secrets` (ADR-072 D3 — no raw secret leaves that core), then
+        paginates. Only the masked preview is binary-derived and wrapped BINARY-origin (ADR-005);
+        ``preview_hash``/``address``/``category``
+        are safe. Redaction is first-class: this adapter logs NOTHING about the values (no raw, no
+        full preview) — the pure core already reduced each value to a masked preview + hash.
+        """
+        from vivarium.core import secretscan
+
+        strings = _build_string_list(
+            self._tool_call(
+                sid,
+                "list_strings",
+                {"offset": 0, "limit": _SECRET_STRING_BUDGET, "min_length": a.min_length},
+            )
+        )
+        rows = [(ds.address, ds.value.value) for ds in strings.strings]
+        categories = tuple(a.categories) if a.categories else None
+        hits = secretscan.scan_secrets(
+            rows, categories=categories, entropy_threshold=a.entropy_threshold
+        )
+        total = len(hits)
+        page = hits[a.offset : a.offset + a.limit]
+        truncated = strings.truncated or (a.offset + a.limit < total)
+        return s.SecretScanOut(
+            findings=[
+                s.SecretFinding(
+                    address=h.address,
+                    category=h.category,
+                    pattern_id=h.pattern_id,
+                    masked_preview=_w(h.masked_preview, DataOrigin.BINARY),
+                    preview_hash=h.preview_hash,
+                    entropy=h.entropy,
+                )
                 for h in page
             ],
             total=total,
@@ -2639,6 +2808,48 @@ def _build_data_flow_slice(r: dict[str, Any]) -> s.DataFlowSliceOut:
     )
 
 
+def _build_proposed_field(r: dict[str, Any]) -> s.ProposedField:
+    """Build one :class:`ProposedField` (ADR-069): ``inferred_type`` is decompiler-derived."""
+    raw_type = r.get("inferred_type")
+    return s.ProposedField(
+        offset=int(r["offset"]),
+        size=int(r.get("size") or 0),
+        inferred_type=None if raw_type is None else _w(str(raw_type), DataOrigin.GHIDRA),
+        access=r["access"],
+        confidence=r.get("confidence", "observed"),
+    )
+
+
+@_fail_closed
+def _build_recover_struct(r: dict[str, Any]) -> s.RecoverStructOut:
+    """Build :class:`RecoverStructOut` (ADR-069) — a proposed layout, never applied."""
+    return s.RecoverStructOut(
+        base=str(r["base"]),
+        fields=[_build_proposed_field(f) for f in r.get("fields", [])],
+        total_span=int(r.get("total_span") or 0),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_recovered_string(r: dict[str, Any]) -> s.RecoveredString:
+    """Build one :class:`RecoveredString` (ADR-068): the recovered text is binary-derived."""
+    return s.RecoveredString(
+        address=str(r["address"]),
+        technique=r["technique"],
+        text=_w(str(r["text"]), DataOrigin.BINARY),
+        length=int(r["length"]),
+    )
+
+
+@_fail_closed
+def _build_deobfuscate_strings(r: dict[str, Any]) -> s.DeobfuscateStringsOut:
+    """Build :class:`DeobfuscateStringsOut` (ADR-068); each recovered text is UNTRUSTED."""
+    return s.DeobfuscateStringsOut(
+        strings=[_build_recovered_string(x) for x in r.get("strings", [])],
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
 @_fail_closed
 def _build_stack_variable(r: dict[str, Any]) -> s.StackVariable:
     """Build one :class:`StackVariable`: name + data_type are binary/Ghidra-derived (untrusted)."""
@@ -2758,6 +2969,40 @@ def _build_version_track(r: dict[str, Any]) -> s.VersionTrackOut:
     return s.VersionTrackOut(
         matches=[_build_version_match(m) for m in r.get("matches", [])],
         match_count=int(r["match_count"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_diff_function(r: dict[str, Any]) -> s.DiffFunction:
+    """Build one added/removed :class:`DiffFunction` (ADR-067): the name is binary-derived."""
+    return s.DiffFunction(address=str(r["address"]), name=_w(str(r["name"]), DataOrigin.BINARY))
+
+
+def _build_changed_function(r: dict[str, Any]) -> s.ChangedFunction:
+    """Build one :class:`ChangedFunction` (ADR-067): the shared name is binary-derived."""
+    return s.ChangedFunction(
+        address_a=str(r["address_a"]),
+        address_b=str(r["address_b"]),
+        name=_w(str(r["name"]), DataOrigin.BINARY),
+        change=r["change"],
+    )
+
+
+@_fail_closed
+def _build_binary_diff(r: dict[str, Any]) -> s.BinaryDiffOut:
+    """Build :class:`BinaryDiffOut` (ADR-067); names are UNTRUSTED, addresses/counts SAFE."""
+    summary = r["summary"]
+    return s.BinaryDiffOut(
+        added=[_build_diff_function(f) for f in r.get("added", [])],
+        removed=[_build_diff_function(f) for f in r.get("removed", [])],
+        changed=[_build_changed_function(f) for f in r.get("changed", [])],
+        unchanged=[_build_diff_function(f) for f in r.get("unchanged", [])],
+        summary=s.DiffSummary(
+            added=int(summary["added"]),
+            removed=int(summary["removed"]),
+            changed=int(summary["changed"]),
+            unchanged=int(summary.get("unchanged", 0)),
+        ),
         truncated=bool(r.get("truncated", False)),
     )
 
@@ -2946,9 +3191,9 @@ def _build_read_bytes(r: dict[str, Any]) -> s.ReadBytesOut:
 def _build_emulate(r: dict[str, Any]) -> s.EmulateOut:
     """Build :class:`EmulateOut` (ADR-049): register/memory VALUES are BINARY (emulation output)."""
     sr = str(r["stop_reason"])
-    if sr not in ("stop-address", "max-steps", "halted", "fault"):
+    if sr not in ("stop-address", "max-steps", "halted", "fault", "stub-limit"):
         sr = "fault"  # fail closed on an unexpected worker stop_reason
-    stop_reason = cast('Literal["stop-address", "max-steps", "halted", "fault"]', sr)
+    stop_reason = cast('Literal["stop-address", "max-steps", "halted", "fault", "stub-limit"]', sr)
     return s.EmulateOut(
         steps_executed=int(r["steps_executed"]),
         stop_reason=stop_reason,
@@ -2966,6 +3211,11 @@ def _build_emulate(r: dict[str, Any]) -> s.EmulateOut:
             )
             for x in r.get("memory", [])
         ],
+        return_value=(
+            None
+            if r.get("return_value") is None
+            else _w(str(r["return_value"]), DataOrigin.BINARY, encoding="hex")
+        ),
     )
 
 

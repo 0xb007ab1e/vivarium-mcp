@@ -170,6 +170,14 @@ listing — read-only; lifts each instruction's raw p-code ops, no execution), `
 `data_flow_slice` (ADR-064 bounded intra-function def-use slice — read-only; walks the HighFunction
 SSA def-use graph backward=defs/forward=uses from a seed address, boundary nodes at params/constants,
 bounded by max_nodes/max_depth; each rendered op is untrusted),
+`recover_struct` (ADR-069 propose a struct layout from access patterns — read-only, propose-only;
+walks the HighFunction accesses off a base pointer — pointer arithmetic + LOAD/STORE unioned across
+SSA instances — proposing one field per observed access, never writing; inferred_type untrusted),
+`deobfuscate_strings` (ADR-068 recover hidden strings — read-only; the `stack_string` technique
+walks a function's RAW per-instruction p-code for runs of constant stores to adjacent stack slots
+and reassembles them via the pure core — invisible to the HighFunction because dead-code elimination
+removes stores never read; function-scoped or a bounded program scan; recovered text untrusted;
+`xor_decode` deferred),
 `stack_frame` (ADR-054 recovered stack layout — read-only; the function's locals/parameters with
 offsets, types, sizes from the Stack analyzer), `basic_blocks` (ADR-055 control-flow graph —
 read-only; each basic block's address range + intraprocedural successor edges from
@@ -183,7 +191,12 @@ Tracking — read-only w.r.t. the session; confines + size-caps two refs server-
 fresh in the worker via the lockable domain-file path, auto-analyzes both, runs an allow-listed VT
 correlator, returns `{matches[]{source_address, destination_address, similarity, confidence},
 match_count, truncated}`, then releases + wipes both — the session's own program is never a
-participant), `bsim_search_corpus` (ADR-062 cross-binary BSim search over an EPHEMERAL corpus —
+participant), `binary_diff` (ADR-067 function-granularity two-program diff — read-only w.r.t. the
+session; confines + size-caps two refs server-side, loads BOTH fresh in the worker, auto-analyzes
+both, indexes functions by name, classifies added/removed/changed by name-pairing + the `match_by`
+signal (`name`=body size + instruction count, `function_hash`=Ghidra ExactInstructions hash),
+returns `{added[], removed[], changed[], summary, truncated}` — names UNTRUSTED, then releases +
+wipes both), `bsim_search_corpus` (ADR-062 cross-binary BSim search over an EPHEMERAL corpus —
 read-only w.r.t. the session; confines + size-caps the target + up to 16 reference refs, loads each
 fresh one at a time, BSim-signs, returns each target function's best reference-corpus match
 `{matches[]{target_address, target_name, reference_index, reference_address, reference_name,
@@ -193,7 +206,13 @@ persistent DB, session program untouched), `list_functions`, `get_function`,
 `get_data_type`, `list_data_types` (ADR-056 the list-counterpart to `get_data_type` — read-only;
 paginated summary rows over the program's DataTypeManager), `get_comments`, `memory_map`, `read_bytes`,
 `emulate` (ADR-049 p-code emulation —
-bounded, read-effect-only; interpreter, no native exec/syscalls/IO), `demangle` (ADR-050 C++
+bounded, read-effect-only; interpreter, no native exec/syscalls/IO; ADR-066 `call=true` adds the
+call convenience — the worker sets up a scratch stack + sentinel return address, runs to the return,
+and reads the ABI return register into `return_value`; args/buffers stay caller-provided via
+set_registers/write_memory; ADR-066 D2 `stubs=[{target, action=return_const:N|skip}]` substitutes
+an external call the routine makes — returning to the caller instead of executing/halting, never
+running real code or touching the host — with a `stub-limit` stop_reason when the budget is
+exhausted), `demangle` (ADR-050 C++
 demangler — read-only, program-independent; GNU/Itanium + MSVC), `search_bytes`, `search_strings`,
 `program_metadata`, the v1.1 semantic-naming extraction primitives `call_graph` and
 `referenced_strings` (ADR-007), the v1.1 Tier-2 extraction primitives `function_cfg`, `imports`,
@@ -308,6 +327,35 @@ A fat/universal Mach-O loads its default slice, or the slice named by an optiona
 **re-validates** the language against the installed set and fails closed `not-found` if absent
 (defense in depth). **Additive, opt-in, no new capability/agency** — read-only import, no script
 execution, tool count unchanged (ADR-001 intact).
+
+**`import_binary` — multi-region scatter-load (v1.9 — ADR-065; server → worker, OPTIONAL):** the
+params MAY carry `regions` — a resolved list `[{source_ref, offset, length, base_addr, entry?}]`
+(each `source_ref` a server-confined path, `offset`/`length` the exact byte slice) — with
+`loader="binary"` + one shared `processor`. The worker opens ONE program at the Language (via
+`BinaryLoader` on the parent ref), drops the loader's default block, and creates one initialized
+memory block per region (`Memory.createInitializedBlock` from `path[offset:offset+length]`) at its
+`base_addr`, seeding each region's `entry`. The server resolves + confines + size-caps EVERY region
+and rejects overlapping address ranges **before** the worker (per-region CWE-22/CWE-400, D2/D3);
+absent ⇒ byte-for-byte the single-region path. Additive/opt-in, read-only, tool count unchanged.
+
+**`import_binary` — companion debug map (v1.9 — ADR-071; server → worker, OPTIONAL):** the params
+MAY carry `debug_ref` (a second server-confined + size-capped path under `VIVARIUM_IMPORT_ROOT`) +
+`debug_format` (`"map"`), allowed only with the auto loader and mutually exclusive with `pdb_ref`
+(a program takes one companion). When present, after the ELF is loaded the worker parses the map
+with the pure `core.debugmap.parse_symbol_map` and creates one `IMPORTED` label per name→address
+symbol (inside a transaction), before analysis. The ref is confined + size-capped **before** the
+worker; a malformed map fails closed `not-found`; out-of-space addresses are skipped honestly.
+Additive/opt-in, read-only, tool count unchanged. (`debug_format="dwarf"` is a tracked follow-up.)
+
+**`import_binary` — container unwrap (v1.9 — ADR-070; server → worker, OPTIONAL):** the params MAY
+carry `container` (`"gzip"`/`"xz"`/`"lzma"`) + `max_decompressed_bytes` + `max_decompression_ratio`.
+When present the worker DECOMPRESSES `source_ref` first (via the stdlib decompressor for the token),
+streaming the output against `min(max_decompressed_bytes, input_size × max_decompression_ratio)` and
+ABORTING on overflow (`limit-exceeded` — a zip-bomb never materializes a large buffer, ADR-070 D3),
+then loads the decompressed payload with the loader hints. Parsed in the worker, never the server
+(ADR-001/D4); a corrupt stream fails closed `not-found`. Mutually exclusive with `regions`. Absent ⇒
+byte-for-byte the pre-ADR-070 path. Additive/opt-in, read-only, tool count unchanged. (uImage /
+androidboot header formats are a tracked follow-up.)
 
 **`import_binary` — companion PDB (v1.8 — ADR-061; server → worker, OPTIONAL):** the params MAY
 carry `pdb_ref` (a second server-confined + size-capped path under `VIVARIUM_IMPORT_ROOT`), allowed

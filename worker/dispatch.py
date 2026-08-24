@@ -84,6 +84,8 @@ RPC_METHODS = frozenset(
         "get_pcode",
         "get_high_pcode",
         "data_flow_slice",
+        "recover_struct",
+        "deobfuscate_strings",
         "stack_frame",
         "basic_blocks",
         "list_data_types",
@@ -91,6 +93,7 @@ RPC_METHODS = frozenset(
         "bsim_similarity",
         "find_similar_functions",
         "version_track",
+        "binary_diff",
         "bsim_search_corpus",
         "list_functions",
         "get_function",
@@ -230,6 +233,14 @@ class GhidraBackend(Protocol):
         """Return a bounded intra-function def-use slice from a seed — v1.9 (ADR-064)."""
         ...
 
+    def recover_struct(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Propose a struct layout from access patterns off a base pointer — v1.9 (ADR-069)."""
+        ...
+
+    def deobfuscate_strings(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Recover hidden (stack-string) strings from a function/program scan — v1.9 (ADR-068)."""
+        ...
+
     def stack_frame(self, params: dict[str, Any]) -> dict[str, Any]:
         """Return a function's recovered stack-frame layout — v1.8 (ADR-054)."""
         ...
@@ -256,6 +267,10 @@ class GhidraBackend(Protocol):
 
     def version_track(self, params: dict[str, Any]) -> dict[str, Any]:
         """Correlate functions between two confined binaries via Ghidra VT — v1.8 (ADR-060)."""
+        ...
+
+    def binary_diff(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Function-granularity diff of two confined binaries — v1.9 (ADR-067)."""
         ...
 
     def bsim_search_corpus(self, params: dict[str, Any]) -> dict[str, Any]:

@@ -32,6 +32,14 @@ _MAX_READ_BYTES = 1_048_576  # 1 MiB
 # Defensive per-instruction ceiling on emitted p-code ops (v1.8 — ADR-052 get_pcode). A SLEIGH
 # instruction lifts to a bounded op count, but cap it so one instruction can't balloon the response.
 _MAX_PCODE_OPS_PER_INSN = 256
+#: Cap on functions scanned in a whole-program `deobfuscate_strings` scan (ADR-068 D5) — bounds the
+#: raw-p-code walk so an adversarial binary cannot force an unbounded scan; the per-call wall-clock
+#: kill backs it. A `function`-scoped call ignores this (one function).
+_DEOBFUSCATE_FUNCTION_SCAN_CAP = 2_000
+#: Cap on library-call stub APPLICATIONS during one `emulate` call (ADR-066 D2). A hostile routine
+#: that calls a stubbed target in a tight loop is already bounded by `max_steps`; this bounds the
+#: substitutions and surfaces `stop_reason="stub-limit"` honestly when exceeded (CWE-400).
+_MAX_EMULATE_STUB_APPLICATIONS = 100_000
 # Max FID match candidates the worker ever returns from identify_functions (v1.x — ADR-042 Phase 1;
 # mirrors rpc_client._IDENTIFY_MATCH_BUDGET). Defense-in-depth: the FID service can emit many
 # candidates per function on a large binary; the worker clamps + sets truncated, the server caps
@@ -225,7 +233,26 @@ class PyGhidraBackend:
             A plain ``SessionInfo``-shaped dict.
         """
         source_ref = _require(params, "source_ref")
+        container = params.get("container")
+        if container is not None:
+            # ADR-070: unwrap the compressed container FIRST (streamed, zip-bomb-capped), then load
+            # the decompressed payload with the loader hints below. Parsing hostile container bytes
+            # happens here in the worker, never the server (ADR-001/D4).
+            source_ref = self._decompress_container(
+                str(source_ref),
+                str(container),
+                int(params.get("max_decompressed_bytes", 512 * 1024 * 1024)),
+                int(params.get("max_decompression_ratio", 200)),
+            )
         loader = params.get("loader")
+        regions = params.get("regions")
+        if regions is not None:
+            # ADR-065: multi-region scatter-load. The server resolved/confined/size-capped every
+            # region and rejected overlap; the worker opens one program at the shared processor and
+            # creates one memory block per region.
+            return self._gh_import_regions(
+                str(source_ref), str(_require(params, "processor")), list(regions)
+            )
         if loader == "binary":
             return self._gh_import(
                 str(source_ref),
@@ -248,10 +275,19 @@ class PyGhidraBackend:
             return self._gh_import(
                 str(source_ref), loader="macho", processor=None if proc is None else str(proc)
             )
-        # AUTO path — plus the optional ADR-061 companion PDB (the server allows pdb_ref only with
-        # loader='auto', so it threads here and nowhere else).
+        # AUTO path — plus the optional ADR-061 companion PDB / ADR-071 companion debug map (the
+        # server allows pdb_ref/debug_ref only with loader='auto', so they thread here and nowhere
+        # else; the schema makes them mutually exclusive).
         pdb_ref = params.get("pdb_ref")
-        return self._gh_import(str(source_ref), pdb_ref=None if pdb_ref is None else str(pdb_ref))
+        debug_ref = params.get("debug_ref")
+        return self._gh_import(
+            str(source_ref),
+            pdb_ref=None if pdb_ref is None else str(pdb_ref),
+            debug_ref=None if debug_ref is None else str(debug_ref),
+            debug_format=None
+            if params.get("debug_format") is None
+            else str(params["debug_format"]),
+        )
 
     def analyze(
         self,
@@ -358,6 +394,27 @@ class PyGhidraBackend:
             _clamp_count(params.get("max_depth", 64)),
         )
 
+    def recover_struct(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Propose a struct layout from access patterns off a base pointer (read-only — ADR-069)."""
+        return self._gh_recover_struct(
+            str(_require(params, "function")),
+            str(_require(params, "base")),
+            _clamp_count(params.get("max_fields", 256)),
+            _clamp_count(params.get("max_accesses", 1024)),
+        )
+
+    def deobfuscate_strings(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Recover hidden (stack-string) strings from a function/program scan — ADR-068."""
+        function = params.get("function")
+        techniques = params.get("techniques") or ["stack_string"]
+        return self._gh_deobfuscate_strings(
+            None if function is None else str(function),
+            [str(t) for t in techniques],
+            _clamp_count(params.get("min_length", 4)),
+            _clamp_count(params.get("max_results", 256)),
+            _clamp_count(params.get("max_bytes", 256)),
+        )
+
     def stack_frame(self, params: dict[str, Any]) -> dict[str, Any]:
         """Return a function's recovered stack-frame layout (read-only — ADR-054)."""
         return self._gh_stack_frame(str(_require(params, "function")))
@@ -404,6 +461,21 @@ class PyGhidraBackend:
             correlator=str(params.get("correlator", "exact_instructions")),
             min_confidence=float(params.get("min_confidence", 0.0)),
             limit=_clamp_count(params.get("limit", 100)),
+        )
+
+    def binary_diff(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Function-granularity diff of two confined binaries (read-only — ADR-067).
+
+        Both refs are loaded fresh in a throwaway project inside this worker, analyzed, diffed
+        (added/removed/changed by name-pairing + the ``match_by`` change signal), then released +
+        wiped. The paths were confined + size-capped by the server (ADR-001 / CWE-22 / CWE-400).
+        """
+        return self._gh_binary_diff(
+            source_ref_a=str(_require(params, "program_a")),
+            source_ref_b=str(_require(params, "program_b")),
+            match_by=str(params.get("match_by", "name")),
+            max_entries=_clamp_count(params.get("max_entries", 1000)),
+            include_unchanged=bool(params.get("include_unchanged", False)),
         )
 
     def bsim_search_corpus(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -488,6 +560,9 @@ class PyGhidraBackend:
             stop_at=(None if params.get("stop_at") is None else str(params["stop_at"])),
             read_registers=list(params.get("read_registers") or []),
             read_memory=list(params.get("read_memory") or []),
+            call=bool(params.get("call", False)),
+            stubs=list(params.get("stubs") or []),
+            args=None if params.get("args") is None else [int(a) for a in params["args"]],
         )
 
     def demangle(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -830,6 +905,133 @@ class PyGhidraBackend:
     # Each helper converts every Ghidra object to a plain str/int/bool before returning (no Java
     # object leaks the boundary); addresses render via ``str(addr)`` (Ghidra's canonical hex form).
 
+    def _decompress_container(  # noqa: C901 - one bounded unwrap dispatch (stream/uimage branches read clearer inline; worker edge)
+        self, source_ref: str, container: str, max_output: int, max_ratio: int
+    ) -> str:  # pragma: no cover - worker filesystem edge
+        """Unwrap a compressed container to a payload file, zip-bomb-bounded (ADR-070; JVM-free).
+
+        Streams the (server-confined + size-capped) compressed ``source_ref`` through the stdlib
+        decompressor for ``container`` (``gzip``/``xz``/``lzma``) into a payload file in the
+        worker store, aborting the moment the running output exceeds ``min(max_output,
+        input_size * max_ratio)`` — a bomb never materializes a large buffer (ADR-070 D3, streamed
+        not decompress-then-check). Runs inside the worker container, never the server (ADR-001/D4);
+        a corrupt/hostile stream fails closed with a category-safe slug (master §5). No JVM.
+
+        Args:
+            source_ref: The confined compressed input path.
+            container: ``"gzip"`` | ``"xz"`` | ``"lzma"`` | ``"uimage"`` (schema-closed; re-checked
+                here). ``"uimage"`` strips the 64-byte U-Boot legacy header, then unwraps the
+                payload per its ``ih_comp`` field (none/gzip/lzma) under the same caps.
+            max_output: Absolute cap on decompressed bytes.
+            max_ratio: Cap on output ÷ input bytes.
+
+        Returns:
+            The path to the decompressed payload file (loaded by the caller's loader dispatch).
+
+        Raises:
+            WorkerError: ``limit-exceeded`` on a bomb (output over the cap); ``not-found`` if the
+                stream is not a valid ``container`` archive.
+        """
+        import gzip
+        import lzma
+
+        from worker.dispatch import CODE_LIMIT_EXCEEDED, CODE_NOT_FOUND, WorkerError
+
+        input_size = os.path.getsize(source_ref)  # noqa: PTH202 — confined path from the server
+        limit = min(max_output, max(input_size, 1) * max_ratio)
+        project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
+        payload_path = os.path.join(project_dir, "payload.bin")  # noqa: PTH118
+
+        def _open_comp(path: str, comp: str) -> Any:
+            if comp == "gzip":
+                return gzip.open(path, "rb")
+            if comp == "xz":
+                return lzma.open(path, "rb", format=lzma.FORMAT_XZ)
+            return lzma.open(path, "rb", format=lzma.FORMAT_AUTO)  # legacy .lzma (alone) / auto
+
+        def _stream_to_payload(reader: Any) -> None:
+            # Copy a chunked reader into payload_path, aborting the moment the running output
+            # exceeds the cap (a bomb never materializes — ADR-070 D3, streamed not buffered).
+            total = 0
+            with open(payload_path, "wb") as dst:  # noqa: PTH123
+                while True:
+                    chunk = reader.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > limit:
+                        raise WorkerError(
+                            CODE_LIMIT_EXCEEDED, "decompressed output exceeds the cap"
+                        )
+                    dst.write(chunk)
+
+        try:
+            if container == "uimage":
+                self._unwrap_uimage(source_ref, limit, _open_comp, _stream_to_payload)
+            else:
+                with _open_comp(source_ref, container) as src:
+                    _stream_to_payload(src)
+        except WorkerError:
+            raise
+        except Exception as exc:  # bad/hostile stream — fail closed, category-safe
+            raise WorkerError(CODE_NOT_FOUND, "container could not be decompressed") from exc
+        return payload_path
+
+    def _unwrap_uimage(
+        self,
+        source_ref: str,
+        limit: int,
+        open_comp: Callable[[str, str], Any],
+        stream_to_payload: Callable[[Any], None],
+    ) -> None:  # pragma: no cover - worker filesystem edge
+        """Strip a uImage legacy envelope + unwrap its payload, bomb-bounded (ADR-070 follow-up).
+
+        Parses the 64-byte header with the PURE :func:`vivarium.core.uimage.parse_uimage_header`
+        (hostile bytes, hermetically fuzzed), slices the declared payload window (clamped to the
+        real file size — a header claiming more than exists never over-reads), then either writes
+        the raw payload (``ih_comp`` = none) or streams it through the matching decompressor — all
+        under the shared output cap.
+
+        Args:
+            source_ref: The confined uImage path.
+            limit: The already-computed absolute output cap (min of the abs cap + the ratio cap).
+            open_comp: The compressor opener (path, comp-name) → chunked reader.
+            stream_to_payload: The bounded chunk-copier into the payload file.
+        """
+        from vivarium.core.uimage import UIMAGE_HEADER_SIZE, parse_uimage_header
+
+        with open(source_ref, "rb") as handle:  # noqa: PTH123 — confined path from the server
+            meta = parse_uimage_header(handle.read(UIMAGE_HEADER_SIZE), max_payload_size=limit)
+        file_size = os.path.getsize(source_ref)  # noqa: PTH202
+        payload_len = min(meta.payload_size, max(0, file_size - UIMAGE_HEADER_SIZE))
+        if payload_len <= 0:
+            raise ValueError("uImage payload window is empty")
+
+        project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
+        # Extract the exact payload window to a temp (bounded by payload_len, already <= limit).
+        envelope_path = os.path.join(project_dir, "uimage_payload.bin")  # noqa: PTH118
+        with (
+            open(source_ref, "rb") as src,  # noqa: PTH123 — confined path
+            open(envelope_path, "wb") as dst,  # noqa: PTH123
+        ):
+            src.seek(UIMAGE_HEADER_SIZE)
+            remaining = payload_len
+            while remaining > 0:
+                chunk = src.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                dst.write(chunk)
+                remaining -= len(chunk)
+
+        if meta.comp == "none":
+            # No nested compression: rewrite the raw payload out under the cap (identity stream).
+            with open(envelope_path, "rb") as src:  # noqa: PTH123
+                stream_to_payload(src)
+            return
+        # Nested-compressed payload: stream-decompress the extracted window under the same cap.
+        with open_comp(envelope_path, meta.comp) as src:
+            stream_to_payload(src)
+
     def _gh_import(
         self,
         source_ref: str,
@@ -839,6 +1041,8 @@ class PyGhidraBackend:
         base_addr: int | None = None,
         entry: int | None = None,
         pdb_ref: str | None = None,
+        debug_ref: str | None = None,
+        debug_format: str | None = None,
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Import a binary file into a transient Ghidra project (PyGhidra).
 
@@ -864,6 +1068,10 @@ class PyGhidraBackend:
             entry: Optional entry-point offset to seed as an external entry point.
             pdb_ref: Optional companion PDB path (auto path only, ADR-061); when set, its
                 symbols/types are applied to the loaded PE before analysis via :meth:`_apply_pdb`.
+            debug_ref: Optional companion detached debug/map path (auto path only, ADR-071); when
+                set, its symbols are applied to the loaded program before analysis via
+                :meth:`_apply_debug`.
+            debug_format: The companion debug format (``"map"``) — required with ``debug_ref``.
 
         Returns:
             A plain ``SessionInfo``-shaped dict.
@@ -919,7 +1127,69 @@ class PyGhidraBackend:
             # session_analyze benefits from them.
             if pdb_ref is not None:
                 self._apply_pdb(pdb_ref)
+            # ADR-071: apply a companion detached debug map to the fresh program BEFORE analysis
+            # (auto path only; the server allows debug_ref only with loader='auto', and the schema
+            # makes it mutually exclusive with pdb_ref). Names land now so a later session_analyze
+            # (and every read tool) sees the recovered symbols.
+            if debug_ref is not None:
+                self._apply_debug(debug_ref, str(debug_format))
         return _session_info_dict("importing", self._sha256, analysis_complete=False)
+
+    def _apply_debug(
+        self, debug_ref: str, debug_format: str
+    ) -> None:  # pragma: no cover - JVM edge
+        """Apply a companion detached debug source's symbols to the loaded program (ADR-071).
+
+        For ``debug_format="map"`` (a linker/``nm``/``.sym`` name→address dump), parses the file
+        with the pure :func:`core.debugmap.parse_symbol_map` and creates one ``IMPORTED`` label per
+        symbol inside a transaction (it mutates the fresh program DB). The ``debug_ref`` was
+        confined + size-capped by the server (ADR-001/CWE-22/CWE-400); a hostile map is contained
+        by the unchanged ADR-004 isolation, and a parse/apply failure fails closed with a
+        category-safe slug (the original exception is chained server-side only — master §5).
+        Addresses outside the program's address space are skipped honestly, not fatally.
+
+        (``debug_format="dwarf"`` — detached DWARF via Ghidra's DWARF analyzer + external-debug
+        service — is a tracked follow-up increment; the schema does not yet accept it.)
+
+        Args:
+            debug_ref: The server-resolved, confined path to the debug/map file.
+            debug_format: The companion format — ``"map"``.
+
+        Raises:
+            WorkerError: ``not-found`` if the map cannot be read/parsed or applied.
+        """
+        import contextlib
+
+        from ghidra.program.model.symbol import SourceType  # type: ignore[import-not-found]
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        from vivarium.core.debugmap import parse_symbol_map
+
+        program = self._require_program()
+        try:
+            with open(debug_ref, encoding="utf-8", errors="ignore") as handle:  # noqa: PTH123
+                text = handle.read()
+            symbols = parse_symbol_map(text, max_symbols=100_000)
+            if not symbols:
+                raise WorkerError(CODE_NOT_FOUND, "companion debug map yielded no symbols")
+            space = program.getAddressFactory().getDefaultAddressSpace()
+            symbol_table = program.getSymbolTable()
+
+            def _apply() -> None:
+                for sym in symbols:
+                    with contextlib.suppress(Exception):
+                        # A bad/out-of-space address is skipped, not fatal (honest partial apply).
+                        symbol_table.createLabel(
+                            space.getAddress(sym.address), sym.name, SourceType.IMPORTED
+                        )
+
+            self._in_transaction("session_import (debug map apply)", _apply)
+        except WorkerError:
+            raise
+        except Exception as exc:
+            raise WorkerError(
+                CODE_NOT_FOUND, "companion debug map could not be parsed or applied"
+            ) from exc
 
     def _apply_pdb(self, pdb_ref: str) -> None:  # pragma: no cover - JVM edge
         """Apply a companion Microsoft PDB's symbols/types to the loaded program (ADR-061).
@@ -1037,6 +1307,98 @@ class PyGhidraBackend:
                 prog.getSymbolTable().addExternalEntryPoint(space.getAddress(entry))
 
         self._in_transaction("session_import (raw layout)", _rebase)
+
+    def _gh_import_regions(
+        self, source_ref: str, processor: str, regions: list[dict[str, Any]]
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Import a multi-region (scatter-load) raw image as one program, N blocks (ADR-065).
+
+        All regions share the one ``processor`` ``LanguageID`` (a differing arch is a separate
+        session — ADR-065 D5). The server has already resolved/confined/size-capped every region and
+        rejected overlapping address ranges (D2/D3). The worker opens one program at the Language
+        (via ``BinaryLoader`` on the parent ref, reusing the eviction-safe context), drops the
+        loader's default block, then creates one initialized memory block per region from its exact
+        bytes (``path[offset:offset+length]``) at its ``base_addr`` — optionally seeding each
+        region's entry point — inside one transaction (ADR-012 §4). Read-only wrt the source bytes;
+        the program DB is the fresh session's own.
+
+        Args:
+            source_ref: The confined parent path (opens the program at the Language + digest).
+            processor: The shared allow-listed ``LanguageID``.
+            regions: Server-resolved dicts ``{source_ref, offset, length, base_addr, entry?}``.
+
+        Returns:
+            A plain ``SessionInfo``-shaped dict.
+
+        Raises:
+            WorkerError: ``not-found`` if the language is absent or a region cannot be mapped.
+        """
+        import hashlib
+
+        import jpype
+        import pyghidra
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        sha256 = hashlib.sha256()
+        with open(source_ref, "rb") as handle:  # noqa: PTH123 — confined path from the server
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                sha256.update(chunk)
+        self._sha256 = sha256.hexdigest()
+        self._analyzed = False
+        project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
+
+        try:
+            ctx = pyghidra.open_program(
+                source_ref,
+                project_location=project_dir,
+                project_name="session",
+                analyze=False,
+                language=processor,
+                loader="ghidra.app.util.opinion.BinaryLoader",
+            )
+            program = ctx.__enter__()
+        except Exception as exc:
+            raise WorkerError(
+                CODE_NOT_FOUND, "processor language not installed or raw image could not be loaded"
+            ) from exc
+
+        self._project = ctx  # retain the ctx manager for the launcher to close on evict
+        prog = getattr(program, "getCurrentProgram", lambda: program)()
+        self._program = prog
+        # The JVM is now up (open_program started it) — safe to resolve Java classes.
+        from ghidra.util.task import TaskMonitor
+
+        space = prog.getAddressFactory().getDefaultAddressSpace()
+        memory = prog.getMemory()
+        byte_array_input_stream = jpype.JClass("java.io.ByteArrayInputStream")
+
+        def _build() -> None:
+            # Drop the BinaryLoader's default whole-file block(s); the regions define the real map.
+            for block in list(memory.getBlocks()):
+                memory.removeBlock(block, TaskMonitor.DUMMY)
+            for i, region in enumerate(regions):
+                path = str(region["source_ref"])
+                offset = int(region["offset"])
+                length = int(region["length"])
+                with open(path, "rb") as handle:  # noqa: PTH123 — confined path from the server
+                    handle.seek(offset)
+                    data = handle.read(length)
+                start = space.getAddress(int(region["base_addr"]))
+                # jpype converts the Python bytes to a Java byte[] for the stream constructor.
+                memory.createInitializedBlock(
+                    f"region_{i}",
+                    start,
+                    byte_array_input_stream(data),
+                    len(data),
+                    TaskMonitor.DUMMY,
+                    False,
+                )
+                entry = region.get("entry")
+                if entry is not None:
+                    prog.getSymbolTable().addExternalEntryPoint(space.getAddress(int(entry)))
+
+        self._in_transaction("session_import (scatter-load regions)", _build)
+        return _session_info_dict("importing", self._sha256, analysis_complete=False)
 
     #: Client loader hint -> Ghidra loader class. Hex formats (ADR-046) take a ``processor``;
     #: self-describing container formats (ADR-047) take none (the format carries it).
@@ -1602,6 +1964,293 @@ class PyGhidraBackend:
         finally:
             decompiler.dispose()
         return {"seed": seed_addr, "direction": direction, "nodes": nodes, "truncated": truncated}
+
+    def _gh_recover_struct(  # noqa: C901 - one bounded HighFunction access walk; branches read clearer inline (JVM edge, live-regression-only coverage)
+        self, function: str, base: str, max_fields: int, max_accesses: int
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Propose a struct layout from accesses off ``base`` in a function (ADR-069; READ-ONLY).
+
+        Decompiles to the SSA ``HighFunction`` and walks the descendants of the ``base`` pointer
+        (a high-variable name, else an address) for pointer arithmetic (``PTRSUB``/``PTRADD``/
+        ``INT_ADD`` with a constant offset) and ``LOAD``/``STORE`` accesses, proposing one field per
+        observed access ``{offset, size, inferred_type, access, confidence}``. PROPOSES ONLY — it
+        never creates/names a type or touches the ``DataTypeManager`` (ADR-069 D2); materializing a
+        proposal goes through the existing gated ``define_struct``/``apply_data_type`` writes.
+        Overlapping/conflicting accesses are reported as-observed. Bounded by ``max_fields`` +
+        ``max_accesses`` (already server-clamped); ``truncated`` honest (ADR-005). Read-only; the
+        decompiler is disposed in a ``finally`` (ADR-002).
+
+        Args:
+            function: Function name or entry address (hex).
+            base: The base pointer — a high-variable name, or an address (hex) whose op output
+                is the pointer.
+            max_fields: Hard cap on proposed fields (already clamped).
+            max_accesses: Hard cap on HighFunction accesses examined (already clamped).
+
+        Returns:
+            ``{"base", "fields": [{"offset","size","inferred_type","access","confidence"}],
+            "truncated", "total_span"}``.
+
+        Raises:
+            WorkerError: ``not-found`` if the function or base does not resolve; ``analysis-failed``
+                if the decompiler did not complete / produced no high function.
+        """
+        from ghidra.app.decompiler import DecompInterface
+        from ghidra.util.task import ConsoleTaskMonitor
+        from worker.dispatch import CODE_ANALYSIS_FAILED, CODE_NOT_FOUND, WorkerError
+
+        program = self._require_program()
+        func = self._resolve_function(function)
+
+        def _drain(java_iter: Any) -> list[Any]:
+            items: list[Any] = []
+            while java_iter.hasNext():
+                items.append(java_iter.next())
+            return items
+
+        def _vn_type(vn: Any) -> str | None:
+            if vn is None:
+                return None
+            high_var = vn.getHigh()
+            data_type = high_var.getDataType() if high_var is not None else None
+            return None if data_type is None else _to_text(data_type.getName())
+
+        fields: list[dict[str, Any]] = []
+        truncated = False
+        total_span = 0
+        decompiler = DecompInterface()
+        try:
+            decompiler.openProgram(program)
+            results = decompiler.decompileFunction(func, 0, ConsoleTaskMonitor())
+            if results is None or not results.decompileCompleted():
+                raise WorkerError(CODE_ANALYSIS_FAILED, "decompilation did not complete")
+            high = results.getHighFunction()
+            if high is None:
+                raise WorkerError(CODE_ANALYSIS_FAILED, "no high p-code produced")
+
+            # Resolve the base to its SSA varnodes. An untyped/typed pointer high-variable can have
+            # several varnode instances (SSA); struct accesses hang off *any* instance, so union the
+            # descendants across all of them (walking getRepresentative() alone misses accesses).
+            base_varnodes: list[Any] = []
+            symbol_map = high.getLocalSymbolMap()
+            for symbol in _drain(symbol_map.getSymbols()):
+                if _to_text(symbol.getName()) == base:
+                    high_var = symbol.getHighVariable()
+                    if high_var is not None:
+                        base_varnodes = list(high_var.getInstances())
+                        break
+            if not base_varnodes:
+                try:
+                    target = str(self._parse_address(base))
+                    for op in _drain(high.getPcodeOps()):
+                        if str(op.getSeqnum().getTarget()) == target and op.getOutput() is not None:
+                            base_varnodes = [op.getOutput()]
+                            break
+                except Exception:  # a non-address base just falls through to "not found" below
+                    base_varnodes = []
+            if not base_varnodes:
+                raise WorkerError(CODE_NOT_FOUND, "base variable/address not found in the function")
+            base_set = set(base_varnodes)
+
+            descendants: list[Any] = []
+            seen_ops: set[Any] = set()
+            for vn in base_varnodes:
+                for op in _drain(vn.getDescendants()):
+                    key = op.getSeqnum()
+                    if key not in seen_ops:
+                        seen_ops.add(key)
+                        descendants.append(op)
+
+            examined = 0
+            for op in descendants:
+                if examined >= max_accesses:
+                    truncated = True
+                    break
+                examined += 1
+                mnem = str(op.getMnemonic())
+                offset: int | None = None
+                access: str | None = None
+                size = 0
+                inferred: str | None = None
+                if mnem in ("PTRSUB", "PTRADD", "INT_ADD"):
+                    for i in range(op.getNumInputs()):
+                        iv = op.getInput(i)
+                        if iv is not None and iv.isConstant() and iv not in base_set:
+                            offset = int(iv.getOffset())
+                            break
+                    if offset is None:
+                        continue
+                    out = op.getOutput()
+                    size = int(out.getSize()) if out is not None else 0
+                    inferred = _vn_type(out)
+                    access = "addr"
+                    if out is not None:
+                        for use in _drain(out.getDescendants()):
+                            um = str(use.getMnemonic())
+                            if um == "LOAD" and use.getOutput() is not None:
+                                loaded = use.getOutput()
+                                access = "load"
+                                size, inferred = int(loaded.getSize()), _vn_type(loaded)
+                                break
+                            if um == "STORE" and use.getNumInputs() > 2:
+                                sv = use.getInput(2)
+                                access, size, inferred = "store", int(sv.getSize()), _vn_type(sv)
+                                break
+                elif mnem == "LOAD" and op.getOutput() is not None:
+                    offset, access = 0, "load"
+                    size, inferred = int(op.getOutput().getSize()), _vn_type(op.getOutput())
+                elif mnem == "STORE" and op.getNumInputs() > 2:
+                    offset, access = 0, "store"
+                    sv = op.getInput(2)
+                    size, inferred = int(sv.getSize()), _vn_type(sv)
+                else:
+                    continue
+                if len(fields) >= max_fields:
+                    truncated = True
+                    break
+                fields.append(
+                    {
+                        "offset": offset,
+                        "size": size,
+                        "inferred_type": inferred,
+                        "access": access,
+                        "confidence": "observed",
+                    }
+                )
+                total_span = max(total_span, offset + size)
+        finally:
+            decompiler.dispose()
+        return {"base": base, "fields": fields, "truncated": truncated, "total_span": total_span}
+
+    def _gh_deobfuscate_strings(  # noqa: C901 - one bounded raw-p-code stack-store walk; branches read clearer inline (JVM edge)
+        self,
+        function: str | None,
+        techniques: list[str],
+        min_length: int,
+        max_results: int,
+        max_bytes: int,
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Recover hidden (stack-string) strings from a function or bounded program scan (ADR-068).
+
+        The ``stack_string`` technique walks each function's RAW per-instruction p-code (NOT the
+        decompiler's ``HighFunction`` — dead-code elimination removes stack stores that are never
+        read, which is exactly how these hide) for runs of constant stores to adjacent stack slots:
+        an ``INT_ADD(frame/stack register, const)`` computes the slot address, a ``COPY(const)`` (or
+        a direct constant) is the value, and a ``STORE`` writes it. Constant slot bytes are
+        collected by stack offset and reassembled by the pure
+        :func:`core.stackstring.reassemble_stack_strings` (contiguous runs, NUL-split,
+        printable-ratio + ``min_length`` filter). Pure static analysis —
+        no execution (ADR-068 D2), read-only, program DB untouched. Bounded by ``max_results`` +
+        ``max_bytes`` + a function-scan cap; ``truncated`` honest (ADR-005).
+
+        (``xor_decode`` — bounded emulation of a local decode loop via the ADR-049 engine — is a
+        tracked follow-up; the schema does not yet accept it.)
+
+        Args:
+            function: A function (name or entry address) to scope the scan; ``None`` scans a bounded
+                set of the program's functions.
+            techniques: Requested passes (this increment supports ``"stack_string"``).
+            min_length: Minimum recovered-string length (already server-clamped).
+            max_results: Cap on recovered strings returned (already server-clamped).
+            max_bytes: Cap on the length of any single recovered string (already server-clamped).
+
+        Returns:
+            ``{"strings": [{"address", "technique", "text", "length"}], "truncated"}``.
+
+        Raises:
+            WorkerError: ``not-found`` if a named ``function`` does not resolve.
+        """
+        from vivarium.core.stackstring import reassemble_stack_strings
+
+        program = self._require_program()
+        listing = program.getListing()
+        want_stack = "stack_string" in techniques
+
+        if function is not None:
+            functions = [self._resolve_function(function)]
+        else:
+            functions = []
+            for count, func in enumerate(program.getFunctionManager().getFunctions(True)):
+                if count >= _DEOBFUSCATE_FUNCTION_SCAN_CAP:
+                    break
+                functions.append(func)
+
+        def _def_in(ops: list[Any], varnode: Any) -> Any | None:
+            for op in ops:
+                out = op.getOutput()
+                if out is not None and out.equals(varnode):
+                    return op
+            return None
+
+        results: list[dict[str, Any]] = []
+        truncated = False
+        for func in functions:
+            if not want_stack:
+                break
+            slots: dict[int, int] = {}
+            for instruction in listing.getInstructions(func.getBody(), True):
+                ops = list(instruction.getPcode())
+                for op in ops:
+                    if str(op.getMnemonic()) != "STORE":
+                        continue
+                    addr_vn = op.getInput(1)
+                    val_vn = op.getInput(2)
+                    size = int(val_vn.getSize())
+                    value: int | None = None
+                    if val_vn.isConstant():
+                        value = int(val_vn.getOffset())
+                    else:
+                        def_op = _def_in(ops, val_vn)
+                        if (
+                            def_op is not None
+                            and str(def_op.getMnemonic()) == "COPY"
+                            and def_op.getInput(0).isConstant()
+                        ):
+                            value = int(def_op.getInput(0).getOffset())
+                            size = int(def_op.getOutput().getSize())
+                    if value is None:
+                        continue
+                    addr_def = _def_in(ops, addr_vn)
+                    offset: int | None = None
+                    if addr_def is not None and str(addr_def.getMnemonic()) == "INT_ADD":
+                        in0, in1 = addr_def.getInput(0), addr_def.getInput(1)
+                        if in1.isConstant() and in0.isRegister():
+                            const_vn = in1
+                        elif in0.isConstant() and in1.isRegister():
+                            const_vn = in0
+                        else:
+                            const_vn = None
+                        if const_vn is not None:
+                            raw = int(const_vn.getOffset())
+                            bits = int(const_vn.getSize()) * 8
+                            offset = raw - (1 << bits) if raw >= (1 << (bits - 1)) else raw
+                    if offset is None:
+                        continue
+                    for i, byte_value in enumerate(
+                        (value & ((1 << (8 * size)) - 1)).to_bytes(size, "little")
+                    ):
+                        slots[offset + i] = byte_value
+
+            entry = str(func.getEntryPoint())
+            for text in reassemble_stack_strings(
+                slots, min_length=min_length, min_printable_ratio=0.8
+            ):
+                clipped = text[:max_bytes]
+                if len(results) >= max_results:
+                    truncated = True
+                    break
+                results.append(
+                    {
+                        "address": entry,
+                        "technique": "stack_string",
+                        "text": clipped,
+                        "length": len(clipped),
+                    }
+                )
+            if truncated:
+                break
+
+        return {"strings": results, "truncated": truncated}
 
     def _gh_stack_frame(self, function: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Return a function's recovered stack-frame layout (ADR-054).
@@ -2625,6 +3274,161 @@ class PyGhidraBackend:
             "truncated": len(matches) > limit,
         }
 
+    def _gh_binary_diff(  # noqa: C901 - one bounded two-program pair-and-classify; the branches read clearer inline (JVM edge)
+        self,
+        source_ref_a: str,
+        source_ref_b: str,
+        match_by: str,
+        max_entries: int,
+        include_unchanged: bool = False,
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Function-granularity diff of two confined binaries (ADR-067; session read-only).
+
+        Loads BOTH refs FRESH into a throwaway project in this worker (the session's own program is
+        NOT a participant — same isolation as ``version_track``), auto-analyzes both, indexes each
+        program's functions by name, pairs by name, and classifies: ADDED (in B, not A), REMOVED
+        (in A, not B), CHANGED (same name, differing per the ``match_by`` signal — ``function_hash``
+        compares Ghidra's operand-masked ExactInstructions hash, ``name`` compares body size +
+        instruction count). ``summary`` counts are HONEST (full counts even when the entry lists are
+        capped at ``max_entries``). Both programs + the project are released + WIPED (ADR-002). All
+        fields are SAFE (names + addresses + computed change kinds). Bounded by ``max_entries`` +
+        the worker wall-clock/memory caps (ADR-004, two loaded programs).
+
+        When ``include_unchanged`` is set, the name-paired functions that do NOT differ are also
+        returned (``unchanged`` list + ``summary.unchanged`` count) — a full correspondence map, not
+        just the deltas; default off keeps the byte-for-byte deltas-only result.
+
+        (``match_by="bsim"`` — content pairing for STRIPPED binaries via the ADR-058 BSim / VT
+        correlators — is a tracked follow-up; the schema does not yet accept it.)
+
+        Args:
+            source_ref_a: Baseline binary (server-confined + size-capped path).
+            source_ref_b: Comparison binary (server-confined + size-capped path).
+            match_by: ``"name"`` or ``"function_hash"`` — the change-detection signal.
+            max_entries: Hard cap per entry list (already server-clamped).
+            include_unchanged: Also return name-paired non-differing functions (default off).
+
+        Returns:
+            ``{"added": [...], "removed": [...], "changed": [...], "summary": {...}, "truncated"}``.
+
+        Raises:
+            WorkerError: ``analysis-failed`` if a program cannot be loaded/analyzed.
+        """
+        import contextlib
+        import shutil
+        from pathlib import Path
+
+        import pyghidra
+
+        pyghidra.start(verbose=False)
+
+        from ghidra.app.plugin.match import ExactInstructionsFunctionHasher
+        from ghidra.util.task import TaskMonitor
+        from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+        monitor = TaskMonitor.DUMMY
+        consumer = "vivarium-diff"
+        project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
+        diff_path = Path(project_dir) / "diff"
+        diff_path.mkdir(parents=True, exist_ok=True)
+        diff_dir = str(diff_path)
+
+        def _index(program: Any) -> dict[str, dict[str, Any]]:
+            index: dict[str, dict[str, Any]] = {}
+            for func in program.getFunctionManager().getFunctions(True):
+                if func.isExternal():
+                    continue
+                name = str(func.getName())
+                if name in index:
+                    continue  # first occurrence per name (deterministic)
+                sig: dict[str, Any] = {
+                    "address": str(func.getEntryPoint()),
+                    "size": int(func.getBody().getNumAddresses()),
+                }
+                if match_by == "function_hash":
+                    sig["hash"] = str(
+                        int(ExactInstructionsFunctionHasher.INSTANCE.hash(func, monitor))
+                    )
+                else:
+                    count = 0
+                    for _instr in program.getListing().getInstructions(func.getBody(), True):
+                        count += 1
+                    sig["instr"] = count
+                index[name] = sig
+            return index
+
+        proj_ctx = pyghidra.open_project(diff_dir, "diff", create=True)
+        proj = proj_ctx.__enter__()
+        prog_a = prog_b = None
+        try:
+            root = proj.getProjectData().getRootFolder()
+            prog_a = self._vt_load_program(proj, root, source_ref_a, "A", consumer, monitor)
+            prog_b = self._vt_load_program(proj, root, source_ref_b, "B", consumer, monitor)
+            idx_a = _index(prog_a)
+            idx_b = _index(prog_b)
+            names_a, names_b = set(idx_a), set(idx_b)
+
+            added = [{"address": idx_b[n]["address"], "name": n} for n in sorted(names_b - names_a)]
+            removed = [
+                {"address": idx_a[n]["address"], "name": n} for n in sorted(names_a - names_b)
+            ]
+            changed: list[dict[str, Any]] = []
+            unchanged: list[dict[str, Any]] = []
+            for name in sorted(names_a & names_b):
+                a_sig, b_sig = idx_a[name], idx_b[name]
+                if match_by == "function_hash":
+                    differs = a_sig["hash"] != b_sig["hash"]
+                    change_kind = "body"
+                else:
+                    differs = a_sig["size"] != b_sig["size"] or a_sig["instr"] != b_sig["instr"]
+                    change_kind = "body"
+                if differs:
+                    changed.append(
+                        {
+                            "address_a": a_sig["address"],
+                            "address_b": b_sig["address"],
+                            "name": name,
+                            "change": change_kind,
+                        }
+                    )
+                elif include_unchanged:
+                    # A full correspondence map when asked: the name-paired functions that match on
+                    # the selected signal. Carries the program_b address (mirrors added/removed).
+                    unchanged.append({"address": b_sig["address"], "name": name})
+            summary = {
+                "added": len(added),
+                "removed": len(removed),
+                "changed": len(changed),
+                "unchanged": len(unchanged),
+            }
+            truncated = (
+                len(added) > max_entries
+                or len(removed) > max_entries
+                or len(changed) > max_entries
+                or len(unchanged) > max_entries
+            )
+            return {
+                "added": added[:max_entries],
+                "removed": removed[:max_entries],
+                "changed": changed[:max_entries],
+                "unchanged": unchanged[:max_entries],
+                "summary": summary,
+                "truncated": truncated,
+            }
+        except WorkerError:
+            raise
+        except Exception as exc:
+            raise WorkerError(CODE_ANALYSIS_FAILED, "binary diff failed") from exc
+        finally:
+            for obj in (prog_a, prog_b):
+                if obj is not None:
+                    with contextlib.suppress(Exception):
+                        obj.release(consumer)
+            with contextlib.suppress(Exception):
+                proj_ctx.__exit__(None, None, None)
+            with contextlib.suppress(Exception):
+                shutil.rmtree(diff_dir, ignore_errors=True)
+
     def _bsim_sign(
         self, program: Any, factory: Any, max_scan: int
     ) -> list[tuple[str, str, Any]]:  # pragma: no cover - JVM edge
@@ -3492,7 +4296,7 @@ class PyGhidraBackend:
             WorkerError: ``not-found`` if the function does not resolve; ``analysis-failed`` if the
                 rename raised (the transaction is rolled back first — fail closed).
         """
-        from ghidra.program.model.symbol import SourceType  # type: ignore[import-not-found]
+        from ghidra.program.model.symbol import SourceType
 
         func = self._resolve_function(function)
         old_name = _to_text(func.getName())
@@ -4727,6 +5531,9 @@ class PyGhidraBackend:
         stop_at: str | None,
         read_registers: list[Any],
         read_memory: list[dict[str, Any]],
+        call: bool = False,
+        stubs: list[dict[str, Any]] | None = None,
+        args: list[int] | None = None,
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Run bounded Ghidra p-code emulation and return register/memory readbacks (ADR-049).
 
@@ -4744,16 +5551,23 @@ class PyGhidraBackend:
             stop_at: Optional stop address (hex).
             read_registers: Register names to read back.
             read_memory: ``[{"address": hex, "length": int}]`` ranges to read back.
+            call: When ``True`` (ADR-066), set up a scratch stack + sentinel return, run to the
+                return, and read the ABI return register into ``return_value``.
+            stubs: ``[{"target", "action"}]`` library-call stubs (ADR-066 D2) — a CALL landing on a
+                stubbed target is substituted (return_const/skip) + returned to the caller.
+            args: ``[int, ...]`` auto arg-placement (ADR-066 follow-up; ``call`` only) — each value
+                is written to its parameter's register storage per the function's resolved calling
+                convention (register params only; a stack-passed param fails closed).
 
         Returns:
-            ``{"steps_executed", "stop_reason", "registers": [...], "memory": [...]}``.
+            ``{"steps_executed", "stop_reason", "registers", "memory", "return_value"}``.
 
         Raises:
             WorkerError: ``not-found`` if a named register does not exist.
         """
         from ghidra.app.emulator import EmulatorHelper  # type: ignore[import-not-found]
         from ghidra.util.task import TaskMonitor
-        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+        from worker.dispatch import CODE_ANALYSIS_FAILED, CODE_NOT_FOUND, WorkerError
 
         program = self._require_program()
         emu = EmulatorHelper(program)
@@ -4770,6 +5584,97 @@ class PyGhidraBackend:
                     bytes.fromhex(str(write["data_hex"])),
                 )
 
+            # ADR-066: shared arch info for the call convenience (D1) + library-call stubs (D2).
+            space = program.getAddressFactory().getDefaultAddressSpace()
+            bits = int(space.getSize())
+            ptr_bytes = max(bits // 8, 1)
+            cspec = program.getCompilerSpec()
+            sp_reg = cspec.getStackPointer()
+            lr_reg = None
+            for lr_name in ("lr", "LR", "x30", "ra"):
+                candidate = program.getLanguage().getRegister(lr_name)
+                if candidate is not None:
+                    lr_reg = candidate
+                    break
+            return_reg_name: str | None = None
+            if call or stubs:
+                # The ABI return LOCATION is resolvable even when the arg convention is not
+                # (proven: EAX/RAX for x86) — used for `return_value` (D1) + `return_const` (D2).
+                from ghidra.program.model.data import Undefined
+
+                ret_dt = Undefined.getUndefinedDataType(ptr_bytes)
+                ret_loc = cspec.getDefaultCallingConvention().getReturnLocation(ret_dt, program)
+                ret_reg = ret_loc.getRegister() if ret_loc is not None else None
+                return_reg_name = str(ret_reg.getName()) if ret_reg is not None else None
+
+            # D1 call convenience: scratch stack + sentinel return so the function returns to a
+            # known STOP address (the fiddly part callers re-derive). Args stay caller-provided.
+            if call:
+                sentinel_offset = min(0xDEAD0000, (1 << bits) - 1)
+                if sp_reg is not None and str(sp_reg.getName()) not in set_registers:
+                    scratch_sp = min((1 << bits) - 0x1000, 0x00007FFFFFFFF000) & ~0xF
+                    emu.writeRegister(str(sp_reg.getName()), scratch_sp)
+                else:
+                    scratch_sp = int(str(emu.readRegister(str(sp_reg.getName())))) if sp_reg else 0
+                emu.writeMemory(
+                    space.getAddress(scratch_sp), sentinel_offset.to_bytes(ptr_bytes, "little")
+                )
+                if lr_reg is not None:
+                    emu.writeRegister(str(lr_reg.getName()), sentinel_offset)
+                stop_at = format(sentinel_offset, "x")  # implicit stop at the sentinel
+
+                # ADR-066 follow-up: auto arg-placement. Place each integer arg into the target
+                # function's parameter storage per its RESOLVED calling convention (the caller set a
+                # signature — a raw binary's convention is null, proven). Register params only; a
+                # stack-passed param fails closed (stage it via write_memory). An explicit
+                # `set_registers` value for that register wins (already applied above).
+                if args:
+                    func = program.getFunctionManager().getFunctionAt(self._parse_address(start))
+                    if func is None:
+                        raise WorkerError(
+                            CODE_NOT_FOUND, "args requires a defined function at the start address"
+                        )
+                    params = list(func.getParameters())
+                    if len(args) > len(params):
+                        raise WorkerError(
+                            CODE_ANALYSIS_FAILED,
+                            "more args than the function's resolved parameters "
+                            "(set a matching signature first)",
+                        )
+                    if not params:
+                        raise WorkerError(
+                            CODE_ANALYSIS_FAILED,
+                            "function has no resolved parameters — set a signature first",
+                        )
+                    for i, value in enumerate(args):
+                        storage = params[i].getVariableStorage()
+                        reg = storage.getRegister() if storage is not None else None
+                        if reg is None:
+                            raise WorkerError(
+                                CODE_ANALYSIS_FAILED,
+                                f"parameter {i} is not register-passed; stage it via write_memory",
+                            )
+                        if str(reg.getName()) not in set_registers:
+                            emu.writeRegister(str(reg.getName()), int(value))
+
+            # D2 stub table: {target_offset: ("return_const", int) | ("skip", None)}. A CALL landing
+            # on a stubbed target is SUBSTITUTED (a value the client asserts) — never real library
+            # code, no host effect (the interpreter still makes no syscalls; ADR-066 D2 sandbox).
+            stub_map: dict[int, tuple[str, int | None]] = {}
+            for stub in stubs or []:
+                target, action = str(stub["target"]), str(stub["action"])
+                try:
+                    target_off: int | None = int(self._parse_address(target).getOffset())
+                except Exception:  # not an address — try a symbol name
+                    target_off = self._first_symbol_offset(target)
+                if target_off is None:
+                    continue
+                if action.startswith("return_const:"):
+                    stub_map[target_off] = ("return_const", int(action.split(":", 1)[1], 0))
+                elif action == "skip":
+                    stub_map[target_off] = ("skip", None)
+            stub_applications = 0
+
             stop_addr = self._parse_address(stop_at) if stop_at is not None else None
             steps = 0
             stop_reason = "max-steps"
@@ -4783,6 +5688,35 @@ class PyGhidraBackend:
                 if not stepped:
                     stop_reason = "halted"
                     break
+                # D2: a CALL that landed on a stubbed target — substitute + return to the caller.
+                if stub_map:
+                    action_entry = stub_map.get(int(emu.getExecutionAddress().getOffset()))
+                    if action_entry is not None:
+                        kind, value = action_entry
+                        if (
+                            kind == "return_const"
+                            and return_reg_name is not None
+                            and value is not None
+                        ):
+                            emu.writeRegister(return_reg_name, value)
+                        if lr_reg is not None:  # LR arches: return address is in the link register
+                            ret_addr = int(str(emu.readRegister(str(lr_reg.getName()))))
+                        else:  # stack arches: pop the return address off [SP]
+                            sp_val = (
+                                int(str(emu.readRegister(str(sp_reg.getName())))) if sp_reg else 0
+                            )
+                            raw_ra, _ = self._get_bytes_via(
+                                emu, space.getAddress(sp_val), ptr_bytes
+                            )
+                            ret_addr = int.from_bytes(raw_ra.ljust(ptr_bytes, b"\x00"), "little")
+                            if sp_reg is not None:
+                                emu.writeRegister(str(sp_reg.getName()), sp_val + ptr_bytes)
+                        emu.writeRegister(emu.getPCRegister(), ret_addr)
+                        stub_applications += 1
+                        if stub_applications > _MAX_EMULATE_STUB_APPLICATIONS:
+                            stop_reason = "stub-limit"
+                            break
+                        continue
                 if stop_addr is not None and emu.getExecutionAddress() == stop_addr:
                     stop_reason = "stop-address"
                     break
@@ -4802,11 +5736,20 @@ class PyGhidraBackend:
                 data, count = self._get_bytes_via(emu, addr, length)
                 mems.append({"address": str(addr), "data": data.hex(), "length": count})
 
+            return_value: str | None = None
+            if call and return_reg_name is not None:
+                try:
+                    raw = int(str(emu.readRegister(return_reg_name)))
+                    return_value = format(raw & ((1 << 512) - 1), "x")
+                except Exception:  # a missing return register just yields no value (honest None)
+                    return_value = None
+
             return {
                 "steps_executed": steps,
                 "stop_reason": stop_reason,
                 "registers": regs,
                 "memory": mems,
+                "return_value": return_value,
             }
         finally:
             emu.dispose()
@@ -4886,6 +5829,21 @@ class PyGhidraBackend:
             return self._parse_address(value)
         except WorkerError:
             return None
+
+    def _first_symbol_offset(self, name: str) -> int | None:  # pragma: no cover - JVM edge
+        """Return the offset of the first symbol named ``name``, or ``None`` (ADR-066 stub targets).
+
+        Lets a stub target be given by import/function NAME (e.g. ``memcpy``) instead of an address.
+        Read-only symbol-table lookup; a name resolving to no symbol yields ``None`` (the stub is
+        simply not installed — fail safe).
+        """
+        try:
+            symbols = self._require_program().getSymbolTable().getSymbols(name)
+            if symbols.hasNext():
+                return int(symbols.next().getAddress().getOffset())
+        except Exception:  # a lookup miss just means "no such stub target"
+            return None
+        return None
 
     def _resolve_function(self, function: str) -> Any:  # pragma: no cover - JVM edge
         """Resolve a function by entry address (hex) or by name.

@@ -425,6 +425,13 @@ jobs:
             tests/integration/test_version_track.py \
             tests/integration/test_import_pdb.py \
             tests/integration/test_bsim_search_corpus.py \
+            tests/integration/test_recover_struct.py \
+            tests/integration/test_binary_diff.py \
+            tests/integration/test_import_regions.py \
+            tests/integration/test_import_debug_map.py \
+            tests/integration/test_deobfuscate_strings.py \
+            tests/integration/test_import_uimage.py \
+            tests/integration/test_emulate_autoarg.py \
             ${DETERMINISTIC}
 
       # --- FAIL-LOUD ON SKIP: a skipped hard gate is a FAILURE, not a silent pass ------------------
@@ -471,13 +478,23 @@ jobs:
           # ADR-060 Version Tracking: two identical ARM ELFs exact-instructions-match (sim 1.0, same addr) (1) +
           # ADR-061 companion PDB: a PE imported with pdb_ref surfaces the PDB function name the_answer (1) +
           # ADR-062 cross-binary BSim: a target function matches a separately-loaded reference (sim 1.0) (1) +
-          # ADR-064 data-flow slice: a backward def-use slice over a real function returns >=1 node (1) = 27.
-          # The deterministic same-toolchain FID gate (zlib + musl, 2) is SELF-ACTIVATING: included
-          # only when the worker image ships the bundled DBs (FID_DETERMINISTIC_GATE=1), so the
-          # expected floor is 29 then, 27 otherwise. When inactive the test is omitted (not skipped),
-          # so the zero-skip rule below still holds.
+          # ADR-064 data-flow slice: a backward def-use slice over a real function returns >=1 node (1) +
+          # ADR-069 recover_struct: a struct-rich in-image library yields a non-empty proposed field union (1) +
+          # ADR-067 binary_diff: two identical ARM ELFs diff to nothing (added==removed==changed==0) (1) +
+          # ADR-065 multi-region import: a two-region scatter-load produces exactly two blocks at the bases (1) +
+          # ADR-071 debug_ref map: a companion .map symbol is applied to the loaded ELF as a label (1) +
+          # ADR-068 deobfuscate_strings: a byte-by-byte x86-64 stack-string recovers "Hello!" (1) +
+          # ADR-070 uImage unwrap: a gzip-payload uImage strips + nested-decompresses + loads (1) +
+          # ADR-066 auto arg-placement: emulate(call, args=[5,7]) places into resolved storage -> 12 (1).
+          # The non-FID base collects 35 (empirically: 32 single-test files + analyze_profiles's 3
+          # parametrized cases; the floor is a >= collection minimum, kept in lock-step with
+          # `--collect-only`). The deterministic
+          # same-toolchain FID gate (zlib + musl, 2) is SELF-ACTIVATING: included only when the
+          # worker image ships the bundled DBs (FID_DETERMINISTIC_GATE=1), so the expected floor is
+          # 37 then, 35 otherwise. When inactive the test is omitted (not skipped), so the zero-skip
+          # rule below still holds.
           import os
-          expected = 29 if os.environ.get("FID_DETERMINISTIC_GATE", "0") == "1" else 27
+          expected = 37 if os.environ.get("FID_DETERMINISTIC_GATE", "0") == "1" else 35
           if tests < expected:
               problems.append(f"expected >={expected} hard-gate tests to run, collected {tests}")
           if skipped:

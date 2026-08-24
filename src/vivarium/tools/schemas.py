@@ -23,6 +23,7 @@ numeric values are mirrored from :mod:`vivarium.core.validation` / ``security.li
 
 from __future__ import annotations
 
+from itertools import pairwise
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -48,6 +49,9 @@ _DEFAULT_EMULATE_STEPS = 100_000  # default step budget when the client omits ma
 _MAX_EMULATE_REGISTERS = 64  # cap on set_registers / read_registers list length
 _MAX_EMULATE_MEM_WRITE = 65_536  # cap on total pre-run memory-write bytes
 _MAX_EMULATE_MEM_REGIONS = 16  # cap on write_memory / read_memory region count
+_MAX_EMULATE_STUBS = 64  # cap on the library-call stub table (ADR-066 D2/D3)
+#: A stub action: substitute the ABI return register with a constant, or skip the call as a no-op.
+_STUB_ACTION_RE = r"^(?:return_const:-?(?:0x[0-9A-Fa-f]+|\d+)|skip)$"
 _MAX_EMULATE_MEM_READ = 65_536  # cap on a single read_memory region length
 
 # --- demangler bound (ADR-050; a hostile mangled name is untrusted input — CWE-400/CWE-20) ---
@@ -140,6 +144,60 @@ class SessionInfo(_Out):
     allow_structural: bool = False
 
 
+#: Hard cap on the number of scatter-load regions in one multi-region raw import (ADR-065 D3 — a
+#: client cannot request thousands of memory blocks; the per-region size cap + wall-clock kill back
+#: this).
+_MAX_IMPORT_REGIONS = 64
+
+
+class RegionSpec(_In):
+    """One memory region of a multi-region (scatter-load) raw import (ADR-065).
+
+    Each region is an untrusted input: its bytes come either from its own confined ``source_ref`` or
+    as an ``offset``/``length`` slice of the parent import's ``source_ref``. The server confines +
+    size-caps every region BEFORE the worker; the worker creates one initialized memory block per
+    region at ``base_addr``. All regions in a set share the one top-level ``processor`` (Language) —
+    a differing architecture is a separate session (ADR-065 D5), not a region.
+
+    Attributes:
+        source_ref: The region's bytes as a confined reference (under ``VIVARIUM_IMPORT_ROOT``); OR
+            omit and use ``offset``/``length`` to carve the region from the parent ``source_ref``.
+        offset: In-file byte offset into the parent ``source_ref`` (with ``length``) — the carve
+            start; mutually exclusive with a region ``source_ref``.
+        length: Byte length of the carved slice (required with ``offset``); each region is
+            independently size-capped server-side.
+        base_addr: Load/base address for this region's memory block (required; bounded to the shared
+            processor's address width).
+        entry: Optional per-region entry-point hint (a disassembly seed; ``>= base_addr``).
+    """
+
+    source_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    offset: int | None = Field(default=None, ge=0)
+    length: int | None = Field(default=None, ge=1)
+    base_addr: int = Field(ge=0)
+    entry: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_region_source(self) -> RegionSpec:
+        """A region's bytes come from EXACTLY one of ``source_ref`` or an offset/length slice.
+
+        Returns:
+            ``self`` when the source specification is well-formed.
+
+        Raises:
+            ValueError: If both/neither byte-source forms are given, or ``offset`` lacks ``length``.
+        """
+        has_ref = self.source_ref is not None
+        has_slice = self.offset is not None or self.length is not None
+        if has_ref and has_slice:
+            raise ValueError("a region takes either source_ref OR offset/length, not both")
+        if not has_ref and not has_slice:
+            raise ValueError("a region needs a source_ref or an offset/length slice")
+        if has_slice and (self.offset is None or self.length is None):
+            raise ValueError("a region offset/length slice needs both offset and length")
+        return self
+
+
 class SessionImportIn(_SessionScopedIn):
     """Arguments for ``session_import`` — load a binary into the session.
 
@@ -197,6 +255,10 @@ class SessionImportIn(_SessionScopedIn):
     base_addr: int | None = Field(default=None, ge=0)
     entry: int | None = Field(default=None, ge=0)
     pdb_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    regions: list[RegionSpec] | None = Field(default=None, max_length=_MAX_IMPORT_REGIONS)
+    debug_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    debug_format: Literal["map"] | None = None
+    container: Literal["gzip", "xz", "lzma", "uimage"] | None = None
 
     @model_validator(mode="after")
     def _validate_loader_hints(self) -> SessionImportIn:  # noqa: C901 — one branch per loader kind
@@ -228,6 +290,30 @@ class SessionImportIn(_SessionScopedIn):
         if self.pdb_ref is not None and self.loader != "auto":
             raise ValueError("pdb_ref (companion PDB) is only allowed with loader='auto'")
 
+        # ADR-071: a companion detached debug source (a name→address symbol map). Additive/opt-in —
+        # None ⇒ byte-for-byte the pre-ADR-071 path. `debug_ref` + `debug_format` come as a pair,
+        # apply only to the ELF/auto-loaded case (like pdb_ref → PE), and are mutually exclusive
+        # with pdb_ref (a program takes ONE companion). Fail closed on a half/misplaced set.
+        if (self.debug_ref is None) != (self.debug_format is None):
+            raise ValueError("debug_ref and debug_format must be provided together")
+        if self.debug_ref is not None:
+            if self.loader != "auto":
+                raise ValueError(
+                    "debug_ref (companion debug info) is only allowed with loader='auto'"
+                )
+            if self.pdb_ref is not None:
+                raise ValueError("debug_ref and pdb_ref are mutually exclusive (one companion)")
+
+        # ADR-070: an optional container to unwrap before loading. Additive/opt-in — None ⇒
+        # byte-for-byte the pre-ADR-070 path. `gzip`/`xz`/`lzma` are decompressed first (streamed,
+        # with zip-bomb output + ratio caps); `uimage` strips the 64-byte U-Boot legacy header and
+        # unwraps its payload per the header's own compression (none/gzip/lzma), under the same
+        # caps. The payload is then handed to the loader hints below. Mutually exclusive with
+        # `regions` (a scatter-load of ALREADY-mapped raw blocks, not a single stream); everything
+        # else (auto/binary loaders, processor/base) still applies to the unwrapped payload.
+        if self.container is not None and self.regions is not None:
+            raise ValueError("container and regions are mutually exclusive")
+
         def _require_supported_processor() -> None:
             if self.processor is None or not languages.is_supported_language(self.processor):
                 raise ValueError(
@@ -236,6 +322,42 @@ class SessionImportIn(_SessionScopedIn):
                     "(e.g. ARM:LE:32:Cortex, x86:LE:64:default, MIPS:BE:32:default, "
                     "RISCV:LE:32:default) — see the vivarium://docs/importing resource"
                 )
+
+        # ADR-065: a multi-region (scatter-load) raw import. `regions` is additive/opt-in — when it
+        # is None the rest of this validator (and the worker call) is byte-for-byte the
+        # single-region path. When set it governs the whole import: loader must be 'binary', one
+        # shared processor, and the top-level single-region base_addr/entry are mutually exclusive
+        # with it (D1). Placed after `_require_supported_processor` so it can reuse it.
+        if self.regions is not None:
+            if self.loader != "binary":
+                raise ValueError("regions (multi-region import) requires loader='binary'")
+            if self.base_addr is not None or self.entry is not None:
+                raise ValueError(
+                    "regions is mutually exclusive with the top-level base_addr/entry hints"
+                )
+            if not self.regions:
+                raise ValueError("regions must be non-empty when provided")
+            _require_supported_processor()
+            max_addr = 1 << languages.address_bits(self.processor)  # type: ignore[arg-type]
+            spans: list[tuple[int, int]] = []
+            for i, region in enumerate(self.regions):
+                if region.base_addr >= max_addr:
+                    raise ValueError(f"region[{i}].base_addr exceeds the address width")
+                if region.entry is not None:
+                    if region.entry >= max_addr:
+                        raise ValueError(f"region[{i}].entry exceeds the address width")
+                    if region.entry < region.base_addr:
+                        raise ValueError(f"region[{i}].entry must be >= its base_addr")
+                # Overlap is checkable here only for offset/length regions (length known); a region
+                # sourced from its own file has its length resolved server-side, where the full
+                # overlap check (D2) also runs before the worker.
+                if region.length is not None:
+                    spans.append((region.base_addr, region.base_addr + region.length))
+            spans.sort()
+            for (_a0, a_end), (b_start, _b1) in pairwise(spans):
+                if b_start < a_end:
+                    raise ValueError("region address ranges overlap")
+            return self
 
         # `auto` and the self-describing container loaders (ADR-047: dex/apk — the format carries
         # its own processor + layout) take NO hints; auto lets opinion pick the loader, the named
@@ -539,6 +661,123 @@ class DataFlowSliceOut(_Out):
     seed: str
     direction: Literal["backward", "forward"]
     nodes: list[SliceNode]
+    truncated: bool = False
+
+
+class RecoverStructIn(_SessionScopedIn):
+    """Arguments for ``recover_struct`` — propose a struct layout from access patterns (ADR-069).
+
+    Read-only: decompiles ``function`` to its SSA ``HighFunction`` and walks the accesses off the
+    ``base`` pointer (pointer arithmetic + ``LOAD``/``STORE``) to *propose* one field per observed
+    access. **Proposes only** — it never creates, names, or applies a type; materializing a proposal
+    goes through the existing gated ``define_struct``/``apply_data_type`` writes. Intra-function: an
+    access via a value that leaves the function is not followed. Bounded by ``max_fields`` +
+    ``max_accesses``.
+
+    Attributes:
+        function: Function name or entry address (hex) containing the base pointer.
+        base: The base pointer — a high-variable name (a parameter/local), or an address (hex)
+            whose op output is the pointer.
+        max_fields: Cap on proposed fields (bounded).
+        max_accesses: Cap on HighFunction accesses examined (bounded).
+    """
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)
+    base: str = Field(min_length=1, max_length=_MAX_NAME)
+    max_fields: int = Field(default=256, ge=1, le=_MAX_LIMIT)
+    max_accesses: int = Field(default=1024, ge=1, le=_MAX_LIMIT)
+
+
+class ProposedField(_Out):
+    """One proposed struct field from an observed access (ADR-069).
+
+    A *proposal*, not ground truth — overlapping/conflicting accesses are reported as-observed; the
+    client decides what to materialize (via the gated write tools).
+
+    Attributes:
+        offset: Byte offset from the base pointer (``>= 0``) — safe (computed).
+        size: Access width in bytes — safe (computed).
+        inferred_type: The decompiler's data-type name for the accessed value, if any — untrusted
+            (decompiler-derived); ``None`` when unavailable.
+        access: ``"load"`` (read), ``"store"`` (write), or ``"addr"`` (address taken, no deref
+            observed).
+        confidence: Evidence tier — ``"observed"`` (seen in the def-use graph).
+    """
+
+    offset: int = Field(ge=0)
+    size: int = Field(ge=0)
+    inferred_type: Untrusted[str] | None = None
+    access: Literal["load", "store", "addr"]
+    confidence: Literal["observed"] = "observed"
+
+
+class RecoverStructOut(_Out):
+    """Result of ``recover_struct`` (ADR-069) — a *proposed* layout, never applied.
+
+    Attributes:
+        base: The base pointer the layout was recovered from (echoed) — safe.
+        fields: Bounded list of proposed fields (one per observed access; may overlap).
+        total_span: The largest ``offset + size`` observed — a lower bound on the struct's size.
+        truncated: Whether the ``max_fields``/``max_accesses`` caps clipped the walk.
+    """
+
+    base: str
+    fields: list[ProposedField]
+    total_span: int = Field(ge=0, default=0)
+    truncated: bool = False
+
+
+class DeobfuscateStringsIn(_SessionScopedIn):
+    """Arguments for ``deobfuscate_strings`` — recover hidden strings (ADR-068).
+
+    Read-only static recovery of strings the ordinary string scan misses. This increment supports
+    the ``stack_string`` technique: the worker walks a function's RAW per-instruction p-code for
+    of constant stores to adjacent stack slots and reassembles them (these are invisible to the
+    decompiler's ``HighFunction`` — dead-code elimination removes stores never read). Bounded by
+    ``max_results``/``max_bytes`` + a whole-program function-scan cap; ``truncated`` honest.
+
+    Attributes:
+        function: Optional function (address or name) to scope the scan; omit for a bounded
+            whole-program scan (server-clamped).
+        techniques: Recovery passes to run (this increment: ``"stack_string"``); default all
+            supported. (``"xor_decode"`` — bounded decode-loop emulation — is a tracked follow-up.)
+        min_length: Minimum recovered-string length to report (noise floor; bounded).
+        max_results: Cap on recovered strings returned (bounded).
+        max_bytes: Cap on the length of any single recovered string (bounded).
+    """
+
+    function: str | None = Field(default=None, min_length=1, max_length=_MAX_NAME)
+    techniques: list[Literal["stack_string"]] | None = Field(default=None, max_length=4)
+    min_length: int = Field(default=4, ge=1, le=_MAX_LIMIT)
+    max_results: int = Field(default=256, ge=1, le=_MAX_LIMIT)
+    max_bytes: int = Field(default=256, ge=1, le=_MAX_LIMIT)
+
+
+class RecoveredString(_Out):
+    """One recovered (deobfuscated) string (ADR-068).
+
+    Attributes:
+        address: Where the string is constructed — the function entry (hex) — safe.
+        technique: How it was recovered (``"stack_string"``) — safe (closed vocabulary).
+        text: The recovered string — UNTRUSTED (binary-derived; ADR-005).
+        length: Recovered length in bytes — safe.
+    """
+
+    address: str
+    technique: Literal["stack_string"]
+    text: Untrusted[str]
+    length: int
+
+
+class DeobfuscateStringsOut(_Out):
+    """Result of ``deobfuscate_strings`` (ADR-068).
+
+    Attributes:
+        strings: Bounded list of recovered strings.
+        truncated: Whether ``max_results`` (or the scan cap) clipped the result.
+    """
+
+    strings: list[RecoveredString]
     truncated: bool = False
 
 
@@ -1213,6 +1452,105 @@ class VersionTrackOut(_Out):
     truncated: bool = False
 
 
+class BinaryDiffIn(_SessionScopedIn):
+    """Arguments for ``binary_diff`` — function-granularity two-program diff (ADR-067).
+
+    Diffs **two** binaries (patch-diffing OTA builds / build-to-build correspondence). Both are
+    loaded **fresh** in the session's already-hardened worker via a throwaway project,
+    auto-analyzed,
+    diffed, then released + wiped — the session's own program is NOT a participant. The
+    ``session_id``
+    supplies auth/scoping + the worker, not a program. Both refs resolve through the **same confined
+    import root** as ``session_import`` (CWE-22) and are size-capped (CWE-400) before any
+    byte reaches Ghidra. Bounded by ``max_entries`` + the worker wall-clock/memory caps (two loaded
+    programs).
+
+    Attributes:
+        program_a: Baseline binary — a path under ``VIVARIUM_IMPORT_ROOT`` (confined + size-capped).
+        program_b: Comparison binary — a confined + size-capped path under ``VIVARIUM_IMPORT_ROOT``.
+        match_by: The change-detection signal — ``"name"`` (body size + instruction count) or
+            ``"function_hash"`` (Ghidra's operand-masked ExactInstructions hash). Functions are
+            paired by name; a ``"bsim"`` content-pairing mode for stripped binaries is a follow-up.
+        include_unchanged: When ``True``, also return the name-paired functions that did NOT differ
+            (the ``unchanged`` list + ``summary.unchanged`` count) — a full correspondence map, not
+            just the deltas. Default ``False`` (byte-for-byte the pre-follow-up behavior: an empty
+            ``unchanged`` list and a zero count). Bounded by ``max_entries`` like the delta lists.
+        max_entries: Hard cap per entry list (bounded; ``summary`` stays honest when clipped).
+    """
+
+    program_a: str = Field(min_length=1, max_length=512)
+    program_b: str = Field(min_length=1, max_length=512)
+    match_by: Literal["name", "function_hash"] = "name"
+    include_unchanged: bool = False
+    max_entries: int = Field(default=1000, ge=1, le=_MAX_LIMIT)
+
+
+class DiffFunction(_Out):
+    """One added/removed function in a ``binary_diff`` (ADR-067).
+
+    Attributes:
+        address: Entry address (hex) in the program it belongs to — server-normalized, safe.
+        name: The function name — UNTRUSTED (binary-derived; ADR-005).
+    """
+
+    address: str
+    name: Untrusted[str]
+
+
+class ChangedFunction(_Out):
+    """One changed (name-paired but differing) function in a ``binary_diff`` (ADR-067).
+
+    Attributes:
+        address_a: Entry address (hex) in ``program_a`` — safe.
+        address_b: Entry address (hex) in ``program_b`` — safe.
+        name: The shared function name — UNTRUSTED (binary-derived; ADR-005).
+        change: What differs — ``"signature"`` / ``"body"`` / ``"both"`` (MVP reports ``"body"``).
+    """
+
+    address_a: str
+    address_b: str
+    name: Untrusted[str]
+    change: Literal["signature", "body", "both"]
+
+
+class DiffSummary(_Out):
+    """Per-category counts for a ``binary_diff`` — HONEST even when entry lists are truncated.
+
+    Attributes:
+        added: Total functions present in B but not A — safe.
+        removed: Total functions present in A but not B — safe.
+        changed: Total name-paired functions that differ — safe.
+        unchanged: Total name-paired functions that did NOT differ — safe. Always ``0`` unless
+            ``include_unchanged`` was requested (the worker only counts them then).
+    """
+
+    added: int
+    removed: int
+    changed: int
+    unchanged: int = 0
+
+
+class BinaryDiffOut(_Out):
+    """Result of ``binary_diff`` (ADR-067) — a bounded structured diff.
+
+    Attributes:
+        added: Functions in B with no A pairing (bounded).
+        removed: Functions in A with no B pairing (bounded).
+        changed: Name-paired functions that differ (bounded).
+        unchanged: Name-paired functions that did NOT differ (bounded) — populated only when
+            ``include_unchanged`` was requested, else empty. Each carries its ``program_b`` address.
+        summary: Full per-category counts (honest even when lists are clipped).
+        truncated: Whether ``max_entries`` clipped any list.
+    """
+
+    added: list[DiffFunction]
+    removed: list[DiffFunction]
+    changed: list[ChangedFunction]
+    unchanged: list[DiffFunction] = Field(default_factory=list)
+    summary: DiffSummary
+    truncated: bool = False
+
+
 # =====================================================================================
 # Comments
 # =====================================================================================
@@ -1345,6 +1683,24 @@ class MemRead(_In):
     length: int = Field(ge=1, le=_MAX_EMULATE_MEM_READ)
 
 
+class EmulateStub(_In):
+    """One library-call stub for ``emulate`` — substitute an external call (ADR-066 D2).
+
+    A stub NEVER runs real library code, loads a host library, or touches the host — it only asserts
+    a return value / skips the call frame so a self-contained routine that calls out mid-way (e.g.
+    ``memcpy``/``strlen``/a ROM thunk) completes instead of halting. The substituted value is
+    client-asserted (untrusted like any input); the ADR-049 sandbox is intact.
+
+    Attributes:
+        target: The callee to stub — an address (hex) or an import/function name.
+        action: ``"return_const:<int>"`` (set the ABI return register to the constant and continue
+            past the call) or ``"skip"`` (step over the call as a no-op).
+    """
+
+    target: str = Field(min_length=1, max_length=_MAX_NAME)
+    action: str = Field(min_length=1, max_length=64, pattern=_STUB_ACTION_RE)
+
+
 class EmulateIn(_SessionScopedIn):
     """Arguments for ``emulate`` — bounded Ghidra p-code emulation (ADR-049).
 
@@ -1360,6 +1716,26 @@ class EmulateIn(_SessionScopedIn):
         stop_at: Optional address (hex); execution stops when the PC reaches it.
         read_registers: Optional register names to return after the run.
         read_memory: Optional memory ranges to return after the run.
+        call: **Call convenience (ADR-066).** When ``True``, ``start`` is treated as a function to
+            *call*: the worker sets up a scratch stack + a sentinel return address (at the stack
+            pointer and, on link-register arches, in LR), runs to the return (an implicit
+            ``stop_at``), and reads the ABI return register into ``return_value``. Input buffers
+            stay caller-provided via ``write_memory``; outputs via ``read_memory``. Automates the
+            sentinel-return + return-value dance.
+        args: **Auto arg-placement (ADR-066 follow-up).** With ``call=True``, an ordered list of
+            integer argument values placed into the target function's parameter storage per its
+            RESOLVED calling convention (``set_function_signature`` it first — a raw binary's
+            convention is not auto-resolved, proven). Register-passed parameters are supported;
+            a parameter the ABI passes on the STACK fails closed (``analysis-failed``) — stage it
+            via ``write_memory`` instead. Requires ``call=True``. Bounded to
+            ``_MAX_EMULATE_REGISTERS`` entries; ``set_registers`` still overrides a given register.
+        stubs: **Library-call stubs (ADR-066 D2).** A bounded table substituting external calls the
+            routine makes: each ``{target, action}`` where ``target`` is a callee (address or import
+            name) and ``action`` is ``"return_const:<int>"`` (set the return register + continue)
+            or ``"skip"`` (no-op past the call). A stub never runs real code / touches the host — it
+            lets a routine that calls ``memcpy``/``strlen``/a ROM thunk complete instead of halting.
+            An unstubbed unresolved call still halts (opt-in). Exhausting the budget →
+            ``stop_reason="stub-limit"``.
     """
 
     start: str = Field(min_length=1, max_length=_MAX_NAME)
@@ -1369,6 +1745,9 @@ class EmulateIn(_SessionScopedIn):
     stop_at: str | None = Field(default=None, max_length=_MAX_NAME)
     read_registers: list[str] | None = None
     read_memory: list[MemRead] | None = None
+    call: bool = False
+    stubs: list[EmulateStub] | None = Field(default=None, max_length=_MAX_EMULATE_STUBS)
+    args: list[int] | None = Field(default=None, max_length=_MAX_EMULATE_REGISTERS)
 
     @model_validator(mode="after")
     def _bound_emulate(self) -> EmulateIn:
@@ -1392,6 +1771,12 @@ class EmulateIn(_SessionScopedIn):
             total = sum(len(w.data_hex) // 2 for w in self.write_memory)
             if total > _MAX_EMULATE_MEM_WRITE:
                 raise ValueError(f"write_memory total exceeds {_MAX_EMULATE_MEM_WRITE} bytes")
+        if self.args is not None and not self.call:
+            # Auto arg-placement is only meaningful for a call (it targets the function's parameter
+            # storage) — reject args without call rather than silently ignoring them (fail closed).
+            raise ValueError(
+                "args requires call=True (auto arg-placement targets a called function)"
+            )
         return self
 
 
@@ -1429,12 +1814,15 @@ class EmulateOut(_Out):
         stop_reason: Why emulation stopped (closed vocabulary) — safe.
         registers: Requested register values (each ``value`` UNTRUSTED).
         memory: Requested memory ranges (each ``data`` UNTRUSTED).
+        return_value: The ABI return-register value, hex-encoded — UNTRUSTED (emulation output);
+            populated only when ``call=True`` (ADR-066), else ``None``.
     """
 
     steps_executed: int
-    stop_reason: Literal["stop-address", "max-steps", "halted", "fault"]
+    stop_reason: Literal["stop-address", "max-steps", "halted", "fault", "stub-limit"]
     registers: list[RegisterValue]
     memory: list[MemoryRegion]
+    return_value: Untrusted[str] | None = None
 
 
 class DemangleIn(_SessionScopedIn):
@@ -1961,6 +2349,65 @@ class CryptoConstantScanOut(_Out):
     """
 
     findings: list[CryptoConstantFinding]
+    total: int
+    truncated: bool = False
+
+
+class SecretScanIn(_Page):
+    """Arguments for ``secret_scan`` — heuristic firmware-secret scan over strings (ADR-072).
+
+    A curated, read-only pass over the program's extracted strings for hardcoded credentials,
+    key material, format magic, and secret-implying property names. HEURISTIC (leads, not proof) and
+    REDACTED (ADR-072 D3): a finding never carries the raw secret — only a masked preview + a salted
+    correlation hash. Paginated like the other scanners.
+
+    Attributes:
+        categories: Restrict to these categories (subset of the closed set
+            (``hardcoded_credential`` / ``key_material`` / ``format_magic`` /
+            ``property_secret_name``);
+            omit to scan all.
+        min_length: Skip strings shorter than this (noise filter).
+        entropy_threshold: Shannon-entropy floor (bits/byte) for a high-entropy blob to count as a
+            hardcoded credential (server-bounded).
+    """
+
+    categories: list[str] | None = Field(default=None, max_length=8)
+    min_length: int = Field(default=4, ge=1, le=4096)
+    entropy_threshold: float = Field(default=4.0, ge=0.0, le=8.0)
+
+
+class SecretFinding(_Out):
+    """One heuristic secret finding — REDACTED (ADR-072 D3): never the raw value.
+
+    Attributes:
+        address: Address of the source string (hex) — safe (``None`` if unknown).
+        category: One of the closed category set — safe.
+        pattern_id: Which pattern fired (e.g. ``"keyword:password"``, ``"pem_private_key"``) — safe.
+        masked_preview: The value with its middle masked — UNTRUSTED (binary-derived); not the raw
+            secret.
+        preview_hash: Salted, truncated digest of the raw value — safe (non-disclosing correlation
+            handle).
+        entropy: Shannon entropy (bits/byte) when entropy drove the match, else ``None`` — safe.
+    """
+
+    address: str | None = None
+    category: str
+    pattern_id: str
+    masked_preview: Untrusted[str]
+    preview_hash: str
+    entropy: float | None = None
+
+
+class SecretScanOut(_Out):
+    """Result of ``secret_scan`` (ADR-072).
+
+    Attributes:
+        findings: Bounded page of redacted secret findings.
+        total: Total findings in the scanned set — safe.
+        truncated: Whether the scanned string set or the page was capped.
+    """
+
+    findings: list[SecretFinding]
     total: int
     truncated: bool = False
 

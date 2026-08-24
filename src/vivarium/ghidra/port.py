@@ -143,6 +143,14 @@ class GhidraPort(Protocol):
         """Return a bounded intra-function def-use slice from a seed (read-only — ADR-064)."""
         ...
 
+    def recover_struct(self, sid: str, a: s.RecoverStructIn) -> s.RecoverStructOut:
+        """Propose a struct layout from access patterns off a base pointer (read-only — ADR-069)."""
+        ...
+
+    def deobfuscate_strings(self, sid: str, a: s.DeobfuscateStringsIn) -> s.DeobfuscateStringsOut:
+        """Recover hidden (stack-string) strings from a function/program scan — ADR-068."""
+        ...
+
     def stack_frame(self, sid: str, a: s.StackFrameIn) -> s.StackFrameOut:
         """Return a function's recovered stack-frame layout (read-only — ADR-054)."""
         ...
@@ -167,6 +175,14 @@ class GhidraPort(Protocol):
         self, sid: str, a: s.FindSimilarFunctionsIn
     ) -> s.FindSimilarFunctionsOut:
         """Rank the program's functions by BSim similarity to a target (read-only — ADR-059)."""
+        ...
+
+    def binary_diff(self, sid: str, a: s.BinaryDiffIn) -> s.BinaryDiffOut:
+        """Function-granularity diff of two confined binaries (read-only — ADR-067).
+
+        Both refs are confined + size-capped server-side; the two programs are loaded fresh in the
+        session's worker, analyzed, diffed (added/removed/changed), then wiped. Session untouched.
+        """
         ...
 
     def version_track(self, sid: str, a: s.VersionTrackIn) -> s.VersionTrackOut:
@@ -303,6 +319,10 @@ class GhidraPort(Protocol):
 
     def crypto_constant_scan(self, sid: str, a: s.CryptoConstantScanIn) -> s.CryptoConstantScanOut:
         """Heuristic crypto-constant search (pure signature table over the search_bytes RPC)."""
+        ...
+
+    def secret_scan(self, sid: str, a: s.SecretScanIn) -> s.SecretScanOut:
+        """Heuristic firmware-secret scan over defined strings (pure, redacted — ADR-072)."""
         ...
 
     def call_graph_metrics(self, sid: str, a: s.CallGraphMetricsIn) -> s.CallGraphMetricsOut:

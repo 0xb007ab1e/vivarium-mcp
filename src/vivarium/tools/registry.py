@@ -67,6 +67,8 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "get_pcode",
     "get_high_pcode",
     "data_flow_slice",
+    "recover_struct",
+    "deobfuscate_strings",
     "stack_frame",
     "basic_blocks",
     "list_data_types",
@@ -74,6 +76,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "bsim_similarity",
     "find_similar_functions",
     "version_track",
+    "binary_diff",
     "bsim_search_corpus",
     "list_functions",
     "get_function",
@@ -110,6 +113,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "coverage",
     "ioc_scan",
     "crypto_constant_scan",
+    "secret_scan",
     "call_graph_metrics",
     "program_summary",
     # Function ID library-match identification (ADR-042 Phase 1; READ-ONLY)
@@ -533,6 +537,23 @@ def _handle_data_flow_slice(ctx: ToolContext, args: s.DataFlowSliceIn) -> s.Data
     return ctx.port.data_flow_slice(args.session_id, args)
 
 
+def _handle_recover_struct(ctx: ToolContext, args: s.RecoverStructIn) -> s.RecoverStructOut:
+    """Propose a struct layout from access patterns off a base pointer (read-only — ADR-069)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    v.validate_name(args.function)
+    return ctx.port.recover_struct(args.session_id, args)
+
+
+def _handle_deobfuscate_strings(
+    ctx: ToolContext, args: s.DeobfuscateStringsIn
+) -> s.DeobfuscateStringsOut:
+    """Recover hidden (stack-string) strings from a function/program scan (read-only — ADR-068)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    if args.function is not None:
+        v.validate_name(args.function)
+    return ctx.port.deobfuscate_strings(args.session_id, args)
+
+
 def _handle_stack_frame(ctx: ToolContext, args: s.StackFrameIn) -> s.StackFrameOut:
     """Return a function's recovered stack-frame layout (read-only — ADR-054)."""
     ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
@@ -595,6 +616,21 @@ def _handle_version_track(ctx: ToolContext, args: s.VersionTrackIn) -> s.Version
     # exist yet. Idempotent when a worker is already running for the session.
     ctx.sessions.ensure_worker(args.session_id, caller=ctx.caller_id)
     return ctx.port.version_track(args.session_id, args)
+
+
+def _handle_binary_diff(ctx: ToolContext, args: s.BinaryDiffIn) -> s.BinaryDiffOut:
+    """Function-granularity diff of two confined binaries (read-only — ADR-067).
+
+    Loads + analyzes TWO binaries in the session's worker (a capability, gated exactly like
+    ``session_import``/``version_track``: confined import root + size cap, worker-only per ADR-001).
+    Like version_track it ensures the owning principal's worker is spawned (it loads its own
+    binaries, no prior session_import needed) and does NOT touch the session's own program (refs
+    are loaded fresh + wiped), so it needs no write-consent. The two refs are confined + size-capped
+    server-side in the adapter (CWE-22/CWE-400).
+    """
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    ctx.sessions.ensure_worker(args.session_id, caller=ctx.caller_id)
+    return ctx.port.binary_diff(args.session_id, args)
 
 
 def _handle_bsim_search_corpus(
@@ -858,6 +894,12 @@ def _handle_crypto_constant_scan(
     """Heuristic crypto-constant search (signature table over search_bytes)."""
     ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     return ctx.port.crypto_constant_scan(args.session_id, args)
+
+
+def _handle_secret_scan(ctx: ToolContext, args: s.SecretScanIn) -> s.SecretScanOut:
+    """Heuristic firmware-secret scan over defined strings (pure, redacted — ADR-072)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    return ctx.port.secret_scan(args.session_id, args)
 
 
 def _handle_call_graph_metrics(
@@ -1800,6 +1842,8 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "get_pcode": (_handle_get_pcode, s.GetPcodeIn),
     "get_high_pcode": (_handle_get_high_pcode, s.GetHighPcodeIn),
     "data_flow_slice": (_handle_data_flow_slice, s.DataFlowSliceIn),
+    "recover_struct": (_handle_recover_struct, s.RecoverStructIn),
+    "deobfuscate_strings": (_handle_deobfuscate_strings, s.DeobfuscateStringsIn),
     "stack_frame": (_handle_stack_frame, s.StackFrameIn),
     "basic_blocks": (_handle_basic_blocks, s.BasicBlocksIn),
     "list_data_types": (_handle_list_data_types, s.ListDataTypesIn),
@@ -1807,6 +1851,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "bsim_similarity": (_handle_bsim_similarity, s.BsimSimilarityIn),
     "find_similar_functions": (_handle_find_similar_functions, s.FindSimilarFunctionsIn),
     "version_track": (_handle_version_track, s.VersionTrackIn),
+    "binary_diff": (_handle_binary_diff, s.BinaryDiffIn),
     "bsim_search_corpus": (_handle_bsim_search_corpus, s.BsimSearchCorpusIn),
     "list_functions": (_handle_list_functions, s.ListFunctionsIn),
     "get_function": (_handle_get_function, s.GetFunctionIn),
@@ -1836,6 +1881,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "coverage": (_handle_coverage, s.CoverageIn),
     "ioc_scan": (_handle_ioc_scan, s.IocScanIn),
     "crypto_constant_scan": (_handle_crypto_constant_scan, s.CryptoConstantScanIn),
+    "secret_scan": (_handle_secret_scan, s.SecretScanIn),
     "call_graph_metrics": (_handle_call_graph_metrics, s.CallGraphMetricsIn),
     "program_summary": (_handle_program_summary, s.ProgramSummaryIn),
     # Function ID library-match identification (ADR-042 Phase 1; READ-ONLY)

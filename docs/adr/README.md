@@ -51,15 +51,15 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 - **ADR-063** — DYLD shared-cache support — **DEFERRED** (fixture-blocked; capability ready).
 
 ### v1.9 capability-gap batch (post-v1.8 survey)
-- **ADR-064** — Data-flow slicing (read-only def-use / taint reachability) — **Accepted** (in progress).
-- **ADR-065** — Multi-region / scatter-load raw import (same-arch regions into one session) — *Proposed*.
-- **ADR-066** — Emulation ergonomics: call-with-args + library-call stubs on `emulate` — *Proposed*.
-- **ADR-067** — Function-granularity binary-diff report (patch-diffing) — *Proposed*.
-- **ADR-068** — String / constant deobfuscation (stack-strings, XOR-decoded) — *Proposed*.
-- **ADR-069** — Automatic struct/type recovery from access patterns (proposes; existing write applies) — *Proposed*.
-- **ADR-070** — Extended firmware container unwrap + loaders (OTA/uImage/decompress, fuzz-gated) — *Proposed*.
-- **ADR-071** — Debug-info import beyond PDB (DWARF / `.map` / `.sym`) — *Proposed*.
-- **ADR-072** — Firmware-aware secret/credential/key-material scan (redacted) — *Proposed*.
+- **ADR-064** — Data-flow slicing (`data_flow_slice`; read-only def-use/taint) — **MERGED** (#294).
+- **ADR-065** — Multi-region / scatter-load raw import (same-arch regions into one session) — **Accepted**.
+- **ADR-066** — Emulation ergonomics: call-with-args + library-call stubs on `emulate` — **Accepted**.
+- **ADR-067** — Function-granularity binary-diff report (patch-diffing) — **Accepted**.
+- **ADR-068** — String / constant deobfuscation (stack-strings, XOR-decoded) — **Accepted**.
+- **ADR-069** — Automatic struct/type recovery from access patterns (proposes; existing write applies) — **Accepted**.
+- **ADR-070** — Extended firmware container unwrap + loaders (OTA/uImage/decompress, fuzz-gated) — **Accepted**.
+- **ADR-071** — Debug-info import beyond PDB (DWARF / `.map` / `.sym`) — **Accepted**.
+- **ADR-072** — Firmware-aware secret/credential/key-material scan (redacted) — **Accepted**.
 
 ### Read/analysis tools
 - **ADR-007** — Semantic-naming support tools (call graph, leaf-first ordering, function context).

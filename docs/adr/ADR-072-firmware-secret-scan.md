@@ -1,6 +1,6 @@
 # ADR-072: Firmware-aware secret / credential / key-material scan (read-only)
 
-- **Status:** **Proposed** (awaiting human ratification; v1.9). Item 9 (last) of the post-v1.8
+- **Status:** **Accepted** (ratified by the human operator 2026-08-13; v1.9). Item 9 (last) of the post-v1.8
   capability-gap batch (ADR-064..072).
 - **Date:** 2026-08-13
 - **Deciders:** Human operator (ratification pending); drafted by the assistant from the post-v1.8
