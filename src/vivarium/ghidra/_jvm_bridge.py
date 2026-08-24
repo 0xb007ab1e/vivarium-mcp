@@ -1182,6 +1182,14 @@ class PyGhidraBackend:
                 CODE_NOT_FOUND,
                 "debug_format='dwarf' needs a binary with a .gnu_debuglink naming the companion",
             )
+        # Defense in depth (AA1): the parser already rejects non-basename debuglink names, but the
+        # staging destination is derived from hostile-binary content — confine it to a bare
+        # basename so a crafted name can never escape stage_dir via os.path.join (CWE-22).
+        if link_name != os.path.basename(link_name):  # noqa: PTH119
+            raise WorkerError(
+                CODE_NOT_FOUND,
+                "debug_format='dwarf' .gnu_debuglink must name a bare companion file, not a path",
+            )
         stage_dir = os.path.join(project_dir, "dwarf_stage")  # noqa: PTH118
         os.makedirs(stage_dir, exist_ok=True)  # noqa: PTH103
         staged_binary = os.path.join(stage_dir, os.path.basename(source_ref))  # noqa: PTH118,PTH119

@@ -92,7 +92,14 @@ def _parse(data: bytes) -> str | None:  # noqa: C901 - one bounded ELF-header wa
         if nul <= 0 or nul > _MAX_NAME:
             return None
         try:
-            return blob[:nul].decode("ascii")
+            link = blob[:nul].decode("ascii")
         except UnicodeDecodeError:
             return None
+        # A `.gnu_debuglink` value is a bare filename by spec — never a path. Reject any name
+        # carrying a path separator or a `.`/`..` component so a hostile binary cannot steer the
+        # worker's later `os.path.join(stage_dir, name)` copy destination outside the staging dir
+        # (CWE-22 path-traversal write; AA1). Fail closed = treat as "no debuglink".
+        if link in {".", ".."} or "/" in link or "\\" in link:
+            return None
+        return link
     return None
