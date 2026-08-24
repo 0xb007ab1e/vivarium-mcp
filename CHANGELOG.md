@@ -64,10 +64,16 @@ real hardened worker. Separately, the **security-hardening / gap-remediation** w
     labels to the loaded ELF before analysis (mirrors the ADR-061 PDB companion; mutually exclusive
     with `pdb_ref`). Additive/opt-in. `debug_format="dwarf"` (detached DWARF) is a tracked
     follow-up (fixture-blocked).
-  - **`deobfuscate_strings` (ADR-068)** — recover hidden **stack-strings** by walking a function's
-    RAW per-instruction p-code for runs of constant stores to adjacent stack slots (invisible to the
-    decompiler's `HighFunction` — dead-code elimination removes stores never read). Pure static
-    analysis; recovered text untrusted. `xor_decode` (decode-loop emulation) is a tracked follow-up.
+  - **`deobfuscate_strings` (ADR-068)** — recover hidden strings the ordinary scan misses via two
+    techniques: **`stack_string`** walks a function's RAW per-instruction p-code for runs of constant
+    stores to adjacent stack slots (invisible to the decompiler's `HighFunction` — dead-code
+    elimination removes stores never read); **`xor_decode` (D3)** detects a single-pass XOR-const
+    in-place decode loop (INT_XOR const + STORE + a WRITE data ref locating the buffer) and recovers
+    the plaintext by **bounded p-code emulation** of the decode function — reusing the ADR-049
+    sandbox (no native execution, program DB untouched) + reading the decoded buffer back, reporting
+    only a run that BECAME printable, with `encoding` + the recovered `decode_key` (untrusted). Pure
+    static + sandboxed emulation; recovered text/key untrusted. `add`-decoders + multi-stage/keyed
+    decoders are tracked follow-ups within ADR-068 (D4).
   - **Container unwrap (ADR-070)** — an optional `container` (`gzip`/`xz`/`lzma`/`uimage`) on
     `session_import` decompresses the input before loading, **streamed against hard zip-bomb caps**
     (absolute output + ratio; aborts on overflow) in the worker, never the server. `uimage` strips

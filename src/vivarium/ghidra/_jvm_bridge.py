@@ -406,13 +406,14 @@ class PyGhidraBackend:
     def deobfuscate_strings(self, params: dict[str, Any]) -> dict[str, Any]:
         """Recover hidden (stack-string) strings from a function/program scan — ADR-068."""
         function = params.get("function")
-        techniques = params.get("techniques") or ["stack_string"]
+        techniques = params.get("techniques") or ["stack_string", "xor_decode"]
         return self._gh_deobfuscate_strings(
             None if function is None else str(function),
             [str(t) for t in techniques],
             _clamp_count(params.get("min_length", 4)),
             _clamp_count(params.get("max_results", 256)),
             _clamp_count(params.get("max_bytes", 256)),
+            int(params.get("max_steps", 100_000)),
         )
 
     def stack_frame(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2129,6 +2130,7 @@ class PyGhidraBackend:
         min_length: int,
         max_results: int,
         max_bytes: int,
+        max_steps: int = 100_000,
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Recover hidden (stack-string) strings from a function or bounded program scan (ADR-068).
 
@@ -2153,9 +2155,11 @@ class PyGhidraBackend:
             min_length: Minimum recovered-string length (already server-clamped).
             max_results: Cap on recovered strings returned (already server-clamped).
             max_bytes: Cap on the length of any single recovered string (already server-clamped).
+            max_steps: ``xor_decode`` p-code step budget for the decode-loop emulation (clamped).
 
         Returns:
-            ``{"strings": [{"address", "technique", "text", "length"}], "truncated"}``.
+            ``{"strings": [{"address", "technique", "text", "length", "encoding"?, "decode_key"?}],
+            "truncated"}``.
 
         Raises:
             WorkerError: ``not-found`` if a named ``function`` does not resolve.
@@ -2165,6 +2169,7 @@ class PyGhidraBackend:
         program = self._require_program()
         listing = program.getListing()
         want_stack = "stack_string" in techniques
+        want_xor = "xor_decode" in techniques
 
         if function is not None:
             functions = [self._resolve_function(function)]
@@ -2250,7 +2255,118 @@ class PyGhidraBackend:
             if truncated:
                 break
 
+        # ADR-068 D3: xor_decode — recover single-pass XOR-const in-place decoders by BOUNDED
+        # emulation of the decode function (reuses the ADR-049 sandbox via _gh_emulate) + reading
+        # back the decoded buffer. A candidate that isn't really a decoder just yields no
+        # newly-printable run (the before/after gate), so a false pre-filter match is harmless.
+        for func in functions:
+            if not want_xor or len(results) >= max_results:
+                break
+            try:
+                recovered = self._gh_xor_decode_one(func, min_length, max_bytes, max_steps)
+            except (
+                Exception
+            ):  # a decoder that faults/halts oddly is skipped, not fatal (fail closed)
+                recovered = None
+            if recovered is None:
+                continue
+            recovered["text"] = recovered["text"][:max_bytes]
+            recovered["length"] = len(recovered["text"])
+            results.append(recovered)
+            if len(results) >= max_results:
+                truncated = True
+                break
+
         return {"strings": results, "truncated": truncated}
+
+    def _gh_xor_decode_one(  # noqa: C901 - one bounded detect-then-emulate decoder recovery (JVM edge)
+        self, func: Any, min_length: int, max_bytes: int, max_steps: int
+    ) -> dict[str, Any] | None:  # pragma: no cover - JVM edge
+        """Recover one single-pass XOR-const in-place decoder's plaintext (ADR-068 D3).
+
+        Detects the decoder statically (an ``INT_XOR`` with a constant operand — the single-byte
+        key — plus at least one ``STORE``, and a WRITE data reference locating the in-place buffer),
+        then recovers the plaintext by BOUNDED p-code emulation of the function via
+        :meth:`_gh_emulate` (``call=True`` — the ADR-049 sandbox: no native execution, program DB
+        untouched) and reading the decoded buffer back. Reports only a run that BECAME printable
+        (changed vs the original bytes), so a non-decoder pre-filter match yields nothing. ``xor``
+        only in this increment (``add`` decoders are a tracked follow-up within ADR-068).
+
+        Args:
+            func: The candidate function.
+            min_length: Minimum recovered-run length.
+            max_bytes: Cap on the decoded-buffer window read back.
+            max_steps: P-code step budget for the emulation (server-clamped).
+
+        Returns:
+            A recovered-string dict, or ``None`` if not a recoverable XOR decoder.
+        """
+        listing = self._require_program().getListing()
+        refmgr = self._require_program().getReferenceManager()
+
+        key: int | None = None
+        has_store = False
+        write_targets: list[int] = []
+        for instruction in listing.getInstructions(func.getBody(), True):
+            for op in instruction.getPcode():
+                mnem = str(op.getMnemonic())
+                if mnem == "STORE":
+                    has_store = True
+                elif mnem == "INT_XOR" and key is None:
+                    for k in range(op.getNumInputs()):
+                        vn = op.getInput(k)
+                        if vn.isConstant():
+                            key = int(vn.getOffset()) & 0xFF
+                            break
+            for ref in refmgr.getReferencesFrom(instruction.getAddress()):
+                if ref.getReferenceType().isWrite():
+                    write_targets.append(int(ref.getToAddress().getOffset()))
+
+        if key is None or not has_store or not write_targets:
+            return None
+
+        base = min(write_targets)
+        entry = str(func.getEntryPoint())
+        before_hex = self._gh_read_bytes(hex(base), max_bytes).get("data", "")
+
+        result = self._gh_emulate(
+            start=entry,
+            set_registers={},
+            write_memory=[],
+            max_steps=max_steps,
+            stop_at=None,
+            read_registers=[],
+            read_memory=[{"address": hex(base), "length": max_bytes}],
+            call=True,
+            stubs=[],
+            args=None,
+        )
+        memory = result.get("memory") or []
+        if not memory:
+            return None
+        decoded = bytes.fromhex(str(memory[0].get("data", "")))
+        before = bytes.fromhex(before_hex) if before_hex else b""
+
+        run_bytes = bytearray()
+        for byte in decoded:  # leading printable run (stops at NUL / any non-printable byte)
+            if 0x20 <= byte <= 0x7E:
+                run_bytes.append(byte)
+            else:
+                break
+        if len(run_bytes) < min_length:
+            return None
+        # Only report a run the decode actually PRODUCED — reject bytes that were already plaintext.
+        if bytes(run_bytes) == before[: len(run_bytes)]:
+            return None
+
+        return {
+            "address": entry,
+            "technique": "xor_decode",
+            "text": run_bytes.decode("latin1"),
+            "length": len(run_bytes),
+            "encoding": "xor",
+            "decode_key": hex(key),
+        }
 
     def _gh_stack_frame(self, function: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Return a function's recovered stack-frame layout (ADR-054).
