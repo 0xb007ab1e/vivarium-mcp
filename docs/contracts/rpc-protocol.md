@@ -177,7 +177,9 @@ SSA instances — proposing one field per observed access, never writing; inferr
 walks a function's RAW per-instruction p-code for runs of constant stores to adjacent stack slots
 and reassembles them via the pure core — invisible to the HighFunction because dead-code elimination
 removes stores never read; function-scoped or a bounded program scan; recovered text untrusted;
-`xor_decode` deferred),
+`xor_decode` (ADR-068 D3) detects an in-place XOR-with-const decode loop and emulates it in the
+ADR-049 sandbox, reporting a run only if it became printable, with untrusted `encoding`/`decode_key`;
+`add`/multi-stage decoders deferred),
 `stack_frame` (ADR-054 recovered stack layout — read-only; the function's locals/parameters with
 offsets, types, sizes from the Stack analyzer), `basic_blocks` (ADR-055 control-flow graph —
 read-only; each basic block's address range + intraprocedural successor edges from
@@ -193,10 +195,11 @@ correlator, returns `{matches[]{source_address, destination_address, similarity,
 match_count, truncated}`, then releases + wipes both — the session's own program is never a
 participant), `binary_diff` (ADR-067 function-granularity two-program diff — read-only w.r.t. the
 session; confines + size-caps two refs server-side, loads BOTH fresh in the worker, auto-analyzes
-both, indexes functions by name, classifies added/removed/changed by name-pairing + the `match_by`
-signal (`name`=body size + instruction count, `function_hash`=Ghidra ExactInstructions hash),
-returns `{added[], removed[], changed[], summary, truncated}` — names UNTRUSTED, then releases +
-wipes both), `bsim_search_corpus` (ADR-062 cross-binary BSim search over an EPHEMERAL corpus —
+both, pairs functions per the `match_by` signal (`name`=name-pairing + body size + instruction
+count, `function_hash`=Ghidra ExactInstructions hash, `bsim`=BSim content-similarity ≥
+`min_similarity` for stripped binaries), classifies added/removed/changed (+ `unchanged[]` when
+`include_unchanged`), returns `{added[], removed[], changed[], unchanged[]?, summary, truncated}` —
+names UNTRUSTED, then releases + wipes both), `bsim_search_corpus` (ADR-062 cross-binary BSim search over an EPHEMERAL corpus —
 read-only w.r.t. the session; confines + size-caps the target + up to 16 reference refs, loads each
 fresh one at a time, BSim-signs, returns each target function's best reference-corpus match
 `{matches[]{target_address, target_name, reference_index, reference_address, reference_name,
@@ -208,7 +211,9 @@ paginated summary rows over the program's DataTypeManager), `get_comments`, `mem
 `emulate` (ADR-049 p-code emulation —
 bounded, read-effect-only; interpreter, no native exec/syscalls/IO; ADR-066 `call=true` adds the
 call convenience — the worker sets up a scratch stack + sentinel return address, runs to the return,
-and reads the ABI return register into `return_value`; args/buffers stay caller-provided via
+and reads the ABI return register into `return_value`; an optional `args` (ints) is placed into the
+target's parameter storage per its RESOLVED convention (register params only, stack-param convention
+fails closed, `args` without `call` rejected), buffers stay caller-provided via
 set_registers/write_memory; ADR-066 D2 `stubs=[{target, action=return_const:N|skip}]` substitutes
 an external call the routine makes — returning to the caller instead of executing/halting, never
 running real code or touching the host — with a `stub-limit` stop_reason when the budget is
@@ -338,24 +343,30 @@ memory block per region (`Memory.createInitializedBlock` from `path[offset:offse
 and rejects overlapping address ranges **before** the worker (per-region CWE-22/CWE-400, D2/D3);
 absent ⇒ byte-for-byte the single-region path. Additive/opt-in, read-only, tool count unchanged.
 
-**`import_binary` — companion debug map (v1.9 — ADR-071; server → worker, OPTIONAL):** the params
+**`import_binary` — companion debug info (v1.9 — ADR-071; server → worker, OPTIONAL):** the params
 MAY carry `debug_ref` (a second server-confined + size-capped path under `VIVARIUM_IMPORT_ROOT`) +
-`debug_format` (`"map"`), allowed only with the auto loader and mutually exclusive with `pdb_ref`
-(a program takes one companion). When present, after the ELF is loaded the worker parses the map
-with the pure `core.debugmap.parse_symbol_map` and creates one `IMPORTED` label per name→address
-symbol (inside a transaction), before analysis. The ref is confined + size-capped **before** the
-worker; a malformed map fails closed `not-found`; out-of-space addresses are skipped honestly.
-Additive/opt-in, read-only, tool count unchanged. (`debug_format="dwarf"` is a tracked follow-up.)
+`debug_format` (`"map"` or `"dwarf"`), allowed only with the auto loader and mutually exclusive with
+`pdb_ref` (a program takes one companion). For `"map"`, after the ELF is loaded the worker parses
+the map with the pure `core.debugmap.parse_symbol_map` and creates one `IMPORTED` label per
+name→address symbol (inside a transaction), before analysis. For `"dwarf"` (detached DWARF), the
+worker reads the ELF's `.gnu_debuglink` (pure `core.debuglink`, hostile-byte bounded, the name
+confined to a bare basename — CWE-22), stages the `debug_ref` beside the binary under that name, and
+opens from there so Ghidra's DWARF analyzer resolves it (`SameDirDebugInfoProvider`) at analysis
+time; a binary with no `.gnu_debuglink` fails closed `not-found`. The ref is confined + size-capped
+**before** the worker; a malformed map/companion fails closed `not-found`; out-of-space addresses
+are skipped honestly. Additive/opt-in, read-only, tool count unchanged.
 
 **`import_binary` — container unwrap (v1.9 — ADR-070; server → worker, OPTIONAL):** the params MAY
-carry `container` (`"gzip"`/`"xz"`/`"lzma"`) + `max_decompressed_bytes` + `max_decompression_ratio`.
-When present the worker DECOMPRESSES `source_ref` first (via the stdlib decompressor for the token),
-streaming the output against `min(max_decompressed_bytes, input_size × max_decompression_ratio)` and
-ABORTING on overflow (`limit-exceeded` — a zip-bomb never materializes a large buffer, ADR-070 D3),
-then loads the decompressed payload with the loader hints. Parsed in the worker, never the server
-(ADR-001/D4); a corrupt stream fails closed `not-found`. Mutually exclusive with `regions`. Absent ⇒
-byte-for-byte the pre-ADR-070 path. Additive/opt-in, read-only, tool count unchanged. (uImage /
-androidboot header formats are a tracked follow-up.)
+carry `container` (`"gzip"`/`"xz"`/`"lzma"`/`"uimage"`) + `max_decompressed_bytes` +
+`max_decompression_ratio`. When present the worker unwraps `source_ref` first — for the compression
+tokens via the stdlib decompressor; for `"uimage"` the pure `core.uimage` parser (fuzzed) strips the
+64-byte U-Boot legacy header and nested-decompresses the payload — streaming the output against
+`min(max_decompressed_bytes, input_size × max_decompression_ratio)` and ABORTING on overflow
+(`limit-exceeded` — a zip-bomb never materializes a large buffer, ADR-070 D3), then loads the payload
+with the loader hints. Parsed in the worker, never the server (ADR-001/D4); a corrupt stream/header
+fails closed `not-found`. Mutually exclusive with `regions`. Absent ⇒ byte-for-byte the pre-ADR-070
+path. Additive/opt-in, read-only, tool count unchanged. (androidboot header format is a tracked
+follow-up.)
 
 **`import_binary` — companion PDB (v1.8 — ADR-061; server → worker, OPTIONAL):** the params MAY
 carry `pdb_ref` (a second server-confined + size-capped path under `VIVARIUM_IMPORT_ROOT`), allowed

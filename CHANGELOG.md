@@ -148,6 +148,21 @@ trust identity tightened to tag builds, plus CI-drift tripwires, workflow lintin
 required gate, and CI/docs/threat-model currency.
 
 ### Fixed
+- **Real-worker analysis e2e now gates CI (AA2, round-11).** `test_worker_analysis`
+  (`test_worker_analyzes_real_elf_end_to_end`) — a live-worker drive of `PyGhidraBackend` asserting
+  the WS2 `_build_*` contract shapes against the JVM (TB3/ADR-001) — ran in **no** workflow. It is
+  now in the live-regression hard-gate list; the fail-loud floor bumps `38→39` (non-FID) / `40→41`
+  (FID), verified by `--collect-only`. The related `test_kill_and_wipe` / `test_session_lifecycle`
+  are intentional skip-stubs that DEFER to the live containment coverage in
+  `tests/e2e/test_abuse_containment_oss.py` (`e2e-groundtruth.yml`, nightly + dispatch) and are
+  therefore not gated here; promoting that containment suite to a per-PR gate is tracked as round-4
+  gap Q1.
+- **Frozen contracts describe the shipped inputs (AA4, round-11).** `docs/contracts/tool-catalog.md`
+  + `rpc-protocol.md` marked already-shipped `session_import`/`emulate`/`binary_diff`/
+  `deobfuscate_strings` inputs as "tracked follow-ups": `debug_format="dwarf"` (#298),
+  `match_by="bsim"` + `include_unchanged` (#297), `xor_decode` (#296), `container="uimage"`, and
+  `emulate` `args` auto-placement. The rows now match the schemas a client builds to (a caller no
+  longer sees a valid input documented as rejected).
 - **`set_function_signature` applies against a real worker (#291).** The worker's `updateFunction`
   JVM-overload call passed a bare Python `None` for the calling-convention slot and a raw `DataType`
   where a `Variable` (return parameter) is required, so JPype matched no overload → `TypeError` →
