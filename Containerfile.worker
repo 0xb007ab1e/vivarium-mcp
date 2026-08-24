@@ -175,11 +175,14 @@ RUN set -eux; \
     # transitive dep; the explicit constraint also busts the build-layer cache so a fresh resolve
     # gets the fix in CI, not a stale -r0 cached layer). py3-pip-wheel is build-bootstrap only — not
     # executed in the runtime — but we upgrade rather than waive (upgrade-first; ADR-003 spirit).
-    # CVE-2026-14456 (HIGH, openssl): the pinned wolfi-base bakes libcrypto3-3.6.3-r1; force the
-    # fixed r5 (libcrypto3 + libssl3 share the openssl aport version, so the one constraint drags
-    # both). Upgrade-first, not a waiver (workflow-cve-management). The explicit constraint also
-    # busts the layer cache so a fresh resolve pulls the fix in CI.
-    apk add --no-cache python-3.12 openjdk-21 "py3-pip-wheel>=26.1.2-r1" "libcrypto3>=3.6.3-r5"; \
+    # Force fixed base packages the pinned wolfi-base bakes vulnerable (upgrade-first, not a waiver
+    # — workflow-cve-management; the explicit constraints also bust the layer cache so a fresh CI
+    # resolve pulls the fixes):
+    #   * CVE-2026-14456 (HIGH, openssl) — wolfi-base bakes libcrypto3/libssl3 3.6.3-r1; pin BOTH to
+    #     r5 (they are separate apk packages — one constraint does NOT drag the other, proven).
+    #   * CVE-2026-38753 + CVE-2026-38754 (HIGH, busybox) — baked 1.37.0-r60; pin the 1.38.0 fix.
+    apk add --no-cache python-3.12 openjdk-21 "py3-pip-wheel>=26.1.2-r1" \
+        "libcrypto3>=3.6.3-r5" "libssl3>=3.6.3-r5" "busybox>=1.38.0-r0"; \
     ln -sf /usr/bin/python3.12 /usr/bin/python; \
     ln -sf /usr/bin/python3.12 /usr/bin/python3
 

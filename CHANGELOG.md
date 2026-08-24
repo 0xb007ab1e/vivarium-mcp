@@ -14,12 +14,15 @@ real hardened worker. Separately, the **security-hardening / gap-remediation** w
 
 ### Security
 
-- **CVE-2026-14456 (HIGH, openssl/libcrypto3) — upgraded, not waived.** The image Trivy gate caught a
-  new HIGH in the base openssl (`libcrypto3` fixed in `3.6.3-r5`). The **server** base was bumped to
-  the current Chainguard `python` digests (`:latest` + `:latest-dev`, which ship `r5`); the
-  **worker** pins `libcrypto3>=3.6.3-r5` in its runtime `apk add` (its `wolfi-base` baked `r1`;
-  libcrypto3/libssl3 share the openssl aport version so the one constraint drags both). Upgrade-first
-  per `workflow-cve-management`; base digests remain pinned (no floating tags).
+- **Base-image HIGH CVEs — upgraded, not waived.** The image Trivy gate caught new HIGHs from base
+  drift; all fixed by upgrade (`workflow-cve-management`), base digests still pinned:
+  - **CVE-2026-14456** (openssl) — `libcrypto3`/`libssl3` fixed in `3.6.3-r5`. **Server** base bumped
+    to the current Chainguard `python` digests (`:latest` + `:latest-dev`, which ship `r5`).
+    **Worker** pins BOTH `libcrypto3>=3.6.3-r5` and `libssl3>=3.6.3-r5` in its runtime `apk add`
+    (its `wolfi-base` baked `r1`; the two are separate apk packages — one constraint does not drag
+    the other).
+  - **CVE-2026-38753 + CVE-2026-38754** (busybox, worker) — `wolfi-base` baked `1.37.0-r60`; the
+    worker pins `busybox>=1.38.0-r0`.
 
 ### Added
 
