@@ -1348,6 +1348,7 @@ class RpcGhidraAdapter:
                     "program_a": a.program_a,
                     "program_b": a.program_b,
                     "match_by": a.match_by,
+                    "min_similarity": a.min_similarity,
                     "include_unchanged": a.include_unchanged,
                     "max_entries": a.max_entries,
                 },

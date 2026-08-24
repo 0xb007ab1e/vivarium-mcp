@@ -24,17 +24,28 @@ def test_defaults_name_bounded() -> None:
     assert m.max_entries == 1000
 
 
-@pytest.mark.parametrize("mode", ["name", "function_hash"])
-def test_both_match_modes_accepted(mode: str) -> None:
-    """Both supported pairing signals validate."""
+@pytest.mark.parametrize("mode", ["name", "function_hash", "bsim"])
+def test_match_modes_accepted(mode: str) -> None:
+    """All three supported pairing modes validate (name, function_hash, bsim)."""
     m = s.BinaryDiffIn(session_id="s", program_a="a", program_b="b", match_by=mode)  # type: ignore[arg-type]
     assert m.match_by == mode
 
 
 def test_unknown_match_by_rejected() -> None:
-    """A match_by outside the closed set (e.g. the deferred 'bsim') fails closed."""
+    """A match_by outside the closed set fails closed."""
     with pytest.raises(ValidationError):
-        s.BinaryDiffIn(session_id="s", program_a="a", program_b="b", match_by="bsim")  # type: ignore[arg-type]
+        s.BinaryDiffIn(session_id="s", program_a="a", program_b="b", match_by="rot13")  # type: ignore[arg-type]
+
+
+def test_min_similarity_default_and_bounds() -> None:
+    """`min_similarity` defaults to 0.7 (bsim pairing floor) and is bounded to [0, 1]."""
+    assert s.BinaryDiffIn(session_id="s", program_a="a", program_b="b").min_similarity == 0.7
+    m = s.BinaryDiffIn(
+        session_id="s", program_a="a", program_b="b", match_by="bsim", min_similarity=0.9
+    )
+    assert m.min_similarity == 0.9
+    with pytest.raises(ValidationError):
+        s.BinaryDiffIn(session_id="s", program_a="a", program_b="b", min_similarity=1.5)
 
 
 def test_include_unchanged_defaults_off_and_accepts_true() -> None:
