@@ -36,6 +36,9 @@ _MAX_PCODE_OPS_PER_INSN = 256
 #: raw-p-code walk so an adversarial binary cannot force an unbounded scan; the per-call wall-clock
 #: kill backs it. A `function`-scoped call ignores this (one function).
 _DEOBFUSCATE_FUNCTION_SCAN_CAP = 2_000
+#: Cap on functions BSim-signed per side in a `binary_diff` bsim (content) pairing (ADR-067). Bounds
+#: the O(n*m) all-pairs vector compare on a hostile pair of binaries (CWE-400).
+_BINARY_DIFF_BSIM_MAX_SCAN = 500
 #: Cap on library-call stub APPLICATIONS during one `emulate` call (ADR-066 D2). A hostile routine
 #: that calls a stubbed target in a tight loop is already bounded by `max_steps`; this bounds the
 #: substitutions and surfaces `stop_reason="stub-limit"` honestly when exceeded (CWE-400).
@@ -477,6 +480,7 @@ class PyGhidraBackend:
             match_by=str(params.get("match_by", "name")),
             max_entries=_clamp_count(params.get("max_entries", 1000)),
             include_unchanged=bool(params.get("include_unchanged", False)),
+            min_similarity=float(params.get("min_similarity", 0.7)),
         )
 
     def bsim_search_corpus(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -3397,38 +3401,41 @@ class PyGhidraBackend:
         match_by: str,
         max_entries: int,
         include_unchanged: bool = False,
+        min_similarity: float = 0.7,
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Function-granularity diff of two confined binaries (ADR-067; session read-only).
 
         Loads BOTH refs FRESH into a throwaway project in this worker (the session's own program is
-        NOT a participant — same isolation as ``version_track``), auto-analyzes both, indexes each
-        program's functions by name, pairs by name, and classifies: ADDED (in B, not A), REMOVED
-        (in A, not B), CHANGED (same name, differing per the ``match_by`` signal — ``function_hash``
-        compares Ghidra's operand-masked ExactInstructions hash, ``name`` compares body size +
-        instruction count). ``summary`` counts are HONEST (full counts even when the entry lists are
-        capped at ``max_entries``). Both programs + the project are released + WIPED (ADR-002). All
-        fields are SAFE (names + addresses + computed change kinds). Bounded by ``max_entries`` +
-        the worker wall-clock/memory caps (ADR-004, two loaded programs).
+        NOT a participant — same isolation as ``version_track``), auto-analyzes both, and classifies
+        ADDED / REMOVED / CHANGED / (optionally) UNCHANGED functions. Pairing is by NAME for
+        ``match_by`` in {``name``, ``function_hash``} (``function_hash`` compares Ghidra's
+        operand-masked ExactInstructions hash, ``name`` compares body size + instruction count), or
+        by CONTENT for ``match_by="bsim"`` — a greedy best-match over BSim feature vectors (the
+        stripped-binary mode, where names are address-derived and name-pairing mispairs). The
+        ``summary`` counts are HONEST (full counts even when the entry lists are capped at
+        ``max_entries``). Both programs + the project are released + WIPED (ADR-002). All fields are
+        SAFE except the binary-derived names (the server wraps those). Bounded by ``max_entries`` +
+        the BSim scan cap + the worker wall-clock/memory caps (ADR-004, two loaded programs).
 
-        When ``include_unchanged`` is set, the name-paired functions that do NOT differ are also
-        returned (``unchanged`` list + ``summary.unchanged`` count) — a full correspondence map, not
-        just the deltas; default off keeps the byte-for-byte deltas-only result.
-
-        (``match_by="bsim"`` — content pairing for STRIPPED binaries via the ADR-058 BSim / VT
-        correlators — is a tracked follow-up; the schema does not yet accept it.)
+        When ``include_unchanged`` is set, the paired functions that do NOT differ are also returned
+        (``unchanged`` list + ``summary.unchanged`` count) — a full correspondence map, not just the
+        deltas; default off keeps the byte-for-byte deltas-only result.
 
         Args:
             source_ref_a: Baseline binary (server-confined + size-capped path).
             source_ref_b: Comparison binary (server-confined + size-capped path).
-            match_by: ``"name"`` or ``"function_hash"`` — the change-detection signal.
+            match_by: ``"name"`` / ``"function_hash"`` (name-paired) or ``"bsim"`` (content-paired).
             max_entries: Hard cap per entry list (already server-clamped).
-            include_unchanged: Also return name-paired non-differing functions (default off).
+            include_unchanged: Also return paired non-differing functions (default off).
+            min_similarity: ``bsim`` only — minimum BSim similarity to pair two functions.
 
         Returns:
-            ``{"added": [...], "removed": [...], "changed": [...], "summary": {...}, "truncated"}``.
+            ``{"added": [...], "removed": [...], "changed": [...], "unchanged": [...],
+            "summary": {...}, "truncated"}``.
 
         Raises:
-            WorkerError: ``analysis-failed`` if a program cannot be loaded/analyzed.
+            WorkerError: ``analysis-failed`` if a program cannot be loaded/analyzed (or an
+                unsupported address size for ``bsim``).
         """
         import contextlib
         import shutil
@@ -3480,6 +3487,12 @@ class PyGhidraBackend:
             root = proj.getProjectData().getRootFolder()
             prog_a = self._vt_load_program(proj, root, source_ref_a, "A", consumer, monitor)
             prog_b = self._vt_load_program(proj, root, source_ref_b, "B", consumer, monitor)
+            if match_by == "bsim":
+                # Content pairing (stripped binaries): both programs are loaded — BSim-sign each +
+                # greedy-match by feature-vector similarity, no name dependence. Same result shape.
+                return self._binary_diff_bsim(
+                    prog_a, prog_b, min_similarity, max_entries, include_unchanged
+                )
             idx_a = _index(prog_a)
             idx_b = _index(prog_b)
             names_a, names_b = set(idx_a), set(idx_b)
@@ -3544,6 +3557,103 @@ class PyGhidraBackend:
                 proj_ctx.__exit__(None, None, None)
             with contextlib.suppress(Exception):
                 shutil.rmtree(diff_dir, ignore_errors=True)
+
+    def _binary_diff_bsim(
+        self,
+        prog_a: Any,
+        prog_b: Any,
+        min_similarity: float,
+        max_entries: int,
+        include_unchanged: bool,
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Content-pair two loaded programs by BSim similarity + classify (ADR-067 bsim mode).
+
+        BSim-signs each program (bounded by :data:`_BINARY_DIFF_BSIM_MAX_SCAN`), greedily matches
+        A→B functions best-first over the ``>= min_similarity`` pairs (one-to-one), then classifies:
+        unpaired-B = ADDED, unpaired-A = REMOVED, a paired pair scoring ``< 1.0`` = CHANGED, exactly
+        ``1.0`` = UNCHANGED (returned only when requested). Names are binary-derived (the server
+        wraps them). This is the stripped-binary path — pairing does NOT depend on names, so a build
+        that only shifted addresses (unstable ``FUN_<addr>`` names) still correlates.
+
+        Args:
+            prog_a: The baseline program (already loaded + analyzed).
+            prog_b: The comparison program (already loaded + analyzed).
+            min_similarity: Minimum BSim similarity to pair two functions.
+            max_entries: Hard cap per entry list.
+            include_unchanged: Whether to also return the identical (sim 1.0) pairs.
+
+        Returns:
+            The same ``{"added","removed","changed","unchanged","summary","truncated"}`` shape.
+
+        Raises:
+            WorkerError: ``analysis-failed`` on an unsupported address size.
+        """
+        from generic.lsh.vector import VectorCompare
+        from ghidra.features.bsim.query import FunctionDatabase
+        from worker.dispatch import CODE_ANALYSIS_FAILED, WorkerError
+
+        size = int(prog_a.getAddressFactory().getDefaultAddressSpace().getSize())
+        template = self._BSIM_TEMPLATES.get(size)
+        if template is None or size != int(
+            prog_b.getAddressFactory().getDefaultAddressSpace().getSize()
+        ):
+            raise WorkerError(
+                CODE_ANALYSIS_FAILED, f"bsim diff: unsupported/mismatched address size {size}"
+            )
+        config = FunctionDatabase.loadConfigurationTemplate(template)
+        factory = FunctionDatabase.generateLSHVectorFactory()
+        factory.set(config.weightfactory, config.idflookup, config.info.settings)
+        sigs_a = self._bsim_sign(prog_a, factory, _BINARY_DIFF_BSIM_MAX_SCAN)
+        sigs_b = self._bsim_sign(prog_b, factory, _BINARY_DIFF_BSIM_MAX_SCAN)
+
+        comparer = VectorCompare()
+        candidates: list[tuple[float, int, int]] = []
+        for i, (_na, _aa, va) in enumerate(sigs_a):
+            for j, (_nb, _ab, vb) in enumerate(sigs_b):
+                score = float(va.compare(vb, comparer))
+                if score >= min_similarity:
+                    candidates.append((score, i, j))
+        candidates.sort(key=lambda c: c[0], reverse=True)  # best-first, greedy one-to-one
+
+        used_a: set[int] = set()
+        used_b: set[int] = set()
+        changed: list[dict[str, Any]] = []
+        unchanged: list[dict[str, Any]] = []
+        for score, i, j in candidates:
+            if i in used_a or j in used_b:
+                continue
+            used_a.add(i)
+            used_b.add(j)
+            _, addr_a, _ = sigs_a[i]
+            name_b, addr_b, _ = sigs_b[j]
+            if score >= 0.99999:  # identical content (BSim ~1.0)
+                if include_unchanged:
+                    unchanged.append({"address": addr_b, "name": name_b})
+            else:
+                changed.append(
+                    {"address_a": addr_a, "address_b": addr_b, "name": name_b, "change": "body"}
+                )
+        added = [
+            {"address": ab, "name": nb} for j, (nb, ab, _vb) in enumerate(sigs_b) if j not in used_b
+        ]
+        removed = [
+            {"address": aa, "name": na} for i, (na, aa, _va) in enumerate(sigs_a) if i not in used_a
+        ]
+        summary = {
+            "added": len(added),
+            "removed": len(removed),
+            "changed": len(changed),
+            "unchanged": len(unchanged),
+        }
+        truncated = any(len(x) > max_entries for x in (added, removed, changed, unchanged))
+        return {
+            "added": added[:max_entries],
+            "removed": removed[:max_entries],
+            "changed": changed[:max_entries],
+            "unchanged": unchanged[:max_entries],
+            "summary": summary,
+            "truncated": truncated,
+        }
 
     def _bsim_sign(
         self, program: Any, factory: Any, max_scan: int

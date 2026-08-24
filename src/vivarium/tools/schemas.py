@@ -1485,10 +1485,15 @@ class BinaryDiffIn(_SessionScopedIn):
     Attributes:
         program_a: Baseline binary — a path under ``VIVARIUM_IMPORT_ROOT`` (confined + size-capped).
         program_b: Comparison binary — a confined + size-capped path under ``VIVARIUM_IMPORT_ROOT``.
-        match_by: The change-detection signal — ``"name"`` (body size + instruction count) or
-            ``"function_hash"`` (Ghidra's operand-masked ExactInstructions hash). Functions are
-            paired by name; a ``"bsim"`` content-pairing mode for stripped binaries is a follow-up.
-        include_unchanged: When ``True``, also return the name-paired functions that did NOT differ
+        match_by: The change-detection signal / pairing mode. ``"name"`` (body size + instruction
+            count) and ``"function_hash"`` (Ghidra's operand-masked ExactInstructions hash) pair
+            functions **by name**; ``"bsim"`` pairs by **content** (BSim feature-vector similarity,
+            greedy best-match ≥ ``min_similarity``) — the mode for STRIPPED binaries where names are
+            address-derived and unstable across builds, so name-pairing mispairs.
+        min_similarity: ``bsim`` only — the minimum BSim cosine similarity for two functions to be
+            paired (``[0, 1]``); a paired pair scoring < 1.0 is ``changed``, exactly 1.0 is
+            unchanged. Ignored by the name-based modes.
+        include_unchanged: When ``True``, also return the paired functions that did NOT differ
             (the ``unchanged`` list + ``summary.unchanged`` count) — a full correspondence map, not
             just the deltas. Default ``False`` (byte-for-byte the pre-follow-up behavior: an empty
             ``unchanged`` list and a zero count). Bounded by ``max_entries`` like the delta lists.
@@ -1497,7 +1502,8 @@ class BinaryDiffIn(_SessionScopedIn):
 
     program_a: str = Field(min_length=1, max_length=512)
     program_b: str = Field(min_length=1, max_length=512)
-    match_by: Literal["name", "function_hash"] = "name"
+    match_by: Literal["name", "function_hash", "bsim"] = "name"
+    min_similarity: float = Field(default=0.7, ge=0.0, le=1.0)
     include_unchanged: bool = False
     max_entries: int = Field(default=1000, ge=1, le=_MAX_LIMIT)
 
