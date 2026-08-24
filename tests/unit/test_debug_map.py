@@ -65,9 +65,25 @@ def test_debug_ref_and_format_are_a_pair() -> None:
 
 
 def test_debug_ref_valid_with_auto() -> None:
-    """A paired debug_ref/debug_format is accepted with the default auto loader."""
+    """A paired debug_ref/debug_format is accepted with the default auto loader (map + dwarf)."""
     m = s.SessionImportIn(session_id="s", source_ref="p.elf", debug_ref="p.map", debug_format="map")
     assert m.debug_ref == "p.map" and m.debug_format == "map"
+    # ADR-071 follow-up: detached DWARF is now an accepted debug_format too.
+    d = s.SessionImportIn(
+        session_id="s", source_ref="p.elf", debug_ref="p.debug", debug_format="dwarf"
+    )
+    assert d.debug_format == "dwarf"
+
+
+def test_debug_format_unknown_rejected() -> None:
+    """A debug_format outside {map, dwarf} fails closed."""
+    with pytest.raises(ValidationError):
+        s.SessionImportIn(
+            session_id="s",
+            source_ref="p.elf",
+            debug_ref="p.x",
+            debug_format="stabs",  # type: ignore[arg-type]
+        )
 
 
 def test_debug_ref_rejected_with_non_auto_loader() -> None:

@@ -257,7 +257,7 @@ class SessionImportIn(_SessionScopedIn):
     pdb_ref: str | None = Field(default=None, min_length=1, max_length=512)
     regions: list[RegionSpec] | None = Field(default=None, max_length=_MAX_IMPORT_REGIONS)
     debug_ref: str | None = Field(default=None, min_length=1, max_length=512)
-    debug_format: Literal["map"] | None = None
+    debug_format: Literal["map", "dwarf"] | None = None
     container: Literal["gzip", "xz", "lzma", "uimage"] | None = None
 
     @model_validator(mode="after")
@@ -290,10 +290,13 @@ class SessionImportIn(_SessionScopedIn):
         if self.pdb_ref is not None and self.loader != "auto":
             raise ValueError("pdb_ref (companion PDB) is only allowed with loader='auto'")
 
-        # ADR-071: a companion detached debug source (a name→address symbol map). Additive/opt-in —
-        # None ⇒ byte-for-byte the pre-ADR-071 path. `debug_ref` + `debug_format` come as a pair,
-        # apply only to the ELF/auto-loaded case (like pdb_ref → PE), and are mutually exclusive
-        # with pdb_ref (a program takes ONE companion). Fail closed on a half/misplaced set.
+        # ADR-071: a companion detached debug source — a name→address symbol map (`"map"`: linker/
+        # `nm`/`.sym`) or split DWARF (`"dwarf"`: a `.gnu_debuglink`ed `.debug`, applied by the
+        # Ghidra DWARF analyzer). Additive/opt-in — None ⇒ byte-for-byte the pre-ADR-071 path. Both
+        # `debug_ref` +
+        # `debug_format` come as a pair, apply only to the ELF/auto-loaded case (as pdb_ref → PE),
+        # and are mutually exclusive with pdb_ref (a program takes ONE companion). Fail closed on a
+        # half/misplaced set.
         if (self.debug_ref is None) != (self.debug_format is None):
             raise ValueError("debug_ref and debug_format must be provided together")
         if self.debug_ref is not None:
