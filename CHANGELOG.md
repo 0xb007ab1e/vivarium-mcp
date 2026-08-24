@@ -12,6 +12,15 @@ new tool is read-only (or, for `apply_type_archive`, a consent-gated structural 
 the standard confinement + size caps before the worker (ADR-001); each was proven live against a
 real hardened worker. Separately, the **security-hardening / gap-remediation** work continues below.
 
+### Security
+
+- **CVE-2026-14456 (HIGH, openssl/libcrypto3) — upgraded, not waived.** The image Trivy gate caught a
+  new HIGH in the base openssl (`libcrypto3` fixed in `3.6.3-r5`). The **server** base was bumped to
+  the current Chainguard `python` digests (`:latest` + `:latest-dev`, which ship `r5`); the
+  **worker** pins `libcrypto3>=3.6.3-r5` in its runtime `apk add` (its `wolfi-base` baked `r1`;
+  libcrypto3/libssl3 share the openssl aport version so the one constraint drags both). Upgrade-first
+  per `workflow-cve-management`; base digests remain pinned (no floating tags).
+
 ### Added
 
 - **Data-flow slicing (`data_flow_slice`, ADR-064) — v1.9.** A read-only, bounded intra-function
