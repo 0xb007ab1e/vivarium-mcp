@@ -487,16 +487,17 @@ jobs:
           # ADR-068 deobfuscate_strings: a byte-by-byte x86-64 stack-string recovers "Hello!" (1) +
           # ADR-070 uImage unwrap: a gzip-payload uImage strips + nested-decompresses + loads (1) +
           # ADR-066 auto arg-placement: emulate(call, args=[5,7]) places into resolved storage -> 12 (1) +
-          # ADR-068 xor_decode: an in-place XOR decoder is detected + emulated -> "Hello!" (1).
-          # The non-FID base collects 37 (empirically, via `--collect-only`: 30 single-test files +
+          # ADR-068 xor_decode: an in-place XOR decoder is detected + emulated -> "Hello!" (1) +
+          # ADR-071 debug_ref dwarf: a detached DWARF (.gnu_debuglink'd .debug) recovers fn names (1).
+          # The non-FID base collects 38 (empirically, via `--collect-only`: 29 single-test files +
           # analyze_profiles's 3 + test_deobfuscate_strings's 2 [stack_string + xor_decode] +
-          # test_binary_diff's 2 [name + bsim]; the floor is a >= collection minimum kept in
-          # lock-step). The deterministic same-toolchain FID gate (zlib + musl, 2) is SELF-ACTIVATING:
-          # included only when the worker image ships the bundled DBs (FID_DETERMINISTIC_GATE=1), so
-          # the expected floor is 39 then, 37 otherwise. When inactive the test is omitted (not
-          # skipped), so the zero-skip rule below still holds.
+          # test_binary_diff's 2 [name + bsim] + test_import_debug_map's 2 [map + dwarf]; the floor is
+          # a >= collection minimum kept in lock-step). The deterministic same-toolchain FID gate
+          # (zlib + musl, 2) is SELF-ACTIVATING: included only when the worker image ships the bundled
+          # DBs (FID_DETERMINISTIC_GATE=1), so the expected floor is 40 then, 38 otherwise. When
+          # inactive the test is omitted (not skipped), so the zero-skip rule below still holds.
           import os
-          expected = 39 if os.environ.get("FID_DETERMINISTIC_GATE", "0") == "1" else 37
+          expected = 40 if os.environ.get("FID_DETERMINISTIC_GATE", "0") == "1" else 38
           if tests < expected:
               problems.append(f"expected >={expected} hard-gate tests to run, collected {tests}")
           if skipped:

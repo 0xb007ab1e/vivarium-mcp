@@ -63,11 +63,14 @@ real hardened worker. Separately, the **security-hardening / gap-remediation** w
     loads a headerless raw image into one program with N memory blocks (each region its own
     confined ref or an `offset`/`length` slice of the parent, at its `base_addr`; overlap rejected
     server-side). Additive/opt-in; a differing arch is a separate session (D5).
-  - **Companion debug map import (ADR-071)** — an optional `debug_ref` + `debug_format="map"` on
-    `session_import` applies a detached name→address symbol map (linker/`nm`/`.sym`) as `IMPORTED`
-    labels to the loaded ELF before analysis (mirrors the ADR-061 PDB companion; mutually exclusive
-    with `pdb_ref`). Additive/opt-in. `debug_format="dwarf"` (detached DWARF) is a tracked
-    follow-up (fixture-blocked).
+  - **Companion detached-debug import (ADR-071)** — an optional `debug_ref` + `debug_format` on
+    `session_import` applies detached debug info to the loaded ELF (mirrors the ADR-061 PDB
+    companion; mutually exclusive with `pdb_ref`; additive/opt-in). Two formats: **`"map"`** applies
+    a name→address symbol map (linker/`nm`/`.sym`) as `IMPORTED` labels before analysis;
+    **`"dwarf"`** applies split DWARF — the worker parses the binary's `.gnu_debuglink` (pure, fuzzed
+    `core.debuglink`), stages the `.debug` next to the binary under that name, and Ghidra's DWARF
+    analyzer resolves + applies it during analysis (function names + types). A binary without a
+    `.gnu_debuglink` fails closed for `dwarf`.
   - **`deobfuscate_strings` (ADR-068)** — recover hidden strings the ordinary scan misses via two
     techniques: **`stack_string`** walks a function's RAW per-instruction p-code for runs of constant
     stores to adjacent stack slots (invisible to the decompiler's `HighFunction` — dead-code

@@ -1117,9 +1117,15 @@ class PyGhidraBackend:
             # Self-describing (ADR-047): force the loader, no language (the format carries it).
             self._open_named_loader(source_ref, project_dir, str(loader), None)
         else:
-            # AUTO path — byte-for-byte the pre-ADR-045 call (opinion/container loaders).
+            # AUTO path — byte-for-byte the pre-ADR-045 call (opinion/container loaders). For a
+            # detached-DWARF companion (ADR-071 follow-up) the binary is opened from a staging dir
+            # that also holds the `.debug` under its `.gnu_debuglink` name, so Ghidra's DWARF
+            # analyzer resolves + applies it during the LATER session_analyze (no manual wiring).
+            open_source = source_ref
+            if debug_ref is not None and debug_format == "dwarf":
+                open_source = self._stage_dwarf_debug(source_ref, debug_ref, project_dir)
             ctx = pyghidra.open_program(
-                source_ref,
+                open_source,
                 project_location=project_dir,
                 project_name="session",
                 analyze=False,
@@ -1132,13 +1138,56 @@ class PyGhidraBackend:
             # session_analyze benefits from them.
             if pdb_ref is not None:
                 self._apply_pdb(pdb_ref)
-            # ADR-071: apply a companion detached debug map to the fresh program BEFORE analysis
-            # (auto path only; the server allows debug_ref only with loader='auto', and the schema
-            # makes it mutually exclusive with pdb_ref). Names land now so a later session_analyze
-            # (and every read tool) sees the recovered symbols.
-            if debug_ref is not None:
+            # ADR-071: a detached SYMBOL MAP is applied post-load here; detached DWARF is applied by
+            # the analyzer during session_analyze (staged above), so only "map" runs _apply_debug.
+            if debug_ref is not None and debug_format == "map":
                 self._apply_debug(debug_ref, str(debug_format))
         return _session_info_dict("importing", self._sha256, analysis_complete=False)
+
+    def _stage_dwarf_debug(
+        self, source_ref: str, debug_ref: str, project_dir: str
+    ) -> str:  # pragma: no cover - worker filesystem edge
+        """Stage a detached-DWARF companion next to the binary so the analyzer finds it (ADR-071).
+
+        Reads the binary's ``.gnu_debuglink`` (via the pure :func:`vivarium.core.debuglink`
+        parser — hostile bytes, hermetically fuzzed), copies the (server-confined) binary + the
+        ``debug_ref`` into a fresh writable staging dir with the debug file named EXACTLY as the
+        debuglink expects, and returns the staged binary path. Ghidra's ``SameDirDebugInfoProvider``
+        then resolves the companion by that name in the binary's directory at analysis time. The
+        source root may be read-only to the worker, so both files are copied into the project store
+        (writable tmpfs) rather than dropped next to the original.
+
+        Args:
+            source_ref: The confined binary path.
+            debug_ref: The confined detached-debug (``.debug``) path.
+            project_dir: The writable worker project store.
+
+        Returns:
+            The staged binary path to open.
+
+        Raises:
+            WorkerError: ``not-found`` if the binary has no ``.gnu_debuglink`` (a detached-DWARF
+                apply needs a debuglinked binary to name the companion).
+        """
+        import shutil
+
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        from vivarium.core.debuglink import parse_gnu_debuglink
+
+        with open(source_ref, "rb") as handle:  # noqa: PTH123 — confined path from the server
+            link_name = parse_gnu_debuglink(handle.read())
+        if not link_name:
+            raise WorkerError(
+                CODE_NOT_FOUND,
+                "debug_format='dwarf' needs a binary with a .gnu_debuglink naming the companion",
+            )
+        stage_dir = os.path.join(project_dir, "dwarf_stage")  # noqa: PTH118
+        os.makedirs(stage_dir, exist_ok=True)  # noqa: PTH103
+        staged_binary = os.path.join(stage_dir, os.path.basename(source_ref))  # noqa: PTH118,PTH119
+        shutil.copyfile(source_ref, staged_binary)
+        shutil.copyfile(debug_ref, os.path.join(stage_dir, link_name))  # noqa: PTH118
+        return staged_binary
 
     def _apply_debug(
         self, debug_ref: str, debug_format: str
