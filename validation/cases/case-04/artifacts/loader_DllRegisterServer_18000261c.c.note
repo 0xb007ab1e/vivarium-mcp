@@ -1,0 +1,17 @@
+case-04 — DllRegisterServer @0x18000261c (Vivarium decompile, UNTRUSTED/inert). Sample NEVER executed.
+KEY BEHAVIOUR (obfuscated self-decoding loader):
+ - Body is saturated with junk/opaque arithmetic on ~60 scratch globals DAT_1800a90xx..91xx
+   (dead reads/writes, XOR/mul/add with large constants, opaque predicates like
+   `if (DAT==*(ptr+0x1b0))`) — Mixed-Boolean-Arithmetic anti-analysis padding.
+ - THREE decode loops build a buffer: iVar6 = *piVar1 * multiplier; store bytes
+   (iVar6>>24, >>16, >>8, iVar6) into *(DAT_1800a9128 / +0x118) — i.e. multiply-and-scatter
+   decode of embedded data blocks; loop bounds 0x22ba8, 0x10e90, 0x264c (large regions).
+ - Calls own export Cnt918(&DAT_1800a9010,...) and FUN_180008498 / FUN_180008a18 (helpers).
+ - Ends: DAT_1800a914c = (*DAT_1800a9110)(module, DAT_1800a9150, "DllRegisterServer");
+   = resolve/dispatch "DllRegisterServer" of a decoded/loaded module (GetProcAddress-style),
+   then return it. => classic packed loader that reconstructs a second stage and jumps in.
+IMPORTS corroborate: VirtualAlloc + GetProcAddress + LoadLibraryExW + CreateThread +
+   SuspendThread + DuplicateHandle (reflective load/inject); CreateNamedPipeA/WaitNamedPipeA/
+   TransactNamedPipe (named-pipe C2/IPC); CreateMutexA/OpenMutexA (single instance);
+   IsDebuggerPresent (anti-debug); GetSystemDirectoryA (drop target).
+The real malware = the decoded stage, NOT statically present here. This file is the packer/loader.

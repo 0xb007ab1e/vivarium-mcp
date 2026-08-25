@@ -1,0 +1,22 @@
+# ── Vivarium validation exercise ──────────────────────────────────────────
+# NEVER commit malware or any binary-derived hostile bytes (master §5, project rules).
+# Samples are of HOSTILE ORIGIN and CONFIDENTIAL. Only text reports/methodology are tracked.
+
+# Live malware samples — hard-ignored, all forms
+samples/
+**/*.bin
+**/*.malware
+**/*.sample
+**/*.vir
+**/*.dat
+*.zip
+*.7z
+*.gz
+
+# Raw binary-derived artifact blobs (keep curated MD reports, drop raw dumps)
+cases/**/artifacts/raw/
+evidence/**/raw/
+
+# Scratch
+*.tmp
+.DS_Store
