@@ -1,8 +1,13 @@
 # ADR-074: Capability detection + MITRE ATT&CK tagging (read-only, capa-style)
 
-- **Status:** **Proposed** (drafted 2026-08-25 from the blind-triage validation benchmark; ratification
-  pending human operator). Remediation item **R2** of the validation miss-analysis
-  (`validation/reports/remediation-analysis.md`).
+- **Status:** **Accepted** (ratified by the human operator 2026-08-25). **`capability_scan` is
+  IMPLEMENTED** in this increment with a **curated, built-in** rule pack (`core.capabilityscan`,
+  `RULE_PACK_VERSION="builtin-1"`) matched over the existing `list_imports` / `list_exports` /
+  `list_strings` facts (no new worker verb), each capability mapped to a MITRE ATT&CK technique. The
+  full **capa-rules ecosystem** (a bundled, signed, versioned external rule pack — D2) and any
+  disassembly/constant-based rules are a tracked **fast-follow**; the per-match `rule_id` +
+  `rule_pack_version` make that migration additive. Remediation item **R2** of the validation
+  miss-analysis (`validation/reports/remediation-analysis.md`).
 - **Date:** 2026-08-25
 - **Deciders:** Human operator (ratification pending); drafted by the assistant from the 4-case
   validation exercise.
