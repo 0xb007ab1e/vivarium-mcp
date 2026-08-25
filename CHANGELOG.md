@@ -155,6 +155,20 @@ trust identity tightened to tag builds, plus CI-drift tripwires, workflow lintin
 required gate, and CI/docs/threat-model currency.
 
 ### Fixed
+- **Doc/threat-model completeness (AB3/AB4/AB5, round-12).** The round-12 gap sweep found three
+  Medium documentation/coverage gaps — two in round-11's own remediation:
+  - **AB3** `search_bytes` (Tier-1 tool #36) had no `tool-catalog.md` row — the catalog listed 73
+    rows while asserting 74 (AA4 de-drift targeted v1.9 inputs and missed this pre-existing tool).
+    Row added; catalog is now 74/74.
+  - **AB4** `demangle` (ADR-050), a hostile-string parser, was in the ADR-045..072 range threat-model
+    §20 claims to cover but had no STRIDE cell — a §20.3 D/I row now models it (program-independent,
+    `mangled` ≤8 KiB DoS-bounded, `demangled` untrusted).
+  - **AB5** §20.1 asserted `core.debugmap` was "hermetically fuzzed" but `test_debug_map.py` had no
+    property test — a false mitigation claim + a real master-§4 parser-fuzz gap on a hostile parser.
+    Added hypothesis fuzz for `parse_symbol_map` (arbitrary + map-shaped text → bounded, well-formed,
+    never crash), making the claim true. (`core.debugmap` promotion to the 100%-critical set — the
+    third debuglink/uimage sibling — is tracked as Low AB10.)
+  - Also fixed the stale `ci.yml` critical-path comment ("the 7 files" → 9; AB11) left by AA12.
 - **Bounded-collection fixes + CI fetch resilience (AA5/AA6/AA7/AA17, round-11).** Four Low
   gap-sweep items, all self-bounded already but tightened:
   - **AA5** `data_flow_slice` forward slice now honours `max_nodes` INSIDE the descendant loop, not

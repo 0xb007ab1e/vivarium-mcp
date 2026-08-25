@@ -1399,7 +1399,7 @@ like TB3/TB5 (execute-hostile-logic) but is strictly weaker: a **p-code interpre
 | **T/I** | **Emulator readback poisoning** — register/memory/`return_value` values used downstream as trusted | All readback values cross TB4 as `Untrusted[...]` (attacker-influenced, BINARY origin), normalized at the `core.envelope.wrap` chokepoint; the client renders them inert |
 | **E** | Auto arg-placement (ADR-066) mis-drives the callee | Args placed only for a **resolved** calling convention (register params); a stack-param convention **fails closed**; `args` without `call` is rejected — no silent mis-execution |
 
-### 20.3 Read-only analysis primitives + heuristic scanners (ADR-064 data_flow_slice, 067 binary_diff, 069 recover_struct, 072 secret_scan, 068 stack_string; and ioc_scan/crypto_constant_scan)
+### 20.3 Read-only analysis primitives + heuristic scanners + the demangler (ADR-064 data_flow_slice, 067 binary_diff, 069 recover_struct, 072 secret_scan, 068 stack_string, 050 demangle; and ioc_scan/crypto_constant_scan)
 
 Static, read-only extraction — inputs across TB3, outputs across TB4. **ADR-001 nuance:** the *pure
 scanners* (`secret_scan`, `stack_string`, `ioc_scan`) run **server-side**, but only over
@@ -1412,6 +1412,7 @@ no loader), so the ADR-001 "server never parses a binary" invariant holds.
 | **D** | **Slice / scan / diff bomb** — huge fan-out or string flood exhausts memory/output (CWE-400) | Every primitive is bounded before/at the worker: `max_nodes`/`max_depth` (data_flow_slice), `max_entries` (binary_diff), `max_accesses` (recover_struct), scan/`min_length`/entropy caps (scanners); `truncated` reported honestly (round-11 AA5/AA6/AA7: two overshoot-by-fan-out lows, SSA/worker-mem-bounded, tracked) |
 | **I/S** | **Injection via matched/derived content** — a planted string, inferred type, decoded string, op text, or function name carries a prompt-injection payload | All binary-derived fields (`inferred_type`, decoded `text`/`encoding`/`decode_key`, `pcode_op`, `masked_preview`, `name`) cross TB4 as `Untrusted[...]`, normalized at the `core.envelope.wrap` chokepoint; the client MUST render inert / never follow/exec (ADR-005, extends abuse-case 5) |
 | **T** | **ReDoS** in scanner patterns over hostile strings | Scanner regexes are linear/bounded/anchored and inputs length-capped before match (round-11 Lane-B verified) |
+| **D/I** | **`demangle` (ADR-050)** — a pathological/attacker-controlled mangled symbol drives Ghidra's GNU/Itanium + MSVC demanglers (a real parser) into excess CPU, or the demangled output is trusted downstream | Program-independent (NO binary loaded/mutated); the `mangled` input is length-bounded (`≤8 KiB`, DoS guard) and backed by the per-call wall-clock kill in the worker; the `demangled` result crosses TB4 as `Untrusted[...]`; a non-mangled input is a safe `None`, not an error (round-12 AB4) |
 
 **Residual risk.** The surface is large (many new parsers), but each is either a bounded pure
 server-side parser (fuzzed, fail-closed) or runs in the unchanged ADR-004 worker isolation with the
