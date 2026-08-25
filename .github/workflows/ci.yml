@@ -65,11 +65,12 @@ jobs:
       - name: Critical-path coverage 100%   # master §4: 100% on designated critical paths
         run: |
           # Critical modules (see pyproject [tool.coverage] note): validation, envelope, errors,
-          # sessions.manager, security.limits, server.auth, jobs.streaming. Enforce 100% SCOPED to
-          # these. NOTE: pyproject `[tool.coverage.run] source = ["vivarium"]` forces whole-package
-          # measurement, so `--cov=<module> --cov-fail-under=100` would (wrongly) gate the whole
-          # package. Instead: measure once, then `coverage report --include=<the 7 files>
-          # --fail-under=100` to gate exactly the critical paths. (jobs/streaming.py added round-3 P5
+          # sessions.manager, security.limits, server.auth, jobs.streaming, core.debuglink,
+          # core.uimage. Enforce 100% SCOPED to these. NOTE: pyproject `[tool.coverage.run]
+          # source = ["vivarium"]` forces whole-package measurement, so `--cov=<module>
+          # --cov-fail-under=100` would (wrongly) gate the whole package. Instead: measure once,
+          # then `coverage report --include=<the 9 files> --fail-under=100` to gate exactly the
+          # critical paths. (jobs/streaming.py added round-3 P5
           # — it is `@pytest.mark.critical`-tested and touches BOLA + resource bounds + the N4 replay
           # window, so it now carries the same 100% enforcement as the rest.)
           pytest -m "not integration" --cov=vivarium --cov-report=

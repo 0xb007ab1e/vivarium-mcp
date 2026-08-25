@@ -9,6 +9,8 @@ against a real worker; these cover the pure ``core.debugmap`` parser and the ser
 from __future__ import annotations
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 from pydantic import ValidationError
 
 from tests.unit.test_import_loader_hints import _adapter_capturing_call
@@ -133,3 +135,30 @@ def test_no_debug_ref_is_byte_for_byte_noop() -> None:
     adapter.import_binary("s", s.SessionImportIn(session_id="s", source_ref="p.elf"))  # type: ignore[attr-defined]
     assert "debug_ref" not in captured[0]
     assert "debug_format" not in captured[0]
+
+
+# --- fuzz (AB5, round-12): the pure parser over a HOSTILE debug-map text -------------------------
+# `parse_symbol_map` runs over an untrusted companion (`debug_ref`) file; the master-§4 parser-fuzz
+# mandate (like debuglink/uimage) — arbitrary text must yield a bounded, well-formed symbol list or
+# nothing, never a crash/hang/over-cap. This is what makes the threat-model §20.1 "hermetically
+# fuzzed" claim TRUE for debugmap.
+@given(st.text(max_size=4096), st.integers(min_value=1, max_value=64))
+def test_fuzz_parse_symbol_map_bounded_and_total(text: str, cap: int) -> None:
+    """Hostile text → a list of ≤ `max_symbols` (name:str, address:int≥0); never raises."""
+    out = parse_symbol_map(text, max_symbols=cap)
+    assert isinstance(out, list)
+    assert len(out) <= cap
+    for sym in out:
+        assert isinstance(sym.name, str) and sym.name
+        assert isinstance(sym.address, int) and sym.address >= 0
+
+
+@given(
+    st.lists(
+        st.text(alphabet="0123456789abcdefABCDEF xX\t=;_.:TtDdBb\n", max_size=40), max_size=200
+    )
+)
+def test_fuzz_maplike_lines_never_crash(lines: list[str]) -> None:
+    """Map-shaped junk (hex/identifier/separator chars, many lines) still parses total + bounded."""
+    out = parse_symbol_map("\n".join(lines), max_symbols=64)
+    assert isinstance(out, list) and len(out) <= 64
