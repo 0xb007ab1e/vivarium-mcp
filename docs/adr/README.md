@@ -1,6 +1,6 @@
 # Architecture Decision Records (ADR) index
 
-This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-072).
+This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-075).
 Each ADR captures one significant decision: its context, the decision, alternatives, and consequences.
 Records are **point-in-time** — a `Status:` of *Proposed* reflects the record when it was written; what
 actually shipped in each release is tracked in [`../../CHANGELOG.md`](../../CHANGELOG.md) and the
@@ -60,6 +60,11 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 - **ADR-070** — Extended firmware container unwrap + loaders (OTA/uImage/decompress, fuzz-gated) — **Accepted**.
 - **ADR-071** — Debug-info import beyond PDB (DWARF / `.map` / `.sym`) — **Accepted**.
 - **ADR-072** — Firmware-aware secret/credential/key-material scan (redacted) — **Accepted**.
+
+### Validation-driven detection batch (blind-triage benchmark remediation)
+- **ADR-073** — Program-level fingerprint (`program_fingerprint`) + offline family-match corpus (`family_match`) — **Proposed**.
+- **ADR-074** — Capability detection + MITRE ATT&CK tagging (`capability_scan`, capa-style) — **Proposed**.
+- **ADR-075** — Crypto detection by API/import/instruction (`crypto_detect`; complements `crypto_constant_scan`) — **Proposed**.
 
 ### Read/analysis tools
 - **ADR-007** — Semantic-naming support tools (call graph, leaf-first ordering, function context).
