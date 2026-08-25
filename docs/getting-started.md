@@ -150,7 +150,7 @@ common reverse-engineering tasks to the tools and worked examples that cover the
 
 ## Reverse-engineering workflows
 
-Vivarium's 56 tools cover the usual reverse-engineering arc: **triage** (what is this and is it
+Vivarium's 74 tools cover the usual reverse-engineering arc: **triage** (what is this and is it
 dangerous?), **deep analysis** (understand and document a specific area), **bulk extraction** (read a
 lot of code efficiently), and **persistence** (keep and share what you learned). Pick the workflow that
 matches your task — each links a worked, copy-pasteable example.

@@ -155,6 +155,19 @@ trust identity tightened to tag builds, plus CI-drift tripwires, workflow lintin
 required gate, and CI/docs/threat-model currency.
 
 ### Fixed
+- **Hostile-input parsers promoted to the 100%-critical set (AA12, round-11).** `core.debuglink`
+  (the `.gnu_debuglink` parser — where AA1 lived) and `core.uimage` (the U-Boot uImage header
+  parser) parse untrusted binary-derived input — the same trust-boundary class as `core.validation`
+  — but were outside the 100%-coverage + mutation gate. Both are now designated critical (SSOT tuple
+  + `pyproject` `[tool.mutmut]` + the CI `coverage report --include` + `docs/ci-cd.md`, kept in
+  lock-step by the `test_coverage_markers` tripwire); the critical set grows **7 → 9**. debuglink was
+  brought to 100% line+branch (a synthetic-ELF builder exercising the 32-bit/big-endian/malformation
+  branches); uimage was already 100%.
+- **Stale tool counts corrected in public docs (AA11, round-11).** `README.md` / `docs/faq.md` /
+  `docs/getting-started.md` said **56 tools** and `docs/contracts/tool-catalog.md` said **69**; the
+  catalog is **74** (58 read-only / 16 write). Fixed the current-state claims (the historical
+  v0.13.0 release blurb in the README, which correctly said "catalog stays 56" for that release, is
+  left as-is — its stale "current release" header is a separate release-notes-currency item).
 - **Real-worker analysis e2e now gates CI (AA2, round-11).** `test_worker_analysis`
   (`test_worker_analyzes_real_elf_end_to_end`) — a live-worker drive of `PyGhidraBackend` asserting
   the WS2 `_build_*` contract shapes against the JVM (TB3/ADR-001) — ran in **no** workflow. It is

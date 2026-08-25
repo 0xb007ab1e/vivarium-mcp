@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-# The SEVEN modules designated 100%-critical (master §4). This tuple is the single source of truth
+# The NINE modules designated 100%-critical (master §4). This tuple is the single source of truth
 # the sync tripwire below enforces against the two config copies (CI `--include` + mutmut
 # `only_mutate`). server.auth (the HTTP authN/authZ boundary) + jobs.streaming (BOLA + the N4 replay
 # window) are the two most security-relevant — added round-4 Q3 after the tripwire was found to
@@ -39,6 +39,8 @@ _CRITICAL_MODULES = (
     "vivarium.security.limits",
     "vivarium.server.auth",
     "vivarium.jobs.streaming",
+    "vivarium.core.debuglink",
+    "vivarium.core.uimage",
 )
 
 #: The critical modules as coverage/mutmut path globs (``vivarium.core.validation`` →
@@ -145,7 +147,7 @@ def test_baseline_fail_under_is_at_least_ninety() -> None:
 
 
 def test_critical_modules_designated_in_pyproject_comment() -> None:
-    """All seven critical-path modules remain documented in pyproject (designation not lost).
+    """All nine critical-path modules remain documented in pyproject (designation not lost).
 
     The 100%-critical designation lives as an authoritative comment block in pyproject.toml (the
     CI critical-path job reads it). If that block is edited away, the per-path gate loses its
