@@ -437,6 +437,10 @@ class PyGhidraBackend:
         """Return a function's Ghidra match-hash fingerprints (read-only — ADR-057)."""
         return self._gh_function_hash(str(_require(params, "function")))
 
+    def program_fingerprint(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return whole-program pivot digests (read-only — ADR-073 D1)."""
+        return self._gh_program_fingerprint()
+
     def bsim_similarity(self, params: dict[str, Any]) -> dict[str, Any]:
         """Return the BSim cosine similarity between two functions (read-only — ADR-058)."""
         return self._gh_bsim_similarity(
@@ -3117,6 +3121,73 @@ class PyGhidraBackend:
             "exact_mnemonics": str(int(ExactMnemonicsFunctionHasher.INSTANCE.hash(func, monitor))),
             "instruction_count": count,
         }
+
+    def _gh_program_fingerprint(self) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Whole-program pivot digests (ADR-073 D1) — all outputs are SAFE server scalars.
+
+        Computes, over already-analyzed Ghidra facts (no decompile, no DB mutation, read-only):
+
+        * ``structure_digest`` — SHA-256 over the SORTED multiset of every non-external, non-thunk
+          function's ``ExactMnemonics`` match-hash (the operand-masked hasher from
+          ``function_hash``, ADR-057). Operand-independent ⇒ clusters recompiled / variant builds.
+          The SORT makes
+          it order-independent (deterministic regardless of function-iteration order).
+        * ``import_digest`` — SHA-256 over the SORTED set of unique ``library!symbol`` import tokens
+          (lowercased), or ``None`` if the program imports nothing. An honest digest of Ghidra's OWN
+          normalized import view (NOT the pefile/VT ``imphash`` algorithm — see the schema note).
+        * ``coverage`` — reuses :meth:`_gh_coverage` (the packed-loader signal).
+
+        Bounded by the program's own (analysis-capped) function/symbol counts; the per-tool
+        wall-clock kill (ADR-002) backstops a pathological input. Digests are computed here so only
+        the fixed-size hex strings cross the RPC boundary (never the raw fact lists).
+
+        Returns:
+            ``{"structure_digest", "import_digest"?, "function_count", "import_count", "coverage":
+            {...}}`` (plain; all SAFE).
+        """
+        import hashlib
+
+        from ghidra.app.plugin.match import ExactMnemonicsFunctionHasher
+        from ghidra.util.task import TaskMonitor
+
+        program = self._require_program()
+        monitor = TaskMonitor.DUMMY
+
+        # structure_digest: operand-masked mnemonic hash per real (non-external/thunk) function.
+        mnem_hashes: list[str] = []
+        for func in program.getFunctionManager().getFunctions(True):
+            if bool(func.isExternal()) or bool(func.isThunk()):
+                continue
+            mnem_hashes.append(str(int(ExactMnemonicsFunctionHasher.INSTANCE.hash(func, monitor))))
+        mnem_hashes.sort()
+        structure_digest = hashlib.sha256("\n".join(mnem_hashes).encode("utf-8")).hexdigest()
+
+        # import_digest: unique lowercased ``library!symbol`` tokens over external symbols.
+        import_tokens: set[str] = set()
+        for symbol in program.getSymbolTable().getExternalSymbols():
+            name = _to_text(symbol.getName())
+            namespace = symbol.getParentNamespace()
+            if namespace is not None and not bool(namespace.isGlobal()):
+                token = f"{_to_text(namespace.getName())}!{name}"
+            else:
+                token = name
+            import_tokens.add(token.lower())
+        import_count = len(import_tokens)
+        import_digest = (
+            hashlib.sha256("\n".join(sorted(import_tokens)).encode("utf-8")).hexdigest()
+            if import_tokens
+            else None
+        )
+
+        result: dict[str, Any] = {
+            "structure_digest": structure_digest,
+            "function_count": len(mnem_hashes),
+            "import_count": import_count,
+            "coverage": self._gh_coverage(),
+        }
+        if import_digest is not None:
+            result["import_digest"] = import_digest
+        return result
 
     #: BSim config template name by address size (bits). The bundled ``medium_*`` weights ship in
     #: the pinned Ghidra install (Features/BSim/data). Only the mainstream 32/64-bit sizes map.

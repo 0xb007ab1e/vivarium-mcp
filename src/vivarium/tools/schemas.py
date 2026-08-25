@@ -2307,6 +2307,54 @@ class CoverageOut(_Out):
     function_count: int
 
 
+class ProgramFingerprintIn(_SessionScopedIn):
+    """Arguments for ``program_fingerprint`` — whole-program pivot digests (ADR-073 D1).
+
+    Read-only: returns deterministic, program-level fingerprints usable as clustering / pivot keys
+    (the input to an offline family-match corpus — ADR-073 D2, deferred). Session-scoped only; no
+    other input.
+
+    Scope note (ADR-073, ratified 2026-08-25): this MVP ships the fingerprints computable in-worker
+    from Ghidra + the stdlib with **no new dependencies** — ``structure_digest``, ``import_digest``,
+    and ``coverage``. VT-compatible ``imphash``, ``tlsh``, PE ``rich_hash`` / ``authentihash``
+    need a vetted native dependency or a hostile-PE byte parser (fuzz-gated) and are a tracked
+    fast-follow; they are intentionally **absent** here rather than emitted as always-null fields
+    (an absent field is honest; a null one would read as "no imports / not applicable").
+    """
+
+
+class ProgramFingerprintOut(_Out):
+    """Result of ``program_fingerprint`` (ADR-073 D1) — all fields SAFE (server-computed scalars).
+
+    Every value is a digest/count over worker-extracted facts — bare (not ``Untrusted``), like
+    ``binary_sha256`` and the ``function_hash`` digests. The raw imports / instruction bytes these
+    summarize stay ``Untrusted`` where separately returned (``list_imports`` / ``disassemble``).
+
+    Attributes:
+        structure_digest: SHA-256 hex over the SORTED multiset of every non-external function's
+            Ghidra ``ExactMnemonics`` match-hash (operands masked). An operand-independent
+            structural fingerprint of the code — clusters recompiled / minor-variant builds of the
+            same family that a raw file hash would miss. Empty program ⇒ the SHA-256 of the empty
+            string (stable, well-defined).
+        import_digest: SHA-256 hex over the SORTED set of unique ``library!symbol`` import tokens
+            (lowercased). A same-import-set clustering key (the dependency-driven pivot); ``None``
+            if the program has no imports. An honest Ghidra-derived digest of its OWN normalized
+            import view — deliberately NOT labelled ``imphash`` (it is not the pefile/VT
+            ordinal-canonical algorithm; see the scope note on the input model).
+        function_count: Functions discovered (worker scalar).
+        import_count: Distinct imported symbols summarized (worker scalar).
+        coverage: Defined-code/data byte coverage of the program (the packed-loader signal surfaced
+            by the validation benchmark — high undefined ratio ⇒ likely packed/padded). All ratios
+            server-computed.
+    """
+
+    structure_digest: str
+    import_digest: str | None = None
+    function_count: int
+    import_count: int
+    coverage: CoverageOut
+
+
 class IocScanIn(_Page):
     """Arguments for ``ioc_scan`` — heuristic IOC scan over defined strings (paginated).
 

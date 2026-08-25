@@ -73,6 +73,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "basic_blocks",
     "list_data_types",
     "function_hash",
+    "program_fingerprint",
     "bsim_similarity",
     "find_similar_functions",
     "version_track",
@@ -581,6 +582,14 @@ def _handle_function_hash(ctx: ToolContext, args: s.FunctionHashIn) -> s.Functio
     ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     v.validate_name(args.function)
     return ctx.port.function_hash(args.session_id, args)
+
+
+def _handle_program_fingerprint(
+    ctx: ToolContext, args: s.ProgramFingerprintIn
+) -> s.ProgramFingerprintOut:
+    """Return whole-program pivot digests (read-only — ADR-073 D1)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    return ctx.port.program_fingerprint(args.session_id, args)
 
 
 def _handle_bsim_similarity(ctx: ToolContext, args: s.BsimSimilarityIn) -> s.BsimSimilarityOut:
@@ -1848,6 +1857,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "basic_blocks": (_handle_basic_blocks, s.BasicBlocksIn),
     "list_data_types": (_handle_list_data_types, s.ListDataTypesIn),
     "function_hash": (_handle_function_hash, s.FunctionHashIn),
+    "program_fingerprint": (_handle_program_fingerprint, s.ProgramFingerprintIn),
     "bsim_similarity": (_handle_bsim_similarity, s.BsimSimilarityIn),
     "find_similar_functions": (_handle_find_similar_functions, s.FindSimilarFunctionsIn),
     "version_track": (_handle_version_track, s.VersionTrackIn),
