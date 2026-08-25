@@ -290,6 +290,7 @@ they are **not** worker RPC methods. Only `start_decompile_stream` touches the w
 tools compute server-side with **no dedicated worker method**: `callees`/`callers`/`analysis_order`/
 `function_context` from `call_graph`+`referenced_strings`; the Tier-2 `cyclomatic_complexity` from
 `function_cfg`, `ioc_scan` from `list_strings`, `crypto_constant_scan` from `search_bytes`,
+`crypto_detect` (ADR-075) from `imports`+`list_strings` (pure `core.cryptodetect`),
 `call_graph_metrics` from `call_graph`, and `program_summary` by aggregation — all per ADR-001.
 **Annotation import (`session_import_annotations`, ADR-018 TB8) adds NO worker method** — it is
 **server-side orchestration** (the registry) that schema-validates + hash-binds + consent-gates the

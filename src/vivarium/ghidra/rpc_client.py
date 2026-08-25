@@ -163,6 +163,10 @@ _SECRET_STRING_BUDGET = 10_000
 #: Max ``search_bytes`` matches requested per crypto signature (each search is already bounded; this
 #: caps the per-signature contribution to the aggregate and feeds ``truncated``).
 _CRYPTO_MATCH_BUDGET = 1_000
+#: Max imports + strings pulled for the ``crypto_detect`` pass (ADR-075); bounds the scanned sets
+#: and feeds ``truncated`` when either the imports or the strings exceed the budget.
+_CRYPTO_DETECT_IMPORT_BUDGET = 10_000
+_CRYPTO_DETECT_STRING_BUDGET = 10_000
 #: Hard cap on FID match candidates the adapter ever returns from ``identify_functions`` (ADR-042;
 #: bounds the result BEFORE shaping — std-cwe CWE-400). Mirrors the worker-side cap; the per-call
 #: ``limit`` (schema-bounded) further narrows it, and ``truncated`` is honest when more matched.
@@ -1761,6 +1765,54 @@ class RpcGhidraAdapter:
         return s.CryptoConstantScanOut(
             findings=[
                 s.CryptoConstantFinding(algorithm=h.algorithm, kind=h.kind, address=h.address)
+                for h in page
+            ],
+            total=total,
+            truncated=truncated,
+        )
+
+    def crypto_detect(self, sid: str, a: s.CryptoDetectIn) -> s.CryptoDetectOut:
+        """Detect crypto by imported API / resolved symbol name (PURE core; ADR-075).
+
+        Complements ``crypto_constant_scan``: fetches a bounded page of imports (the ``import``
+        source) and strings (the ``api_name`` source), runs the pure
+        :func:`core.cryptodetect.detect_crypto`, then paginates. Each ``detail`` (a matched
+        symbol/string) is binary-derived and wrapped BINARY-origin (ADR-005) — inert data.
+        HEURISTIC: a match is a lead; an empty result is NOT proof of "no crypto" (an obfuscated /
+        statically-linked routine can evade both sources). ``truncated`` reflects the import/string
+        budgets or a matches-page cap (honesty).
+        """
+        from vivarium.core import cryptodetect
+
+        imports = self.list_imports(
+            sid,
+            s.ListImportsIn(session_id=a.session_id, offset=0, limit=_CRYPTO_DETECT_IMPORT_BUDGET),
+        )
+        strings = _build_string_list(
+            self._tool_call(
+                sid,
+                "list_strings",
+                {"offset": 0, "limit": _CRYPTO_DETECT_STRING_BUDGET, "min_length": a.min_length},
+            )
+        )
+        import_rows = [
+            (im.address, im.name.value, im.library.value if im.library else None)
+            for im in imports.imports
+        ]
+        string_rows = [(ds.address, ds.value.value) for ds in strings.strings]
+        hits = cryptodetect.detect_crypto(import_rows, string_rows)
+        total = len(hits)
+        page = hits[a.offset : a.offset + a.limit]
+        truncated = imports.truncated or strings.truncated or (a.offset + a.limit < total)
+        return s.CryptoDetectOut(
+            indicators=[
+                s.CryptoIndicator(
+                    address=h.address,
+                    kind=h.kind,
+                    source=h.source,
+                    detail=_w(h.detail, DataOrigin.BINARY),
+                    confidence=h.confidence,
+                )
                 for h in page
             ],
             total=total,

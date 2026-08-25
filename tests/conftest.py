@@ -854,6 +854,23 @@ class FakeGhidraPort:
         """Reserved Tier-2 stub."""
         raise NotImplementedError("RESERVED (v1.1 ADR-008): crypto_constant_scan")
 
+    def crypto_detect(self, sid: str, a: s.CryptoDetectIn) -> s.CryptoDetectOut:
+        """Return a deterministic crypto indicator (detail UNTRUSTED-wrapped, ADR-075)."""
+        self._maybe_fail()
+        return s.CryptoDetectOut(
+            indicators=[
+                s.CryptoIndicator(
+                    address="0x00402000",
+                    kind="crypto_api",
+                    source="import",
+                    detail=_u("CCCrypt"),
+                    confidence=0.9,
+                )
+            ],
+            total=1,
+            truncated=False,
+        )
+
     def secret_scan(self, sid: str, a: s.SecretScanIn) -> s.SecretScanOut:
         """Reserved Tier-2 stub (ADR-072; the pure core + adapter are unit-tested directly)."""
         raise NotImplementedError("RESERVED (ADR-072): secret_scan")
