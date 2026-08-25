@@ -6,7 +6,34 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
-_No changes yet._
+### Added
+
+- **`crypto_detect` — crypto detection by imported API / resolved symbol name (ADR-075).** A
+  read-only Tier-2 tool that **complements** `crypto_constant_scan` (the frozen constant-only tool is
+  untouched): it detects crypto by an imported crypto **API** (`import` source — CryptoAPI / CNG /
+  CommonCrypto / OpenSSL / libsodium / mbedTLS / wolfSSL) or a resolved crypto **symbol name** in the
+  strings (`api_name` source, symbol-like only). Fixes the framework-crypto blind spot the constant
+  scan misses (e.g. Apple CommonCrypto AES) surfaced by the blind-triage validation benchmark
+  (miss M2). Pure `core.cryptodetect` run by the adapter over the existing `list_imports` +
+  `list_strings` RPCs — no new worker verb; heuristic (empty ≠ no crypto). The `instruction`
+  (AES-NI/SHA opcodes) and `code_pattern` (cipher-shaped loops) sources are a tracked fast-follow.
+  Tier-1 catalog **75 → 76** (read-only 59 → 60).
+- **`program_fingerprint` — whole-program pivot digests (ADR-073 D1).** A read-only tool returning a
+  `structure_digest` (SHA-256 over the sorted per-function `ExactMnemonics` match-hashes —
+  operand-masked, clusters recompiled/variant builds), an `import_digest` (SHA-256 over the sorted
+  `library!symbol` tokens; an honest Ghidra-derived digest, **not** the pefile/VT `imphash`), plus
+  function/import counts and coverage (the packed-loader signal). Remediates the validation
+  benchmark's family-name miss (M1); digests computed in-worker so only fixed-size hex crosses the
+  RPC boundary. VT-`imphash`/`tlsh`/PE `rich_hash`/`authentihash` and the `family_match` corpus
+  (ADR-073 D2) are a tracked fast-follow. Tier-1 catalog **74 → 75**.
+
+### Internal
+
+- **Blind-triage validation benchmark + remediation ADRs.** Added `validation/` (4-case blind static
+  triage of the read-only battery — Kelihos / Wirenet / LuckyCat / BumbleBee; verdict/severity/
+  category correct 4/4) with a cross-case scorecard, dashboard, and a remediation analysis, plus
+  Proposed ADR-073/074/075. ADR-073 (`program_fingerprint`) and ADR-075 (`crypto_detect`) are now
+  **Accepted** and implemented (above); ADR-074 (`capability_scan`) remains Proposed.
 
 ## [0.14.0] — 2026-08-25
 
