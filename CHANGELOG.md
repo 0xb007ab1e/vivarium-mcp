@@ -155,6 +155,19 @@ trust identity tightened to tag builds, plus CI-drift tripwires, workflow lintin
 required gate, and CI/docs/threat-model currency.
 
 ### Fixed
+- **Build-fetch fail-over mirrors — the AA17 siblings (AB1/AB2, round-12).** Round-11's AA17 gave
+  the musl source fetch a sha256-verified fail-over mirror because `musl.libc.org` was a single
+  availability SPOF that flaked the worker build AND the required live-regression gate. Round-12
+  found the same class on the OTHER build fetches and mirrored the two that have a byte-identical
+  second host:
+  - **AB1** the **zlib** fetch (github/madler) feeds the `fid-probes` build behind the **required
+    `fid-elf-match-gate`** — the highest-risk sibling; now fails over to `zlib.net/fossils`.
+  - **AB2** the **openssl** fetch (image-scan-gate path) now fails over to `openssl.org/source`.
+  - The **ghidra** release zip (NSA GitHub-only) and the **boost** `b2-nodocs` GitHub-release artifact
+    have no sha-matching second host, so no mirror is possible — documented inline as
+    single-host-by-necessity (both on the image-scan-gate path, not the FID required gate,
+    high-availability + checksum-gated). Each mirror keeps the sha256 verify (source-agnostic
+    integrity) and fails closed if no candidate matches.
 - **Doc/threat-model completeness (AB3/AB4/AB5, round-12).** The round-12 gap sweep found three
   Medium documentation/coverage gaps — two in round-11's own remediation:
   - **AB3** `search_bytes` (Tier-1 tool #36) had no `tool-catalog.md` row — the catalog listed 73
