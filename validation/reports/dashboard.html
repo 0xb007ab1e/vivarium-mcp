@@ -1,0 +1,420 @@
+<title>Vivarium Blind Triage</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+  :root{
+    --bg:#eef1f6; --surface:#ffffff; --surface-2:#f5f8fc; --surface-3:#eaeff6;
+    --line:#d6dde8; --line-strong:#c1cad8;
+    --ink:#182031; --ink-2:#374156; --muted:#5c667a;
+    --accent:#0e8fa8; --accent-ink:#0a6b7f;
+    --good:#2f9169; --good-bg:#e2f2ea;
+    --warn:#b6791b; --warn-bg:#f6ecd6;
+    --crit:#c8483f; --crit-bg:#f7e3e1;
+    --shadow:0 1px 2px rgba(24,32,49,.06),0 8px 28px -12px rgba(24,32,49,.18);
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  }
+  :root:not([data-theme="light"]){
+    @media (prefers-color-scheme:dark){
+      --bg:#0f1319; --surface:#171c25; --surface-2:#1c232f; --surface-3:#232c3a;
+      --line:#2a3240; --line-strong:#3a4557;
+      --ink:#dfe6f0; --ink-2:#b3bece; --muted:#8b97a8;
+      --accent:#37c0d8; --accent-ink:#6ad4e8;
+      --good:#4fb583; --good-bg:#16281f;
+      --warn:#d8a03e; --warn-bg:#2c2413;
+      --crit:#de5a52; --crit-bg:#2e1917;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 12px 34px -14px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0f1319; --surface:#171c25; --surface-2:#1c232f; --surface-3:#232c3a;
+    --line:#2a3240; --line-strong:#3a4557;
+    --ink:#dfe6f0; --ink-2:#b3bece; --muted:#8b97a8;
+    --accent:#37c0d8; --accent-ink:#6ad4e8;
+    --good:#4fb583; --good-bg:#16281f;
+    --warn:#d8a03e; --warn-bg:#2c2413;
+    --crit:#de5a52; --crit-bg:#2e1917;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 12px 34px -14px rgba(0,0,0,.6);
+  }
+
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--sans); font-size:15px; line-height:1.6;
+    font-feature-settings:"cv05","ss01"; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1120px; margin:0 auto; padding:clamp(20px,4vw,44px) clamp(16px,4vw,32px) 72px}
+
+  a{color:var(--accent-ink); text-decoration:none}
+  a:hover{text-decoration:underline}
+  :focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:3px}
+
+  .eyebrow{
+    font-family:var(--mono); font-size:12px; font-weight:500;
+    letter-spacing:.18em; text-transform:uppercase; color:var(--accent-ink);
+  }
+  .mono{font-family:var(--mono)}
+  .num{font-variant-numeric:tabular-nums}
+
+  /* ---- masthead ---- */
+  .top{
+    display:flex; align-items:flex-start; justify-content:space-between;
+    gap:20px; flex-wrap:wrap; padding-bottom:22px;
+    border-bottom:1px solid var(--line);
+  }
+  .brand{display:flex; align-items:center; gap:12px}
+  .glyph{
+    width:38px; height:38px; flex:none; border-radius:9px;
+    background:var(--surface); border:1px solid var(--line-strong);
+    display:grid; place-items:center; font-size:20px; box-shadow:var(--shadow);
+  }
+  h1{
+    font-family:var(--mono); font-weight:700; font-size:clamp(22px,3.4vw,30px);
+    letter-spacing:-.01em; margin:0; line-height:1.1; text-wrap:balance;
+  }
+  .sub{color:var(--muted); font-size:13.5px; margin-top:4px; max-width:56ch}
+  .thesis{
+    margin-top:20px; padding:16px 18px; border-radius:11px;
+    background:var(--surface); border:1px solid var(--line);
+    border-left:3px solid var(--accent); box-shadow:var(--shadow);
+    font-size:15.5px; color:var(--ink-2); max-width:78ch;
+  }
+  .thesis b{color:var(--ink); font-weight:600}
+
+  .toggle{
+    font-family:var(--mono); font-size:12px; letter-spacing:.04em;
+    color:var(--ink-2); background:var(--surface); border:1px solid var(--line-strong);
+    border-radius:8px; padding:8px 12px; cursor:pointer; display:inline-flex; gap:8px; align-items:center;
+  }
+  .toggle:hover{border-color:var(--accent); color:var(--accent-ink)}
+
+  /* ---- section scaffolding ---- */
+  section{margin-top:40px}
+  .sec-head{display:flex; align-items:baseline; gap:14px; margin-bottom:16px}
+  .sec-head h2{
+    font-family:var(--mono); font-weight:600; font-size:15px; letter-spacing:.02em;
+    margin:0; color:var(--ink); text-transform:none;
+  }
+  .sec-head .rule{flex:1; height:1px; background:var(--line)}
+  .sec-head .count{font-family:var(--mono); font-size:12px; color:var(--muted)}
+
+  /* ---- KPI strip ---- */
+  .kpis{display:grid; grid-template-columns:repeat(4,1fr); gap:14px}
+  @media(max-width:720px){.kpis{grid-template-columns:repeat(2,1fr)}}
+  .kpi{
+    background:var(--surface); border:1px solid var(--line); border-radius:12px;
+    padding:16px 16px 14px; box-shadow:var(--shadow); position:relative; overflow:hidden;
+  }
+  .kpi .lab{font-family:var(--mono); font-size:11.5px; letter-spacing:.12em;
+    text-transform:uppercase; color:var(--muted)}
+  .kpi .big{font-family:var(--mono); font-weight:700; font-size:30px; line-height:1.05;
+    margin-top:8px; letter-spacing:-.01em}
+  .kpi .foot{font-size:12.5px; color:var(--muted); margin-top:3px}
+  .kpi.good .big{color:var(--good)} .kpi.warn .big{color:var(--warn)}
+  .kpi .spark{display:flex; gap:4px; margin-top:11px}
+  .kpi .spark i{height:6px; flex:1; border-radius:3px; background:var(--line-strong)}
+  .kpi .spark i.on{background:var(--good)}
+  .kpi .spark i.part{background:var(--warn)}
+
+  /* ---- case cards ---- */
+  .cases{display:grid; grid-template-columns:repeat(2,1fr); gap:18px}
+  @media(max-width:760px){.cases{grid-template-columns:1fr}}
+  .card{
+    position:relative; background:var(--surface); border:1px solid var(--line);
+    border-radius:14px; padding:20px 20px 18px 24px; box-shadow:var(--shadow);
+    transition:transform .18s ease, border-color .18s ease;
+  }
+  .card:hover{transform:translateY(-2px); border-color:var(--line-strong)}
+  .card .stripe{position:absolute; left:0; top:14px; bottom:14px; width:4px; border-radius:4px}
+  .stripe.sev-crit{background:var(--crit)} .stripe.sev-high{background:var(--warn)}
+  .card .chead{display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap}
+  .caseid{font-family:var(--mono); font-size:12px; color:var(--muted); letter-spacing:.08em}
+  .fam{font-family:var(--mono); font-weight:700; font-size:19px; color:var(--ink); letter-spacing:-.01em; margin:2px 0 0}
+  .type{font-size:12.5px; color:var(--muted); margin-top:2px}
+  .badges{display:flex; gap:6px; flex-wrap:wrap; margin-top:14px}
+  .pill{
+    font-family:var(--mono); font-size:11px; font-weight:500; letter-spacing:.03em;
+    padding:3px 9px; border-radius:999px; border:1px solid transparent; white-space:nowrap;
+    display:inline-flex; gap:5px; align-items:center;
+  }
+  .pill::before{content:""; width:6px; height:6px; border-radius:50%}
+  .pill.hit{color:var(--good); background:var(--good-bg); border-color:color-mix(in srgb,var(--good) 34%,transparent)}
+  .pill.hit::before{background:var(--good)}
+  .pill.part{color:var(--warn); background:var(--warn-bg); border-color:color-mix(in srgb,var(--warn) 34%,transparent)}
+  .pill.part::before{background:var(--warn)}
+  .pill.miss{color:var(--crit); background:var(--crit-bg); border-color:color-mix(in srgb,var(--crit) 34%,transparent)}
+  .pill.miss::before{background:var(--crit)}
+  .plabel{font-family:var(--mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--muted); align-self:center; margin-right:2px}
+  .finding{font-size:13.5px; color:var(--ink-2); margin:14px 0 0; line-height:1.55}
+  .ioc{
+    margin-top:13px; padding-top:12px; border-top:1px dashed var(--line-strong);
+    display:flex; flex-direction:column; gap:5px;
+  }
+  .ioc .k{font-family:var(--mono); font-size:10.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted)}
+  .ioc code{font-family:var(--mono); font-size:12px; color:var(--ink-2); word-break:break-all}
+  .ioc .c2{color:var(--crit)}
+
+  /* ---- tool table ---- */
+  .tblwrap{overflow-x:auto; border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow)}
+  table{border-collapse:collapse; width:100%; min-width:560px; background:var(--surface)}
+  th,td{text-align:left; padding:11px 14px; border-bottom:1px solid var(--line); font-size:13.5px; vertical-align:top}
+  thead th{
+    font-family:var(--mono); font-size:11px; letter-spacing:.12em; text-transform:uppercase;
+    color:var(--muted); font-weight:500; background:var(--surface-2); position:sticky; top:0;
+  }
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr:hover{background:var(--surface-2)}
+  td.tool{font-family:var(--mono); font-size:12.5px; color:var(--ink); white-space:nowrap}
+  .chip{font-family:var(--mono); font-size:11px; font-weight:500; padding:2px 8px; border-radius:6px; white-space:nowrap;
+    display:inline-flex; gap:5px; align-items:center}
+  .chip::before{content:""; width:6px; height:6px; border-radius:2px}
+  .chip.solid{color:var(--good); background:var(--good-bg)} .chip.solid::before{background:var(--good)}
+  .chip.mixed{color:var(--warn); background:var(--warn-bg)} .chip.mixed::before{background:var(--warn)}
+  .chip.limit{color:var(--muted); background:var(--surface-3)} .chip.limit::before{background:var(--muted)}
+  td .note{color:var(--muted); font-size:12.5px; display:block; margin-top:2px}
+
+  /* ---- lessons ---- */
+  .lessons{display:grid; grid-template-columns:repeat(2,1fr); gap:14px}
+  @media(max-width:720px){.lessons{grid-template-columns:1fr}}
+  .lesson{background:var(--surface); border:1px solid var(--line); border-radius:11px; padding:15px 16px; box-shadow:var(--shadow)}
+  .lesson .n{font-family:var(--mono); font-size:12px; color:var(--accent-ink); font-weight:600}
+  .lesson p{margin:6px 0 0; font-size:13.5px; color:var(--ink-2); line-height:1.55}
+  .lesson code{font-family:var(--mono); font-size:12px; background:var(--surface-3); padding:1px 5px; border-radius:4px; color:var(--ink)}
+
+  footer{margin-top:44px; padding-top:20px; border-top:1px solid var(--line);
+    display:flex; gap:14px; flex-wrap:wrap; align-items:center; justify-content:space-between;
+    font-size:12.5px; color:var(--muted)}
+  .safe{font-family:var(--mono); font-size:12px; color:var(--good); display:inline-flex; gap:7px; align-items:center}
+  .safe::before{content:""; width:7px; height:7px; border-radius:50%; background:var(--good);
+    box-shadow:0 0 0 3px var(--good-bg)}
+
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+
+  <header class="top">
+    <div class="brand">
+      <div class="glyph" aria-hidden="true">🧫</div>
+      <div>
+        <div class="eyebrow">Vivarium&nbsp;·&nbsp;read-only Ghidra MCP</div>
+        <h1>Blind Triage Validation</h1>
+        <p class="sub">Four real malware samples, analyzed blind through the read-only tool battery — verdict, severity, and behavior called before the sealed ground truth was opened.</p>
+      </div>
+    </div>
+    <button class="toggle" id="themeBtn" type="button" aria-label="Switch color theme">
+      <span id="themeIcon">◐</span><span id="themeTxt">Theme</span>
+    </button>
+  </header>
+
+  <p class="thesis">
+    Across PE32, PE32+ x64, and Mach-O — including obfuscated APT and packed loader specimens —
+    the static battery called the <b>threat nature correctly on all four</b>. Verdict, severity, and
+    category: <b>4/4 hit</b>. Exact malware-family proper-name: 1/4 (the rest landed the right
+    bucket). Every sample was analyzed inert; <b>none was ever executed</b>.
+  </p>
+
+  <!-- ===== ACCURACY SUMMARY ===== -->
+  <section aria-labelledby="acc">
+    <div class="sec-head"><h2 id="acc">Accuracy</h2><span class="rule"></span><span class="count">blind vs. sealed ground truth · n=4</span></div>
+    <div class="kpis">
+      <div class="kpi good">
+        <div class="lab">Verdict</div><div class="big num">4/4</div><div class="foot">malicious — no false negatives</div>
+        <div class="spark"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i></div>
+      </div>
+      <div class="kpi good">
+        <div class="lab">Severity</div><div class="big num">4/4</div><div class="foot">high / critical, all correct</div>
+        <div class="spark"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i></div>
+      </div>
+      <div class="kpi good">
+        <div class="lab">Category</div><div class="big num">4/4</div><div class="foot">bot · RAT · APT RAT · loader</div>
+        <div class="spark"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i></div>
+      </div>
+      <div class="kpi warn">
+        <div class="lab">Family name</div><div class="big num">1/4</div><div class="foot">3 landed the right bucket</div>
+        <div class="spark"><i class="on"></i><i class="part"></i><i class="part"></i><i class="part"></i></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== CASES ===== -->
+  <section aria-labelledby="cs">
+    <div class="sec-head"><h2 id="cs">Cases</h2><span class="rule"></span><span class="count">theZoo corpus · static-only</span></div>
+    <div class="cases">
+
+      <!-- case 01 -->
+      <article class="card">
+        <span class="stripe sev-high"></span>
+        <div class="chead">
+          <div>
+            <div class="caseid">CASE-01</div>
+            <p class="fam">Win32/Kelihos</p>
+            <div class="type">Hlux · PE32 x86 bot · 1.96&nbsp;MB</div>
+          </div>
+        </div>
+        <div class="badges">
+          <span class="plabel">blind</span>
+          <span class="pill hit">verdict</span><span class="pill hit">severity</span>
+          <span class="pill hit">category</span><span class="pill hit">family</span>
+        </div>
+        <p class="finding">Credential-stealing network bot: FTP-client credential harvest list, WinPcap sniffer, raw-socket P2P, <code class="mono">SonyAgent</code> Run-key persistence. AES + CRC-32 + Base64 constants recovered.</p>
+        <div class="ioc"><span class="k">clean sweep</span><code>5/5 — the only exact family-name hit</code></div>
+      </article>
+
+      <!-- case 02 -->
+      <article class="card">
+        <span class="stripe sev-high"></span>
+        <div class="chead">
+          <div>
+            <div class="caseid">CASE-02</div>
+            <p class="fam">OSX/Wirenet</p>
+            <div class="type">Mach-O i386 RAT · 77&nbsp;KB</div>
+          </div>
+        </div>
+        <div class="badges">
+          <span class="plabel">blind</span>
+          <span class="pill hit">verdict</span><span class="pill hit">severity</span>
+          <span class="pill hit">category</span><span class="pill part">family</span>
+        </div>
+        <p class="finding">macOS RAT + infostealer: Mozilla NSS credential decryptor over <code class="mono">moz_logins</code>, AppleEvent + CoreGraphics surveillance, BEL-delimited C2. Family bucket right; specific label missed.</p>
+        <div class="ioc"><span class="k">tool lesson</span><code>C2 crypto invisible — Wirenet uses CommonCrypto AES (no constants)</code></div>
+      </article>
+
+      <!-- case 03 -->
+      <article class="card">
+        <span class="stripe sev-crit"></span>
+        <div class="chead">
+          <div>
+            <div class="caseid">CASE-03</div>
+            <p class="fam">Win32.LuckyCat</p>
+            <div class="type">PE32 DLL · APT RAT · masquerade</div>
+          </div>
+        </div>
+        <div class="badges">
+          <span class="plabel">blind</span>
+          <span class="pill hit">verdict</span><span class="pill hit">severity</span>
+          <span class="pill hit">category</span><span class="pill hit">targeting</span><span class="pill part">family</span>
+        </div>
+        <p class="finding">Reconstructed the campaign fingerprint from static code alone: rolling-cipher config decrypt, telnet-shell + file-transfer transports, DLL faking <b>Windows Credential Manager</b>, Tibetan-targeting C2. <b>6 hit / 1 partial.</b></p>
+        <div class="ioc">
+          <span class="k">C2 (defanged)</span>
+          <code class="c2">dalailamatrustindia[.]ddns[.]net : 110 / 443</code>
+          <code class="c2">5.126.6[.]16 : 110</code>
+        </div>
+      </article>
+
+      <!-- case 04 -->
+      <article class="card">
+        <span class="stripe sev-crit"></span>
+        <div class="chead">
+          <div>
+            <div class="caseid">CASE-04</div>
+            <p class="fam">Win32.BumbleBee</p>
+            <div class="type">PE32+ x64 · regsvr32 loader · 2.3&nbsp;MB</div>
+          </div>
+        </div>
+        <div class="badges">
+          <span class="plabel">blind</span>
+          <span class="pill hit">verdict</span><span class="pill hit">nature</span>
+          <span class="pill hit">severity</span><span class="pill hit">vector</span><span class="pill part">family</span>
+        </div>
+        <p class="finding">Called <b>loader-not-payload</b> — the one call that matters for BumbleBee — from structure alone: <code class="mono">DllRegisterServer</code> export + multiply-decode loops + <b>97.7% undefined</b> padding, before any decompile. <b>5 hit / 1 partial.</b></p>
+        <div class="ioc"><span class="k">signals</span><code>regsvr32 vector · named-pipe IPC · MBA junk-code · decoy word-salad</code></div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- ===== TOOL RELIABILITY ===== -->
+  <section aria-labelledby="tr">
+    <div class="sec-head"><h2 id="tr">Tool reliability</h2><span class="rule"></span><span class="count">observed across 4 cases</span></div>
+    <div class="tblwrap">
+      <table>
+        <thead><tr><th>Tool</th><th>Status</th><th>Observation</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="tool">decompile_function</td>
+            <td><span class="chip solid">solid</span></td>
+            <td>Clean C on all four, incl. LuckyCat's rolling cipher and BumbleBee's MBA junk-code (dead-block warnings, still readable). <span class="note">The workhorse — carried every case.</span></td>
+          </tr>
+          <tr>
+            <td class="tool">program_summary</td>
+            <td><span class="chip solid">solid</span></td>
+            <td>Coverage ratio was the standout triage signal — <span class="mono">1.5% code / 97.7% undefined</span> flagged case-04 as packed before decompiling.</td>
+          </tr>
+          <tr>
+            <td class="tool">session_* · imports · strings</td>
+            <td><span class="chip solid">solid</span></td>
+            <td>Load/analyze reliable. <span class="note">Use <code>auto</code> loader for real PE/Mach-O; <code>source_ref</code> must be absolute under the import root.</span></td>
+          </tr>
+          <tr>
+            <td class="tool">ioc_scan</td>
+            <td><span class="chip mixed">mixed</span></td>
+            <td>Precise on 03 (2/2, no FP); correctly empty on 04 (encoded stage = true negative); <b>FP-prone on 01</b> — version strings→IPv4, timestamps→IPv6. Filter numerics.</td>
+          </tr>
+          <tr>
+            <td class="tool">crypto_constant_scan</td>
+            <td><span class="chip mixed">mixed</span></td>
+            <td>Hit on 01 (real AES/CRC/Base64). Empty on 02/03/04 — all of which <i>do</i> use crypto (framework / bespoke). <b>Empty ≠ no crypto</b>, confirmed 3×.</td>
+          </tr>
+          <tr>
+            <td class="tool">secret_scan</td>
+            <td><span class="chip mixed">mixed</span></td>
+            <td>Keyword / high-entropy false positives (Base64 alphabets, api-ms names) — but the "Credential" hit usefully surfaced the case-03 masquerade.</td>
+          </tr>
+          <tr>
+            <td class="tool">encoded 2nd-stage recovery</td>
+            <td><span class="chip limit">v1 limit</span></td>
+            <td>Read-only static triage can't unpack BumbleBee's encoded stage — an expected boundary, not a failure. Candidate for an emulate/unpack follow-up.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ===== LESSONS ===== -->
+  <section aria-labelledby="ls">
+    <div class="sec-head"><h2 id="ls">Carry-forward lessons</h2><span class="rule"></span></div>
+    <div class="lessons">
+      <div class="lesson"><div class="n">01 · scanners are leads, not verdicts</div>
+        <p>An empty <code>crypto_constant_scan</code> or <code>ioc_scan</code> is <b>not</b> a clean bill — framework crypto, bespoke ciphers, and encoded stages leave no constants. Corroborate with imports + decompile.</p></div>
+      <div class="lesson"><div class="n">02 · coverage ratio triages packers</div>
+        <p>High undefined-byte percentage plus a run-export (<code>DllRegisterServer</code> → regsvr32) equals a packed loader — a cheap, decisive call before any decompilation.</p></div>
+      <div class="lesson"><div class="n">03 · behavior beats the label</div>
+        <p>Static blind triage nails <i>what it does and how bad</i> every time; exact family proper-names need OSINT / hash intel. Report the actionable call with high confidence, the label with humility.</p></div>
+      <div class="lesson"><div class="n">04 · containment is the substrate</div>
+        <p>Every byte from Ghidra treated as inert under the untrusted-data envelope (ADR-005). No sample executed, no C2 contacted, worker killed on TTL — analysis stayed one-way.</p></div>
+    </div>
+  </section>
+
+  <footer>
+    <span class="safe">Containment held · 4/4 samples inert · never executed</span>
+    <span class="mono">read-only Ghidra battery · static triage · theZoo corpus</span>
+  </footer>
+
+</div>
+
+<script>
+  (function(){
+    var root=document.documentElement, btn=document.getElementById('themeBtn'),
+        icon=document.getElementById('themeIcon'), txt=document.getElementById('themeTxt');
+    function sysDark(){return window.matchMedia&&window.matchMedia('(prefers-color-scheme:dark)').matches;}
+    var cur=null; try{cur=localStorage.getItem('viv-theme');}catch(e){}
+    function apply(t){
+      if(t){root.setAttribute('data-theme',t);}else{root.removeAttribute('data-theme');}
+      var dark = t? t==='dark' : sysDark();
+      icon.textContent = dark ? '☾' : '☀';
+      txt.textContent = dark ? 'Dark' : 'Light';
+    }
+    apply(cur);
+    btn.addEventListener('click',function(){
+      var dark = cur? cur==='dark' : sysDark();
+      cur = dark ? 'light' : 'dark';
+      try{localStorage.setItem('viv-theme',cur);}catch(e){}
+      apply(cur);
+    });
+  })();
+</script>
