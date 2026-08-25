@@ -14,6 +14,13 @@ real hardened worker. Separately, the **security-hardening / gap-remediation** w
 
 ### Security
 
+- **Threat-model STRIDE pass for the v1.5–v1.9 parser/emulation/scanner surface (AA3, round-11).**
+  `docs/security/threat-model.md` had no delta past §19 (ADR-034, v1.4) for the extended import
+  loaders (raw/hex/self-describing/fat-slice/multi-region/container/DWARF), the p-code emulator
+  (call/args/stubs, xor_decode decode-loop emulation), and the read-only analysis primitives +
+  heuristic scanners (ADR-045…072) — new crossings of the hostile TB3 (binary→analyzer) / TB4
+  (untrusted output) boundaries left unanalysed. Adds **§20** modeling them as one STRIDE pass; AA1
+  (below) is the concrete T/E cell it surfaced.
 - **`.gnu_debuglink` path-traversal write fixed (AA1, CWE-22; round-11 gap sweep).** When applying
   detached DWARF (`debug_format="dwarf"`, ADR-071), the companion filename came from the **hostile
   binary's** `.gnu_debuglink` section and was used as the staging copy destination via

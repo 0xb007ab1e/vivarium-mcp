@@ -10,7 +10,11 @@
 > adds the **Version Tracking second-binary surface (TB3 delta, ADR-060 — ACCEPTED + IMPLEMENTED
 > 2026-08-13)**, the **companion-PDB second-file surface (TB3 delta, ADR-061 — ACCEPTED +
 > IMPLEMENTED 2026-08-13)**, and the **cross-binary BSim ephemeral-corpus surface (TB3 delta,
-> ADR-062 — ACCEPTED + IMPLEMENTED 2026-08-13)**.
+> ADR-062 — ACCEPTED + IMPLEMENTED 2026-08-13)**. The remaining v1.5–v1.9 loader, emulation, and
+> scanner surface (ADR-045…072 — extended loaders, p-code emulation, container/DWARF parsers, and the
+> read-only analysis primitives + heuristic scanners) is modeled as one STRIDE pass in **§20 (TB3/TB4
+> delta)** — added in the round-11 gap sweep (gap AA3), where the AA1 `.gnu_debuglink` traversal was
+> found + fixed (#299).
 > Source of truth: [`PLAN.md`](../../PLAN.md).
 > **Data classification:** the analyzed binary and all derived artifacts are **confidential** and
 > of **hostile origin** (master §5).
@@ -1355,3 +1359,63 @@ untrusted networks **and** leaking the shared secret; both are required to forge
 are documented mandatory constraints (threat model + `docs/runbooks/http-exposure.md`). The mode is
 **off by default** (opt-in `auth_mode=mtls-proxy`, which cannot start without the secret). Server-only,
 fully unit-tested — no live-verification dependency.
+
+## 20. TB3 / TB4 (delta) — v1.5–v1.9 loader, emulation & scanner surface (ADR-045…072)
+
+The v1.5–v1.9 capability batches broadened Ghidra loader coverage, added a p-code **emulator**, new
+read-only analysis primitives, and heuristic **scanners**. The v1.8 second-binary deltas (VT ADR-060,
+PDB ADR-061, BSim-corpus ADR-062) were modeled inline above; this section covers the rest as one
+STRIDE pass. **No new trust boundary:** every item is either another *input across TB3* (hostile
+binary → parser/analyzer/emulator, all inside the **unchanged** ADR-004 isolation + ADR-002
+kill/verified-wipe) or an *output across TB4* (binary-derived → client, wrapped `Untrusted[...]` per
+ADR-005). The concrete value of this pass: **AA1** (round-11) — a `.gnu_debuglink` path-traversal
+write in the ADR-071 staging path (CWE-22) — is exactly the STRIDE-**T/E** cell below, found + fixed
+(#299) once the surface was analysed rather than assumed benign.
+
+### 20.1 Extended import loaders + companions (ADR-045 raw/binary, 046 intel/motorola-hex, 047 dex/macho/apk, 048 fat-Mach-O slice, 065 multi-region scatter-load, 070 container unwrap, 071 detached DWARF)
+
+New ways to get hostile bytes into the analyzer — each a **second/other input across TB3**, not a new
+boundary. New **hostile PARSERS** (U-Boot uImage header, ELF `.gnu_debuglink`, decompressors) are the
+added surface; they run in the worker (or as pure, bounded, fuzzed server-side pre-parsers for
+confinement — ADR-001 preserved: the server never loads the JVM).
+
+| STRIDE | Threat | Mitigation |
+|---|---|---|
+| **T/E** | **Parser-controlled filesystem write / traversal** — a hostile binary's embedded name (e.g. `.gnu_debuglink`, ADR-071) steers a worker copy/stage destination outside its staging dir (CWE-22) — **the AA1 instance** | The debuglink name is confined to a **bare basename** in depth: the pure `core.debuglink` parser rejects any `/`, `\`, `.`/`..` (fail-closed = "no debuglink") and the worker staging step re-confines to `basename` and raises otherwise (#299). Every `*_ref` (binary, `debug_ref`, `pdb_ref`, per-region source) is resolved under the confined `VIVARIUM_IMPORT_ROOT` (CWE-22) server-side before the worker |
+| **D** | **Decompression / scatter bomb** — a container (`gzip`/`xz`/`lzma`/`uimage`) or a 64-region scatter-load inflates to exhaust memory/disk (CWE-400) | Two hard zip-bomb caps (absolute output ceiling AND output÷input ratio) **streamed** in the worker — abort on either (`limit-exceeded`, no large buffer ever materializes, ADR-070 D3); uImage payload clamped to the real file size; regions ≤64, each confined + size-capped before the worker; the ADR-002 wall-clock kill + worker mem cgroup backstop |
+| **T** | **Malformed loader hints / language** poison the load (bad `processor`, `base_addr`, region overlap) | Hints validated **server-side before the worker** (allow-listed `LanguageID`, address-width bounds, entry ≥ base, overlap-reject — CWE-20/CWE-190 via Python bigints); the worker re-validates the language against the installed set (defense in depth) and fails closed `not-found`/`invalid-params` |
+| **E** | A new loader path bypasses the server to reach the JVM directly | **ADR-001 unchanged** — all loading/parsing runs only in the worker via typed RPC; the pure server-side parsers (`core.uimage`/`core.debuglink`/`core.debugmap`) touch no JVM and are hermetically fuzzed (hostile-byte total: name-or-None, never crash/hang/over-read) |
+| **S/I** | A malformed companion (PDB/map/DWARF) or corrupt container smuggles state or crashes the worker | Each companion is `loader="auto"`-only + mutually exclusive with the others (one companion per program); a malformed map/companion/stream fails closed `not-found`; recovered symbol/type names cross TB4 as `Untrusted[...]` |
+
+### 20.2 p-code emulation (ADR-049 emulate, 066 call/args/stubs, 068 xor_decode decode-loop emulation)
+
+The emulator is the notable new *capability* — it **runs attacker-derived p-code**. It is analysed
+like TB3/TB5 (execute-hostile-logic) but is strictly weaker: a **p-code interpreter**, never native.
+
+| STRIDE | Threat | Mitigation |
+|---|---|---|
+| **E** | **Sandbox escape / native execution** via emulated hostile code | Ghidra's p-code **interpreter** only — **no native execution, no syscalls, no I/O, no host reach**; the program DB is not mutated; stubs substitute an external call (set ABI return + continue) and **never run real code or touch the host**; all inside the unchanged ADR-004 isolation |
+| **D** | **CPU/step exhaustion** — an infinite/huge emulation loop (incl. `xor_decode` mass-emulating candidate functions) | `max_steps` server-clamped (≤1,000,000, default 100k); stub-application budget (100k → `stop_reason=stub-limit`); per-call wall-clock kill (ADR-002) + worker mem cap; `xor_decode` bounded by the function-scan cap × `max_steps` (self-inflicted, deadline-bounded — round-11 AA15, accepted) |
+| **T/I** | **Emulator readback poisoning** — register/memory/`return_value` values used downstream as trusted | All readback values cross TB4 as `Untrusted[...]` (attacker-influenced, BINARY origin), normalized at the `core.envelope.wrap` chokepoint; the client renders them inert |
+| **E** | Auto arg-placement (ADR-066) mis-drives the callee | Args placed only for a **resolved** calling convention (register params); a stack-param convention **fails closed**; `args` without `call` is rejected — no silent mis-execution |
+
+### 20.3 Read-only analysis primitives + heuristic scanners (ADR-064 data_flow_slice, 067 binary_diff, 069 recover_struct, 072 secret_scan, 068 stack_string; and ioc_scan/crypto_constant_scan)
+
+Static, read-only extraction — inputs across TB3, outputs across TB4. **ADR-001 nuance:** the *pure
+scanners* (`secret_scan`, `stack_string`, `ioc_scan`) run **server-side**, but only over
+**already-extracted strings** (`list_strings` output) — inert data, **not** raw-binary parsing (no JVM,
+no loader), so the ADR-001 "server never parses a binary" invariant holds.
+
+| STRIDE | Threat | Mitigation |
+|---|---|---|
+| **I** | **Secret disclosure** — `secret_scan` echoes a raw hardcoded secret it flags | **REDACTED by construction (ADR-072 D3):** the raw value never leaves the pure core — only a middle-masked `masked_preview` (`Untrusted`) + a salted 12-hex `preview_hash`; server logs carry only address/category/pattern_id/hash. Heuristic (leads, not proof) |
+| **D** | **Slice / scan / diff bomb** — huge fan-out or string flood exhausts memory/output (CWE-400) | Every primitive is bounded before/at the worker: `max_nodes`/`max_depth` (data_flow_slice), `max_entries` (binary_diff), `max_accesses` (recover_struct), scan/`min_length`/entropy caps (scanners); `truncated` reported honestly (round-11 AA5/AA6/AA7: two overshoot-by-fan-out lows, SSA/worker-mem-bounded, tracked) |
+| **I/S** | **Injection via matched/derived content** — a planted string, inferred type, decoded string, op text, or function name carries a prompt-injection payload | All binary-derived fields (`inferred_type`, decoded `text`/`encoding`/`decode_key`, `pcode_op`, `masked_preview`, `name`) cross TB4 as `Untrusted[...]`, normalized at the `core.envelope.wrap` chokepoint; the client MUST render inert / never follow/exec (ADR-005, extends abuse-case 5) |
+| **T** | **ReDoS** in scanner patterns over hostile strings | Scanner regexes are linear/bounded/anchored and inputs length-capped before match (round-11 Lane-B verified) |
+
+**Residual risk.** The surface is large (many new parsers), but each is either a bounded pure
+server-side parser (fuzzed, fail-closed) or runs in the unchanged ADR-004 worker isolation with the
+ADR-002 kill + verified-wipe; every binary-derived output is `Untrusted`-enveloped. AA1 is the one
+concrete escape this analysis surfaced, now fixed + regression-tested (#299). Follow-ups tracked in
+the round-11 register (AA5/AA6/AA7 cap overshoots, AA15 emulation CPU) are self-inflicted +
+deadline/SSA-bounded, not containment breaks.
