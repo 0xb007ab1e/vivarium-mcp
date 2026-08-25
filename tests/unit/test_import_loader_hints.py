@@ -552,6 +552,33 @@ def test_container_unknown_rejected() -> None:
         s.SessionImportIn(session_id="s", source_ref="fw", container="androidboot")  # type: ignore[arg-type]
 
 
+def test_regions_aggregate_byte_budget_enforced_before_worker() -> None:
+    """AA7 (round-11): the SUM of region sizes is capped, not just each region.
+
+    N regions each individually under the single-binary cap would resident ~Nx the cap in the one
+    worker program. Two regions each at the cap → aggregate 2x cap → LIMIT_EXCEEDED before the
+    worker (never reaches the RPC).
+    """
+    from vivarium.core.errors import ErrorType, GhidraMcpError
+
+    adapter, captured = _adapter_capturing_call()
+    cap = adapter._limits.max_binary_bytes  # type: ignore[attr-defined]
+    adapter._source_resolver = lambda _ref: cap  # type: ignore[attr-defined]  # each region at cap
+    # Non-overlapping bases so the aggregate budget (not the overlap check) is what fails.
+    args = s.SessionImportIn.model_validate(
+        _regions(
+            regions=[
+                {"source_ref": "a.bin", "base_addr": 0x0},
+                {"source_ref": "b.bin", "base_addr": cap},
+            ]
+        )
+    )
+    with pytest.raises(GhidraMcpError) as ei:
+        adapter.import_binary("s", args)  # type: ignore[attr-defined]
+    assert ei.value.envelope.type is ErrorType.LIMIT_EXCEEDED
+    assert captured == []  # rejected before any RPC reached the worker
+
+
 def test_container_mutually_exclusive_with_regions() -> None:
     """container (single compressed stream) and regions (scatter-load) cannot combine."""
     with pytest.raises(ValidationError):
