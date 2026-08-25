@@ -538,6 +538,12 @@ class RpcGhidraAdapter:
             params["processor"] = args.processor
             resolved_regions: list[dict[str, object]] = []
             spans: list[tuple[int, int]] = []
+            # AA7 (round-11): enforce an AGGREGATE byte budget across all regions, not just the
+            # per-region cap — the worker loads every region into ONE program, so N regions each at
+            # the single-binary cap would resident ~Nx the cap. The running total is gated by the
+            # same check_binary_size ceiling (LIMIT_EXCEEDED before the worker), so a multi-region
+            # import can never exceed what a single-binary import would.
+            total_region_bytes = 0
             for region in args.regions:
                 if region.source_ref is not None:
                     region_size = self._resolve_and_cap(region.source_ref)
@@ -551,6 +557,8 @@ class RpcGhidraAdapter:
                             ErrorType.VALIDATION, "a region slice exceeds the source length"
                         )
                     region_path = args.source_ref
+                total_region_bytes += region_length
+                check_binary_size(total_region_bytes, self._limits)
                 resolved_regions.append(
                     {
                         "source_ref": region_path,

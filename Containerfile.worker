@@ -436,17 +436,32 @@ FROM cgr.dev/chainguard/wolfi-base@sha256:0b5fd36c9f36ecc95bf6dbe049fe0a211410e1
 ARG MUSL_VERSION
 ARG MUSL_TARBALL_SHA256
 ARG MUSL_TARBALL_URL
+# AA17 (round-11): a sha256-verified FAIL-OVER mirror. musl.libc.org is a single point of
+# availability failure that flaked the worker build AND the required live-regression gate; because
+# the tarball is checksum-verified below, the SOURCE is irrelevant to integrity — a mirror that
+# serves tampered bytes fails the sha256 check exactly like the primary. The sabotage-linux mirror
+# is a long-standing musl distfiles host. Override via build-arg if it too becomes unavailable.
+ARG MUSL_TARBALL_URL_FALLBACK=https://ftp.barfooze.de/pub/sabotage/tarballs/musl-1.2.5.tar.gz
 
 RUN set -eux; \
     echo "https://packages.wolfi.dev/os" >> /etc/apk/repositories; \
     apk add --no-cache ca-certificates curl gcc make
 
 # --- Fetch + VERIFY musl source (fail-closed on checksum mismatch — std-supplychain) -------------
+# AA17: try the primary, then the fail-over mirror; sha256-verify each candidate and accept the
+# first that matches. Fails closed only if EVERY mirror is unreachable or none matches the pin.
 WORKDIR /opt/musl-src
 RUN set -eux; \
     echo "${MUSL_TARBALL_SHA256}  musl.tar.gz" > musl.tar.gz.sha256; \
-    curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 60 --proto '=https' --tlsv1.2 -o musl.tar.gz "${MUSL_TARBALL_URL}"; \
-    sha256sum -c musl.tar.gz.sha256; \
+    ok=""; \
+    for url in "${MUSL_TARBALL_URL}" "${MUSL_TARBALL_URL_FALLBACK}"; do \
+        echo "fetching musl from ${url}"; \
+        if curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 60 --proto '=https' --tlsv1.2 -o musl.tar.gz "${url}" && sha256sum -c musl.tar.gz.sha256; then \
+            ok=1; break; \
+        fi; \
+        rm -f musl.tar.gz; \
+    done; \
+    test -n "${ok}" || { echo "all musl mirrors failed (unreachable or checksum mismatch)" >&2; exit 1; }; \
     tar -xzf musl.tar.gz; \
     rm -f musl.tar.gz musl.tar.gz.sha256
 

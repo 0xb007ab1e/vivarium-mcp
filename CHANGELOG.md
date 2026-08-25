@@ -155,6 +155,21 @@ trust identity tightened to tag builds, plus CI-drift tripwires, workflow lintin
 required gate, and CI/docs/threat-model currency.
 
 ### Fixed
+- **Bounded-collection fixes + CI fetch resilience (AA5/AA6/AA7/AA17, round-11).** Four Low
+  gap-sweep items, all self-bounded already but tightened:
+  - **AA5** `data_flow_slice` forward slice now honours `max_nodes` INSIDE the descendant loop, not
+    only at the outer frontier — a high-fan-out varnode no longer overshoots the cap by its
+    descendant count before breaking (`_jvm_bridge` worker edge; live-regression covered).
+  - **AA6** `recover_struct` now bounds the descendant COLLECTION to `max_accesses` (lazy Java-iter
+    walk) instead of draining every base varnode's full fan-out first — peak memory scales with
+    `max_accesses`, not the attacker-influenced fan-out.
+  - **AA7** multi-region (`session_import` `regions`) import now enforces an AGGREGATE byte budget
+    (running `check_binary_size` over the summed region lengths), not just the per-region cap — N
+    regions each at the cap can no longer resident ~Nx the cap in the single worker program
+    (`LIMIT_EXCEEDED` before the worker; regression test added).
+  - **AA17** the musl source fetch (worker build + the live-regression FID-probe build) gained a
+    sha256-verified fail-over mirror — `musl.libc.org` was a single availability SPOF that flaked
+    the worker build AND the required live-regression gate; verification makes any mirror safe.
 - **Hostile-input parsers promoted to the 100%-critical set (AA12, round-11).** `core.debuglink`
   (the `.gnu_debuglink` parser — where AA1 lived) and `core.uimage` (the U-Boot uImage header
   parser) parse untrusted binary-derived input — the same trust-boundary class as `core.validation`

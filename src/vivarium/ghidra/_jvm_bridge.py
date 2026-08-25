@@ -1994,6 +1994,12 @@ class PyGhidraBackend:
                     continue
                 if forward:
                     for use in _drain(vn.getDescendants()):
+                        # AA5 (round-11): honour max_nodes INSIDE the inner descendant loop, not
+                        # only at the outer-frontier check — a high-fan-out varnode would otherwise
+                        # overshoot the cap by its descendant count before the outer break.
+                        if len(nodes) >= max_nodes:
+                            truncated = True
+                            break
                         key = str(use.getSeqnum())
                         if key in seen:
                             continue
@@ -2114,10 +2120,21 @@ class PyGhidraBackend:
                 raise WorkerError(CODE_NOT_FOUND, "base variable/address not found in the function")
             base_set = set(base_varnodes)
 
+            # AA6 (round-11): bound the descendant COLLECTION to max_accesses, iterating the Java
+            # iterator lazily rather than draining every base varnode's full fan-out first — peak
+            # memory now scales with max_accesses, not the (attacker-influenced) fan-out.
             descendants: list[Any] = []
             seen_ops: set[Any] = set()
             for vn in base_varnodes:
-                for op in _drain(vn.getDescendants()):
+                if len(descendants) >= max_accesses:
+                    truncated = True
+                    break
+                java_iter = vn.getDescendants()
+                while java_iter.hasNext():
+                    if len(descendants) >= max_accesses:
+                        truncated = True
+                        break
+                    op = java_iter.next()
                     key = op.getSeqnum()
                     if key not in seen_ops:
                         seen_ops.add(key)
