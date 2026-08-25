@@ -2,15 +2,15 @@
 
 > Pydantic source of truth: [`src/vivarium/tools/schemas.py`](../../src/vivarium/tools/schemas.py).
 > Allow-list registry: [`src/vivarium/tools/registry.py`](../../src/vivarium/tools/registry.py).
-> **Read-by-default.** 59 of the 75 tools are read-only; the **16 mutation/write tools** below are
+> **Read-by-default.** 60 of the 76 tools are read-only; the **16 mutation/write tools** below are
 > **default-deny**, gated by per-session write-consent (`session_enable_writes`) — structural writes
 > additionally by `allow_structural`. **`runScript`/arbitrary script execution is permanently out of
 > scope** (PLAN §2), and the tool surface is a **fixed allow-list** (no dynamic registration).
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **75** tools (asserted in tests by
-  `len(TIER1_TOOL_NAMES) == 75`). The breakdown:
+- **Allow-list only:** the catalog is fixed; there are exactly **76** tools (asserted in tests by
+  `len(TIER1_TOOL_NAMES) == 76`). The breakdown:
   22 Tier-1 read-only (v1) + **1 p-code emulation tool (ADR-049: `emulate`; read-effect-only)** +
   **1 p-code listing tool (ADR-052: `get_pcode`; read-only)** +
   **1 high (SSA) p-code tool (ADR-053: `get_high_pcode`; read-only)** +
@@ -37,7 +37,9 @@
   read-only, propose-only)** — plus **1 firmware-secret scan tool (ADR-072: `secret_scan`;
   read-only, heuristic, REDACTED)** — plus **1 two-program binary-diff tool (ADR-067:
   `binary_diff`; read-only w.r.t. the session)** — plus **1 string-deobfuscation tool (ADR-068:
-  `deobfuscate_strings`; read-only)**. That is **59 read-only + 16 mutation/write** (the 16 = the 6
+  `deobfuscate_strings`; read-only)** — plus **1 crypto-detection tool (ADR-075: `crypto_detect`;
+  read-only, complements `crypto_constant_scan`)**. That is **60 read-only + 16 mutation/write**
+  (the 16 = the 6
   ADR-012 write tools + the 9 structural-write tools + the gated `session_import_annotations`; it
   matches the `WRITE_TOOLS` frozenset in `registry.py`).
   Every write tool is GATED by per-session write-consent (structural additionally by
@@ -168,6 +170,7 @@ node `name`s and decompiled C stay `Untrusted` (ADR-005). Bounded (`max_nodes �
 | `coverage` | `CoverageIn{}` | `CoverageOut{total_bytes, defined_code_bytes, defined_data_bytes, undefined_bytes, code_ratio, data_ratio, function_count}` |
 | `ioc_scan` | `IocScanIn{offset, limit, categories?, min_length}` | `IocScanOut{matches[{category, value*, source_address?}], total, truncated}` |
 | `crypto_constant_scan` | `CryptoConstantScanIn{offset, limit}` | `CryptoConstantScanOut{findings[{algorithm, kind, address}], total, truncated}` |
+| `crypto_detect` | `CryptoDetectIn{offset, limit, min_length}` | `CryptoDetectOut{indicators[{address?, kind, source, detail*, confidence}], total, truncated}` | **ADR-075** crypto detection (read-only, heuristic) — **complements, does NOT replace, `crypto_constant_scan`**. Pure core over `list_imports` + `list_strings`: detects crypto by an imported crypto **API** (`import` source: CryptoAPI/CNG/CommonCrypto/OpenSSL/libsodium/mbedTLS symbols) or a resolved crypto **symbol NAME** in the strings (`api_name` source, symbol-like only). Fixes the framework-crypto blind spot the constant scan misses (validation miss M2 — e.g. CommonCrypto AES). `kind`∈{aes,sha,md5,rc4,hmac,crypto_api}, `source`∈{import,api_name}, `confidence` per source; `detail`(`*`=UNTRUSTED matched symbol). HEURISTIC — empty ≠ no crypto. **MVP:** `instruction` (AES-NI/SHA opcodes) + `code_pattern` (cipher loops) sources need a worker disassembly pass — tracked fast-follow |
 | `secret_scan` | `SecretScanIn{offset, limit, categories?, min_length, entropy_threshold}` | `SecretScanOut{findings[{address?, category, pattern_id, masked_preview*, preview_hash, entropy?}], total, truncated}` | **ADR-072** firmware-secret scan (read-only, heuristic, **REDACTED**). Pure core over `list_strings` (like `ioc_scan`) — flags `hardcoded_credential` (keyword-adjacent + high-entropy blob), `key_material` (PEM/OpenSSH/PGP headers), `format_magic` (bootloader/container magic), `property_secret_name` (secret-implying key names, the T19 `WIFI_PWD` case). **Never emits the raw secret** (ADR-072 D3): `masked_preview` masks the middle (`*`=UNTRUSTED), `preview_hash` is a salted 12-hex correlation handle; server logs carry only address/category/pattern_id/hash. HEURISTIC — leads, not proof |
 | `call_graph_metrics` | `CallGraphMetricsIn{root?, max_depth, max_nodes, max_edges, top_n}` | `CallGraphMetricsOut{function_count, edge_count, leaf_count, root_count, recursive_component_count, self_recursive_count, unresolved_caller_count, top_fan_in[{address, name*, count}], top_fan_out[…], truncated}` |
 | `program_summary` | `ProgramSummaryIn{max_complex_functions, max_iocs, include_call_graph}` | `ProgramSummary{metadata, function_count, import_count, export_count, string_count, coverage?, call_graph_metrics?, top_complex_functions[], ioc_counts[{category, count}], crypto_algorithms[], truncated}` |

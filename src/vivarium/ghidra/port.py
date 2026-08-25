@@ -325,6 +325,10 @@ class GhidraPort(Protocol):
         """Heuristic crypto-constant search (pure signature table over the search_bytes RPC)."""
         ...
 
+    def crypto_detect(self, sid: str, a: s.CryptoDetectIn) -> s.CryptoDetectOut:
+        """Detect crypto by imported API / resolved symbol name (pure, read-only — ADR-075)."""
+        ...
+
     def secret_scan(self, sid: str, a: s.SecretScanIn) -> s.SecretScanOut:
         """Heuristic firmware-secret scan over defined strings (pure, redacted — ADR-072)."""
         ...

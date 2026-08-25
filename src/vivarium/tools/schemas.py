@@ -2427,6 +2427,60 @@ class CryptoConstantScanOut(_Out):
     truncated: bool = False
 
 
+class CryptoDetectIn(_Page):
+    """Arguments for ``crypto_detect`` — crypto by API/import/symbol name (ADR-075, paginated).
+
+    A read-only pass that **complements** ``crypto_constant_scan``: it detects crypto by signals the
+    constant scan cannot see — an imported crypto API (``import`` source) or a dynamically-resolved
+    crypto symbol NAME in the strings (``api_name`` source). Fixes the framework-crypto blind spot
+    (validation miss M2 — e.g. Apple CommonCrypto). HEURISTIC (leads, not proof); paginated like the
+    other scanners.
+
+    MVP scope (ADR-075, ratified 2026-08-25): the ``instruction`` (AES-NI/SHA opcodes) and
+    ``code_pattern`` (cipher-shaped loops) sources need a worker disassembly pass and are a tracked
+    fast-follow — this increment ships the two pure-over-facts sources (``import`` + ``api_name``).
+
+    Attributes:
+        min_length: Skip strings shorter than this when scanning the ``api_name`` source (noise
+            filter); does not affect the ``import`` source.
+    """
+
+    min_length: int = Field(default=4, ge=1, le=4096)
+
+
+class CryptoIndicator(_Out):
+    """One crypto indicator — HEURISTIC (a lead, not proof; ADR-075 D5).
+
+    Attributes:
+        address: Address of the source import/string (hex) — safe (``None`` if unknown).
+        kind: Primitive/family (closed vocabulary: ``aes`` / ``sha`` / ``md5`` / ``rc4`` /
+            ``hmac`` / ``crypto_api``) — safe.
+        source: How it was detected (closed vocabulary: ``import`` / ``api_name``) — safe.
+        detail: The matched symbol/string — UNTRUSTED (binary-derived; attacker-controlled).
+        confidence: Per-source confidence in ``[0, 1]`` — safe scalar.
+    """
+
+    address: str | None = None
+    kind: str
+    source: str
+    detail: Untrusted[str]
+    confidence: float
+
+
+class CryptoDetectOut(_Out):
+    """Result of ``crypto_detect`` (ADR-075) — complements, not replaces, ``crypto_constant_scan``.
+
+    Attributes:
+        indicators: Bounded page of crypto indicators.
+        total: Total indicators (for pagination) — safe.
+        truncated: Whether the scanned set or the matches page was capped.
+    """
+
+    indicators: list[CryptoIndicator]
+    total: int
+    truncated: bool = False
+
+
 class SecretScanIn(_Page):
     """Arguments for ``secret_scan`` — heuristic firmware-secret scan over strings (ADR-072).
 

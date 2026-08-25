@@ -1,8 +1,11 @@
 # ADR-075: Crypto detection by API / import / instruction (read-only)
 
-- **Status:** **Proposed** (drafted 2026-08-25 from the blind-triage validation benchmark; ratification
-  pending human operator). Remediation item **R3** of the validation miss-analysis
-  (`validation/reports/remediation-analysis.md`).
+- **Status:** **Accepted** (ratified by the human operator 2026-08-25). **`crypto_detect` is
+  IMPLEMENTED** in this increment with the two pure-over-facts sources (`import` + `api_name`), a new
+  pure `core.cryptodetect` run by the adapter over the existing `list_imports` + `list_strings` RPCs
+  (no new worker verb). The `instruction` (AES-NI/SHA opcodes) and `code_pattern` (cipher-shaped
+  loops) sources — which need a worker disassembly pass — are a tracked **fast-follow**. Remediation
+  item **R3** of the validation miss-analysis (`validation/reports/remediation-analysis.md`).
 - **Date:** 2026-08-25
 - **Deciders:** Human operator (ratification pending); drafted by the assistant from the 4-case
   validation exercise.

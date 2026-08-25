@@ -64,7 +64,7 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 ### Validation-driven detection batch (blind-triage benchmark remediation)
 - **ADR-073** — Program-level fingerprint (`program_fingerprint`) + offline family-match corpus (`family_match`) — **Accepted** (`program_fingerprint` MVP implemented; `family_match`/corpus + VT-hashes fast-follow).
 - **ADR-074** — Capability detection + MITRE ATT&CK tagging (`capability_scan`, capa-style) — **Proposed**.
-- **ADR-075** — Crypto detection by API/import/instruction (`crypto_detect`; complements `crypto_constant_scan`) — **Proposed**.
+- **ADR-075** — Crypto detection by API/import/instruction (`crypto_detect`; complements `crypto_constant_scan`) — **Accepted** (import + api_name sources implemented; instruction/code_pattern fast-follow).
 
 ### Read/analysis tools
 - **ADR-007** — Semantic-naming support tools (call graph, leaf-first ordering, function context).
