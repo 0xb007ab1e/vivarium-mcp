@@ -240,6 +240,7 @@ exclude_lines = [
 #   - src/vivarium/jobs/streaming.py      (streaming BOLA + resource bounds + the N4 replay window)
 #   - src/vivarium/core/debuglink.py      (hostile-ELF .gnu_debuglink parser — CWE-22; round-11 AA12)
 #   - src/vivarium/core/uimage.py         (hostile U-Boot uImage header parser — CWE-400; round-11 AA12)
+#   - src/vivarium/core/debugmap.py       (hostile linker/nm/.sym symbol-map parser; round-12 AB10)
 
 [tool.bandit]
 # bandit SAST config; asserts in tests are excluded via the test path, not by skipping checks.
@@ -252,7 +253,7 @@ exclude_dirs = ["tests", ".venv"]
 # ---------------------------------------------------------------------------
 [tool.mutmut]
 # Copy the WHOLE package into mutants/ (so tests that import or read other vivarium files by
-# path still resolve), but MUTATE only the nine critical modules (only_mutate) — master §4:
+# path still resolve), but MUTATE only the ten critical modules (only_mutate) — master §4:
 # mutation testing on critical paths. These are exactly the modules under the 100%-coverage
 # gate (see [tool.coverage] critical-paths note); mutation proves those tests catch faults.
 # (jobs/streaming.py added round-3 P5 — critical-tested; BOLA + resource bounds + the N4 replay window.)
@@ -267,6 +268,7 @@ only_mutate = [
   "*/vivarium/jobs/streaming.py",
   "*/vivarium/core/debuglink.py",
   "*/vivarium/core/uimage.py",
+  "*/vivarium/core/debugmap.py",
 ]
 # Copy repo-root packages the suite needs at COLLECTION time: `worker/` (5 unit tests
 # `from worker import …`) and `scripts/` (test_naming_eval_script / test_generate_fidb_script
