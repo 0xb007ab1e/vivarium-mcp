@@ -13,13 +13,15 @@ and marked as untrusted before it reaches the model.
 The name fits the design: a vivarium is a sealed enclosure where you can safely keep and observe a live
 specimen. Here the specimen is an untrusted binary.
 
-> Current release: **v0.13.0** (2026-07-02). A **security-hardening / gap-remediation** release — it
-> closes the round-4 and round-5 gap-analysis findings with **no new tools or contract changes**
-> (catalog stays **56**). Highlights: a streaming cross-session availability fix (per-job locking), an
-> OAuth JWKS-URI SSRF guard, owner-scoped session in-flight tracking, fail-closed auth-fault handling,
-> the mTLS auth binding now gated in CI, and the server image on the hash-pinned supply-chain install.
-> See the [CHANGELOG](./CHANGELOG.md) for details. Vivarium is pre-1.0, so the tool set and internal
-> contracts may still change before 1.0.
+> Current release: **v0.14.0** (2026-08-25). A large **capability + hardening** release — the v1.8
+> loader/analysis batch and the v1.9 capability-gap batch grow the Tier-1 catalog from **56 to 74**
+> tools (58 read-only / 16 write), and rounds 11–12 of the gap-analysis sweep are folded in. Every
+> new tool is read-only (or a consent-gated structural write) and stays within the containment model
+> (ADR-001/002/004/005). Highlights: broader binary import (raw/hex/self-describing/multi-region/
+> container/DWARF loaders), p-code emulation, cross-binary Version-Tracking + BSim, data-flow
+> slicing, struct recovery, and firmware secret/IOC scanning. See the [CHANGELOG](./CHANGELOG.md)
+> for details. (`v1.8`/`v1.9` are internal feature-milestone labels, not package versions.) Vivarium
+> is pre-1.0, so the tool set and internal contracts may still change before 1.0.
 
 ## What it can do
 
@@ -104,7 +106,7 @@ The full design rationale is in the decision records under [`docs/adr/`](./docs/
   the original source.
 - [`docs/runbooks/`](./docs/runbooks/): operational procedures (deploy, rollback, incident response, and
   more), including [HTTP exposure](./docs/runbooks/http-exposure.md).
-- [`docs/adr/`](./docs/adr/): the numbered design decisions (ADR-001 through ADR-044); see the
+- [`docs/adr/`](./docs/adr/): the numbered design decisions (ADR-001 through ADR-072); see the
   [ADR index](./docs/adr/README.md) for a map and suggested reading order.
 - [`SECURITY.md`](./SECURITY.md): how to report a vulnerability.
 - [`CHANGELOG.md`](./CHANGELOG.md): release history.

@@ -7,7 +7,7 @@
 - **Deciders:** Human (ratifies D1–D9) + PM; recorded by the Software Architect.
 - **Supersedes the deferral in:** ADR-029 §D4 ("(A) progress signal — DEFER to its own ADR;
   it is a frozen-TB2 framing change, not a usability rider"). This is that ADR.
-- **Addresses:** v1.4 roadmap item 2 (`docs/roadmap-v1.4.md` §2) — the "progress streaming" third of
+- **Addresses:** v1.4 roadmap item 2 (`docs/archive/roadmap-v1.4.md` §2) — the "progress streaming" third of
   the large-binary work, after ADR-029 shipped the profile selector (B) + reject pre-flight (C).
 - **Touches a trust boundary?** **Yes — TB2** (the internal server↔worker RPC,
   `docs/contracts/rpc-protocol.md`). This is the load-bearing change: it **revises the frozen

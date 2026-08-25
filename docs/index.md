@@ -20,7 +20,10 @@ specimen; here the specimen is an untrusted binary.
 
 - **[Getting started](getting-started.md)** — install, configure, run, and your first analysis, plus a
   **Reverse-engineering workflows** section (fast triage, deep analysis, bulk streaming, persistence).
+- **[Configuration](configuration.md)** — every `VIVARIUM_*` variable, its default, and where it's read.
 - **[FAQ](faq.md)** — quick answers: is it safe on malware, read-vs-write, persistence, accuracy, limits.
+- **New here?** The [onboarding guide](https://github.com/0xb007ab1e/vivarium-mcp/blob/main/ONBOARDING.md)
+  is the fast path (what it is, the mental model, day-one run).
 - **[Examples](examples/README.md)** — hands-on, copy-pasteable walkthroughs with the actual tool calls:
   [first look](examples/simple-first-look.md),
   [triage an unknown ELF](examples/medium-triage.md),
@@ -38,6 +41,16 @@ specimen; here the specimen is an untrusted binary.
 
 - **[Observability](observability.md)** — metrics, health probes, and SLOs for HTTP deployments.
 - **[Runbooks](runbooks/README.md)** — deploy, rollback, HTTP exposure, incident response, and more.
+
+## Contribute
+
+- **[CI/CD gates](ci-cd.md)** — the merge-blocking checks every change (human or agent) must pass.
+- **[Contributing guide](https://github.com/0xb007ab1e/vivarium-mcp/blob/main/CONTRIBUTING.md)** —
+  workflow, gates, the ADR process, and the rules automated/AI contributors are bound by.
+- **[Code of conduct](https://github.com/0xb007ab1e/vivarium-mcp/blob/main/CODE_OF_CONDUCT.md)** ·
+  **[Changelog](https://github.com/0xb007ab1e/vivarium-mcp/blob/main/CHANGELOG.md)** ·
+  **[Security policy](https://github.com/0xb007ab1e/vivarium-mcp/blob/main/SECURITY.md)**
+- **[Archive](archive/README.md)** — historical roadmaps & findings.
 
 ## Safety model in one breath
 

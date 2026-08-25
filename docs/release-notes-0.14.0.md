@@ -1,14 +1,13 @@
-# Vivarium 0.14.0 — release notes (DRAFT)
+# Vivarium 0.14.0 — release notes (2026-08-25)
 
-> **Status: DRAFT.** Target version **0.14.0** (the v1.8 roadmap milestone). This is the candidate
-> GitHub-release body; the release/tag is **gated** and cut only after PR #293 merges and the CI
-> gates run green (currently pending the account-wide GitHub Actions billing lock). Finalize by
-> stamping the date and promoting the CHANGELOG `[Unreleased]` section to `[0.14.0]`.
+> The v1.8 and v1.9 feature-milestone batches, plus rounds 11–12 of the security-hardening gap sweep,
+> released together as **0.14.0**. (`v1.8`/`v1.9` are internal milestone labels, not package versions.)
 
-**Highlights:** broader Ghidra **loader coverage**, a batch of **read-only analysis tools**, and the
-first **cross-binary** tools (two-program Version Tracking + cross-binary BSim). The Tier-1 tool
-catalog grows **56 → 69**. No breaking changes; every addition is read-only or an opt-in/consent-gated
-capability, and the containment model is unchanged.
+**Highlights:** broader Ghidra **loader coverage**, two batches of **read-only analysis tools**, the
+first **cross-binary** tools (two-program Version Tracking + cross-binary BSim), **data-flow slicing**,
+**struct recovery**, **firmware secret/IOC scanning**, and **p-code emulation** with call/stub support.
+The Tier-1 tool catalog grows **56 → 74** (58 read-only / 16 write). No breaking changes; every
+addition is read-only or an opt-in/consent-gated capability, and the containment model is unchanged.
 
 ---
 
@@ -55,6 +54,37 @@ store** (the stateless-worker guarantee is kept).
 - **`bsim_search_corpus`** — cross-binary BSim search of a target's functions against an **ephemeral**
   corpus of reference binaries you pass in the call. (ADR-062)
 
+### v1.9 capability batch (ADR-064 … ADR-072)
+
+A second batch closing capability gaps — all read-only or opt-in, same containment:
+
+- **`data_flow_slice`** — bounded intra-function def-use slice over the decompiler SSA (backward =
+  provenance, forward = uses); the missing primitive for vulnerability tracing. (ADR-064)
+- **`recover_struct`** — propose a struct layout from access patterns off a base pointer
+  (propose-only, never writes). (ADR-069)
+- **`secret_scan`** — heuristic firmware secret scan, **redacted by construction** (masked preview +
+  salted hash; the raw value never leaves the worker). (ADR-072)
+- **`binary_diff`** — function-granularity two-program diff (`match_by` name / function_hash / BSim
+  for stripped binaries; optional unchanged list). (ADR-067)
+- **`deobfuscate_strings`** — recover stack-strings + in-place XOR-decoded strings (the decoder is
+  emulated in the ADR-049 sandbox). (ADR-068)
+- **Multi-region scatter-load** — `session_import` `regions=[…]` loads a headerless image into one
+  program with N memory blocks at their bases. (ADR-065)
+- **Container unwrap + detached debug info** — `container=` (gzip/xz/lzma/uImage, zip-bomb-capped) and
+  `debug_format=` (linker/`nm` map or detached DWARF via `.gnu_debuglink`) on `session_import`.
+  (ADR-070 / ADR-071)
+- **`emulate` call/args/stubs** — call a function with argument placement + library-call stubs, so a
+  self-contained routine runs to completion in the sandbox. (ADR-066)
+
+### Hardening (gap-sweep rounds 11–12)
+
+Rounds 11 and 12 of the adversarial gap sweep are folded in: a fixed `.gnu_debuglink` path-traversal
+(CWE-22), bounded def-use/struct collection, a multi-region aggregate byte budget, sha256-verified
+**fail-over mirrors** for the musl/zlib/openssl build fetches, the three hostile-input companion
+parsers (`debuglink`/`uimage`/`debugmap`) promoted to the 100%-critical coverage set, a threat-model
+STRIDE pass (§20) over the new parser/emulation/scanner surface, and assorted doc/contract
+reconciliation. See the [CHANGELOG](../CHANGELOG.md) for the itemized list.
+
 ### Structural write (consent-gated)
 
 - **`apply_type_archive`** — apply a bundled Ghidra `.gdt` type archive (e.g. `generic_clib_64`) to
@@ -92,9 +122,9 @@ untrusted-data envelope (ADR-005). No new egress, no new persistent store, no re
 
 ## By the numbers
 
-- Tier-1 tool catalog: **56 → 69**.
-- ADRs: **ADR-045 … ADR-063** (each with a threat-model TB3 delta where it adds input surface).
+- Tier-1 tool catalog: **56 → 74** (58 read-only / 16 write).
+- ADRs: **ADR-045 … ADR-072** (each with a threat-model TB3/TB4 delta where it adds input surface).
 - Every new tool proven live against a real hardened worker via a gated live-regression test.
 
-_See [`CHANGELOG.md`](../CHANGELOG.md) for the itemized change list and
-[`docs/roadmap-v1.8-findings.md`](roadmap-v1.8-findings.md) for the design/findings detail._
+_See [`CHANGELOG.md`](../CHANGELOG.md) for the itemized change list and the archived
+[v1.8 findings](archive/roadmap-v1.8-findings.md) for the design/findings detail._

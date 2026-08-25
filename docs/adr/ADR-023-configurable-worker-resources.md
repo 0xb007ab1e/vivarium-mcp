@@ -9,7 +9,7 @@
   MiB-integer env (defaults = current values; ceilings ~32 GiB mem / 16 CPU / 32 GiB project-tmpfs);
   **D2** a **new `ErrorType` `resource-exhausted`** (HTTP 503, `retryable=False`) for worker OOM/exit;
   **D3** pre-flight size check **warn-only by default** (no reject mode this increment). Addresses
-  **finding F1** (`docs/roadmap-v1.3-findings.md`). Extends **ADR-009** (the concrete launcher) and **ADR-004**
+  **finding F1** (`docs/archive/roadmap-v1.3-findings.md`). Extends **ADR-009** (the concrete launcher) and **ADR-004**
   (isolation tier / resource bounds); refines the worker-death → error mapping in
   `ghidra.rpc_client` (rpc-protocol §3/§6). **No new trust boundary** — this is resource-bound
   *tuning* (the bounds stay clamped) plus *error clarity*.

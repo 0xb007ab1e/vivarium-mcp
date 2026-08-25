@@ -106,7 +106,7 @@ Collision handling is a **client responsibility**. No server change.
      rows): state explicitly that *function names need not be unique (Ghidra distinguishes by
      address); the server does not dedup; a symbol rename within an occupied namespace fails closed
      with `analysis-failed`.* This documents existing behavior — **not a contract change**.
-  2. **Client-guidance section** (catalog or `docs/roadmap-v1.3-findings.md` F5 resolution): the
+  2. **Client-guidance section** (catalog or `docs/archive/roadmap-v1.3-findings.md` F5 resolution): the
      recommended client practice for a multi-rename pass —
      - maintain a name→address map across the batch;
      - on a proposed-name collision, **disambiguate client-side** (the harness's `_<addr>` suffix,

@@ -73,6 +73,7 @@ plugins:
 nav:
   - Home: index.md
   - Getting started: getting-started.md
+  - Configuration: configuration.md
   - FAQ: faq.md
   - Architecture: architecture.md
   - Observability: observability.md
@@ -109,4 +110,8 @@ nav:
       - Scaling: runbooks/scaling.md
       - On-call: runbooks/on-call.md
       - Incident response: runbooks/incident-response.md
+  - Development:
+      - CI/CD gates: ci-cd.md
   - Decision records (ADRs): adr/README.md
+  - Release notes (0.14.0): release-notes-0.14.0.md
+  - Archive (historical): archive/README.md

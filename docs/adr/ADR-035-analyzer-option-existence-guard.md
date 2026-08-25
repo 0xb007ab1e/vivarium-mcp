@@ -9,7 +9,7 @@
   pinned Ghidra 12.1.2 image (see Consequences). Addresses v1.5 roadmap item #2.
 - **Date:** 2026-06-18
 - **Deciders:** Human (ratifies the error mapping + scope) + PM; recorded by the Software Architect.
-- **Addresses:** `docs/roadmap-v1.5.md` §2 — "analyzer-option existence guard (complete the
+- **Addresses:** `docs/archive/roadmap-v1.5.md` §2 — "analyzer-option existence guard (complete the
   profile-gate story — catch a renamed Ghidra option, not just a binding crash)."
 - **Relates to / constrained by:** ADR-029 B (the analyzer-profile selector + the `_PROFILE_PRESETS`
   overlay this guards), ADR-028 (the live-regression profile gate that turns a fail-closed here into
