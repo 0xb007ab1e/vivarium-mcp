@@ -6,7 +6,7 @@
   `ErrorEnvelope` unchanged); strict scrub (exception class + fixed template, drop free-form `str()`);
   strip value-echoing `ValidationError` message lines from rendered tracebacks; transient stderr
   capture, **no persistence** (ADR-002); regression fixture = `/bin/gzip` (benign, gitignored). Driven
-  by blind-acceptance findings **F2** + **F3** (`docs/roadmap-v1.3-findings.md` 2026-06-15).
+  by blind-acceptance findings **F2** + **F3** (`docs/archive/roadmap-v1.3-findings.md` 2026-06-15).
 - **Deciders:** Human (ratifies scope + the worker-error-detail surface/redaction stance) + PM;
   recorded by the Software Architect.
 - **Relates to:** ADR-018 (the export design this fixes — `USER_DEFINED` enumeration), ADR-001

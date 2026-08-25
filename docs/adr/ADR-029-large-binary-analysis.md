@@ -7,7 +7,7 @@
   `# pragma: no cover - JVM edge` code is only proven by a real-worker run).
 - **Date:** 2026-06-17
 - **Deciders:** Human (ratifies D1–D6) + PM; recorded by the Software Architect.
-- **Addresses:** v1.4 roadmap item 2 (`docs/roadmap-v1.4.md` §2) — "Large-binary analysis: progress
+- **Addresses:** v1.4 roadmap item 2 (`docs/archive/roadmap-v1.4.md` §2) — "Large-binary analysis: progress
   streaming, analyzer-profile selector, RAM-vs-size pre-flight." Folds in roadmap item 8 (`§8` /
   ADR-023 D3 — pre-flight reject mode).
 - **Relates to / constrained by:**

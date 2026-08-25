@@ -14,7 +14,7 @@
 - **Date:** 2026-06-18
 - **Deciders:** Human (ratifies the exit-3 match + the detail-string change) + PM; recorded by the
   Software Architect.
-- **Addresses:** `docs/roadmap-v1.6.md` §1 (OOM → `resource-exhausted` on the JVM self-exit path) and
+- **Addresses:** `docs/archive/roadmap-v1.6.md` §1 (OOM → `resource-exhausted` on the JVM self-exit path) and
   §3 (operator memory-sizing hint). Surfaced by the v1.5 #5 measurement spike.
 - **Relates to / constrained by:** ADR-023 (configurable worker resources + the `resource-exhausted`
   error and the warn/reject size pre-flight — this refines its classification), ADR-001 (server

@@ -6,7 +6,7 @@
   (the F2 lesson).
 - **Date:** 2026-06-17
 - **Deciders:** Human (ratifies D1–D6) + PM; recorded by the Software Architect.
-- **Addresses:** v1.4 roadmap item 1 (`docs/roadmap-v1.4.md` §1) — "Blind-acceptance run as a
+- **Addresses:** v1.4 roadmap item 1 (`docs/archive/roadmap-v1.4.md` §1) — "Blind-acceptance run as a
   recurring live regression."
 - **Relates to / constrained by:** ADR-001 (server never parses a binary; enumeration is
   worker-only), ADR-002 (one ephemeral worker per session; evict-wipe), ADR-003 (container-only

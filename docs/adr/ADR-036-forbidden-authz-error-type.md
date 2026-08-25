@@ -10,7 +10,7 @@
 - **Date:** 2026-06-18
 - **Deciders:** Human (ratifies the scope of the move + the type/status) + PM; recorded by the
   Software Architect.
-- **Addresses:** `docs/roadmap-v1.5.md` §3 — "dedicated 403/FORBIDDEN authZ error type."
+- **Addresses:** `docs/archive/roadmap-v1.5.md` §3 — "dedicated 403/FORBIDDEN authZ error type."
 - **Relates to / constrained by:** ADR-033 (OAuth scope→per-tool capability authZ — the denial this
   reclassifies), ADR-012 (write-consent gate — likewise), ADR-017 (owner-scoped sessions — the
   ownership denial that must STAY `session-invalid`), the frozen error-envelope contract

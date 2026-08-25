@@ -1,7 +1,7 @@
 # ADR-045: `session_import` loader hints — raw/headerless binary import
 
 - **Status:** **Accepted** (ratified by the human operator 2026-08-12; targets v1.8). Implements
-  finding **F1** in [`docs/roadmap-v1.8-findings.md`](../roadmap-v1.8-findings.md).
+  finding **F1** in [`docs/archive/roadmap-v1.8-findings.md`](../archive/roadmap-v1.8-findings.md).
 - **Date:** 2026-08-12
 - **Deciders:** Human operator (ratified 2026-08-12 via direct Q&A: implement; allow-list scope =
   embedded-focused; include `entry`); drafted by the assistant from the v1.8 external-run findings
