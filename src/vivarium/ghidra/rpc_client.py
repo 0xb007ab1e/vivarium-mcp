@@ -1283,6 +1283,10 @@ class RpcGhidraAdapter:
         """Return a function's Ghidra match-hash fingerprints (ADR-057)."""
         return _build_function_hash(self._tool_call(sid, "function_hash", {"function": a.function}))
 
+    def program_fingerprint(self, sid: str, a: s.ProgramFingerprintIn) -> s.ProgramFingerprintOut:
+        """Return whole-program pivot digests (ADR-073 D1)."""
+        return _build_program_fingerprint(self._tool_call(sid, "program_fingerprint", {}))
+
     def bsim_similarity(self, sid: str, a: s.BsimSimilarityIn) -> s.BsimSimilarityOut:
         """Return the BSim cosine similarity between two functions (ADR-058)."""
         return _build_bsim_similarity(
@@ -2941,6 +2945,29 @@ def _build_function_hash(r: dict[str, Any]) -> s.FunctionHashOut:
         exact_instructions=str(r["exact_instructions"]),
         exact_mnemonics=str(r["exact_mnemonics"]),
         instruction_count=int(r["instruction_count"]),
+    )
+
+
+@_fail_closed
+def _build_program_fingerprint(r: dict[str, Any]) -> s.ProgramFingerprintOut:
+    """Build :class:`ProgramFingerprintOut` (ADR-073 D1) — all fields SAFE (digests / scalars).
+
+    The digests are server-safe scalars the worker computed over binary-derived facts; ``coverage``
+    ratios are computed here (pure) from the worker's byte counts, reusing :func:`_build_coverage`.
+
+    Args:
+        r: The worker's plain ``program_fingerprint`` result.
+
+    Returns:
+        The typed :class:`ProgramFingerprintOut`.
+    """
+    import_digest = r.get("import_digest")
+    return s.ProgramFingerprintOut(
+        structure_digest=str(r["structure_digest"]),
+        import_digest=str(import_digest) if import_digest is not None else None,
+        function_count=int(r["function_count"]),
+        import_count=int(r["import_count"]),
+        coverage=_build_coverage(r["coverage"]),
     )
 
 

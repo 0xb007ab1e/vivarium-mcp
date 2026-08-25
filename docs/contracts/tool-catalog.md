@@ -2,15 +2,15 @@
 
 > Pydantic source of truth: [`src/vivarium/tools/schemas.py`](../../src/vivarium/tools/schemas.py).
 > Allow-list registry: [`src/vivarium/tools/registry.py`](../../src/vivarium/tools/registry.py).
-> **Read-by-default.** 58 of the 74 tools are read-only; the **16 mutation/write tools** below are
+> **Read-by-default.** 59 of the 75 tools are read-only; the **16 mutation/write tools** below are
 > **default-deny**, gated by per-session write-consent (`session_enable_writes`) — structural writes
 > additionally by `allow_structural`. **`runScript`/arbitrary script execution is permanently out of
 > scope** (PLAN §2), and the tool surface is a **fixed allow-list** (no dynamic registration).
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **74** tools (asserted in tests by
-  `len(TIER1_TOOL_NAMES) == 74`). The breakdown:
+- **Allow-list only:** the catalog is fixed; there are exactly **75** tools (asserted in tests by
+  `len(TIER1_TOOL_NAMES) == 75`). The breakdown:
   22 Tier-1 read-only (v1) + **1 p-code emulation tool (ADR-049: `emulate`; read-effect-only)** +
   **1 p-code listing tool (ADR-052: `get_pcode`; read-only)** +
   **1 high (SSA) p-code tool (ADR-053: `get_high_pcode`; read-only)** +
@@ -18,6 +18,7 @@
   **1 basic-block CFG tool (ADR-055: `basic_blocks`; read-only)** +
   **1 data-type listing tool (ADR-056: `list_data_types`; read-only)** +
   **1 function match-hash tool (ADR-057: `function_hash`; read-only)** +
+  **1 whole-program fingerprint tool (ADR-073 D1: `program_fingerprint`; read-only)** +
   **1 BSim similarity tool (ADR-058: `bsim_similarity`; read-only)** +
   **1 whole-program BSim find-similar tool (ADR-059: `find_similar_functions`; read-only)** +
   **1 two-program Version Tracking tool (ADR-060: `version_track`; read-only w.r.t. the session)** +
@@ -36,7 +37,7 @@
   read-only, propose-only)** — plus **1 firmware-secret scan tool (ADR-072: `secret_scan`;
   read-only, heuristic, REDACTED)** — plus **1 two-program binary-diff tool (ADR-067:
   `binary_diff`; read-only w.r.t. the session)** — plus **1 string-deobfuscation tool (ADR-068:
-  `deobfuscate_strings`; read-only)**. That is **58 read-only + 16 mutation/write** (the 16 = the 6
+  `deobfuscate_strings`; read-only)**. That is **59 read-only + 16 mutation/write** (the 16 = the 6
   ADR-012 write tools + the 9 structural-write tools + the gated `session_import_annotations`; it
   matches the `WRITE_TOOLS` frozenset in `registry.py`).
   Every write tool is GATED by per-session write-consent (structural additionally by
@@ -89,6 +90,7 @@
 | `stack_frame` | `StackFrameIn{function}` | `StackFrameOut{frame_size, variables[]{name*, stack_offset, data_type*, size, is_parameter}}` | **ADR-054** recovered stack layout (read-only). Reads `Function.getStackFrame()` — the locals + stack parameters the Stack analyzer populated during auto-analysis (offset, name, type, size). An un-analyzed function returns an empty list (not an error — `session_analyze` first). `name` + `data_type` are `*`=UNTRUSTED (Ghidra/binary-derived); offsets/sizes are safe scalars |
 | `basic_blocks` | `BasicBlocksIn{function, max_blocks≤10000}` | `BasicBlocksOut{blocks[]{address, end_address, size, successors[]}, truncated}` | **ADR-055** control-flow graph (read-only). Walks `BasicBlockModel` over the function and returns each basic block's address range + intraprocedural successor edges (the CFG STRUCTURE — vs `cyclomatic_complexity`, which returns only counts). All fields are server-normalized addresses/counts — nothing untrusted (no instruction text) |
 | `function_hash` | `FunctionHashIn{function}` | `FunctionHashOut{address, exact_bytes, exact_instructions, exact_mnemonics, instruction_count}` | **ADR-057** function match-hashes (read-only). Ghidra's OWN function hashers (behind its function-match/diff): `exact_bytes` (identical code+operands), `exact_instructions` (OPERANDS MASKED — matches relocated/recompiled clones), `exact_mnemonics` (mnemonic sequence). Two functions sharing a hash are duplicates at that granularity — find statically-linked lib copies / repeated routines. Hashes are opaque decimal-string equality tokens; all fields SAFE |
+| `program_fingerprint` | `ProgramFingerprintIn{session_id}` | `ProgramFingerprintOut{structure_digest, import_digest?, function_count, import_count, coverage{...}}` | **ADR-073 D1** whole-program pivot digests (read-only; no consent). `structure_digest` = SHA-256 over the SORTED per-function `ExactMnemonics` match-hashes (operand-masked ⇒ clusters recompiled/variant builds); `import_digest` = SHA-256 over the SORTED unique lowercased `library!symbol` tokens (`None` if no imports) — an honest Ghidra-derived digest, deliberately NOT the pefile/VT `imphash`; `coverage` = the packed-loader signal (high undefined ratio ⇒ likely packed). Digests computed in-worker so only fixed-size hex crosses the boundary; all fields SAFE (server-computed scalars). **MVP scope:** VT-`imphash`/`tlsh`/`rich_hash`/`authentihash` (need a vetted native dep or hostile-PE parser) and the `family_match` corpus (ADR-073 D2) are a tracked fast-follow — intentionally ABSENT, not null |
 | `bsim_similarity` | `BsimSimilarityIn{function_a, function_b}` | `BsimSimilarityOut{address_a, address_b, similarity}` | **ADR-058** BSim FUZZY similarity (read-only). Generates each function's BSim feature signature (`GenSignatures` + the bundled `medium_32/64` weights) and returns their cosine `similarity` in `[0,1]` (1.0 = identical) — the *continuous* counterpart to `function_hash`'s exact match, for near-duplicates / variant routines. Decompiles both functions but does NOT mutate; bounded to two functions. All fields SAFE (addresses + a computed score) |
 | `find_similar_functions` | `FindSimilarFunctionsIn{function, min_similarity=0.7, limit=20, max_scan=500}` | `FindSimilarFunctionsOut{target_address, matches[]{address, name*, similarity}, functions_scanned, truncated}` | **ADR-059** whole-program BSim clone/variant search (read-only). One `GenSignatures` scan of the target + up to `max_scan` functions, ranked by cosine similarity ≥ `min_similarity` (top `limit`). Built on `bsim_similarity`. Decompiles each scanned function (cost ∝ `max_scan`, wall-clock-bounded) but does NOT mutate. Only each match `name` is `*`=UNTRUSTED; addresses/score/counts are SAFE |
 | `binary_diff` | `BinaryDiffIn{program_a, program_b, match_by=name\|function_hash\|bsim, min_similarity?, include_unchanged?, max_entries≤10000}` | `BinaryDiffOut{added[]{address, name*}, removed[]{address, name*}, changed[]{address_a, address_b, name*, change}, unchanged[]?, summary{added, removed, changed, unchanged?}, truncated}` | **ADR-067** function-granularity two-program diff (read-only w.r.t. the session). Loads BOTH refs FRESH in the session's worker (the session's own program is NOT a participant — untouched, same isolation as `version_track`), auto-analyzes both, indexes functions by name, pairs by name, classifies ADDED (in B not A) / REMOVED (in A not B) / CHANGED (same name, differing per `match_by`: `function_hash`=Ghidra operand-masked ExactInstructions hash, `name`=body size + instruction count), then RELEASES + WIPES both. `summary` counts are HONEST even when the entry lists are clipped at `max_entries`. Both refs confined + size-capped server-side (CWE-22/CWE-400); gated like `session_import` (capability), NOT write-consent. `match_by="bsim"` (ADR-067) pairs by BSim content-similarity ≥ `min_similarity` (default 0.7, greedy one-to-one) instead of by name — for STRIPPED binaries where names don't survive; `include_unchanged=true` also returns the paired non-differing functions (`unchanged[]` + `summary.unchanged`), default off = deltas only. Function `name`s are `*`=UNTRUSTED (binary-derived); addresses/counts/change SAFE |

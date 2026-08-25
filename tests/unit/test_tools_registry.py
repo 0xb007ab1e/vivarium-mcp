@@ -494,11 +494,12 @@ def test_catalog_is_exactly_67_unique_tools() -> None:
     # function_hash; read-only) + 1 v1.8 BSim similarity (ADR-058: bsim_similarity; read-only) + 1
     # v1.8 whole-program BSim find-similar (ADR-059: find_similar_functions; read-only) + 1 v1.8
     # two-program Version Tracking (ADR-060: version_track; read-only w.r.t. the session) + 1 v1.8
-    # cross-binary BSim corpus search (ADR-062: bsim_search_corpus; read-only w.r.t. the session) —
+    # cross-binary BSim corpus search (ADR-062: bsim_search_corpus; read-only w.r.t. the session) +
+    # 1 whole-program fingerprint (ADR-073 D1: program_fingerprint; read-only) —
     # the 15 mutation tools GATED by per-session write-consent (the structural 9 additionally by
     # allow_structural); import is GATED identically (+ allow_struct for structural entries).
-    assert len(reg.TIER1_TOOL_NAMES) == 74
-    assert len(set(reg.TIER1_TOOL_NAMES)) == 74
+    assert len(reg.TIER1_TOOL_NAMES) == 75
+    assert len(set(reg.TIER1_TOOL_NAMES)) == 75
 
 
 def test_handler_table_matches_frozen_allow_list() -> None:

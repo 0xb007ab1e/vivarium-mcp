@@ -185,6 +185,9 @@ offsets, types, sizes from the Stack analyzer), `basic_blocks` (ADR-055 control-
 read-only; each basic block's address range + intraprocedural successor edges from
 `BasicBlockModel`), `function_hash` (ADR-057 function match-hashes — read-only; Ghidra's own
 exact-bytes / exact-instructions / exact-mnemonics function hashers for duplicate detection),
+`program_fingerprint` (ADR-073 D1 whole-program pivot digests — read-only, no params; SHA-256
+`structure_digest` over the sorted per-function ExactMnemonics hashes + `import_digest` over the
+sorted lowercased `library!symbol` tokens + reused coverage — all fixed-size hex/scalars),
 `bsim_similarity` (ADR-058 BSim fuzzy similarity — read-only; cosine similarity between two
 functions' BSim feature signatures via GenSignatures + the bundled medium weights),
 `find_similar_functions` (ADR-059 whole-program BSim clone/variant search — read-only; ranks up to

@@ -428,6 +428,25 @@ class FakeGhidraPort:
             instruction_count=2,
         )
 
+    def program_fingerprint(self, sid: str, a: s.ProgramFingerprintIn) -> s.ProgramFingerprintOut:
+        """Return deterministic whole-program pivot digests (all safe scalars, ADR-073 D1)."""
+        self._maybe_fail()
+        return s.ProgramFingerprintOut(
+            structure_digest="0" * 64,
+            import_digest="1" * 64,
+            function_count=2,
+            import_count=3,
+            coverage=s.CoverageOut(
+                total_bytes=1024,
+                defined_code_bytes=512,
+                defined_data_bytes=128,
+                undefined_bytes=384,
+                code_ratio=0.5,
+                data_ratio=0.125,
+                function_count=2,
+            ),
+        )
+
     def bsim_similarity(self, sid: str, a: s.BsimSimilarityIn) -> s.BsimSimilarityOut:
         """Return a deterministic BSim similarity score (all safe scalars, ADR-058)."""
         self._maybe_fail()
