@@ -538,12 +538,16 @@ class RpcGhidraAdapter:
             params["processor"] = args.processor
             resolved_regions: list[dict[str, object]] = []
             spans: list[tuple[int, int]] = []
-            # AA7 (round-11): enforce an AGGREGATE byte budget across all regions, not just the
-            # per-region cap — the worker loads every region into ONE program, so N regions each at
-            # the single-binary cap would resident ~Nx the cap. The running total is gated by the
-            # same check_binary_size ceiling (LIMIT_EXCEEDED before the worker), so a multi-region
-            # import can never exceed what a single-binary import would.
+            # AA7 (round-11) + AB8/AB9 (round-12): enforce an AGGREGATE byte budget across all
+            # regions, not just the per-region cap — the worker loads every region into ONE program,
+            # so N regions each at the single-binary cap would resident ~Nx the cap. Two refinements
+            # over the round-11 cut: (AB9) a slice region is carved from the PARENT source_ref,
+            # which the worker materializes whole to slice, so the parent's full size is added ONCE
+            # to the peak when any slice is present (the round-11 total omitted it → real peak was
+            # ~2x cap, not "<= single binary"); (AB8) the aggregate is run through the SAME OOM
+            # `_preflight_check` (reject-mode) as the per-ref path, which the round-11 cut skipped.
             total_region_bytes = 0
+            uses_parent_slice = False
             for region in args.regions:
                 if region.source_ref is not None:
                     region_size = self._resolve_and_cap(region.source_ref)
@@ -557,6 +561,7 @@ class RpcGhidraAdapter:
                             ErrorType.VALIDATION, "a region slice exceeds the source length"
                         )
                     region_path = args.source_ref
+                    uses_parent_slice = True
                 total_region_bytes += region_length
                 check_binary_size(total_region_bytes, self._limits)
                 resolved_regions.append(
@@ -569,6 +574,11 @@ class RpcGhidraAdapter:
                     }
                 )
                 spans.append((region.base_addr, region.base_addr + region_length))
+            # AB9: account for the whole-parent materialization (once) that slice regions cause.
+            peak_bytes = total_region_bytes + (size_bytes if uses_parent_slice else 0)
+            check_binary_size(peak_bytes, self._limits)
+            # AB8: the aggregate gets the same OOM reject-mode pre-flight as every per-ref import.
+            self._preflight_check(peak_bytes)
             spans.sort()
             for (_a0, a_end), (b_start, _b1) in pairwise(spans):
                 if b_start < a_end:

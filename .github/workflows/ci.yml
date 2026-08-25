@@ -66,7 +66,7 @@ jobs:
         run: |
           # Critical modules (see pyproject [tool.coverage] note): validation, envelope, errors,
           # sessions.manager, security.limits, server.auth, jobs.streaming, core.debuglink,
-          # core.uimage. Enforce 100% SCOPED to these. NOTE: pyproject `[tool.coverage.run]
+          # core.uimage, core.debugmap. Enforce 100% SCOPED to these. NOTE: pyproject `[tool.coverage.run]
           # source = ["vivarium"]` forces whole-package measurement, so `--cov=<module>
           # --cov-fail-under=100` would (wrongly) gate the whole package. Instead: measure once,
           # then `coverage report --include=<the 9 files> --fail-under=100` to gate exactly the
@@ -75,7 +75,7 @@ jobs:
           # window, so it now carries the same 100% enforcement as the rest.)
           pytest -m "not integration" --cov=vivarium --cov-report=
           coverage report --fail-under=100 \
-            --include='*/vivarium/core/validation.py,*/vivarium/core/envelope.py,*/vivarium/core/errors.py,*/vivarium/sessions/manager.py,*/vivarium/security/limits.py,*/vivarium/server/auth.py,*/vivarium/jobs/streaming.py,*/vivarium/core/debuglink.py,*/vivarium/core/uimage.py'
+            --include='*/vivarium/core/validation.py,*/vivarium/core/envelope.py,*/vivarium/core/errors.py,*/vivarium/sessions/manager.py,*/vivarium/security/limits.py,*/vivarium/server/auth.py,*/vivarium/jobs/streaming.py,*/vivarium/core/debuglink.py,*/vivarium/core/uimage.py,*/vivarium/core/debugmap.py'
       - name: Upload coverage artifact
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # actions/upload-artifact@v7.0.1

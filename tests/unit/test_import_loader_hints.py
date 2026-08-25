@@ -579,6 +579,28 @@ def test_regions_aggregate_byte_budget_enforced_before_worker() -> None:
     assert captured == []  # rejected before any RPC reached the worker
 
 
+def test_regions_slice_counts_parent_materialization_in_budget() -> None:
+    """AB9 (round-12): a slice region is carved from the PARENT, which the worker materializes
+    whole — so the parent's full size counts ONCE toward the aggregate peak.
+
+    A single small slice of a parent that is itself at the cap → peak = parent + slice > cap →
+    LIMIT_EXCEEDED before the worker (the round-11 total, which omitted the parent, would have
+    let this through as "one small region").
+    """
+    from vivarium.core.errors import ErrorType, GhidraMcpError
+
+    adapter, captured = _adapter_capturing_call()
+    cap = adapter._limits.max_binary_bytes  # type: ignore[attr-defined]
+    adapter._source_resolver = lambda _ref: cap  # type: ignore[attr-defined]  # parent at cap
+    args = s.SessionImportIn.model_validate(
+        _regions(regions=[{"offset": 0, "length": 8, "base_addr": 0x1000}])  # one tiny slice
+    )
+    with pytest.raises(GhidraMcpError) as ei:
+        adapter.import_binary("s", args)  # type: ignore[attr-defined]
+    assert ei.value.envelope.type is ErrorType.LIMIT_EXCEEDED
+    assert captured == []
+
+
 def test_container_mutually_exclusive_with_regions() -> None:
     """container (single compressed stream) and regions (scatter-load) cannot combine."""
     with pytest.raises(ValidationError):

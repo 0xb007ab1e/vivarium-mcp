@@ -28,14 +28,14 @@ gated to same-repo PRs (fork-PR hardening — threat-model §4 delta).
 
 **Critical paths (100% — master §4):** `core.validation`, `core.envelope`, `core.errors`,
 `sessions.manager`, `security.limits`, `server.auth`, `jobs.streaming`, `core.debuglink`,
-`core.uimage` — the input-validation, untrusted/error envelopes, session isolation, DoS-limit,
-authN/authZ, streaming-job (BOLA + bounded replay), and the two hostile-input firmware parsers
-(`.gnu_debuglink` / U-Boot uImage — round-11 AA12) code (the trust boundaries). Designated in
+`core.uimage`, `core.debugmap` — the input-validation, untrusted/error envelopes, session isolation, DoS-limit,
+authN/authZ, streaming-job (BOLA + bounded replay), and the three hostile-input companion/firmware parsers
+(`.gnu_debuglink` / U-Boot uImage / linker-map — round-11 AA12 + round-12 AB10) code (the trust boundaries). Designated in
 `pyproject.toml`.
 
 **Mutation testing (test quality — master §4):** coverage proves the critical-path tests *execute*
 every line; mutation testing proves they *catch faults*. [`mutation.yml`](../.github/workflows/mutation.yml)
-runs `mutmut` over the same nine critical modules (config: `pyproject [tool.mutmut]`) on a **weekly
+runs `mutmut` over the same ten critical modules (config: `pyproject [tool.mutmut]`) on a **weekly
 schedule + manual dispatch** — never per-PR (it re-runs the suite per mutant). It reports the score
 to the run summary + uploads a stats artifact **and is a live regression floor**: `MUTATION_SCORE_MIN`
 is set to **65** (gap round-3 P7 / #222), so a run scoring below it **FAILS** — the score cannot

@@ -155,6 +155,21 @@ trust identity tightened to tag builds, plus CI-drift tripwires, workflow lintin
 required gate, and CI/docs/threat-model currency.
 
 ### Fixed
+- **Round-12 Lows — AA7 accuracy + debugmap promotion (AB8/AB9/AB10).** No behavior change on the
+  shipped-default path (server + config + test only):
+  - **AB8** the multi-region aggregate byte budget now runs through the same OOM `_preflight_check`
+    (reject-mode) as the per-ref import path — the round-11 cut gated only on `check_binary_size`.
+  - **AB9** a slice region is carved from the PARENT `source_ref`, which the worker materializes
+    whole to slice — so the parent's full size now counts ONCE toward the aggregate peak (the
+    round-11 total omitted it, so the real peak was ~2x cap, not the "≤ single-binary" the #303
+    message claimed). Regression test added.
+  - **AB10** `core.debugmap` — the third hostile-input companion parser (linker/`nm`/`.sym` map),
+    sibling of the round-11-promoted `debuglink`/`uimage` — is now in the 100%-critical set across
+    all four lock-step sites (+ `docs/ci-cd.md`); the critical set grows **9 → 10**. Its 100%
+    coverage + the AB5 fuzz make it a genuine member. (`core.debugmap` reached 100% line+branch.)
+  - **AB6** is closed by AB1/AB2: the release (`worker-image.yml`) and nightly (`scheduled-rescan.yml`)
+    builds use the same `Containerfile.worker`, so they inherit the zlib/openssl fail-over mirrors;
+    the ghidra/boost residual is the accepted single-host-by-necessity case.
 - **Build-fetch fail-over mirrors — the AA17 siblings (AB1/AB2, round-12).** Round-11's AA17 gave
   the musl source fetch a sha256-verified fail-over mirror because `musl.libc.org` was a single
   availability SPOF that flaked the worker build AND the required live-regression gate. Round-12

@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-# The NINE modules designated 100%-critical (master §4). This tuple is the single source of truth
+# The TEN modules designated 100%-critical (master §4). This tuple is the single source of truth
 # the sync tripwire below enforces against the two config copies (CI `--include` + mutmut
 # `only_mutate`). server.auth (the HTTP authN/authZ boundary) + jobs.streaming (BOLA + the N4 replay
 # window) are the two most security-relevant — added round-4 Q3 after the tripwire was found to
@@ -41,6 +41,7 @@ _CRITICAL_MODULES = (
     "vivarium.jobs.streaming",
     "vivarium.core.debuglink",
     "vivarium.core.uimage",
+    "vivarium.core.debugmap",
 )
 
 #: The critical modules as coverage/mutmut path globs (``vivarium.core.validation`` →
