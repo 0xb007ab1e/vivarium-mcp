@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from vivarium.core import capabilityscan as cap
 from vivarium.core.capabilityscan import detect_capabilities
+from vivarium.tools import registry as reg
+from vivarium.tools import schemas as s
 
 # --- match modes ---
 
@@ -129,3 +131,22 @@ def test_empty_names_skipped_and_bounded() -> None:
 def test_rule_pack_version_present() -> None:
     """A rule-pack version is exposed for reproducibility + the future external-pack migration."""
     assert cap.RULE_PACK_VERSION == "builtin-1"
+
+
+# --- schema + registry wiring ---
+
+
+def test_schema_evidence_detail_untrusted_and_paginated() -> None:
+    """CapabilityScanIn is paginated; evidence detail is the untrusted envelope."""
+    m = s.CapabilityScanIn(session_id="sess")
+    assert m.offset == 0 and m.limit >= 1
+    field = s.CapabilityEvidence.model_fields["detail"]
+    assert "Untrusted" in str(field.annotation)
+
+
+def test_registered_and_read_only() -> None:
+    """capability_scan is in the frozen allow-list, handled, and NOT a write tool."""
+    assert "capability_scan" in reg.TIER1_TOOL_NAMES
+    assert "capability_scan" in reg._HANDLERS
+    assert "capability_scan" not in reg.WRITE_TOOLS
+    assert reg.required_capability("capability_scan") == reg.required_capability("ioc_scan")

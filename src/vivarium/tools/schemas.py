@@ -2481,6 +2481,83 @@ class CryptoDetectOut(_Out):
     truncated: bool = False
 
 
+class CapabilityScanIn(_Page):
+    """Arguments for ``capability_scan`` — capa-style capability + ATT&CK tagging (ADR-074).
+
+    A read-only pass that matches a curated built-in rule pack over the program's imports, exports,
+    and strings, emitting named capabilities each mapped to a MITRE ATT&CK technique — the
+    structured form of the loader-vs-payload / behaviour call the benchmark made by hand. HEURISTIC
+    (leads, not proof; empty ≠ benign on a packed input). Paginated like the other scanners.
+
+    MVP scope (ADR-074, ratified 2026-08-25): a built-in rule pack over already-extracted facts. The
+    full external capa-rules ecosystem (a bundled, signed, versioned rule pack — D2) and any
+    disassembly/constant rules are a tracked fast-follow; ``rule_pack_version`` + per-match
+    ``rule_id`` make the migration additive.
+    """
+
+
+class AttackTechnique(_Out):
+    """One MITRE ATT&CK technique a capability maps to — all fields SAFE (closed identifiers).
+
+    Attributes:
+        tactic: ATT&CK tactic (e.g. ``"defense-evasion"``) — safe.
+        technique_id: ATT&CK technique id (e.g. ``"T1218.010"``) — safe.
+    """
+
+    tactic: str
+    technique_id: str
+
+
+class CapabilityEvidence(_Out):
+    """One matched signal backing a capability — HEURISTIC (ADR-074 D5).
+
+    Attributes:
+        address: Address of the source import/export/string (hex) — safe (``None`` if unknown).
+        where: Which fact kind matched (``import`` / ``export`` / ``string``) — safe.
+        detail: The matched symbol/string — UNTRUSTED (binary-derived; attacker-controlled).
+    """
+
+    address: str | None = None
+    where: str
+    detail: Untrusted[str]
+
+
+class CapabilityMatch(_Out):
+    """One detected capability — HEURISTIC (a lead, not proof; ADR-074 D5).
+
+    Attributes:
+        rule_id: Which built-in rule fired (stable id) — safe.
+        name: Human-readable capability — safe.
+        namespace: Coarse grouping (roughly an ATT&CK tactic) — safe.
+        attack: The ATT&CK techniques this capability maps to — safe.
+        evidence: The matched signals (each ``detail`` UNTRUSTED).
+        confidence: Per-rule confidence in ``[0, 1]`` — safe scalar.
+    """
+
+    rule_id: str
+    name: str
+    namespace: str
+    attack: list[AttackTechnique]
+    evidence: list[CapabilityEvidence]
+    confidence: float
+
+
+class CapabilityScanOut(_Out):
+    """Result of ``capability_scan`` (ADR-074).
+
+    Attributes:
+        capabilities: Bounded page of detected capabilities.
+        total: Total capabilities (for pagination) — safe.
+        truncated: Whether the scanned facts or the matches page was capped.
+        rule_pack_version: Version of the built-in rule pack that produced these — safe.
+    """
+
+    capabilities: list[CapabilityMatch]
+    total: int
+    truncated: bool = False
+    rule_pack_version: str
+
+
 class SecretScanIn(_Page):
     """Arguments for ``secret_scan`` — heuristic firmware-secret scan over strings (ADR-072).
 

@@ -115,6 +115,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "ioc_scan",
     "crypto_constant_scan",
     "crypto_detect",
+    "capability_scan",
     "secret_scan",
     "call_graph_metrics",
     "program_summary",
@@ -910,6 +911,12 @@ def _handle_crypto_detect(ctx: ToolContext, args: s.CryptoDetectIn) -> s.CryptoD
     """Detect crypto by imported API / resolved symbol name (pure, read-only — ADR-075)."""
     ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     return ctx.port.crypto_detect(args.session_id, args)
+
+
+def _handle_capability_scan(ctx: ToolContext, args: s.CapabilityScanIn) -> s.CapabilityScanOut:
+    """Detect capabilities + MITRE ATT&CK by rule pack (pure, read-only — ADR-074)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    return ctx.port.capability_scan(args.session_id, args)
 
 
 def _handle_secret_scan(ctx: ToolContext, args: s.SecretScanIn) -> s.SecretScanOut:
@@ -1899,6 +1906,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "ioc_scan": (_handle_ioc_scan, s.IocScanIn),
     "crypto_constant_scan": (_handle_crypto_constant_scan, s.CryptoConstantScanIn),
     "crypto_detect": (_handle_crypto_detect, s.CryptoDetectIn),
+    "capability_scan": (_handle_capability_scan, s.CapabilityScanIn),
     "secret_scan": (_handle_secret_scan, s.SecretScanIn),
     "call_graph_metrics": (_handle_call_graph_metrics, s.CallGraphMetricsIn),
     "program_summary": (_handle_program_summary, s.ProgramSummaryIn),
