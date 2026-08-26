@@ -1,12 +1,15 @@
 # ADR-073: Program-level fingerprint + offline family-match corpus (read-only)
 
 - **Status:** **Accepted** (ratified by the human operator 2026-08-25). **`program_fingerprint`
-  (D1) is IMPLEMENTED** in this increment with a scoped MVP field set (`structure_digest`,
-  `import_digest`, `coverage` — the fields computable in-worker with no new dependency); VT
-  `imphash`/`tlsh`/PE `rich_hash`/`authentihash` (D1) and `family_match` + the corpus (D2/D3) are a
-  tracked **fast-follow** (need a vetted native dep or a fuzz-gated hostile-PE parser / a signed
-  corpus artifact). Remediation item **R1** of the validation miss-analysis
-  (`validation/reports/remediation-analysis.md`).
+  (D1)** and **`family_match` (D2)** are IMPLEMENTED. D1 ships a scoped MVP field set
+  (`structure_digest`, `import_digest`, `coverage` — computable in-worker, no new dependency); D2
+  ships exact-digest lookup over a **bundled, offline, versioned corpus** (`vivarium.data.family_corpus`,
+  pure `core.familymatch`, no new worker verb — reuses D1's digests). Still a tracked **fast-follow**:
+  VT `imphash`/`tlsh`/PE `rich_hash`/`authentihash` (D1, need a vetted native dep or a fuzz-gated
+  hostile-PE parser), fuzzy (TLSH) family matching, and a **signed external corpus artifact** (D3;
+  the bundled seed is intentionally empty — populating it is the human-gated curation loop, which
+  needs `program_fingerprint` run on confirmed-family samples). Remediation item **R1** of the
+  validation miss-analysis (`validation/reports/remediation-analysis.md`).
 - **Date:** 2026-08-25
 - **Deciders:** Human operator (ratification pending); drafted by the assistant from the 4-case
   validation exercise (Kelihos / Wirenet / LuckyCat / BumbleBee).

@@ -2355,6 +2355,54 @@ class ProgramFingerprintOut(_Out):
     coverage: CoverageOut
 
 
+class FamilyMatchIn(_SessionScopedIn):
+    """Arguments for ``family_match`` — offline family lookup by fingerprint (ADR-073 D2).
+
+    Read-only: computes this program's ``program_fingerprint`` digests (ADR-073 D1) and ranks
+    candidate malware families by EXACT digest match against a **bundled, offline, versioned** store
+    (no network — containment intact). HEURISTIC (leads, not proof); an empty result means "not in
+    the corpus", NOT "benign".
+
+    MVP scope (ADR-073, ratified 2026-08-25): exact ``structure_digest`` / ``import_digest`` lookup
+    over the bundled corpus. Fuzzy (TLSH/imphash) matching + a signed external corpus artifact are a
+    tracked fast-follow. The corpus is curated human-gated build-time (D3), never a runtime write.
+
+    Attributes:
+        max_candidates: Cap on ranked candidates returned (bounds the result — CWE-400).
+    """
+
+    max_candidates: int = Field(default=10, ge=1, le=100)
+
+
+class FamilyCandidate(_Out):
+    """One ranked family candidate — HEURISTIC (a lead, not proof; ADR-073 D4). All fields SAFE.
+
+    Attributes:
+        family: Candidate family label (curated in-repo) — safe.
+        confidence: ``[0, 1]`` from the match basis (structure >> import; both ≈ certain) — safe.
+        basis: Which digest(s) matched — ``["structure"]`` / ``["import"]`` / ``["structure",
+            "import"]`` — the evidence, never an opaque score.
+    """
+
+    family: str
+    confidence: float
+    basis: list[str]
+
+
+class FamilyMatchOut(_Out):
+    """Result of ``family_match`` (ADR-073 D2) — all fields SAFE (curated labels + scalars).
+
+    Attributes:
+        candidates: Ranked family candidates (empty ⇒ not in the corpus, NOT "benign").
+        corpus_version: Version of the bundled corpus consulted — safe (reproducibility).
+        truncated: Whether the candidate list was capped at ``max_candidates``.
+    """
+
+    candidates: list[FamilyCandidate]
+    corpus_version: str
+    truncated: bool = False
+
+
 class IocScanIn(_Page):
     """Arguments for ``ioc_scan`` — heuristic IOC scan over defined strings (paginated).
 

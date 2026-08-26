@@ -62,7 +62,7 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 - **ADR-072** — Firmware-aware secret/credential/key-material scan (redacted) — **Accepted**.
 
 ### Validation-driven detection batch (blind-triage benchmark remediation)
-- **ADR-073** — Program-level fingerprint (`program_fingerprint`) + offline family-match corpus (`family_match`) — **Accepted** (`program_fingerprint` MVP implemented; `family_match`/corpus + VT-hashes fast-follow).
+- **ADR-073** — Program-level fingerprint (`program_fingerprint`) + offline family-match corpus (`family_match`) — **Accepted** (`program_fingerprint` D1 + `family_match` D2 implemented; VT-hashes/TLSH-fuzzy + signed external corpus fast-follow).
 - **ADR-074** — Capability detection + MITRE ATT&CK tagging (`capability_scan`, capa-style) — **Accepted** (built-in rule pack implemented; external signed capa-rules pack fast-follow).
 - **ADR-075** — Crypto detection by API/import/instruction (`crypto_detect`; complements `crypto_constant_scan`) — **Accepted** (import + api_name sources implemented; instruction/code_pattern fast-follow).
 

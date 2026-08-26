@@ -8,6 +8,18 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **`family_match` — offline malware-family match by fingerprint (ADR-073 D2).** A read-only Tier-2
+  tool that computes this program's `program_fingerprint` digests (D1; no new worker verb) and ranks
+  candidate families by EXACT `structure_digest` / `import_digest` match against a **bundled, offline,
+  versioned corpus** (`vivarium.data.family_corpus`, pure `core.familymatch`) — no network, so
+  consulting it never crosses a trust boundary (containment intact). `basis`∈{structure,import} is the
+  evidence; confidence structure(0.95)/import(0.6)/both(0.98). Completes the family-name remediation
+  (miss M1) started by `program_fingerprint`. Heuristic — an empty result means "not in the corpus",
+  NOT "benign". Corpus curation is human-gated build-time (D3, knowledge-poisoning defence); the
+  **bundled seed is intentionally empty** (populating it needs `program_fingerprint` run on
+  confirmed-family samples). MVP = exact-digest lookup; fuzzy (TLSH/imphash) matching + a signed
+  external corpus artifact are a tracked fast-follow. Tier-1 catalog **77 → 78** (read-only 61 → 62).
+
 - **`capability_scan` — capa-style capability detection mapped to MITRE ATT&CK (ADR-074).** A
   read-only Tier-2 tool that matches a curated built-in rule pack (`core.capabilityscan`,
   `rule_pack_version="builtin-1"`; all/any/n_of match modes) over the existing `list_imports` +

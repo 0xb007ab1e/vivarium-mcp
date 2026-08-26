@@ -292,6 +292,8 @@ tools compute server-side with **no dedicated worker method**: `callees`/`caller
 `function_cfg`, `ioc_scan` from `list_strings`, `crypto_constant_scan` from `search_bytes`,
 `crypto_detect` (ADR-075) from `imports`+`list_strings` (pure `core.cryptodetect`),
 `capability_scan` (ADR-074) from `imports`+`exports`+`list_strings` (pure `core.capabilityscan`),
+`family_match` (ADR-073 D2) from `program_fingerprint`'s digests + the bundled offline corpus (pure
+`core.familymatch`; no network),
 `call_graph_metrics` from `call_graph`, and `program_summary` by aggregation — all per ADR-001.
 **Annotation import (`session_import_annotations`, ADR-018 TB8) adds NO worker method** — it is
 **server-side orchestration** (the registry) that schema-validates + hash-binds + consent-gates the
