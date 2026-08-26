@@ -447,6 +447,17 @@ class FakeGhidraPort:
             ),
         )
 
+    def family_match(self, sid: str, a: s.FamilyMatchIn) -> s.FamilyMatchOut:
+        """Return a deterministic family candidate against the offline corpus (ADR-073 D2)."""
+        self._maybe_fail()
+        return s.FamilyMatchOut(
+            candidates=[
+                s.FamilyCandidate(family="Win32.Example", confidence=0.95, basis=["structure"])
+            ],
+            corpus_version="corpus-1",
+            truncated=False,
+        )
+
     def bsim_similarity(self, sid: str, a: s.BsimSimilarityIn) -> s.BsimSimilarityOut:
         """Return a deterministic BSim similarity score (all safe scalars, ADR-058)."""
         self._maybe_fail()

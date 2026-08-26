@@ -171,6 +171,10 @@ class GhidraPort(Protocol):
         """Return whole-program pivot digests (read-only — ADR-073 D1)."""
         ...
 
+    def family_match(self, sid: str, a: s.FamilyMatchIn) -> s.FamilyMatchOut:
+        """Rank candidate families by fingerprint vs the offline corpus (read-only — ADR-073 D2)."""
+        ...
+
     def bsim_similarity(self, sid: str, a: s.BsimSimilarityIn) -> s.BsimSimilarityOut:
         """Return the BSim cosine similarity between two functions (read-only — ADR-058)."""
         ...

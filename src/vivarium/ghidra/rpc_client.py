@@ -1296,6 +1296,33 @@ class RpcGhidraAdapter:
         """Return whole-program pivot digests (ADR-073 D1)."""
         return _build_program_fingerprint(self._tool_call(sid, "program_fingerprint", {}))
 
+    def family_match(self, sid: str, a: s.FamilyMatchIn) -> s.FamilyMatchOut:
+        """Rank candidate families by fingerprint vs the offline corpus (PURE core; ADR-073 D2).
+
+        Computes this program's digests via ``program_fingerprint`` (D1; no new worker verb),
+        loads the bundled offline corpus (no network — containment intact), and runs the pure
+        :func:`core.familymatch.match`. HEURISTIC: an empty result means "not in the corpus", NOT
+        "benign". All fields SAFE (curated family labels + scalars).
+        """
+        from vivarium.core import familymatch
+
+        fingerprint = self.program_fingerprint(sid, s.ProgramFingerprintIn(session_id=a.session_id))
+        corpus = familymatch.load_default_corpus()
+        hits = familymatch.match(
+            fingerprint.structure_digest,
+            fingerprint.import_digest,
+            corpus,
+            max_candidates=a.max_candidates,
+        )
+        return s.FamilyMatchOut(
+            candidates=[
+                s.FamilyCandidate(family=h.family, confidence=h.confidence, basis=list(h.basis))
+                for h in hits
+            ],
+            corpus_version=corpus.version,
+            truncated=len(hits) >= a.max_candidates,
+        )
+
     def bsim_similarity(self, sid: str, a: s.BsimSimilarityIn) -> s.BsimSimilarityOut:
         """Return the BSim cosine similarity between two functions (ADR-058)."""
         return _build_bsim_similarity(

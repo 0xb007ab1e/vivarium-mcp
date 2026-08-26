@@ -74,6 +74,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     "list_data_types",
     "function_hash",
     "program_fingerprint",
+    "family_match",
     "bsim_similarity",
     "find_similar_functions",
     "version_track",
@@ -592,6 +593,12 @@ def _handle_program_fingerprint(
     """Return whole-program pivot digests (read-only — ADR-073 D1)."""
     ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     return ctx.port.program_fingerprint(args.session_id, args)
+
+
+def _handle_family_match(ctx: ToolContext, args: s.FamilyMatchIn) -> s.FamilyMatchOut:
+    """Rank candidate families by fingerprint vs the offline corpus (read-only — ADR-073 D2)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    return ctx.port.family_match(args.session_id, args)
 
 
 def _handle_bsim_similarity(ctx: ToolContext, args: s.BsimSimilarityIn) -> s.BsimSimilarityOut:
@@ -1872,6 +1879,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "list_data_types": (_handle_list_data_types, s.ListDataTypesIn),
     "function_hash": (_handle_function_hash, s.FunctionHashIn),
     "program_fingerprint": (_handle_program_fingerprint, s.ProgramFingerprintIn),
+    "family_match": (_handle_family_match, s.FamilyMatchIn),
     "bsim_similarity": (_handle_bsim_similarity, s.BsimSimilarityIn),
     "find_similar_functions": (_handle_find_similar_functions, s.FindSimilarFunctionsIn),
     "version_track": (_handle_version_track, s.VersionTrackIn),
