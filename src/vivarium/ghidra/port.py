@@ -329,6 +329,10 @@ class GhidraPort(Protocol):
         """Detect crypto by imported API / resolved symbol name (pure, read-only — ADR-075)."""
         ...
 
+    def capability_scan(self, sid: str, a: s.CapabilityScanIn) -> s.CapabilityScanOut:
+        """Detect capabilities + MITRE ATT&CK by rule pack (pure, read-only — ADR-074)."""
+        ...
+
     def secret_scan(self, sid: str, a: s.SecretScanIn) -> s.SecretScanOut:
         """Heuristic firmware-secret scan over defined strings (pure, redacted — ADR-072)."""
         ...

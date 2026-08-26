@@ -871,6 +871,29 @@ class FakeGhidraPort:
             truncated=False,
         )
 
+    def capability_scan(self, sid: str, a: s.CapabilityScanIn) -> s.CapabilityScanOut:
+        """Return a deterministic capability match (evidence detail UNTRUSTED-wrapped, ADR-074)."""
+        self._maybe_fail()
+        return s.CapabilityScanOut(
+            capabilities=[
+                s.CapabilityMatch(
+                    rule_id="execution/regsvr32",
+                    name="executed via regsvr32 (DllRegisterServer)",
+                    namespace="execution",
+                    attack=[s.AttackTechnique(tactic="defense-evasion", technique_id="T1218.010")],
+                    evidence=[
+                        s.CapabilityEvidence(
+                            address="0x00401000", where="export", detail=_u("DllRegisterServer")
+                        )
+                    ],
+                    confidence=0.8,
+                )
+            ],
+            total=1,
+            truncated=False,
+            rule_pack_version="builtin-1",
+        )
+
     def secret_scan(self, sid: str, a: s.SecretScanIn) -> s.SecretScanOut:
         """Reserved Tier-2 stub (ADR-072; the pure core + adapter are unit-tested directly)."""
         raise NotImplementedError("RESERVED (ADR-072): secret_scan")

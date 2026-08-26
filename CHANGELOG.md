@@ -8,6 +8,18 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **`capability_scan` — capa-style capability detection mapped to MITRE ATT&CK (ADR-074).** A
+  read-only Tier-2 tool that matches a curated built-in rule pack (`core.capabilityscan`,
+  `rule_pack_version="builtin-1"`; all/any/n_of match modes) over the existing `list_imports` +
+  `list_exports` + `list_strings` facts — no new worker verb — emitting named capabilities each
+  mapped to an ATT&CK technique with anchored evidence: regsvr32 exec (T1218.010), reflective load
+  (T1620), process injection (T1055), named-pipe C2 (T1559.001), anti-debug (T1622), Run-key
+  persistence (T1547.001), keylogging (T1056.001), screen capture (T1113), browser credentials
+  (T1555.003), sniffing (T1040), network C2 (T1071), command shell (T1059), host recon (T1082).
+  Remediates the validation benchmark's behaviour-tagging gap (the "loader-not-payload" call was made
+  by hand). Heuristic (empty ≠ benign on a packed input); evidence `detail` is untrusted-wrapped
+  (ADR-005). The full external capa-rules pack (signed, versioned — D2) + disassembly rules are a
+  tracked fast-follow. Tier-1 catalog **76 → 77** (read-only 60 → 61).
 - **`crypto_detect` — crypto detection by imported API / resolved symbol name (ADR-075).** A
   read-only Tier-2 tool that **complements** `crypto_constant_scan` (the frozen constant-only tool is
   untouched): it detects crypto by an imported crypto **API** (`import` source — CryptoAPI / CNG /

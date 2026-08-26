@@ -167,6 +167,11 @@ _CRYPTO_MATCH_BUDGET = 1_000
 #: and feeds ``truncated`` when either the imports or the strings exceed the budget.
 _CRYPTO_DETECT_IMPORT_BUDGET = 10_000
 _CRYPTO_DETECT_STRING_BUDGET = 10_000
+#: Max imports + exports + strings pulled for the ``capability_scan`` rule pass (ADR-074); bounds
+#: the scanned fact sets and feeds ``truncated`` when any of them exceeds its budget.
+_CAPABILITY_IMPORT_BUDGET = 10_000
+_CAPABILITY_EXPORT_BUDGET = 10_000
+_CAPABILITY_STRING_BUDGET = 10_000
 #: Hard cap on FID match candidates the adapter ever returns from ``identify_functions`` (ADR-042;
 #: bounds the result BEFORE shaping — std-cwe CWE-400). Mirrors the worker-side cap; the per-call
 #: ``limit`` (schema-bounded) further narrows it, and ``truncated`` is honest when more matched.
@@ -1817,6 +1822,61 @@ class RpcGhidraAdapter:
             ],
             total=total,
             truncated=truncated,
+        )
+
+    def capability_scan(self, sid: str, a: s.CapabilityScanIn) -> s.CapabilityScanOut:
+        """Detect capabilities + MITRE ATT&CK by the built-in rule pack (PURE core; ADR-074).
+
+        Fetches bounded pages of imports, exports, and strings, runs the pure
+        :func:`core.capabilityscan.detect_capabilities`, then paginates the matches. Each evidence
+        ``detail`` (a matched symbol/string) is binary-derived and wrapped BINARY-origin (ADR-005) —
+        inert data. HEURISTIC: a match is a lead; a thin/empty result on a packed sample is expected
+        (its real capabilities live in the encoded stage). ``truncated`` reflects any fact budget or
+        a matches-page cap (honesty).
+        """
+        from vivarium.core import capabilityscan
+
+        imports = self.list_imports(
+            sid, s.ListImportsIn(session_id=a.session_id, offset=0, limit=_CAPABILITY_IMPORT_BUDGET)
+        )
+        exports = self.list_exports(
+            sid, s.ListExportsIn(session_id=a.session_id, offset=0, limit=_CAPABILITY_EXPORT_BUDGET)
+        )
+        strings = _build_string_list(
+            self._tool_call(sid, "list_strings", {"offset": 0, "limit": _CAPABILITY_STRING_BUDGET})
+        )
+        import_rows = [(im.address, im.name.value) for im in imports.imports]
+        export_rows = [(ex.address, ex.name.value) for ex in exports.exports]
+        string_rows = [(ds.address, ds.value.value) for ds in strings.strings]
+        hits = capabilityscan.detect_capabilities(import_rows, export_rows, string_rows)
+        total = len(hits)
+        page = hits[a.offset : a.offset + a.limit]
+        truncated = (
+            imports.truncated
+            or exports.truncated
+            or strings.truncated
+            or (a.offset + a.limit < total)
+        )
+        return s.CapabilityScanOut(
+            capabilities=[
+                s.CapabilityMatch(
+                    rule_id=h.rule_id,
+                    name=h.name,
+                    namespace=h.namespace,
+                    attack=[s.AttackTechnique(tactic=t, technique_id=tid) for (t, tid) in h.attack],
+                    evidence=[
+                        s.CapabilityEvidence(
+                            address=e.address, where=e.where, detail=_w(e.detail, DataOrigin.BINARY)
+                        )
+                        for e in h.evidence
+                    ],
+                    confidence=h.confidence,
+                )
+                for h in page
+            ],
+            total=total,
+            truncated=truncated,
+            rule_pack_version=capabilityscan.RULE_PACK_VERSION,
         )
 
     def secret_scan(self, sid: str, a: s.SecretScanIn) -> s.SecretScanOut:
