@@ -441,6 +441,10 @@ class PyGhidraBackend:
         """Return whole-program pivot digests (read-only — ADR-073 D1)."""
         return self._gh_program_fingerprint()
 
+    def crypto_instructions(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return crypto-opcode instruction hits (read-only — ADR-075 `instruction` source)."""
+        return self._gh_crypto_instructions(int(_require(params, "max_hits")))
+
     def bsim_similarity(self, params: dict[str, Any]) -> dict[str, Any]:
         """Return the BSim cosine similarity between two functions (read-only — ADR-058)."""
         return self._gh_bsim_similarity(
@@ -4571,6 +4575,58 @@ class PyGhidraBackend:
             "defined_data_bytes": defined_data_bytes,
             "function_count": int(program.getFunctionManager().getFunctionCount()),
         }
+
+    #: Hardware crypto opcodes (x86 AES-NI + SHA extensions + carry-less multiply), lowercased. A
+    #: match is a high-precision crypto indicator (ADR-075 `instruction` source). Extensible.
+    _CRYPTO_OPCODES: ClassVar[frozenset[str]] = frozenset(
+        {
+            "aesenc",
+            "aesenclast",
+            "aesdec",
+            "aesdeclast",
+            "aesimc",
+            "aeskeygenassist",
+            "sha1rnds4",
+            "sha1nexte",
+            "sha1msg1",
+            "sha1msg2",
+            "sha256rnds2",
+            "sha256msg1",
+            "sha256msg2",
+            "pclmulqdq",
+            "vpclmulqdq",
+        }
+    )
+
+    def _gh_crypto_instructions(
+        self, max_hits: int
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Scan the program's instructions for hardware crypto opcodes (ADR-075 `instruction`).
+
+        One linear pass over the defined instructions (like ``_gh_coverage``), matching each
+        mnemonic against :data:`_CRYPTO_OPCODES` (AES-NI / SHA-ext / carry-less mul). Read-only;
+        the DB is not touched. Bounded by ``max_hits`` (already clamped server-side) — ``truncated``
+        is set honestly (ADR-005) when the cap binds. Outputs are SAFE server scalars (an address
+        + a fixed-vocabulary mnemonic — not echoed binary content).
+
+        Args:
+            max_hits: Cap on returned hits (bounds the result — CWE-400).
+
+        Returns:
+            ``{"hits": [{"address", "mnemonic"}], "truncated": bool}`` (plain; all SAFE).
+        """
+        program = self._require_program()
+        opcodes = self._CRYPTO_OPCODES
+        hits: list[dict[str, Any]] = []
+        truncated = False
+        for instruction in program.getListing().getInstructions(True):
+            mnemonic = _to_text(instruction.getMnemonicString()).lower()
+            if mnemonic in opcodes:
+                if len(hits) >= max_hits:
+                    truncated = True
+                    break
+                hits.append({"address": str(instruction.getAddress()), "mnemonic": mnemonic})
+        return {"hits": hits, "truncated": truncated}
 
     def _gh_identify_functions(
         self, limit: int, min_score: float | None

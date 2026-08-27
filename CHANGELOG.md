@@ -6,6 +6,19 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **`crypto_detect` gains the `instruction` source (ADR-075 fast-follow).** In addition to the
+  `import` and `api_name` sources, `crypto_detect` now flags **hardware crypto opcodes** — AES-NI
+  (`aesenc`/`aesdec`/`aeskeygenassist`/…), SHA extensions (`sha256rnds2`/…), and carry-less multiply
+  (`pclmulqdq`) — via a new read-only worker verb `crypto_instructions` (one linear pass over the
+  program's instructions, bounded by a hit cap). Catches HW-accelerated crypto that leaves no
+  importable symbol or algorithm constant. `source`∈{import,api_name,instruction}; instruction
+  confidence 0.9. No tool-count or schema change (the indicator shape already carried `source`). The
+  `code_pattern` (cipher-shaped loops) source remains the last tracked fast-follow. **Note:** the
+  worker opcode scan only runs once the pinned worker image is rebuilt to include it (unit-gated +
+  gated integration test now; image repin is the deploy step).
+
 ### Added
 
 - **`family_match` — offline malware-family match by fingerprint (ADR-073 D2).** A read-only Tier-2

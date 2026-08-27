@@ -2479,14 +2479,14 @@ class CryptoDetectIn(_Page):
     """Arguments for ``crypto_detect`` — crypto by API/import/symbol name (ADR-075, paginated).
 
     A read-only pass that **complements** ``crypto_constant_scan``: it detects crypto by signals the
-    constant scan cannot see — an imported crypto API (``import`` source) or a dynamically-resolved
-    crypto symbol NAME in the strings (``api_name`` source). Fixes the framework-crypto blind spot
-    (validation miss M2 — e.g. Apple CommonCrypto). HEURISTIC (leads, not proof); paginated like the
-    other scanners.
+    constant scan cannot see — an imported crypto API (``import`` source), a dynamically-resolved
+    crypto symbol NAME in the strings (``api_name`` source), or a hardware crypto opcode
+    (``instruction`` source: AES-NI / SHA-ext / ``pclmulqdq``). Fixes the framework-crypto blind
+    spot (validation miss M2 — e.g. Apple CommonCrypto). HEURISTIC (leads, not proof); paginated.
 
-    MVP scope (ADR-075, ratified 2026-08-25): the ``instruction`` (AES-NI/SHA opcodes) and
-    ``code_pattern`` (cipher-shaped loops) sources need a worker disassembly pass and are a tracked
-    fast-follow — this increment ships the two pure-over-facts sources (``import`` + ``api_name``).
+    Scope (ADR-075): ``import`` + ``api_name`` are pure over the ``list_imports`` / ``list_strings``
+    facts; ``instruction`` adds the worker ``crypto_instructions`` opcode scan. The ``code_pattern``
+    (cipher-shaped loops) source remains a tracked fast-follow.
 
     Attributes:
         min_length: Skip strings shorter than this when scanning the ``api_name`` source (noise

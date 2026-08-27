@@ -188,6 +188,8 @@ exact-bytes / exact-instructions / exact-mnemonics function hashers for duplicat
 `program_fingerprint` (ADR-073 D1 whole-program pivot digests — read-only, no params; SHA-256
 `structure_digest` over the sorted per-function ExactMnemonics hashes + `import_digest` over the
 sorted lowercased `library!symbol` tokens + reused coverage — all fixed-size hex/scalars),
+`crypto_instructions` (ADR-075 `instruction` source — read-only; one linear pass returning hardware
+crypto-opcode hits {address, mnemonic} for AES-NI / SHA-ext / `pclmulqdq`, bounded by `max_hits`),
 `bsim_similarity` (ADR-058 BSim fuzzy similarity — read-only; cosine similarity between two
 functions' BSim feature signatures via GenSignatures + the bundled medium weights),
 `find_similar_functions` (ADR-059 whole-program BSim clone/variant search — read-only; ranks up to
@@ -290,7 +292,8 @@ they are **not** worker RPC methods. Only `start_decompile_stream` touches the w
 tools compute server-side with **no dedicated worker method**: `callees`/`callers`/`analysis_order`/
 `function_context` from `call_graph`+`referenced_strings`; the Tier-2 `cyclomatic_complexity` from
 `function_cfg`, `ioc_scan` from `list_strings`, `crypto_constant_scan` from `search_bytes`,
-`crypto_detect` (ADR-075) from `imports`+`list_strings` (pure `core.cryptodetect`),
+`crypto_detect` (ADR-075) from `imports`+`list_strings`+`crypto_instructions` (pure
+`core.cryptodetect`; the `instruction` source adds the worker `crypto_instructions` opcode scan),
 `capability_scan` (ADR-074) from `imports`+`exports`+`list_strings` (pure `core.capabilityscan`),
 `family_match` (ADR-073 D2) from `program_fingerprint`'s digests + the bundled offline corpus (pure
 `core.familymatch`; no network),
