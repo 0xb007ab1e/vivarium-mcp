@@ -2,8 +2,9 @@
 
 The whole detection is the pure ``core.cryptodetect`` (no JVM edge): the adapter merely pulls the
 existing ``list_imports`` / ``list_strings`` facts and wraps ``detail`` untrusted. These tests
-exercise the core exhaustively (the two MVP sources, symbol-likeness gate, dedup, ordering,
-confidence) plus the schema boundary and that the tool is registered read-only.
+exercise the core exhaustively (the import / api_name / instruction sources, symbol-likeness gate,
+opcode kinds, dedup, ordering, confidence) plus the schema boundary and read-only registration. The
+worker opcode scan (``crypto_instructions``) is a JVM edge covered by a gated integration test.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 from vivarium.core import cryptodetect as cd
-from vivarium.core.cryptodetect import detect_crypto
+from vivarium.core.cryptodetect import detect_crypto, detect_instruction_crypto
 from vivarium.tools import registry as reg
 from vivarium.tools import schemas as s
 
@@ -129,6 +130,43 @@ def test_indicator_detail_is_untrusted() -> None:
 
 
 # --- registry wiring -----------------------------------------------------------------------------
+
+
+# --- instruction source (hardware crypto opcodes) ---
+
+
+def test_instruction_aes_ni() -> None:
+    """An AES-NI opcode maps to kind=aes, source=instruction, high confidence."""
+    out = detect_instruction_crypto([("0x1000", "aesenc")])
+    assert len(out) == 1
+    assert out[0].kind == "aes"
+    assert out[0].source == "instruction"
+    assert out[0].detail == "aesenc"
+    assert out[0].confidence == 0.9
+
+
+def test_instruction_sha_and_pclmul_kinds() -> None:
+    """SHA-ext ⇒ sha; carry-less multiply ⇒ crypto_api (generic)."""
+    out = detect_instruction_crypto([("0x1", "sha256rnds2"), ("0x2", "pclmulqdq")])
+    by_addr = {i.address: i.kind for i in out}
+    assert by_addr == {"0x1": "sha", "0x2": "crypto_api"}
+
+
+def test_instruction_unknown_mnemonic_skipped() -> None:
+    """A non-crypto mnemonic (defensive) is skipped, not emitted."""
+    assert detect_instruction_crypto([("0x1", "mov"), ("0x2", "add")]) == []
+
+
+def test_instruction_dedup_and_sort() -> None:
+    """Duplicate (address, opcode) collapses; output is deterministically sorted."""
+    out = detect_instruction_crypto([("0x20", "aesenc"), ("0x20", "aesenc"), ("0x10", "aesdec")])
+    assert len(out) == 2
+    assert [i.address for i in out] == ["0x10", "0x20"]
+
+
+def test_instruction_source_in_vocab() -> None:
+    """`instruction` is now part of the closed source vocabulary."""
+    assert "instruction" in cd.SOURCES
 
 
 def test_registered_and_read_only() -> None:

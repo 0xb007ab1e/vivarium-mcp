@@ -167,6 +167,9 @@ _CRYPTO_MATCH_BUDGET = 1_000
 #: and feeds ``truncated`` when either the imports or the strings exceed the budget.
 _CRYPTO_DETECT_IMPORT_BUDGET = 10_000
 _CRYPTO_DETECT_STRING_BUDGET = 10_000
+#: Max hardware crypto-opcode hits pulled for the ``crypto_detect`` ``instruction`` source
+#: (ADR-075); bounds the worker's opcode scan and feeds ``truncated`` when the cap binds.
+_CRYPTO_DETECT_OPCODE_BUDGET = 10_000
 #: Max imports + exports + strings pulled for the ``capability_scan`` rule pass (ADR-074); bounds
 #: the scanned fact sets and feeds ``truncated`` when any of them exceeds its budget.
 _CAPABILITY_IMPORT_BUDGET = 10_000
@@ -1804,15 +1807,16 @@ class RpcGhidraAdapter:
         )
 
     def crypto_detect(self, sid: str, a: s.CryptoDetectIn) -> s.CryptoDetectOut:
-        """Detect crypto by imported API / resolved symbol name (PURE core; ADR-075).
+        """Detect crypto by imported API / resolved symbol name / hardware opcode (ADR-075).
 
-        Complements ``crypto_constant_scan``: fetches a bounded page of imports (the ``import``
-        source) and strings (the ``api_name`` source), runs the pure
-        :func:`core.cryptodetect.detect_crypto`, then paginates. Each ``detail`` (a matched
-        symbol/string) is binary-derived and wrapped BINARY-origin (ADR-005) — inert data.
-        HEURISTIC: a match is a lead; an empty result is NOT proof of "no crypto" (an obfuscated /
-        statically-linked routine can evade both sources). ``truncated`` reflects the import/string
-        budgets or a matches-page cap (honesty).
+        Complements ``crypto_constant_scan``: fetches imports (``import`` source), strings
+        (``api_name`` source), and the worker's hardware crypto-opcode hits (``instruction`` source,
+        AES-NI/SHA-ext/pclmulqdq), runs the pure :func:`core.cryptodetect` matchers, merges, then
+        paginates. Each ``detail`` (a matched symbol/string/mnemonic) is binary-derived and wrapped
+        BINARY-origin (ADR-005) — inert data. HEURISTIC: a match is a lead; an empty result is NOT
+        proof of "no crypto" (an obfuscated / statically-linked routine can evade all sources).
+        ``truncated`` reflects the import/string/opcode budgets or a matches-page cap (honesty). The
+        ``code_pattern`` (cipher-shaped loops) source remains a tracked fast-follow.
         """
         from vivarium.core import cryptodetect
 
@@ -1827,15 +1831,29 @@ class RpcGhidraAdapter:
                 {"offset": 0, "limit": _CRYPTO_DETECT_STRING_BUDGET, "min_length": a.min_length},
             )
         )
+        opcode_result = self._tool_call(
+            sid, "crypto_instructions", {"max_hits": _CRYPTO_DETECT_OPCODE_BUDGET}
+        )
         import_rows = [
             (im.address, im.name.value, im.library.value if im.library else None)
             for im in imports.imports
         ]
         string_rows = [(ds.address, ds.value.value) for ds in strings.strings]
-        hits = cryptodetect.detect_crypto(import_rows, string_rows)
+        opcode_rows = [
+            (str(h["address"]), str(h["mnemonic"])) for h in opcode_result.get("hits", [])
+        ]
+        opcode_truncated = bool(opcode_result.get("truncated", False))
+        hits = cryptodetect.detect_crypto(import_rows, string_rows) + (
+            cryptodetect.detect_instruction_crypto(opcode_rows)
+        )
         total = len(hits)
         page = hits[a.offset : a.offset + a.limit]
-        truncated = imports.truncated or strings.truncated or (a.offset + a.limit < total)
+        truncated = (
+            imports.truncated
+            or strings.truncated
+            or opcode_truncated
+            or (a.offset + a.limit < total)
+        )
         return s.CryptoDetectOut(
             indicators=[
                 s.CryptoIndicator(

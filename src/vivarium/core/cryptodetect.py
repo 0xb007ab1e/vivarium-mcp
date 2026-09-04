@@ -36,15 +36,36 @@ from dataclasses import dataclass
 #: also paginates the string/import sets).
 MAX_SCAN_LEN = 8192
 
-#: The closed source vocabulary (ADR-075 D1). ``instruction``/``code_pattern`` are the fast-follow.
-SOURCES: tuple[str, ...] = ("import", "api_name")
+#: The closed source vocabulary (ADR-075 D1). ``code_pattern`` (cipher-shaped loops) is the last
+#: fast-follow; ``instruction`` (hardware crypto opcodes) is now implemented.
+SOURCES: tuple[str, ...] = ("import", "api_name", "instruction")
 
 #: The closed primitive/family vocabulary a match reports.
 KINDS: tuple[str, ...] = ("aes", "sha", "md5", "rc4", "hmac", "crypto_api")
 
-#: Confidence per source (ADR-075 D5). A linked import is a strong signal; a symbol-like STRING is a
-#: weaker one (it may be an incidental log/format literal) — hence gated + lower.
-_CONFIDENCE: dict[str, float] = {"import": 0.9, "api_name": 0.6}
+#: Confidence per source (ADR-075 D5). A linked import or a hardware crypto opcode is a strong,
+#: unambiguous signal; a symbol-like STRING is weaker (may be an incidental literal) — hence lower.
+_CONFIDENCE: dict[str, float] = {"import": 0.9, "api_name": 0.6, "instruction": 0.9}
+
+#: Hardware crypto opcode (lowercased mnemonic) → primitive kind. AES-NI ⇒ aes, SHA-ext ⇒ sha,
+#: carry-less multiply (GHASH/AES-GCM) ⇒ crypto_api (generic — not an algorithm by itself).
+_OPCODE_KIND: dict[str, str] = {
+    "aesenc": "aes",
+    "aesenclast": "aes",
+    "aesdec": "aes",
+    "aesdeclast": "aes",
+    "aesimc": "aes",
+    "aeskeygenassist": "aes",
+    "sha1rnds4": "sha",
+    "sha1nexte": "sha",
+    "sha1msg1": "sha",
+    "sha1msg2": "sha",
+    "sha256rnds2": "sha",
+    "sha256msg1": "sha",
+    "sha256msg2": "sha",
+    "pclmulqdq": "crypto_api",
+    "vpclmulqdq": "crypto_api",
+}
 
 #: Curated crypto-API signal table: ``(pattern_id, kind, needle)``. ``needle`` is matched
 #: case-insensitively as a substring of a symbol name. Covers Windows CryptoAPI + CNG, Apple
@@ -168,5 +189,44 @@ def detect_crypto(
         for _pid, kind in _matches(text):
             _emit(address, kind, "api_name", text)
 
+    out.sort(key=lambda i: (i.address or "", i.source, i.kind, i.detail))
+    return out
+
+
+def detect_instruction_crypto(
+    hits: Iterable[tuple[str | None, str]],
+) -> list[CryptoIndicator]:
+    """Map hardware crypto-opcode hits to indicators (pure; ADR-075 ``instruction`` source).
+
+    A hit is a ``(address, mnemonic)`` from the worker's ``crypto_instructions`` opcode scan (AES-NI
+    / SHA-ext / carry-less multiply — all unambiguous crypto, so high confidence). Unknown mnemonics
+    (should not occur — the worker only emits allow-listed opcodes) are skipped defensively.
+
+    Args:
+        hits: ``(address, mnemonic)`` rows; ``mnemonic`` is a lowercased opcode.
+
+    Returns:
+        Deterministic :class:`CryptoIndicator` list, de-duplicated by ``(address, kind, source,
+        detail)`` and sorted — ``source="instruction"``, ``detail`` = the mnemonic.
+    """
+    seen: set[tuple[str | None, str, str, str]] = set()
+    out: list[CryptoIndicator] = []
+    for address, mnemonic in hits:
+        kind = _OPCODE_KIND.get(mnemonic.lower())
+        if kind is None:
+            continue
+        key = (address, kind, "instruction", mnemonic)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            CryptoIndicator(
+                address=address,
+                kind=kind,
+                source="instruction",
+                detail=mnemonic,
+                confidence=_CONFIDENCE["instruction"],
+            )
+        )
     out.sort(key=lambda i: (i.address or "", i.source, i.kind, i.detail))
     return out
