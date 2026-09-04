@@ -6,6 +6,17 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Seeded the `family_match` corpus (ADR-073 D3).** `vivarium.data.family_corpus` advances
+  `corpus-1` (empty) → `corpus-2` with the four confirmed-family validation-benchmark samples —
+  **Win32.Kelihos**, **OSX.Wirenet**, **Win32.LuckyCat**, **Win32.BumbleBee** — each keyed by its
+  `program_fingerprint` `structure_digest` + `import_digest`, computed with the (repinned) worker
+  image (Ghidra 12.1.2) under the default analysis profile. `family_match` now returns real
+  named-family hits on those samples/variants. Profile caveat: `structure_digest` matches only a
+  same-profile query; `import_digest` is profile-stable. The human-gated D3 curation loop stays the
+  way to add entries.
+
 ### Security
 
 - **Worker image base bumped to fix a glibc drift (supply chain).** `Containerfile.worker` pinned
