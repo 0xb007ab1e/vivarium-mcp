@@ -6,6 +6,17 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+### Security
+
+- **Worker image base bumped to fix a glibc drift (supply chain).** `Containerfile.worker` pinned
+  `cgr.dev/chainguard/wolfi-base@sha256:0b5fd36c…` across all 7 build stages, but the wolfi apk repo
+  advanced: `apk add python-3.12` now installs a build linked against **glibc 2.44**, which the older
+  pinned base's `libm.so.6` does not provide — the worker image build failed at the wheel stage
+  (`ImportError: … version GLIBC_2.44 not found`). Repinned all stages to
+  `wolfi-base@sha256:103eb3f4…` (ships glibc-2.44-r4, matching the current apk python), keeping the
+  auto-CVE-patch `apk add` design and digest-pinned bases. Unblocks the worker-image rebuild + trust
+  repin (which lights up the `program_fingerprint` / `crypto_instructions` worker code).
+
 ### Changed
 
 - **`crypto_detect` gains the `instruction` source (ADR-075 fast-follow).** In addition to the
