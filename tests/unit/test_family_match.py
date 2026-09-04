@@ -108,10 +108,26 @@ def test_parse_lowercases_hex() -> None:
 
 
 def test_default_corpus_loads_and_is_valid() -> None:
-    """The bundled corpus loads, parses, and carries a version (seed may be empty)."""
+    """The bundled corpus loads, parses, carries its version; every seeded entry is well-formed."""
     c = load_default_corpus()
-    assert c.version == "corpus-1"
-    assert isinstance(c.entries, tuple)  # empty seed is fine
+    assert c.version == "corpus-2"
+    assert len(c.entries) == 4  # the four validation-benchmark seed samples
+    for e in c.entries:
+        assert e.family
+        assert e.structure_digest is not None or e.import_digest is not None
+
+
+def test_default_corpus_matches_a_seeded_family() -> None:
+    """A seeded sample's digests match its family in the bundled corpus (end-to-end, real data)."""
+    c = load_default_corpus()
+    # BumbleBee's fingerprint from the pinned worker (validation case-04).
+    out = match(
+        "4d56ae8dede0f5fec07d47e94c2d4baa6982deeac2a8c2c22da13719c883107f",
+        "ea793d71a33c8105e560958cb25257269d261045650bb1e8f56e4df3920e1991",
+        c,
+    )
+    assert out and out[0].family == "Win32.BumbleBee"
+    assert out[0].basis == ("structure", "import")
 
 
 # --- schema + registry wiring ---
