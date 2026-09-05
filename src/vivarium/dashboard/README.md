@@ -17,6 +17,20 @@ format, an adjacency list for the call graph. Syntax colorization is a small sel
 tokenizer in `app.js` (no external libraries — strict CSP) that emits **every** token via
 `textContent`, so binary-derived content stays inert even while highlighted (ADR-005).
 
+## Interactive call graph
+
+The **Call graph** view is an interactive, hand-built inline-SVG graph (no external library — strict
+CSP). Nodes are typed — **functions**, **imports** (external calls), **strings/data** — connected by
+directed **call** edges and dashed **data-reference** edges (arrowheads show inbound vs outbound).
+Interactions: **drag** a node to move it, **drag** the background to pan, **scroll** to zoom,
+**click** a node to open its artifact detail, **double-click** to expand its neighbors into the
+graph; a **depth** control bounds how many hops from the focus are shown. Initial node placement is a
+**per-viewer preference** (persisted in `localStorage`, guarded): **layered** (top-down by call
+direction), **force-directed**, or **radial**. The function detail's **"show in graph"** button
+focuses the graph on that function. Node labels are real DOM text (`textContent`), so untrusted
+names stay inert even in the graph (ADR-005); the callers/callees/xref lists in the function view are
+the accessible, keyboard-navigable equivalent.
+
 ## RE browser (functions, cross-references, lineage)
 
 The viewer is a reverse-engineering browser. The Explorer lists each session's **functions**;
