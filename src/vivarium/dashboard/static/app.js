@@ -201,6 +201,7 @@ function ensureSession(id) {
       outputs: [],
       verdict: null,
       workflows: {}, // run id -> merged workflow run
+      annotations: {}, // proposal id -> AI-annotation proposal set (apply-transform, propose-first)
       idIndex: {}, // address id -> { kind, view }
       nameIndex: {}, // symbol name -> id (for code jump-to)
     };
@@ -317,6 +318,12 @@ function buildExplorer() {
       kid(o.label || "output " + (idx + 1), "output:" + idx, { icon: "i-code", iconText: "{}" })
     );
     if (s.verdict) kid("Verdict", "verdict", { icon: "i-ver", iconText: "✓" });
+    const propCount = Object.values(s.annotations).reduce(
+      (n, p) => n + (p.items ? p.items.length : 0),
+      0
+    );
+    if (propCount)
+      kid("Proposals", "proposals", { icon: "i-prop", iconText: "✎", badge: propCount });
     if (Object.keys(s.workflows).length)
       kid("Runs", "runs", { icon: "i-run", iconText: "▷", badge: Object.keys(s.workflows).length });
     kid("Timeline", "timeline", { icon: "i-time", iconText: "≡" });
@@ -420,6 +427,7 @@ function renderViewer() {
     else if (view === "verdict") renderVerdict(s.verdict);
     else if (view === "timeline") renderTimeline(s);
     else if (view === "runs") renderRuns(s);
+    else if (view === "proposals") renderProposals(s);
     else if (view.indexOf("function:") === 0) renderFunction(s, view.slice(9));
     else if (view.indexOf("output:") === 0) renderOutput(s.outputs[+view.slice(7)]);
   }
@@ -1213,7 +1221,14 @@ function renderCatalog() {
   // prebuilt workflows
   (cat.workflows || []).forEach((wf) => {
     const card = el("section", "wfcard");
-    card.appendChild(el("h3", "wfcard-h", wf.name));
+    const hrow = el("div", "vh sub");
+    hrow.appendChild(el("h3", "vh-sub-title", wf.name));
+    const run = el("button", "gbtn sm", "▷ run");
+    run.type = "button";
+    run.title = "run read-only steps against the current session";
+    run.addEventListener("click", () => runWorkflow(wf.name, wf.steps));
+    hrow.appendChild(run);
+    card.appendChild(hrow);
     card.appendChild(el("p", "wfcard-desc", wf.desc || ""));
     const ol = el("ol", "wfsteps");
     (wf.steps || []).forEach((st) => {
@@ -1385,7 +1400,14 @@ function renderBuilder() {
     builderDraft = { name: "", steps: [] };
     renderBuilder();
   });
+  const run = el("button", "gbtn", "▷ run");
+  run.type = "button";
+  run.title = "run read-only steps against the current session";
+  run.addEventListener("click", () => {
+    if (builderDraft.steps.length) runWorkflow(builderDraft.name || "custom workflow", builderDraft.steps);
+  });
   actions.appendChild(save);
+  actions.appendChild(run);
   actions.appendChild(clear);
   editor.appendChild(actions);
 
@@ -1446,7 +1468,114 @@ function renderBuilder() {
   }
 }
 
-const _RUN_STEP_ICON = { done: "✓", running: "▷", failed: "✕", pending: "○" };
+/* ---------------------------------------------------------------- client-side workflow runner */
+
+// Read-only ops are OPERATIONAL client-side: they resolve against the artifacts already streamed
+// into the browser store (no server round-trip, no write path). Each resolver returns a step state
+// + an optional artifact view to link. Ops needing fresh server work or a write stay "needs-agent"
+// (gated: run via the agent under write-consent — propose-first for AI annotation).
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function _firstFunctionId(s) {
+  const f = Object.values(s.functions)[0];
+  return f && f.id;
+}
+
+const _READONLY_OPS = {
+  program_metadata: (s) => (s.metadata ? { state: "done", view: "overview" } : { state: "skipped" }),
+  list_strings: (s) => (s.strings ? { state: "done", view: "strings" } : { state: "skipped" }),
+  list_imports: (s) => (s.imports ? { state: "done", view: "imports" } : { state: "skipped" }),
+  list_exports: (s) => (s.exports ? { state: "done", view: "exports" } : { state: "skipped" }),
+  list_functions: (s) => {
+    const id = _firstFunctionId(s);
+    return id ? { state: "done", view: "function:" + id } : { state: "skipped" };
+  },
+  call_graph: (s) =>
+    s.callgraph || Object.keys(s.functions).length
+      ? { state: "done", view: "callgraph" }
+      : { state: "skipped" },
+  function_context: (s) => {
+    const id = _firstFunctionId(s);
+    return id ? { state: "done", view: "function:" + id } : { state: "skipped" };
+  },
+  callers: (s) => {
+    const id = _firstFunctionId(s);
+    return id ? { state: "done", view: "function:" + id } : { state: "skipped" };
+  },
+  callees: (s) => {
+    const id = _firstFunctionId(s);
+    return id ? { state: "done", view: "function:" + id } : { state: "skipped" };
+  },
+  decompile_function: (s) => {
+    const id = _firstFunctionId(s);
+    const fn = id && s.functions[id];
+    return fn && fn.decompile ? { state: "done", view: "function:" + id } : { state: "skipped" };
+  },
+};
+
+const _GATED_OPS = new Set([
+  "session_import",
+  "session_analyze",
+  "session_close",
+  "rename_function",
+  "rename_local_variable",
+  "rename_parameter",
+  "set_comment",
+  "set_function_signature",
+  "ai_annotate",
+]);
+
+function _pickSession() {
+  if (selection && selection.sessionId && store.sessions[selection.sessionId]) return selection.sessionId;
+  return Object.keys(store.sessions)[0];
+}
+
+/** Run a workflow's steps against the browser store: read-only ops execute + link their artifact;
+ *  gated / not-yet-streamed ops are marked needs-agent (run via the agent). Live-updates the Runs
+ *  view as it goes — operational, client-side, no server write path. */
+async function runWorkflow(name, steps) {
+  const sid = _pickSession();
+  if (!sid) {
+    setStatus("no session to run against");
+    return;
+  }
+  const s = store.sessions[sid];
+  const runId = "uirun-" + Date.now();
+  const run = {
+    id: runId,
+    name: (name || "workflow") + " (UI run)",
+    state: "running",
+    steps: (steps || []).map((st) => ({ op: st.op, label: st.label || "", state: "pending" })),
+  };
+  s.workflows[runId] = run;
+  select({ kind: "session-view", sessionId: sid, view: "runs" });
+  for (let i = 0; i < run.steps.length; i++) {
+    run.steps[i].state = "running";
+    if (selection && selection.view === "runs") renderViewer();
+    await _sleep(110);
+    const op = run.steps[i].op;
+    let res;
+    if (_GATED_OPS.has(op)) res = { state: "needs-agent" };
+    else if (_READONLY_OPS[op]) res = _READONLY_OPS[op](s);
+    else res = { state: "needs-agent" }; // scans / similarity: not in the client store → agent
+    run.steps[i].state = res.state;
+    if (res.view) run.steps[i].view = res.view;
+    if (selection && selection.view === "runs") renderViewer();
+    await _sleep(110);
+  }
+  run.state = "done";
+  if (selection && selection.view === "runs") renderViewer();
+  setStatus("ran " + (name || "workflow") + " — read-only steps applied; gated steps → needs-agent");
+}
+
+const _RUN_STEP_ICON = {
+  done: "✓",
+  running: "▷",
+  failed: "✕",
+  pending: "○",
+  "needs-agent": "⇢",
+  skipped: "–",
+};
 
 function renderRuns(s) {
   const root = viewerRoot();
@@ -1480,6 +1609,104 @@ function renderRuns(s) {
       ol.appendChild(li);
     });
     card.appendChild(ol);
+    root.appendChild(card);
+  });
+}
+
+/** AI-annotation proposals (apply-transform, propose-first): review a diff per item, approve, then
+ *  submit the approved set through the GATED command path — the write happens under write-consent,
+ *  never auto from here. All proposed/current text is untrusted → rendered inert. */
+function renderProposals(s) {
+  const root = viewerRoot();
+  setCrumb([s.summary.session_id, "Proposals"]);
+  const sets = Object.values(s.annotations);
+  vhead(root, "AI annotation proposals", "review · approve · apply (gated write-consent)");
+  if (!sets.length) {
+    root.appendChild(el("p", "muted", "no proposals yet"));
+    return;
+  }
+  root.appendChild(
+    el(
+      "p",
+      "ghint",
+      "Proposed by the agent from decompiled evidence. Applying is a GATED write (write-consent) — " +
+        "approved items are submitted for the agent to apply; nothing is written from the browser."
+    )
+  );
+  sets.forEach((set) => {
+    const approved = new Set((set.items || []).map((_, i) => i)); // default: all approved
+    const card = el("section", "wfcard");
+    const h = el("div", "vh sub");
+    h.appendChild(el("h3", "vh-sub-title", "proposal " + set.id));
+    h.appendChild(el("span", "badge-untrusted", "untrusted"));
+    card.appendChild(h);
+
+    const ul = el("ul", "proplist");
+    (set.items || []).forEach((it, i) => {
+      const li = el("li", "proprow");
+      const cb = el("input", "propcb");
+      cb.type = "checkbox";
+      cb.checked = true;
+      cb.addEventListener("change", () => (cb.checked ? approved.add(i) : approved.delete(i)));
+      li.appendChild(cb);
+      const body = el("div", "propbody");
+      const head = el("div", "prophead");
+      head.appendChild(el("span", "propkind", it.kind));
+      head.appendChild(renderValue(it.target && it.target.name)); // inert target
+      body.appendChild(head);
+      const diff = el("div", "propdiff");
+      const cur = el("span", "diff-old");
+      cur.appendChild(renderValue(it.current));
+      const arr = el("span", "diff-arr", " → ");
+      const prop = el("span", "diff-new");
+      prop.appendChild(renderValue(it.proposed));
+      diff.appendChild(cur);
+      diff.appendChild(arr);
+      diff.appendChild(prop);
+      body.appendChild(diff);
+      if (it.rationale) {
+        const r = el("div", "proprat");
+        r.appendChild(document.createTextNode("why: "));
+        r.appendChild(renderValue(it.rationale));
+        body.appendChild(r);
+      }
+      li.appendChild(body);
+      ul.appendChild(li);
+    });
+    card.appendChild(ul);
+
+    const actions = el("div", "brow");
+    const apply = el("button", "gbtn", "apply approved (gated)");
+    apply.type = "button";
+    const status = el("span", "propstatus muted");
+    apply.addEventListener("click", async () => {
+      const items = (set.items || []).filter((_, i) => approved.has(i));
+      if (!items.length) {
+        status.textContent = "nothing approved";
+        return;
+      }
+      status.textContent = "submitting…";
+      try {
+        const r = await fetch("/api/command", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            op: "ai_annotate",
+            params: { proposal_id: set.id, count: items.length },
+          }),
+        });
+        if (r.status === 503) status.textContent = "interactive disabled — approved set recorded for the agent to apply (write-consent)";
+        else if (r.status === 403) status.textContent = "interactive requires auth";
+        else if (r.status === 202) status.textContent = "gated: queued for human-approved apply (write-consent)";
+        else if (r.ok) status.textContent = "applied (" + items.length + ") — reversible via session_undo";
+        else status.textContent = "submit failed (" + r.status + ")";
+      } catch (_) {
+        status.textContent = "submit failed";
+      }
+    });
+    actions.appendChild(apply);
+    actions.appendChild(status);
+    card.appendChild(actions);
     root.appendChild(card);
   });
 }
@@ -1562,6 +1789,8 @@ function applyEvent(id, e) {
   else if (e.kind === "function") mergeFunction(s, e.data);
   else if (e.kind === "workflow") {
     if (e.data && e.data.id) s.workflows[e.data.id] = { ...s.workflows[e.data.id], ...e.data };
+  } else if (e.kind === "annotations") {
+    if (e.data && e.data.id) s.annotations[e.data.id] = e.data;
   } else if (e.kind === "tool") s.timeline.push({ tool: e.tool, label: e.label });
   else if (e.kind === "output") s.outputs.push({ label: e.label, content: e.content });
   else if (e.kind === "verdict") s.verdict = { label: e.label, content: e.content };
@@ -1575,6 +1804,7 @@ function affectsView(e, id) {
   if (e.kind === "output") return true;
   if (e.kind === "function") return v === "function:" + (e.data && e.data.id);
   if (e.kind === "workflow") return v === "runs";
+  if (e.kind === "annotations") return v === "proposals";
   return v === e.kind; // imports/exports/strings/callgraph/verdict
 }
 
@@ -1592,6 +1822,7 @@ function explorerShape(id) {
     s.outputs.length,
     !!s.verdict,
     Object.keys(s.workflows).length,
+    Object.keys(s.annotations).length,
   ];
 }
 

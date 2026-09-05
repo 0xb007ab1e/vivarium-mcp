@@ -8,6 +8,51 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Interactive executor core (`ReadOnlyExecutor`).** The security-critical, transport-agnostic core
+  of the interactive backend: a pure executor that **re-evaluates every command** (defense in depth)
+  and forwards ONLY read-only `allow` decisions to an injected `ToolCaller` transport — any
+  gated/unknown op raises (never a write path). Writes stay on the gated write-consent path. Wired
+  into `build_app` as the command executor; the concrete transport (MCP stdio client to a running
+  vivarium server) + the enablement flag are the operator's gated step (enabling spawns workers).
+  100% covered; endpoint test confirms read-only executes while gated ops stop at 202 (never reach
+  the transport).
+
+- **Apply transform / AI annotation — propose-first review flow (operational).** The dashboard now
+  surfaces AI-annotation **proposals** (a new streamed `annotations` kind: per-item rename/comment
+  with `current`→`proposed` + rationale, all untrusted-tagged) in a **Proposals** view: review each
+  as a **diff**, approve/reject per item, then **apply approved** — which submits through the
+  **gated** command path (`ai_annotate`). The program write happens only under **write-consent**
+  (ADR-012, human-approved, reversible via `session_undo`), never auto from the browser; while
+  interactive is disabled the approved set is recorded for the agent. STRIDE/TB9 controls apply at
+  every boundary (auth, allow-list, gating, audit, inert rendering).
+
+- **Full vivarium op palette in the dashboard.** `/api/catalog`'s operation palette now covers the
+  **entire Tier-1 tool surface** (78 ops across 9 groups: session · program/listing · code ·
+  graph/xrefs · scans · similarity · types · annotate · utility), each marked read-only vs **gated**
+  (compute/write). Custom workflows can be composed from any vivarium operation.
+
+- **Operational read-only workflow runner (client-side).** Prebuilt and custom workflows now
+  **actually run** from the UI — a **▷ run** button (on each catalog workflow + the builder draft)
+  executes the workflow's steps against the artifacts already streamed into the browser: read-only
+  ops (metadata, strings/imports/exports, functions, **call graph / analyze-recursive**, callers/
+  callees, function context, decompile) resolve immediately and link their artifact in a live **Runs**
+  tracker; steps needing fresh server work or a write (`session_analyze`, scans/similarity, and all
+  writes incl. **`ai_annotate`**) are marked **needs-agent** (run via the agent — propose-first,
+  gated). No server round-trip, no write path — operational over data the dashboard already holds.
+
+- **Dashboard interactive backend — foundation (Phase 2, ADR-076 / threat-model TB9).** The
+  groundwork for driving RE workflows from the browser (open/analyze, recurse, apply transform / AI
+  annotation), built **the mandated way**: the new browser→server command boundary (**TB9**) is
+  STRIDE-modeled (`docs/security/threat-model.md` §21) and specified (**ADR-076**) *before*
+  implementation. A pure gating policy (`vivarium.dashboard.commands`) validates a command against
+  the served catalog and returns **allow** (read-only), **needs-approval** (gated: import/analyze/
+  close, all writes, `ai_annotate` — default-deny, human write-consent only, propose-first), or
+  **deny** (unknown/malformed — CWE-20). A new `POST /api/command` endpoint is **default-OFF +
+  fail-closed**: with no executor wired it returns 503, and interactive **requires auth** (403 if no
+  token) — so the dashboard's read-only posture is byte-for-byte preserved and the browser has **no
+  live execution path** yet. Live wiring to the session manager + production enablement are
+  **gated actions** (human approval) — this increment adds no live attack surface.
+
 - **Dashboard workflows foundation (RE workbench, Phase 1).** First step toward the dashboard
   covering vivarium end-to-end with RE workflows. A new read-only `/api/catalog` serves an
   **operation palette** (vivarium tools grouped: session / listing / code / graph-xrefs / scans /

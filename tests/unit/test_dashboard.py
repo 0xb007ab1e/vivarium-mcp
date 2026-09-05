@@ -90,9 +90,24 @@ def test_catalog_endpoint(client: TestClient) -> None:
     assert ai["steps"] and any(st.get("gated") for st in ai["steps"])
     # the op palette groups real vivarium tools and marks gated (compute/write) ops
     ops = {op["op"] for grp in c["op_groups"] for op in grp["ops"]}
-    assert {"decompile_function", "call_graph", "ioc_scan", "rename_function"} <= ops
+    # the palette covers the full vivarium tool surface (read-only + gated)
+    assert {
+        "decompile_function",
+        "call_graph",
+        "ioc_scan",
+        "rename_function",
+        "emulate",
+        "xrefs_to",
+        "define_struct",
+        "version_track",
+        "demangle",
+        "program_summary",
+    } <= ops
+    assert len(ops) >= 60  # substantially the whole Tier-1 catalog
     gated = {op["op"] for grp in c["op_groups"] for op in grp["ops"] if op.get("gated")}
-    assert "session_analyze" in gated and "rename_function" in gated
+    assert {"session_analyze", "rename_function", "define_struct", "ai_annotate"} <= gated
+    # read-only ops are NOT gated
+    assert "decompile_function" not in gated and "call_graph" not in gated
 
 
 def test_catalog_module_shape() -> None:
@@ -112,6 +127,22 @@ def test_sse_stream_emits_workflow_run(client: TestClient) -> None:
     d = runs[0]["data"]
     assert d["id"] and d["state"] in ("running", "done", "failed")
     assert d["steps"] and all("op" in st and "state" in st for st in d["steps"])
+
+
+def test_sse_stream_emits_ai_proposals(client: TestClient) -> None:
+    """The stream carries AI annotation proposals (apply-transform, propose-first) — tagged leaves.
+
+    Each proposal item's current/proposed/rationale + target name are binary-derived → tagged
+    untrusted; applying is gated (write-consent), never carried as a bare/executable value.
+    """
+    props = [e for e in _drain_sse(client, "demo-analyzing") if e["kind"] == "annotations"]
+    assert props, "no AI annotation proposals streamed"
+    d = props[0]["data"]
+    assert d["id"] and d["items"]
+    it = d["items"][0]
+    assert it["kind"] in ("rename", "comment")
+    assert it["proposed"]["untrusted"] is True
+    assert it["target"]["id"] and it["target"]["name"]["untrusted"] is True
 
 
 def test_sse_stream_tags_untrusted_output(client: TestClient) -> None:
@@ -217,6 +248,164 @@ def test_file_bridge_roundtrips_function_data(tmp_path: Path) -> None:
     fn = next(e for e in got if e.kind == "function")
     assert fn.data is not None
     assert fn.data["callees"][0] == {"id": "0x2", "name": {"value": "puts", "untrusted": True}}
+
+
+# --- interactive command backend (Phase 2 — fail-closed) ------------------------------------------
+
+
+def test_command_policy_evaluate() -> None:
+    """evaluate gates ops: read-only=allow, gated=needs-approval, unknown/malformed=deny."""
+    from vivarium.dashboard.catalog import catalog
+    from vivarium.dashboard.commands import evaluate
+
+    cat = catalog()
+    assert evaluate(cat, {"op": "decompile_function"})["decision"] == "allow"
+    assert evaluate(cat, {"op": "list_strings"})["decision"] == "allow"
+    assert evaluate(cat, {"op": "session_analyze"})["decision"] == "needs-approval"
+    assert evaluate(cat, {"op": "rename_function"})["decision"] == "needs-approval"
+    assert evaluate(cat, {"op": "ai_annotate"})["decision"] == "needs-approval"
+    assert evaluate(cat, {"op": "does_not_exist"})["decision"] == "deny"
+    assert evaluate(cat, {"op": "list_strings", "params": []})["decision"] == "deny"
+    assert evaluate(cat, {})["decision"] == "deny"
+
+
+def test_command_endpoint_disabled_by_default() -> None:
+    """With no executor wired, POST /api/command is fail-closed 503 (read-only preserved)."""
+    c = TestClient(build_app(DemoProvider()))
+    assert c.post("/api/command", json={"op": "list_strings"}).status_code == 503
+
+
+def _noop_exec(cmd: dict[str, Any]) -> dict[str, Any]:
+    """A trivial executor for endpoint tests."""
+    return {"ok": True}
+
+
+def test_command_endpoint_requires_auth() -> None:
+    """An executor wired but no token configured fails closed (interactive needs auth)."""
+    import os
+
+    os.environ.pop("VIVARIUM_DASHBOARD_TOKEN", None)
+    c = TestClient(build_app(DemoProvider(), executor=_noop_exec))
+    assert c.post("/api/command", json={"op": "list_strings"}).status_code == 403
+
+
+def test_command_endpoint_gates_and_executes() -> None:
+    """With executor + token: read-only → executes; gated → 202 (not run); unknown → 400."""
+    import os
+
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = "tok"  # noqa: S105 - test fixture
+    calls: list[dict[str, Any]] = []
+
+    def _exec(cmd: dict[str, Any]) -> dict[str, Any]:
+        calls.append(cmd)
+        return {"ran": cmd["op"]}
+
+    try:
+        c = TestClient(build_app(DemoProvider(), executor=_exec))
+        hdr = {"authorization": "Bearer tok"}
+        # gated op → 202 needs-approval, executor NOT called
+        r = c.post("/api/command", json={"op": "session_analyze"}, headers=hdr)
+        assert r.status_code == 202 and r.json()["decision"] == "needs-approval"
+        # unknown op → 400 deny
+        assert c.post("/api/command", json={"op": "nope"}, headers=hdr).status_code == 400
+        # read-only op → executed
+        r = c.post("/api/command", json={"op": "list_strings"}, headers=hdr)
+        assert r.status_code == 200 and r.json()["result"] == {"ran": "list_strings"}
+        assert [x["op"] for x in calls] == ["list_strings"]  # only the allowed op ran
+    finally:
+        del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
+
+
+def test_command_endpoint_invalid_json_and_bad_params() -> None:
+    """Malformed body → 400 invalid-json; too many params → 400 deny (never dispatched)."""
+    import os
+
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = "tok"  # noqa: S105 - test fixture
+    try:
+        c = TestClient(build_app(DemoProvider(), executor=_noop_exec))
+        hdr = {"authorization": "Bearer tok"}
+        r = c.post("/api/command", content=b"not json", headers=hdr)
+        assert r.status_code == 400 and r.json()["error"] == "invalid-json"
+        big = {"op": "list_strings", "params": {str(i): i for i in range(40)}}
+        assert c.post("/api/command", json=big, headers=hdr).status_code == 400
+    finally:
+        del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
+
+
+def test_command_endpoint_executor_failure_is_safe() -> None:
+    """An executor exception collapses to a 500 that leaks no internals (fail closed)."""
+    import os
+
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = "tok"  # noqa: S105 - test fixture
+
+    def _boom(cmd: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("secret internal detail")
+
+    try:
+        c = TestClient(build_app(DemoProvider(), executor=_boom), raise_server_exceptions=False)
+        r = c.post(
+            "/api/command",
+            json={"op": "list_strings"},
+            headers={"authorization": "Bearer tok"},
+        )
+        assert r.status_code == 500
+        assert r.json() == {"error": "command-failed", "op": "list_strings"}
+        assert "secret internal detail" not in r.text
+    finally:
+        del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
+
+
+def test_readonly_executor_forwards_and_refuses() -> None:
+    """ReadOnlyExecutor forwards read-only ops and REFUSES gated/unknown (defense in depth)."""
+    from vivarium.dashboard.catalog import catalog
+    from vivarium.dashboard.executor import ReadOnlyExecutor
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class _Caller:
+        def call(self, op: str, params: dict[str, Any], /) -> dict[str, Any]:
+            calls.append((op, params))
+            return {"echo": op}
+
+    ex = ReadOnlyExecutor(catalog(), _Caller())
+    # read-only op is forwarded
+    assert ex({"op": "list_strings", "params": {"limit": 5}}) == {"echo": "list_strings"}
+    assert calls == [("list_strings", {"limit": 5})]
+    # gated op is refused BY THE EXECUTOR even if it somehow reached it (defense in depth)
+    with pytest.raises(PermissionError):
+        ex({"op": "rename_function", "params": {}})
+    with pytest.raises(PermissionError):
+        ex({"op": "does_not_exist"})
+    assert len(calls) == 1  # no gated/unknown op ever forwarded to the transport
+
+
+def test_readonly_executor_wires_into_endpoint() -> None:
+    """A ReadOnlyExecutor wired into build_app executes read-only ops; gated still 202 (not run)."""
+    import os
+
+    from vivarium.dashboard.catalog import catalog
+    from vivarium.dashboard.executor import ReadOnlyExecutor
+
+    forwarded: list[str] = []
+
+    class _Caller:
+        def call(self, op: str, params: dict[str, Any], /) -> dict[str, Any]:
+            forwarded.append(op)
+            return {"ok": op}
+
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = "tok"  # noqa: S105 - test fixture
+    try:
+        c = TestClient(build_app(DemoProvider(), executor=ReadOnlyExecutor(catalog(), _Caller())))
+        hdr = {"authorization": "Bearer tok"}
+        r = c.post("/api/command", json={"op": "list_strings"}, headers=hdr)
+        assert r.status_code == 200 and r.json()["result"] == {"ok": "list_strings"}
+        # gated op stops at the endpoint (202) — never reaches the executor/transport
+        assert (
+            c.post("/api/command", json={"op": "rename_function"}, headers=hdr).status_code == 202
+        )
+        assert forwarded == ["list_strings"]
+    finally:
+        del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
 
 
 # --- security posture -----------------------------------------------------------------------------

@@ -16,91 +16,143 @@ from __future__ import annotations
 
 from typing import Any
 
+
 # Operation palette — grouped, closed-vocabulary vivarium tool names + descriptions. `gated=True`
 # marks an operation that computes/costs or WRITES (analyze / annotate / type edits) and therefore
 # runs only via the agent under write-consent + human approval, never autonomously from the UI.
+def _op(op: str, desc: str, gated: bool = False) -> dict[str, Any]:
+    """One palette op entry (``gated`` marks a compute/write op — agent + write-consent only)."""
+    entry: dict[str, Any] = {"op": op, "desc": desc}
+    if gated:
+        entry["gated"] = True
+    return entry
+
+
+# Full vivarium tool surface, grouped. Read-only by default; ``gated=True`` = compute/write (import/
+# analyze/session-control/type+annotation writes/AI) — agent + write-consent only, never auto from
+# the UI. Kept in sync with the Tier-1 catalog (docs/contracts/tool-catalog.md).
 _OP_GROUPS: list[dict[str, Any]] = [
     {
         "group": "Session",
         "ops": [
-            {"op": "session_create", "desc": "Create an analysis session"},
-            {
-                "op": "session_import",
-                "desc": "Load a binary (path under the import root)",
-                "gated": True,
-            },
-            {"op": "session_analyze", "desc": "Run Ghidra auto-analysis", "gated": True},
-            {"op": "session_status", "desc": "Session state / TTL"},
-            {"op": "session_close", "desc": "Close + verified store wipe", "gated": True},
+            _op("session_create", "Create an analysis session"),
+            _op("session_import", "Load a binary (path under the import root)", gated=True),
+            _op("session_analyze", "Run Ghidra auto-analysis", gated=True),
+            _op("session_status", "Session state / TTL"),
+            _op("session_close", "Close + verified store wipe", gated=True),
+            _op("session_enable_writes", "Enable write consent for the session", gated=True),
+            _op("session_disable_writes", "Disable write consent", gated=True),
+            _op("session_undo", "Undo the last write", gated=True),
+            _op("session_export_annotations", "Export annotations (names/comments/types)"),
+            _op("session_import_annotations", "Import + replay an annotation document", gated=True),
         ],
     },
     {
-        "group": "Listing",
+        "group": "Program / listing",
         "ops": [
-            {"op": "list_functions", "desc": "Functions in the program"},
-            {"op": "list_imports", "desc": "Imported symbols"},
-            {"op": "list_exports", "desc": "Exported symbols"},
-            {"op": "list_strings", "desc": "Defined strings"},
-            {"op": "list_symbols", "desc": "Symbol table"},
-            {"op": "list_data", "desc": "Defined data"},
-            {"op": "program_metadata", "desc": "Format / arch / entry / compiler"},
+            _op("program_metadata", "Format / arch / entry / compiler"),
+            _op("program_summary", "High-level program summary"),
+            _op("program_fingerprint", "Structure + import fingerprint"),
+            _op("memory_map", "Memory blocks / segments"),
+            _op("list_functions", "Functions in the program"),
+            _op("list_imports", "Imported symbols"),
+            _op("list_exports", "Exported symbols"),
+            _op("list_strings", "Defined strings"),
+            _op("list_symbols", "Symbol table"),
+            _op("list_data", "Defined data"),
+            _op("list_data_types", "Data types"),
+            _op("get_symbol", "Resolve a symbol"),
+            _op("get_data_type", "Resolve a data type"),
+            _op("get_comments", "Comments at an address"),
         ],
     },
     {
         "group": "Code",
         "ops": [
-            {"op": "decompile_function", "desc": "Decompile to C"},
-            {"op": "disassemble", "desc": "Disassembly listing"},
-            {"op": "get_pcode", "desc": "Raw p-code (IR)"},
-            {"op": "get_high_pcode", "desc": "High (SSA) p-code"},
-            {"op": "data_flow_slice", "desc": "Def-use slice from a seed"},
-            {"op": "stack_frame", "desc": "Recovered locals / params"},
+            _op("decompile_function", "Decompile to C"),
+            _op("disassemble", "Disassembly listing"),
+            _op("basic_blocks", "Basic-block listing"),
+            _op("get_pcode", "Raw p-code (IR)"),
+            _op("get_high_pcode", "High (SSA) p-code"),
+            _op("data_flow_slice", "Def-use slice from a seed"),
+            _op("stack_frame", "Recovered locals / params"),
+            _op("emulate", "Sandboxed p-code emulation (read-only)"),
+            _op("start_decompile_stream", "Bulk decompile stream (job)"),
+            _op("fetch_job_results", "Drain a streaming job"),
+            _op("job_status", "Streaming job status"),
+            _op("cancel_job", "Cancel a streaming job"),
         ],
     },
     {
         "group": "Graph / xrefs",
         "ops": [
-            {"op": "callers", "desc": "Direct callers (parents)"},
-            {"op": "callees", "desc": "Direct callees (children)"},
-            {"op": "call_graph", "desc": "Call graph (bounded)"},
-            {"op": "xrefs_to", "desc": "References to an address"},
-            {"op": "xrefs_from", "desc": "References from an address"},
-            {"op": "function_context", "desc": "Callers+callees+xrefs+vars for a function"},
+            _op("callers", "Direct callers (parents)"),
+            _op("callees", "Direct callees (children)"),
+            _op("call_graph", "Call graph (bounded, recursive)"),
+            _op("call_graph_metrics", "Call-graph metrics"),
+            _op("xrefs_to", "References to an address"),
+            _op("xrefs_from", "References from an address"),
+            _op("function_context", "Callers+callees+xrefs+vars for a function"),
+            _op("cyclomatic_complexity", "Per-function complexity"),
+            _op("coverage", "Analysis coverage"),
+            _op("identify_functions", "Function ID (library match)"),
         ],
     },
     {
         "group": "Scans",
         "ops": [
-            {"op": "ioc_scan", "desc": "Indicators of compromise"},
-            {"op": "secret_scan", "desc": "Embedded secrets"},
-            {"op": "crypto_detect", "desc": "Crypto (imports / consts / instructions)"},
-            {"op": "capability_scan", "desc": "Capabilities / behaviors"},
-            {"op": "deobfuscate_strings", "desc": "Recover hidden strings"},
+            _op("ioc_scan", "Indicators of compromise"),
+            _op("secret_scan", "Embedded secrets (redacted)"),
+            _op("crypto_detect", "Crypto (imports / consts / instructions)"),
+            _op("crypto_constant_scan", "Crypto constants (S-boxes / IVs)"),
+            _op("capability_scan", "Capabilities / behaviors"),
+            _op("deobfuscate_strings", "Recover hidden strings"),
+            _op("search_strings", "Search strings"),
+            _op("search_bytes", "Search byte patterns"),
+            _op("read_bytes", "Read bytes at an address"),
         ],
     },
     {
         "group": "Similarity",
         "ops": [
-            {"op": "function_hash", "desc": "Per-function hashes"},
-            {"op": "bsim_similarity", "desc": "BSim similarity"},
-            {"op": "binary_diff", "desc": "Diff two programs"},
-            {"op": "family_match", "desc": "Known-family match"},
-            {"op": "find_similar_functions", "desc": "Similar functions"},
+            _op("function_hash", "Per-function hashes"),
+            _op("bsim_similarity", "BSim similarity"),
+            _op("bsim_search_corpus", "BSim corpus search"),
+            _op("binary_diff", "Diff two programs"),
+            _op("family_match", "Known-family match"),
+            _op("find_similar_functions", "Similar functions"),
+            _op("version_track", "Version tracking (two binaries)"),
+        ],
+    },
+    {
+        "group": "Types (write — gated)",
+        "ops": [
+            _op("recover_struct", "Propose a struct layout (read-only)"),
+            _op("define_struct", "Define a struct", gated=True),
+            _op("define_union", "Define a union", gated=True),
+            _op("define_types", "Define composite types (batch)", gated=True),
+            _op("apply_data_type", "Apply a data type", gated=True),
+            _op("apply_type_archive", "Apply a type archive", gated=True),
+            _op("delete_type", "Delete a type", gated=True),
         ],
     },
     {
         "group": "Annotate (write — gated)",
         "ops": [
-            {"op": "rename_function", "desc": "Rename a function", "gated": True},
-            {"op": "rename_local_variable", "desc": "Rename a local", "gated": True},
-            {"op": "rename_parameter", "desc": "Rename a parameter", "gated": True},
-            {"op": "set_comment", "desc": "Set a comment", "gated": True},
-            {"op": "set_function_signature", "desc": "Set a signature", "gated": True},
-            {
-                "op": "ai_annotate",
-                "desc": "AI propose renames/comments (propose-first)",
-                "gated": True,
-            },
+            _op("rename_function", "Rename a function", gated=True),
+            _op("rename_local_variable", "Rename a local", gated=True),
+            _op("rename_parameter", "Rename a parameter", gated=True),
+            _op("rename_symbol", "Rename a symbol", gated=True),
+            _op("set_comment", "Set a comment", gated=True),
+            _op("set_function_signature", "Set a signature", gated=True),
+            _op("ai_annotate", "AI propose renames/comments (propose-first)", gated=True),
+        ],
+    },
+    {
+        "group": "Utility",
+        "ops": [
+            _op("demangle", "Demangle a symbol"),
+            _op("analysis_order", "Analyzer order / plan"),
         ],
     },
 ]

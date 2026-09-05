@@ -31,10 +31,22 @@ steps, reorder or remove them, name it, **save** (persisted per viewer in `local
 **copy its run spec** (JSON) for the agent to execute. Saved workflows load/delete and show in the
 Catalog.
 
-**Phase 1 is author + visualize only:** the dashboard stays read-only and decoupled — workflows are
-executed by the agent out-of-band and their results stream back into the session views. Interactive
-execution (browser → server) and the gated, propose-first AI-annotation flow come after a dedicated
-STRIDE threat model + write-consent/authZ.
+**Read-only workflows run in the UI.** A **▷ run** button (on each catalog workflow and the builder
+draft) executes a workflow's steps against the artifacts already streamed into the browser: read-only
+ops (metadata, strings/imports/exports, functions, **call graph / analyze-recursive**, callers/
+callees, function context, decompile) resolve immediately and link their artifact in the live **Runs**
+tracker. Steps needing fresh server work or a write (`session_analyze`, scans/similarity, and all
+writes incl. **`ai_annotate`**) show as **needs-agent** — run via the agent, propose-first + gated.
+This is client-side over data the dashboard already holds: **no server round-trip, no write path.**
+
+**Phase 2 (interactive) — foundation shipped, default-off.** The browser→server command boundary is
+STRIDE-modeled (`docs/security/threat-model.md` §21, **TB9**) and specified (**ADR-076**). A pure
+gating policy (`commands.py`) classifies each command **allow** (read-only) / **needs-approval**
+(gated: import/analyze/close, writes, `ai_annotate` — default-deny, human write-consent only,
+propose-first) / **deny** (unknown/malformed). `POST /api/command` is **default-OFF + fail-closed**:
+no executor wired ⇒ 503, and interactive **requires auth** ⇒ 403 without a token. So there is **no
+live execution path** until an executor is wired to the session manager — a **gated action** needing
+human approval. Applying AI annotations/transforms remains propose-first + reversible (`session_undo`).
 
 ## Interactive call graph
 
