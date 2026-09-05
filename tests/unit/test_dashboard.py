@@ -408,6 +408,79 @@ def test_readonly_executor_wires_into_endpoint() -> None:
         del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
 
 
+def test_state_tool_caller_answers_readonly(tmp_path: Path) -> None:
+    """StateFileToolCaller answers read-only ops from the state file; unknown → unavailable."""
+    from vivarium.dashboard.executor import StateFileToolCaller
+    from vivarium.dashboard.state import DashboardState
+
+    f = tmp_path / "state.json"
+    w = DashboardState(f)
+    w.append_event(
+        SessionEvent(
+            kind="strings",
+            session_id="sx",
+            data={"total": 1, "items": [{"id": "0x1", "value": tag("hi")}]},
+        )
+    )
+    w.append_event(
+        SessionEvent(
+            kind="metadata", session_id="sx", data={"fields": [{"k": "format", "v": "ELF"}]}
+        )
+    )
+    w.append_event(
+        SessionEvent(
+            kind="callgraph", session_id="sx", data={"nodes": [{"id": "0xf"}], "edges": []}
+        )
+    )
+    w.append_event(SessionEvent(kind="imports", session_id="sx", data={"total": 0, "items": []}))
+    w.append_event(
+        SessionEvent(
+            kind="function",
+            session_id="sx",
+            data={
+                "id": "0xf",
+                "name": tag("main"),
+                "callers": [sym_ref("0x9", "entry")],
+                "callees": [sym_ref("0x2", "puts")],
+                "decompile": tag("int main(){}"),
+            },
+        )
+    )
+    tc = StateFileToolCaller(f)
+    assert tc.call("list_strings", {})["items"][0]["value"] == {"value": "hi", "untrusted": True}
+    assert tc.call("list_imports", {}) == {"total": 0, "items": []}
+    assert tc.call("program_metadata", {})["fields"][0]["v"] == "ELF"
+    assert tc.call("call_graph", {})["nodes"][0]["id"] == "0xf"
+    assert tc.call("list_functions", {})["functions"][0]["id"] == "0xf"
+    assert tc.call("callers", {"function": "0xf"})["callers"][0]["name"]["value"] == "entry"
+    assert tc.call("callees", {"function": "0xf"})["callees"][0]["name"]["value"] == "puts"
+    assert (
+        tc.call("decompile_function", {"function": "0xf"})["decompile"]["value"] == "int main(){}"
+    )
+    assert tc.call("function_context", {"function": "0xf"})["id"] == "0xf"
+    assert tc.call("callees", {"function": "missing"}) == {"unavailable": "callees"}
+    assert tc.call("ioc_scan", {}) == {"unavailable": "ioc_scan"}  # not in the store → agent needed
+
+
+def test_select_executor_gating(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Interactive enablement is fail-closed: needs the flag + a state file + a token."""
+    from vivarium.dashboard.__main__ import _select_executor
+
+    for var in (
+        "VIVARIUM_DASHBOARD_INTERACTIVE",
+        "VIVARIUM_DASHBOARD_STATE",
+        "VIVARIUM_DASHBOARD_TOKEN",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    assert _select_executor() is None  # nothing set
+    monkeypatch.setenv("VIVARIUM_DASHBOARD_INTERACTIVE", "1")
+    assert _select_executor() is None  # flag alone → disabled (no state/token)
+    monkeypatch.setenv("VIVARIUM_DASHBOARD_STATE", str(tmp_path / "s.json"))
+    assert _select_executor() is None  # still no token → disabled
+    monkeypatch.setenv("VIVARIUM_DASHBOARD_TOKEN", "tok")
+    assert _select_executor() is not None  # flag + state + token → enabled
+
+
 # --- security posture -----------------------------------------------------------------------------
 
 
