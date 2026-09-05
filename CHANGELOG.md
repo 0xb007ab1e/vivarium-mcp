@@ -8,6 +8,15 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Apply transform / AI annotation — propose-first review flow (operational).** The dashboard now
+  surfaces AI-annotation **proposals** (a new streamed `annotations` kind: per-item rename/comment
+  with `current`→`proposed` + rationale, all untrusted-tagged) in a **Proposals** view: review each
+  as a **diff**, approve/reject per item, then **apply approved** — which submits through the
+  **gated** command path (`ai_annotate`). The program write happens only under **write-consent**
+  (ADR-012, human-approved, reversible via `session_undo`), never auto from the browser; while
+  interactive is disabled the approved set is recorded for the agent. STRIDE/TB9 controls apply at
+  every boundary (auth, allow-list, gating, audit, inert rendering).
+
 - **Full vivarium op palette in the dashboard.** `/api/catalog`'s operation palette now covers the
   **entire Tier-1 tool surface** (78 ops across 9 groups: session · program/listing · code ·
   graph/xrefs · scans · similarity · types · annotate · utility), each marked read-only vs **gated**

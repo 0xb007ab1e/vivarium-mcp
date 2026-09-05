@@ -119,6 +119,18 @@ class SessionEvent:
     (a list of :func:`sym_ref` to the functions that use them) so the browser can show back-refs
     and cross-navigate both directions.
 
+    **``annotations`` kind (AI proposals — apply-transform, propose-first).** A set of AI-proposed
+    renames/comments the agent produced from decompiled evidence, keyed by a safe ``id``. The UI
+    reviews them (diff current→proposed, per-item approve) and submits approved items through the
+    **gated** command path — the program write happens only under write-consent (ADR-012), never
+    auto from the browser; reversible via ``session_undo``. Shape::
+
+        data = {
+          "id": "prop-1", "function_id": "00104c00"?,
+          "items": [ {"kind": "rename"|"comment", "target": sym_ref(addr, current_name),
+                      "current": tag(...), "proposed": tag(...), "rationale": tag(...) } ]
+        }
+
     **``workflow`` kind (Runs).** A workflow-run status, keyed by a safe ``id``, streamed by the
     agent as it executes a prebuilt/custom workflow so the UI shows a step tracker. All safe
     (closed-vocabulary op names + states); no binary-derived leaves. Shape::
