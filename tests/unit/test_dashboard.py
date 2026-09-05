@@ -570,17 +570,28 @@ def test_read_only_no_post() -> None:
     assert c.post("/api/sessions").status_code in (405, 404)
 
 
-def test_bearer_token_gate() -> None:
-    """When a token is configured, requests without it are 401; with it, 200."""
+def test_bearer_token_gates_commands_not_viewing() -> None:
+    """A token gates the COMMAND surface (POST); read-only GETs stay open (tailnet-gated).
+
+    A browser can't attach a bearer on navigation, so the UI + read-only APIs must load with a token
+    set; only the mutating command endpoint (POST /api/command) requires it.
+    """
     import os
 
     os.environ["VIVARIUM_DASHBOARD_TOKEN"] = "s3cret-demo"  # noqa: S105 - test fixture, not a secret
     try:
-        c = TestClient(build_app(DemoProvider()))
-        assert c.get("/api/health").status_code == 401
-        assert (
-            c.get("/api/health", headers={"authorization": "Bearer s3cret-demo"}).status_code == 200
+        # read-only GET loads WITHOUT a token (so the browser can render the page over the tailnet)
+        c = TestClient(build_app(DemoProvider(), executor=_noop_exec))
+        assert c.get("/api/health").status_code == 200
+        assert c.get("/").status_code == 200
+        # the command surface (POST) requires the token
+        assert c.post("/api/command", json={"op": "list_strings"}).status_code == 401
+        r = c.post(
+            "/api/command",
+            json={"op": "list_strings"},
+            headers={"authorization": "Bearer s3cret-demo"},
         )
+        assert r.status_code == 200
     finally:
         del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
 

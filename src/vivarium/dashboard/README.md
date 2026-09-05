@@ -102,7 +102,7 @@ Config (env):
 | Var | Meaning | Default |
 |---|---|---|
 | `VIVARIUM_DASHBOARD_BIND` | `host:port`. Host MUST be loopback or a `100.64.0.0/10` tailnet IP. | `127.0.0.1:8760` |
-| `VIVARIUM_DASHBOARD_TOKEN` | Optional shared bearer token gating every request (constant-time compare). | unset |
+| `VIVARIUM_DASHBOARD_TOKEN` | Optional shared bearer token gating the **command surface** (`POST /api/command`), constant-time compare. Read-only viewing (the UI + GET APIs) stays **tailnet-gated** so a browser can load the page; enter the token in the UI's titlebar field to run commands. | unset |
 | `VIVARIUM_DASHBOARD_STATE` | Optional path to a JSON state file. When set, the dashboard serves **live** data from it (`FileStatusProvider`); unset, it serves the deterministic `DemoProvider`. | unset |
 | `VIVARIUM_DASHBOARD_INTERACTIVE` | Enable the interactive command endpoint (`POST /api/command`). **Fail-closed:** also REQUIRES `VIVARIUM_DASHBOARD_STATE` + `VIVARIUM_DASHBOARD_TOKEN`, else interactive stays disabled (503). The wired transport is **read-only** (`StateFileToolCaller`) — answers read-only ops from the state file; gated ops/writes are refused (202). | unset (off) |
 
