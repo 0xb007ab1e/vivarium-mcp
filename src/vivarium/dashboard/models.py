@@ -29,6 +29,16 @@ class UiValue:
         return {"value": self.value, "untrusted": self.untrusted}
 
 
+def tag(value: str) -> dict[str, Any]:
+    """Serialize a binary-derived string as a tagged UNTRUSTED leaf for :attr:`SessionEvent.data`.
+
+    Shorthand for ``UiValue(value, untrusted=True).json()`` — the ``{"value", "untrusted": true}``
+    shape the browser renders inert. Use it for every attacker-controlled leaf placed in a panel
+    payload (symbol names, strings, call-graph labels), never a bare string (ADR-005).
+    """
+    return UiValue(value, untrusted=True).json()
+
+
 @dataclass(frozen=True, slots=True)
 class SessionSummary:
     """One analysis session's live status — all fields SAFE server scalars.
@@ -64,16 +74,29 @@ class SessionEvent:
 
     ``kind`` is a closed vocabulary. For ``kind="output"``/``"verdict"`` the human-facing content is
     binary-derived and carried in ``content`` as an UNTRUSTED :class:`UiValue`;
-    ``progress``/``tool`` events carry only safe scalars.
+    ``progress``/``tool`` events carry only safe scalars. The richer analysis panels
+    (``metadata`` / ``imports`` / ``exports`` / ``strings`` / ``callgraph``) carry a structured
+    ``data`` payload (see below).
+
+    **``data`` tagging convention (ADR-005).** ``data`` is a plain, JSON-safe container of *safe*
+    scalars (counts, hex addresses, closed-vocabulary labels). Any binary-derived (attacker-
+    controlled) leaf inside it MUST be a tagged value — the serialized :class:`UiValue` shape
+    ``{"value": str, "untrusted": true}`` — never a bare string. The browser renders every such
+    tagged object inert (``textContent``) exactly like ``content``; safe scalars render as text.
+    The producer (:mod:`vivarium.dashboard.state` helpers) is responsible for the tagging; the
+    dashboard never emits a raw binary-derived string outside a tagged value.
 
     Attributes:
-        kind: ``progress`` | ``tool`` | ``output`` | ``verdict`` — safe.
+        kind: ``progress`` | ``tool`` | ``output`` | ``verdict`` | ``metadata`` | ``imports`` |
+            ``exports`` | ``strings`` | ``callgraph`` — safe.
         session_id: Owning session — safe.
         percent: For ``progress``: ``0..100`` or ``None`` — safe.
         phase: For ``progress``: phase label or ``None`` — safe.
         tool: For ``tool``: the tool name (closed catalog) — safe.
         label: A short safe label for the pane (e.g. ``"decompile FUN_00401000"``) — safe.
         content: For ``output``/``verdict``: the binary-derived text — UNTRUSTED.
+        data: For the panel kinds: a structured payload whose untrusted leaves are tagged
+            ``{"value", "untrusted"}`` values (see the convention above); ``None`` otherwise.
     """
 
     kind: str
@@ -83,6 +106,7 @@ class SessionEvent:
     tool: str | None = None
     label: str | None = None
     content: UiValue | None = None
+    data: dict[str, Any] | None = None
 
     def json(self) -> dict[str, Any]:
         """Serialize to a plain dict; ``content`` becomes the tagged UiValue shape (or ``None``)."""
@@ -94,6 +118,7 @@ class SessionEvent:
             "tool": self.tool,
             "label": self.label,
             "content": self.content.json() if self.content is not None else None,
+            "data": self.data,
         }
 
 
