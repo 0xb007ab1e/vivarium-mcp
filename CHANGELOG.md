@@ -6,6 +6,20 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Dashboard redesigned as a VSCode-style workbench.** The dashboard UI moved from stacked
+  cards to a familiar three-region shell: a **titlebar**, an **Explorer sidebar** (sessions →
+  Overview / Imports / Exports / Strings / Call graph / each decompiled output / Verdict / Timeline,
+  plus Build), a **central artifact viewer** that renders each artifact type appropriately
+  (colorized C **code blocks** with a line-number gutter for decompiled output; sortable-width
+  tables for imports/exports/strings; a key/value grid for binary format; an adjacency list for the
+  call graph), and a **status bar**. Syntax colorization is a small self-contained tokenizer in
+  `app.js` — **no external libraries** (strict inline-free CSP) and **every token is emitted via
+  `textContent`**, so binary-derived (untrusted) content stays inert even while highlighted
+  (ADR-005). Theme-aware (light/dark) and keyboard-navigable (WCAG 2.2 AA target). Frontend-only —
+  the data contract, API, and providers are unchanged.
+
 ### Added
 
 - **Dashboard analysis panels (streamed).** The dashboard SSE stream now carries the full analysis

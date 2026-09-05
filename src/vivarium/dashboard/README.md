@@ -6,6 +6,17 @@ per-session analysis panels (**binary format**, **imports**, **exports**, **stri
 graph**), and the build/deliverable snapshot (tool catalog, gates, PRs, benchmark). It is
 **read-only**: no tool invocation, no mutation, no gated action.
 
+## Layout (VSCode-style workbench)
+
+The UI is a three-region shell: a **titlebar**, an **Explorer sidebar**, a **central artifact
+viewer**, and a **status bar**. The Explorer lists each session and its artifacts (Overview,
+Imports, Exports, Strings, Call graph, each decompiled output, Verdict, Timeline) plus Build;
+selecting one renders it type-appropriately in the viewer — colorized C **code blocks** (line-number
+gutter) for decompiled output, tables for imports/exports/strings, a key/value grid for the binary
+format, an adjacency list for the call graph. Syntax colorization is a small self-contained
+tokenizer in `app.js` (no external libraries — strict CSP) that emits **every** token via
+`textContent`, so binary-derived content stays inert even while highlighted (ADR-005).
+
 ## Analysis panels (streamed)
 
 Beyond the progress + timeline, the SSE stream carries structured panel events —
