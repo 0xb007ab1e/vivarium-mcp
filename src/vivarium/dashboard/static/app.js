@@ -1213,7 +1213,14 @@ function renderCatalog() {
   // prebuilt workflows
   (cat.workflows || []).forEach((wf) => {
     const card = el("section", "wfcard");
-    card.appendChild(el("h3", "wfcard-h", wf.name));
+    const hrow = el("div", "vh sub");
+    hrow.appendChild(el("h3", "vh-sub-title", wf.name));
+    const run = el("button", "gbtn sm", "▷ run");
+    run.type = "button";
+    run.title = "run read-only steps against the current session";
+    run.addEventListener("click", () => runWorkflow(wf.name, wf.steps));
+    hrow.appendChild(run);
+    card.appendChild(hrow);
     card.appendChild(el("p", "wfcard-desc", wf.desc || ""));
     const ol = el("ol", "wfsteps");
     (wf.steps || []).forEach((st) => {
@@ -1385,7 +1392,14 @@ function renderBuilder() {
     builderDraft = { name: "", steps: [] };
     renderBuilder();
   });
+  const run = el("button", "gbtn", "▷ run");
+  run.type = "button";
+  run.title = "run read-only steps against the current session";
+  run.addEventListener("click", () => {
+    if (builderDraft.steps.length) runWorkflow(builderDraft.name || "custom workflow", builderDraft.steps);
+  });
   actions.appendChild(save);
+  actions.appendChild(run);
   actions.appendChild(clear);
   editor.appendChild(actions);
 
@@ -1446,7 +1460,114 @@ function renderBuilder() {
   }
 }
 
-const _RUN_STEP_ICON = { done: "✓", running: "▷", failed: "✕", pending: "○" };
+/* ---------------------------------------------------------------- client-side workflow runner */
+
+// Read-only ops are OPERATIONAL client-side: they resolve against the artifacts already streamed
+// into the browser store (no server round-trip, no write path). Each resolver returns a step state
+// + an optional artifact view to link. Ops needing fresh server work or a write stay "needs-agent"
+// (gated: run via the agent under write-consent — propose-first for AI annotation).
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function _firstFunctionId(s) {
+  const f = Object.values(s.functions)[0];
+  return f && f.id;
+}
+
+const _READONLY_OPS = {
+  program_metadata: (s) => (s.metadata ? { state: "done", view: "overview" } : { state: "skipped" }),
+  list_strings: (s) => (s.strings ? { state: "done", view: "strings" } : { state: "skipped" }),
+  list_imports: (s) => (s.imports ? { state: "done", view: "imports" } : { state: "skipped" }),
+  list_exports: (s) => (s.exports ? { state: "done", view: "exports" } : { state: "skipped" }),
+  list_functions: (s) => {
+    const id = _firstFunctionId(s);
+    return id ? { state: "done", view: "function:" + id } : { state: "skipped" };
+  },
+  call_graph: (s) =>
+    s.callgraph || Object.keys(s.functions).length
+      ? { state: "done", view: "callgraph" }
+      : { state: "skipped" },
+  function_context: (s) => {
+    const id = _firstFunctionId(s);
+    return id ? { state: "done", view: "function:" + id } : { state: "skipped" };
+  },
+  callers: (s) => {
+    const id = _firstFunctionId(s);
+    return id ? { state: "done", view: "function:" + id } : { state: "skipped" };
+  },
+  callees: (s) => {
+    const id = _firstFunctionId(s);
+    return id ? { state: "done", view: "function:" + id } : { state: "skipped" };
+  },
+  decompile_function: (s) => {
+    const id = _firstFunctionId(s);
+    const fn = id && s.functions[id];
+    return fn && fn.decompile ? { state: "done", view: "function:" + id } : { state: "skipped" };
+  },
+};
+
+const _GATED_OPS = new Set([
+  "session_import",
+  "session_analyze",
+  "session_close",
+  "rename_function",
+  "rename_local_variable",
+  "rename_parameter",
+  "set_comment",
+  "set_function_signature",
+  "ai_annotate",
+]);
+
+function _pickSession() {
+  if (selection && selection.sessionId && store.sessions[selection.sessionId]) return selection.sessionId;
+  return Object.keys(store.sessions)[0];
+}
+
+/** Run a workflow's steps against the browser store: read-only ops execute + link their artifact;
+ *  gated / not-yet-streamed ops are marked needs-agent (run via the agent). Live-updates the Runs
+ *  view as it goes — operational, client-side, no server write path. */
+async function runWorkflow(name, steps) {
+  const sid = _pickSession();
+  if (!sid) {
+    setStatus("no session to run against");
+    return;
+  }
+  const s = store.sessions[sid];
+  const runId = "uirun-" + Date.now();
+  const run = {
+    id: runId,
+    name: (name || "workflow") + " (UI run)",
+    state: "running",
+    steps: (steps || []).map((st) => ({ op: st.op, label: st.label || "", state: "pending" })),
+  };
+  s.workflows[runId] = run;
+  select({ kind: "session-view", sessionId: sid, view: "runs" });
+  for (let i = 0; i < run.steps.length; i++) {
+    run.steps[i].state = "running";
+    if (selection && selection.view === "runs") renderViewer();
+    await _sleep(110);
+    const op = run.steps[i].op;
+    let res;
+    if (_GATED_OPS.has(op)) res = { state: "needs-agent" };
+    else if (_READONLY_OPS[op]) res = _READONLY_OPS[op](s);
+    else res = { state: "needs-agent" }; // scans / similarity: not in the client store → agent
+    run.steps[i].state = res.state;
+    if (res.view) run.steps[i].view = res.view;
+    if (selection && selection.view === "runs") renderViewer();
+    await _sleep(110);
+  }
+  run.state = "done";
+  if (selection && selection.view === "runs") renderViewer();
+  setStatus("ran " + (name || "workflow") + " — read-only steps applied; gated steps → needs-agent");
+}
+
+const _RUN_STEP_ICON = {
+  done: "✓",
+  running: "▷",
+  failed: "✕",
+  pending: "○",
+  "needs-agent": "⇢",
+  skipped: "–",
+};
 
 function renderRuns(s) {
   const root = viewerRoot();
