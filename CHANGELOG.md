@@ -8,6 +8,18 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Interactive call graph (SVG, movable nodes).** The dashboard's Call graph view is now an
+  interactive node-edge graph instead of a flat list: **draggable** nodes, background **pan**, wheel
+  **zoom**, **click a node to open** its artifact, **double-click to expand** its neighbors, and a
+  **depth** control (focus + N hops). Nodes are typed — **functions**, **imports** (external calls),
+  and **strings/data** — with directed call edges and dashed data-reference edges (arrowheads show
+  direction, i.e. inbound vs outbound). Initial placement is a **user preference** (persisted in
+  `localStorage`): **Layered** (top-down by call direction), **Force-directed**, or **Radial**.
+  Function detail gained a **"show in graph"** action that focuses the graph on that function.
+  Hand-built inline SVG — **no external graph library** (strict CSP) — and node labels are real DOM
+  text (`textContent`), so untrusted names stay inert even in the graph (ADR-005). The accessible
+  equivalent (callers/callees/xref lists in the function view) remains for keyboard/AT users.
+
 - **Dashboard RE browser: navigable functions, cross-references, and lineage.** The dashboard is
   now a reverse-engineering browser. A new streamed `function` kind carries a per-function context
   artifact (keyed by a safe address `id`): name, signature, callers, callees, cross-references

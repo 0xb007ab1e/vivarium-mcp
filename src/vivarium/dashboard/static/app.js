@@ -34,6 +34,42 @@ function plain(v) {
   return v === null || v === undefined ? "" : String(v);
 }
 
+/** Create an SVG element with attributes (SVG uses createElementNS + setAttribute for class). */
+const SVGNS = "http://www.w3.org/2000/svg";
+function svg(tag, attrs) {
+  const n = document.createElementNS(SVGNS, tag);
+  if (attrs) for (const k in attrs) n.setAttribute(k, attrs[k]);
+  return n;
+}
+
+/* ------------------------------------------------------------------ graph preferences (per viewer) */
+
+// User preference: initial node layout for the interactive graph — persisted in localStorage
+// (a per-viewer convenience; wrapped in try/catch per topic-web-frontend, safe if storage is blocked).
+const graphPrefs = { layout: "layered", depth: 1 };
+(function loadGraphPrefs() {
+  try {
+    const raw = localStorage.getItem("vivarium.graph");
+    if (raw) {
+      const p = JSON.parse(raw);
+      if (["layered", "force", "radial"].includes(p.layout)) graphPrefs.layout = p.layout;
+      if (Number.isInteger(p.depth) && p.depth >= 1 && p.depth <= 3) graphPrefs.depth = p.depth;
+    }
+  } catch (_) {
+    /* storage blocked/absent — use defaults */
+  }
+})();
+function saveGraphPrefs() {
+  try {
+    localStorage.setItem("vivarium.graph", JSON.stringify(graphPrefs));
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+// Live graph runtime state (rebuilt when the focus/session changes).
+let graphState = null;
+
 /** A cross-link: a button labelled inert by name, navigating by SAFE id. `ref` = {id, name, ...}. */
 function xlink(sessionId, ref, extraClass) {
   const b = el("button", "xlink" + (extraClass ? " " + extraClass : ""));
@@ -440,6 +476,13 @@ function renderFunction(s, id) {
   title.appendChild(renderValue(fn.name));
   h.appendChild(title);
   h.appendChild(el("span", "vh-sub mono", fn.id));
+  const graphBtn = el("button", "gbtn sm", "⑂ show in graph");
+  graphBtn.type = "button";
+  graphBtn.addEventListener("click", () => {
+    graphState = { sessionId: s.summary.session_id, focus: id, pos: {}, extra: new Set() };
+    select({ kind: "session-view", sessionId: s.summary.session_id, view: "callgraph" });
+  });
+  h.appendChild(graphBtn);
   root.appendChild(h);
 
   if (fn.signature) {
@@ -586,37 +629,470 @@ function renderStrings(s) {
   root.appendChild(scroll);
 }
 
+/* ---------------------------------------------------------------- interactive call graph (SVG) */
+
+/** Build a unified graph model for a session from functions + callgraph + imports/strings. */
+function buildGraphModel(s) {
+  const nodes = {};
+  const edges = [];
+  const seenE = new Set();
+  const kindOf = (id, fallback) => (s.idIndex[id] ? s.idIndex[id].kind : fallback || "function");
+  function addNode(id, name, kind) {
+    if (!id) return;
+    if (!nodes[id]) nodes[id] = { id, name: name || { value: id, untrusted: false }, kind: kind || kindOf(id) };
+    else if (name && (!nodes[id].name || nodes[id].name.value === id)) nodes[id].name = name;
+  }
+  function addEdge(from, to, kind) {
+    if (!from || !to || from === to) return;
+    const k = from + ">" + to + ">" + kind;
+    if (seenE.has(k)) return;
+    seenE.add(k);
+    edges.push({ from, to, kind });
+  }
+  Object.values(s.functions).forEach((fn) => {
+    addNode(fn.id, fn.name, "function");
+    (fn.callees || []).forEach((c) => {
+      addNode(c.id, c.name);
+      addEdge(fn.id, c.id, "call");
+    });
+    (fn.callers || []).forEach((c) => {
+      addNode(c.id, c.name);
+      addEdge(c.id, fn.id, "call");
+    });
+    (fn.xrefs || []).forEach((x) => {
+      const dk = x.kind === "string" || x.kind === "data" ? "data" : "call";
+      addNode(x.id, x.name, x.kind === "string" ? "string" : x.kind === "import" ? "import" : undefined);
+      addEdge(fn.id, x.id, dk);
+    });
+  });
+  if (s.callgraph) {
+    (s.callgraph.nodes || []).forEach((n) => addNode(n.id, n.label, "function"));
+    (s.callgraph.edges || []).forEach((e) => addEdge(e.from, e.to, "call"));
+  }
+  (s.imports && s.imports.items ? s.imports.items : []).forEach((it) => addNode(it.id, it.name, "import"));
+  (s.strings && s.strings.items ? s.strings.items : []).forEach((it) => addNode(it.id, it.value, "string"));
+
+  const adj = {};
+  edges.forEach((e) => {
+    (adj[e.from] = adj[e.from] || []).push(e.to);
+    (adj[e.to] = adj[e.to] || []).push(e.from);
+  });
+  return { nodes, edges, adj };
+}
+
+/** Undirected BFS closure from `roots` up to `depth` hops. */
+function bfsClosure(adj, roots, depth) {
+  const seen = new Set(roots);
+  let frontier = [...roots];
+  for (let d = 0; d < depth; d++) {
+    const next = [];
+    frontier.forEach((id) =>
+      (adj[id] || []).forEach((n) => {
+        if (!seen.has(n)) {
+          seen.add(n);
+          next.push(n);
+        }
+      })
+    );
+    frontier = next;
+  }
+  return seen;
+}
+
+const NODE_W = 132;
+const NODE_H = 30;
+
+/** Compute {id:{x,y}} positions for the shown node set per the chosen layout. */
+function layoutGraph(model, shown, focus, kind) {
+  const ids = [...shown];
+  const pos = {};
+  if (kind === "radial") {
+    const dist = {};
+    bfsRanks(model.adj, focus, shown, dist);
+    const byR = {};
+    ids.forEach((id) => ((byR[dist[id] || 0] = byR[dist[id] || 0] || []).push(id)));
+    Object.keys(byR).forEach((r) => {
+      const ring = byR[r];
+      const radius = Number(r) * 170;
+      ring.forEach((id, i) => {
+        const a = (i / ring.length) * Math.PI * 2;
+        pos[id] = { x: 500 + radius * Math.cos(a), y: 320 + radius * Math.sin(a) };
+      });
+    });
+    if (pos[focus]) pos[focus] = { x: 500, y: 320 };
+  } else if (kind === "force") {
+    ids.forEach((id, i) => {
+      const a = (i / ids.length) * Math.PI * 2;
+      pos[id] = { x: 500 + 200 * Math.cos(a), y: 320 + 160 * Math.sin(a) };
+    });
+    pos[focus] = { x: 500, y: 320 };
+    for (let it = 0; it < 220; it++) {
+      const fx = {};
+      const fy = {};
+      ids.forEach((a) => {
+        fx[a] = 0;
+        fy[a] = 0;
+      });
+      for (let i = 0; i < ids.length; i++) {
+        for (let j = i + 1; j < ids.length; j++) {
+          const a = ids[i];
+          const b = ids[j];
+          let dx = pos[a].x - pos[b].x;
+          let dy = pos[a].y - pos[b].y;
+          let d2 = dx * dx + dy * dy || 1;
+          const f = 24000 / d2;
+          const d = Math.sqrt(d2);
+          dx /= d;
+          dy /= d;
+          fx[a] += dx * f;
+          fy[a] += dy * f;
+          fx[b] -= dx * f;
+          fy[b] -= dy * f;
+        }
+      }
+      model.edges.forEach((e) => {
+        if (!shown.has(e.from) || !shown.has(e.to)) return;
+        let dx = pos[e.to].x - pos[e.from].x;
+        let dy = pos[e.to].y - pos[e.from].y;
+        const d = Math.sqrt(dx * dx + dy * dy) || 1;
+        const f = (d - 150) * 0.02;
+        dx /= d;
+        dy /= d;
+        fx[e.from] += dx * f;
+        fy[e.from] += dy * f;
+        fx[e.to] -= dx * f;
+        fy[e.to] -= dy * f;
+      });
+      ids.forEach((id) => {
+        if (id === focus) return; // pin focus
+        pos[id].x += Math.max(-30, Math.min(30, fx[id]));
+        pos[id].y += Math.max(-30, Math.min(30, fy[id]));
+      });
+    }
+  } else {
+    // layered: signed directed distance from focus (callers above, callees below)
+    const level = {};
+    directedLevels(model.edges, shown, focus, level);
+    const byL = {};
+    ids.forEach((id) => ((byL[level[id] || 0] = byL[level[id] || 0] || []).push(id)));
+    Object.keys(byL)
+      .map(Number)
+      .sort((a, b) => a - b)
+      .forEach((l) => {
+        const row = byL[l];
+        row.forEach((id, i) => {
+          pos[id] = { x: 120 + i * (NODE_W + 40), y: 320 + l * (NODE_H + 70) };
+        });
+      });
+  }
+  return pos;
+}
+
+function bfsRanks(adj, focus, shown, out) {
+  out[focus] = 0;
+  let frontier = [focus];
+  let d = 0;
+  const seen = new Set([focus]);
+  while (frontier.length) {
+    d++;
+    const next = [];
+    frontier.forEach((id) =>
+      (adj[id] || []).forEach((n) => {
+        if (shown.has(n) && !seen.has(n)) {
+          seen.add(n);
+          out[n] = d;
+          next.push(n);
+        }
+      })
+    );
+    frontier = next;
+  }
+}
+
+function directedLevels(edges, shown, focus, out) {
+  out[focus] = 0;
+  const outAdj = {};
+  const inAdj = {};
+  edges.forEach((e) => {
+    if (!shown.has(e.from) || !shown.has(e.to)) return;
+    (outAdj[e.from] = outAdj[e.from] || []).push(e.to);
+    (inAdj[e.to] = inAdj[e.to] || []).push(e.from);
+  });
+  const walk = (adj, sign) => {
+    let frontier = [focus];
+    const seen = new Set([focus]);
+    let d = 0;
+    while (frontier.length) {
+      d++;
+      const next = [];
+      frontier.forEach((id) =>
+        (adj[id] || []).forEach((n) => {
+          if (!seen.has(n)) {
+            seen.add(n);
+            if (out[n] === undefined) out[n] = sign * d;
+            next.push(n);
+          }
+        })
+      );
+      frontier = next;
+    }
+  };
+  walk(outAdj, 1);
+  walk(inAdj, -1);
+  [...shown].forEach((id) => {
+    if (out[id] === undefined) out[id] = 0;
+  });
+}
+
+/** Render the interactive graph view (SVG; movable nodes, click-navigate, double-click-expand). */
 function renderCallgraph(s) {
   const root = viewerRoot();
   setCrumb([s.summary.session_id, "Call graph"]);
-  const data = s.callgraph;
-  if (!data) {
-    root.appendChild(el("p", "muted", "not yet streamed"));
+  const model = buildGraphModel(s);
+  const nodeIds = Object.keys(model.nodes);
+  if (!nodeIds.length) {
+    root.appendChild(el("p", "muted", "no call graph streamed yet"));
     return;
   }
-  const labels = {};
-  (data.nodes || []).forEach((n) => (labels[n.id] = n.label));
-  const adj = {};
-  (data.edges || []).forEach((e) => (adj[e.from] = adj[e.from] || []).push(e.to));
-  vhead(
-    root,
-    "Call graph",
-    (data.nodes || []).length + " nodes · " + (data.edges || []).length + " edges" + (data.truncated ? " (truncated)" : "")
-  );
-  const ul = el("ul", "cg");
-  Object.keys(adj).forEach((from) => {
-    const li = el("li", "cg-row");
-    li.appendChild(xlink(s.summary.session_id, { id: from, name: labels[from] || { value: from, untrusted: false } }));
-    li.appendChild(el("span", "cg-arrow", " → "));
-    const callees = el("span", "cg-callees");
-    adj[from].forEach((to, i) => {
-      if (i) callees.appendChild(document.createTextNode(", "));
-      callees.appendChild(xlink(s.summary.session_id, { id: to, name: labels[to] || { value: to, untrusted: false } }));
-    });
-    li.appendChild(callees);
-    ul.appendChild(li);
+
+  // focus: keep current if still present, else callgraph root / first function / first node
+  let focus = graphState && graphState.sessionId === s.summary.session_id ? graphState.focus : null;
+  if (!focus || !model.nodes[focus]) {
+    const firstFn = Object.values(s.functions)[0];
+    focus =
+      (s.callgraph && s.callgraph.edges && s.callgraph.edges[0] && s.callgraph.edges[0].from) ||
+      (firstFn && firstFn.id) ||
+      nodeIds[0];
+  }
+  graphState = { sessionId: s.summary.session_id, focus, model, pos: {}, extra: new Set() };
+
+  vhead(root, "Call graph", nodeIds.length + " nodes · " + model.edges.length + " edges");
+
+  // toolbar: layout preference + depth + reset
+  const bar = el("div", "gbar");
+  bar.appendChild(el("label", "gbar-lab", "layout"));
+  const sel = el("select", "gsel");
+  [
+    ["layered", "Layered"],
+    ["force", "Force-directed"],
+    ["radial", "Radial"],
+  ].forEach(([v, t]) => {
+    const o = el("option", null, t);
+    o.value = v;
+    if (graphPrefs.layout === v) o.selected = true;
+    sel.appendChild(o);
   });
-  root.appendChild(ul);
+  sel.addEventListener("change", () => {
+    graphPrefs.layout = sel.value;
+    saveGraphPrefs();
+    draw();
+  });
+  bar.appendChild(sel);
+
+  bar.appendChild(el("label", "gbar-lab", "depth"));
+  const depth = el("input", "grange");
+  depth.type = "range";
+  depth.min = "1";
+  depth.max = "3";
+  depth.value = String(graphPrefs.depth);
+  const depthOut = el("span", "gdepth", String(graphPrefs.depth));
+  depth.addEventListener("input", () => {
+    graphPrefs.depth = +depth.value;
+    depthOut.textContent = depth.value;
+    saveGraphPrefs();
+    graphState.extra = new Set();
+    draw();
+  });
+  bar.appendChild(depth);
+  bar.appendChild(depthOut);
+
+  const reset = el("button", "gbtn", "reset view");
+  reset.type = "button";
+  reset.addEventListener("click", () => {
+    graphState.pos = {};
+    draw();
+  });
+  bar.appendChild(reset);
+  const focusLab = el("span", "gfocus");
+  focusLab.appendChild(document.createTextNode("focus: "));
+  focusLab.appendChild(renderValue(model.nodes[focus].name));
+  bar.appendChild(focusLab);
+  root.appendChild(bar);
+
+  root.appendChild(
+    el(
+      "p",
+      "ghint",
+      "drag nodes to arrange · drag background to pan · scroll to zoom · click a node to open it · double-click to expand its neighbors"
+    )
+  );
+
+  const viewport = el("div", "gviewport");
+  const svgEl = svg("svg", { class: "graph", width: "100%", height: "560", role: "group" });
+  const defs = svg("defs");
+  [
+    ["arrow-call", "var(--accent)"],
+    ["arrow-data", "var(--warn)"],
+  ].forEach(([mid, color]) => {
+    const marker = svg("marker", {
+      id: mid,
+      markerWidth: "9",
+      markerHeight: "9",
+      refX: "8",
+      refY: "3",
+      orient: "auto",
+      markerUnits: "strokeWidth",
+    });
+    marker.appendChild(svg("path", { d: "M0,0 L8,3 L0,6 z", fill: color }));
+    defs.appendChild(marker);
+  });
+  svgEl.appendChild(defs);
+  const pan = svg("g", { class: "gpan" });
+  const edgeLayer = svg("g", { class: "gedges" });
+  const nodeLayer = svg("g", { class: "gnodes" });
+  pan.appendChild(edgeLayer);
+  pan.appendChild(nodeLayer);
+  svgEl.appendChild(pan);
+  viewport.appendChild(svgEl);
+  root.appendChild(viewport);
+
+  const view = { x: 40, y: 20, k: 0.85 };
+  function applyView() {
+    pan.setAttribute("transform", "translate(" + view.x + "," + view.y + ") scale(" + view.k + ")");
+  }
+
+  const nodeEls = {};
+  const edgeEls = [];
+
+  function nodeCenter(id) {
+    const p = graphState.pos[id] || { x: 0, y: 0 };
+    return { x: p.x + NODE_W / 2, y: p.y + NODE_H / 2 };
+  }
+  function updateEdge(rec) {
+    const a = nodeCenter(rec.from);
+    const b = nodeCenter(rec.to);
+    rec.el.setAttribute("x1", a.x);
+    rec.el.setAttribute("y1", a.y);
+    rec.el.setAttribute("x2", b.x);
+    rec.el.setAttribute("y2", b.y);
+  }
+
+  function draw() {
+    const sid = s.summary.session_id;
+    const shown = bfsClosure(model.adj, [focus, ...graphState.extra], graphPrefs.depth);
+    // only lay out nodes that don't already have a user position
+    const laid = layoutGraph(model, shown, focus, graphPrefs.layout);
+    [...shown].forEach((id) => {
+      if (!graphState.pos[id]) graphState.pos[id] = laid[id] || { x: 500, y: 320 };
+    });
+    edgeLayer.replaceChildren();
+    nodeLayer.replaceChildren();
+    edgeEls.length = 0;
+    model.edges.forEach((e) => {
+      if (!shown.has(e.from) || !shown.has(e.to)) return;
+      const line = svg("line", {
+        class: "gedge edge-" + e.kind,
+        "marker-end": e.kind === "data" ? "url(#arrow-data)" : "url(#arrow-call)",
+      });
+      edgeLayer.appendChild(line);
+      const rec = { from: e.from, to: e.to, el: line };
+      edgeEls.push(rec);
+      updateEdge(rec);
+    });
+    [...shown].forEach((id) => {
+      const n = model.nodes[id];
+      const p = graphState.pos[id];
+      const g = svg("g", {
+        class: "gnode kind-" + n.kind + (id === focus ? " focus" : ""),
+        transform: "translate(" + p.x + "," + p.y + ")",
+        tabindex: "0",
+        role: "button",
+      });
+      g.setAttribute("aria-label", n.kind + " " + plain(n.name));
+      g.appendChild(svg("rect", { class: "grect", width: NODE_W, height: NODE_H, rx: "6" }));
+      const icon = svg("text", { class: "gicon", x: 12, y: NODE_H / 2 + 4 });
+      icon.textContent = n.kind === "import" ? "⇥" : n.kind === "string" ? '"' : "ƒ";
+      g.appendChild(icon);
+      const t = svg("text", { class: "gtext", x: 26, y: NODE_H / 2 + 4 });
+      t.textContent = plain(n.name); // INERT (raster-free DOM text)
+      g.appendChild(t);
+      nodeLayer.appendChild(g);
+      nodeEls[id] = g;
+      wireNode(g, id, sid);
+    });
+    applyView();
+  }
+
+  let drag = null; // {id?, moved, startX, startY, origX, origY}
+  function wireNode(g, id, sid) {
+    g.addEventListener("pointerdown", (ev) => {
+      ev.stopPropagation();
+      g.setPointerCapture(ev.pointerId);
+      drag = {
+        id,
+        moved: false,
+        startX: ev.clientX,
+        startY: ev.clientY,
+        origX: graphState.pos[id].x,
+        origY: graphState.pos[id].y,
+      };
+    });
+    g.addEventListener("pointermove", (ev) => {
+      if (!drag || drag.id !== id) return;
+      const dx = (ev.clientX - drag.startX) / view.k;
+      const dy = (ev.clientY - drag.startY) / view.k;
+      if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+      graphState.pos[id] = { x: drag.origX + dx, y: drag.origY + dy };
+      g.setAttribute("transform", "translate(" + graphState.pos[id].x + "," + graphState.pos[id].y + ")");
+      edgeEls.forEach((rec) => {
+        if (rec.from === id || rec.to === id) updateEdge(rec);
+      });
+    });
+    g.addEventListener("pointerup", (ev) => {
+      const wasDrag = drag && drag.moved;
+      drag = null;
+      if (!wasDrag) navigateById(sid, id); // click = open the artifact
+    });
+    g.addEventListener("dblclick", (ev) => {
+      ev.preventDefault();
+      graphState.extra.add(id); // expand this node's neighbors into the graph
+      draw();
+    });
+    g.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") navigateById(sid, id);
+      else if (ev.key === "+" || ev.key === "=") {
+        graphState.extra.add(id);
+        draw();
+      }
+    });
+  }
+
+  // background pan + wheel zoom
+  let panning = null;
+  svgEl.addEventListener("pointerdown", (ev) => {
+    if (ev.target.closest(".gnode")) return;
+    panning = { x: ev.clientX, y: ev.clientY, ox: view.x, oy: view.y };
+  });
+  svgEl.addEventListener("pointermove", (ev) => {
+    if (!panning) return;
+    view.x = panning.ox + (ev.clientX - panning.x);
+    view.y = panning.oy + (ev.clientY - panning.y);
+    applyView();
+  });
+  svgEl.addEventListener("pointerup", () => (panning = null));
+  svgEl.addEventListener("pointerleave", () => (panning = null));
+  svgEl.addEventListener(
+    "wheel",
+    (ev) => {
+      ev.preventDefault();
+      const factor = ev.deltaY < 0 ? 1.1 : 1 / 1.1;
+      view.k = Math.max(0.2, Math.min(2.5, view.k * factor));
+      applyView();
+    },
+    { passive: false }
+  );
+
+  draw();
 }
 
 function renderOutput(out) {

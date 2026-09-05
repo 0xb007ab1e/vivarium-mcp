@@ -804,3 +804,129 @@ body {
     background: var(--accent-bg);
   }
 }
+
+/* --- interactive call graph (SVG) --- */
+.gbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0.3rem 0 0.2rem;
+}
+.gbar-lab {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.gsel,
+.gbtn {
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+}
+.gbtn:hover {
+  background: var(--surface-3);
+}
+.gbtn.sm {
+  font-size: 0.74rem;
+  color: var(--sym);
+}
+.grange {
+  accent-color: var(--accent);
+}
+.gdepth {
+  font-family: var(--mono);
+  color: var(--muted);
+  width: 1.2em;
+  text-align: center;
+}
+.gfocus {
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-left: auto;
+}
+.ghint {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin: 0.1rem 0 0.4rem;
+}
+.gviewport {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  background-image: radial-gradient(var(--line) 1px, transparent 1px);
+  background-size: 22px 22px;
+  overflow: hidden;
+}
+.graph {
+  display: block;
+  touch-action: none;
+  cursor: grab;
+}
+.graph:active {
+  cursor: grabbing;
+}
+.gedge {
+  stroke: var(--accent);
+  stroke-width: 1.4;
+  opacity: 0.6;
+}
+.edge-data {
+  stroke: var(--warn);
+  stroke-dasharray: 4 3;
+}
+.gnode {
+  cursor: pointer;
+}
+.grect {
+  fill: var(--surface);
+  stroke: var(--line);
+  stroke-width: 1.2;
+}
+.gnode:hover .grect {
+  stroke: var(--accent);
+}
+.gnode:focus-visible {
+  outline: none;
+}
+.gnode:focus-visible .grect {
+  stroke: var(--accent);
+  stroke-width: 2.2;
+}
+.gnode.focus .grect {
+  stroke: var(--accent);
+  stroke-width: 2.4;
+  fill: var(--accent-bg);
+}
+.gtext {
+  fill: var(--ink);
+  font-family: var(--mono);
+  font-size: 12px;
+  dominant-baseline: middle;
+}
+.gicon {
+  font-family: var(--mono);
+  font-size: 12px;
+  dominant-baseline: middle;
+}
+.kind-function .gicon {
+  fill: var(--kw);
+}
+.kind-import .grect {
+  stroke-dasharray: 5 3;
+}
+.kind-import .gicon {
+  fill: var(--ty);
+}
+.kind-string .gicon {
+  fill: var(--str);
+}
+.kind-string .grect {
+  fill: var(--surface-2);
+}
