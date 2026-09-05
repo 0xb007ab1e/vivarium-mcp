@@ -208,6 +208,61 @@ body {
   font-size: 0.8rem;
   padding: 0.2rem 0.9rem;
 }
+
+/* --- collapsible: explorer groups, sessions, and viewer panels save viewport space --- */
+.is-collapsible {
+  cursor: pointer;
+  user-select: none;
+}
+.tw-group-h.is-collapsible:hover {
+  color: var(--ink-2);
+}
+.tw-group-h.is-collapsible:focus-visible,
+.card2-h.is-collapsible:focus-visible,
+.refpanel-h.is-collapsible:focus-visible,
+.wfcard-h.is-collapsible:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+/* Caret glyph shared by group headers and panel headers. */
+.caret {
+  display: inline-block;
+  width: 1em;
+  color: var(--muted);
+  font-size: 0.8em;
+  margin-right: 0.25rem;
+}
+/* Session block: a head row (caret + nav item) over an indentable kids list. */
+.tw-sess-head {
+  display: flex;
+  align-items: stretch;
+}
+.tw-caret {
+  flex: 0 0 auto;
+  width: 1.3rem;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+.tw-caret:hover {
+  color: var(--ink-2);
+  background: var(--surface-3);
+}
+.tw-caret:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.tw-sess-head .tw-item {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* Viewer panel body — hidden via [hidden] when its header is collapsed. */
+.panel-body[hidden] {
+  display: none;
+}
 .tw-item {
   display: flex;
   align-items: center;

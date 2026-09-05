@@ -8,6 +8,12 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Collapsible explorer sessions/groups and viewer panels (save viewport space).** Every explorer
+  group (Sessions / Workflows / Build), each individual session block, and every viewer panel (a
+  `<section>` led by a header) is now a keyboard-operable collapse toggle (caret + `aria-expanded`,
+  Enter/Space). Collapsed state is persisted per-viewer in `localStorage` (`vivarium.dashboard.collapse`)
+  and survives streamed re-renders. All-`textContent`/`createElement` (no innerHTML) — CSP posture and
+  ADR-005 inert rendering unchanged.
 - **Auth scoped to the command surface (browser-loadable with a token set).** The bearer token now
   gates only mutating requests (`POST /api/command`); read-only GET/HEAD/OPTIONS (the UI + read-only
   APIs) pass, gated by the tailnet/loopback bind — so the dashboard **loads in a browser even with a

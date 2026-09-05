@@ -111,6 +111,81 @@ function saveCustomWorkflows(list) {
 // The in-progress builder draft (module-scoped so it survives view switches within a session).
 let builderDraft = { name: "", steps: [] };
 
+/* ------------------------------------------------------------------ collapse state (per viewer) */
+
+// Which explorer groups / sessions / viewer panels the viewer has collapsed, to save viewport space.
+// A plain id -> true map persisted in localStorage (per-viewer convenience; safe if storage blocked).
+let collapsedState = {};
+(function loadCollapse() {
+  try {
+    const raw = localStorage.getItem("vivarium.dashboard.collapse");
+    const obj = raw ? JSON.parse(raw) : {};
+    collapsedState = obj && typeof obj === "object" ? obj : {};
+  } catch (_) {
+    collapsedState = {};
+  }
+})();
+function saveCollapse() {
+  try {
+    localStorage.setItem("vivarium.dashboard.collapse", JSON.stringify(collapsedState));
+  } catch (_) {
+    /* storage blocked — collapse state stays in memory for this view only */
+  }
+}
+function isCollapsed(id) {
+  return collapsedState[id] === true;
+}
+function setCollapsed(id, val) {
+  if (val) collapsedState[id] = true;
+  else delete collapsedState[id];
+  saveCollapse();
+}
+
+// Make a header element a keyboard-operable collapse toggle for `bodyEl`, persisted under `id`.
+// Prepends a caret; the header controls the body's visibility (aria-expanded reflects state).
+function wireCollapse(headerEl, bodyEl, id) {
+  const caret = el("span", "caret", "");
+  caret.setAttribute("aria-hidden", "true");
+  headerEl.insertBefore(caret, headerEl.firstChild);
+  headerEl.classList.add("is-collapsible");
+  headerEl.setAttribute("role", "button");
+  headerEl.setAttribute("tabindex", "0");
+  const apply = () => {
+    const c = isCollapsed(id);
+    bodyEl.hidden = c;
+    caret.textContent = c ? "▸" : "▾"; // ▸ / ▾
+    headerEl.setAttribute("aria-expanded", String(!c));
+  };
+  const toggle = () => {
+    setCollapsed(id, !isCollapsed(id));
+    apply();
+  };
+  headerEl.addEventListener("click", toggle);
+  headerEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      toggle();
+    }
+  });
+  apply();
+}
+
+// After a view renders, turn every panel (a <section> led by an h2/h3/h4 header) into a
+// collapsible element so the viewer can hide any panel to save space. Idempotent per render.
+function enhanceViewerCollapsibles(root, viewKey) {
+  root.querySelectorAll("section").forEach((sec, i) => {
+    const header = sec.firstElementChild;
+    if (!header || !/^H[2-4]$/.test(header.tagName)) return;
+    if (sec.dataset.collapsibleReady) return;
+    sec.dataset.collapsibleReady = "1";
+    const body = el("div", "panel-body");
+    while (header.nextSibling) body.appendChild(header.nextSibling);
+    sec.appendChild(body);
+    const label = (header.textContent || "panel").slice(0, 48);
+    wireCollapse(header, body, "panel:" + viewKey + ":" + i + ":" + label);
+  });
+}
+
 /** A cross-link: a button labelled inert by name, navigating by SAFE id. `ref` = {id, name, ...}. */
 function xlink(sessionId, ref, extraClass) {
   const b = el("button", "xlink" + (extraClass ? " " + extraClass : ""));
@@ -274,18 +349,47 @@ function isActive(kind, sessionId, view) {
   );
 }
 
+// A collapsible explorer group: a header that toggles its item container (persisted per viewer).
+function explorerGroup(title, id) {
+  const wrap = el("div", "tw-group");
+  const head = el("div", "tw-group-h", title);
+  const body = el("div", "tw-group-body");
+  wrap.appendChild(head);
+  wrap.appendChild(body);
+  wireCollapse(head, body, "grp:" + id);
+  return { wrap, body };
+}
+
 function buildExplorer() {
   const root = document.getElementById("explorer");
   root.replaceChildren();
 
-  const g = el("div", "tw-group");
-  g.appendChild(el("div", "tw-group-h", "Sessions"));
+  const sg = explorerGroup("Sessions", "sessions");
   const ids = Object.keys(store.sessions);
-  if (!ids.length) g.appendChild(el("div", "tw-none", "no active sessions"));
+  if (!ids.length) sg.body.appendChild(el("div", "tw-none", "no active sessions"));
 
   ids.forEach((id) => {
     const s = store.sessions[id];
-    g.appendChild(
+    // Each session is its own collapsible block: a head row (caret + nav item) over a kids list.
+    const block = el("div", "tw-sess");
+    const head = el("div", "tw-sess-head");
+    const kids = el("div", "tw-sess-kids");
+    const cid = "sess:" + id;
+    const caret = el("button", "tw-caret");
+    caret.type = "button";
+    caret.setAttribute("aria-label", "collapse session " + id);
+    const applyCaret = () => {
+      const c = isCollapsed(cid);
+      kids.hidden = c;
+      caret.textContent = c ? "▸" : "▾";
+      caret.setAttribute("aria-expanded", String(!c));
+    };
+    caret.addEventListener("click", () => {
+      setCollapsed(cid, !isCollapsed(cid));
+      applyCaret();
+    });
+    head.appendChild(caret);
+    head.appendChild(
       treeItem(id, {
         depth: 0,
         icon: "i-sess",
@@ -294,8 +398,11 @@ function buildExplorer() {
         onClick: () => select({ kind: "session-view", sessionId: id, view: "overview" }),
       })
     );
+    block.appendChild(head);
+    block.appendChild(kids);
+
     const kid = (label, view, opts) =>
-      g.appendChild(
+      kids.appendChild(
         treeItem(label, {
           depth: 1,
           icon: (opts && opts.icon) || "i-doc",
@@ -310,11 +417,11 @@ function buildExplorer() {
 
     const fns = Object.values(s.functions);
     if (fns.length) {
-      g.appendChild(el("div", "tw-sub", "Functions · " + fns.length));
+      kids.appendChild(el("div", "tw-sub", "Functions · " + fns.length));
       fns.forEach((fn) => {
         const lab = el("span", "tw-label");
         lab.appendChild(renderValue(fn.name)); // inert name
-        g.appendChild(
+        kids.appendChild(
           treeItem(null, {
             depth: 2,
             icon: "i-fn",
@@ -344,12 +451,14 @@ function buildExplorer() {
     if (Object.keys(s.workflows).length)
       kid("Runs", "runs", { icon: "i-run", iconText: "▷", badge: Object.keys(s.workflows).length });
     kid("Timeline", "timeline", { icon: "i-time", iconText: "≡" });
-  });
-  root.appendChild(g);
 
-  const w = el("div", "tw-group");
-  w.appendChild(el("div", "tw-group-h", "Workflows"));
-  w.appendChild(
+    applyCaret();
+    sg.body.appendChild(block);
+  });
+  root.appendChild(sg.wrap);
+
+  const wg = explorerGroup("Workflows", "workflows");
+  wg.body.appendChild(
     treeItem("Catalog", {
       depth: 0,
       icon: "i-wf",
@@ -358,7 +467,7 @@ function buildExplorer() {
       onClick: () => select({ kind: "catalog" }),
     })
   );
-  w.appendChild(
+  wg.body.appendChild(
     treeItem("Builder", {
       depth: 0,
       icon: "i-wf",
@@ -367,11 +476,10 @@ function buildExplorer() {
       onClick: () => select({ kind: "builder" }),
     })
   );
-  root.appendChild(w);
+  root.appendChild(wg.wrap);
 
-  const b = el("div", "tw-group");
-  b.appendChild(el("div", "tw-group-h", "Build"));
-  b.appendChild(
+  const bg = explorerGroup("Build", "build");
+  bg.body.appendChild(
     treeItem("Build & deliverables", {
       depth: 0,
       icon: "i-build",
@@ -380,7 +488,7 @@ function buildExplorer() {
       onClick: () => select({ kind: "build" }),
     })
   );
-  root.appendChild(b);
+  root.appendChild(bg.wrap);
 }
 
 /* ------------------------------------------------------------------ selection + navigation */
@@ -448,6 +556,11 @@ function renderViewer() {
     else if (view.indexOf("function:") === 0) renderFunction(s, view.slice(9));
     else if (view.indexOf("output:") === 0) renderOutput(s.outputs[+view.slice(7)]);
   }
+  const viewKey =
+    selection.kind === "session-view"
+      ? selection.sessionId + ":" + selection.view
+      : selection.kind;
+  enhanceViewerCollapsibles(v, viewKey);
   document.getElementById("viewer").scrollTop = keepScroll;
   if (pendingHighlight) {
     const row = document.querySelector('[data-row-id="' + cssEscape(pendingHighlight) + '"]');
