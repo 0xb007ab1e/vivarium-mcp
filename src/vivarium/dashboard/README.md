@@ -17,6 +17,25 @@ format, an adjacency list for the call graph. Syntax colorization is a small sel
 tokenizer in `app.js` (no external libraries — strict CSP) that emits **every** token via
 `textContent`, so binary-derived content stays inert even while highlighted (ADR-005).
 
+## Workflows (RE workbench — Phase 1)
+
+The dashboard is growing into an RE workbench. **Explorer → Workflows → Catalog** shows the
+**operation palette** (vivarium tools grouped: session / listing / code / graph-xrefs / scans /
+similarity / annotate; compute/write ops are marked **gated**) and the **prebuilt workflows** —
+Triage, Call-tree exploration, AI annotation pass, Scans & similarity — as ordered steps, served
+read-only at `/api/catalog`. A per-session **Runs** view renders the streamed `workflow` run kind as
+a step tracker (per-step state + links to each step's produced artifact).
+
+**Workflows → Builder** composes a custom workflow from the operation palette: click ops to append
+steps, reorder or remove them, name it, **save** (persisted per viewer in `localStorage`), and
+**copy its run spec** (JSON) for the agent to execute. Saved workflows load/delete and show in the
+Catalog.
+
+**Phase 1 is author + visualize only:** the dashboard stays read-only and decoupled — workflows are
+executed by the agent out-of-band and their results stream back into the session views. Interactive
+execution (browser → server) and the gated, propose-first AI-annotation flow come after a dedicated
+STRIDE threat model + write-consent/authZ.
+
 ## Interactive call graph
 
 The **Call graph** view is an interactive, hand-built inline-SVG graph (no external library — strict

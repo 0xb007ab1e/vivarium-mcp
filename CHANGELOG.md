@@ -8,6 +8,23 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Dashboard workflows foundation (RE workbench, Phase 1).** First step toward the dashboard
+  covering vivarium end-to-end with RE workflows. A new read-only `/api/catalog` serves an
+  **operation palette** (vivarium tools grouped: session / listing / code / graph-xrefs / scans /
+  similarity / annotate — annotate + analyze marked **gated**) and the **prebuilt workflows**
+  (Triage · Call-tree exploration · AI annotation pass · Scans & similarity) as ordered steps. The
+  Explorer gains a **Workflows → Catalog** view (workflows + palette) and a per-session **Runs**
+  view that renders a streamed **`workflow`** run kind as a step tracker (per-step state + links to
+  the artifacts each step produced). Phase 1 is **author + visualize only** — the dashboard stays
+  read-only and decoupled; workflows execute via the agent out-of-band and results stream back into
+  the session views.
+- **Custom workflow builder (step-list).** **Workflows → Builder** composes a new workflow from the
+  operation palette: click ops to append steps, reorder (↑/↓) or remove them, name it, **save** it
+  (persisted per viewer in `localStorage`), and **copy its run spec** (JSON) for the agent to
+  execute. Saved workflows can be loaded/deleted and appear in the Catalog. Next (after a dedicated
+  STRIDE threat model + write-consent/authZ): interactive execution and the gated propose-first
+  AI-annotation flow.
+
 - **Interactive call graph (SVG, movable nodes).** The dashboard's Call graph view is now an
   interactive node-edge graph instead of a flat list: **draggable** nodes, background **pan**, wheel
   **zoom**, **click a node to open** its artifact, **double-click to expand** its neighbors, and a

@@ -80,6 +80,40 @@ def test_build_snapshot(client: TestClient) -> None:
     assert b["benchmark"]["verdict_hits"] == 4
 
 
+def test_catalog_endpoint(client: TestClient) -> None:
+    """/api/catalog serves the static workflow + op catalog (prebuilt workflows + op groups)."""
+    c = client.get("/api/catalog").json()
+    wf_ids = {w["id"] for w in c["workflows"]}
+    assert {"triage", "call-tree", "ai-annotation", "scans-similarity"} <= wf_ids
+    # every workflow has ordered steps; the AI annotation pass marks gated write steps
+    ai = next(w for w in c["workflows"] if w["id"] == "ai-annotation")
+    assert ai["steps"] and any(st.get("gated") for st in ai["steps"])
+    # the op palette groups real vivarium tools and marks gated (compute/write) ops
+    ops = {op["op"] for grp in c["op_groups"] for op in grp["ops"]}
+    assert {"decompile_function", "call_graph", "ioc_scan", "rename_function"} <= ops
+    gated = {op["op"] for grp in c["op_groups"] for op in grp["ops"] if op.get("gated")}
+    assert "session_analyze" in gated and "rename_function" in gated
+
+
+def test_catalog_module_shape() -> None:
+    """The catalog module returns well-formed op groups + workflows."""
+    from vivarium.dashboard.catalog import catalog
+
+    c = catalog()
+    assert c["op_groups"] and c["workflows"]
+    for w in c["workflows"]:
+        assert w["id"] and w["name"] and isinstance(w["steps"], list) and w["steps"]
+
+
+def test_sse_stream_emits_workflow_run(client: TestClient) -> None:
+    """The stream carries a workflow-run tracker (safe: op names + step states, no untrusted)."""
+    runs = [e for e in _drain_sse(client, "demo-analyzing") if e["kind"] == "workflow"]
+    assert runs, "no workflow run streamed"
+    d = runs[0]["data"]
+    assert d["id"] and d["state"] in ("running", "done", "failed")
+    assert d["steps"] and all("op" in st and "state" in st for st in d["steps"])
+
+
 def test_sse_stream_tags_untrusted_output(client: TestClient) -> None:
     """The SSE stream delivers an OUTPUT event whose binary-derived content is tagged untrusted.
 

@@ -257,6 +257,35 @@ class DemoProvider:
                 "provenance": {"tool": "function_context", "address": "0x00401000"},
             },
         )
+        # a workflow run tracker (agent-executed; the UI shows the step progress)
+        yield SessionEvent(
+            kind="workflow",
+            session_id=session_id,
+            label="Triage / overview",
+            data={
+                "id": "run-1",
+                "name": "Triage / overview",
+                "state": "done",
+                "steps": [
+                    {"op": "session_import", "label": "open binary", "state": "done"},
+                    {"op": "session_analyze", "label": "analyze", "state": "done"},
+                    {
+                        "op": "program_metadata",
+                        "label": "binary format",
+                        "state": "done",
+                        "view": "overview",
+                    },
+                    {"op": "list_strings", "label": "strings", "state": "done", "view": "strings"},
+                    {"op": "ioc_scan", "label": "IOC scan", "state": "done"},
+                    {
+                        "op": "ai_annotate",
+                        "label": "verdict summary",
+                        "state": "done",
+                        "view": "verdict",
+                    },
+                ],
+            },
+        )
         yield SessionEvent(
             kind="verdict",
             session_id=session_id,

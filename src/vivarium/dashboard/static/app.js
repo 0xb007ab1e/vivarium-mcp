@@ -70,6 +70,30 @@ function saveGraphPrefs() {
 // Live graph runtime state (rebuilt when the focus/session changes).
 let graphState = null;
 
+/* ------------------------------------------------------------------ custom workflows (per viewer) */
+
+// Custom workflows are authored client-side and saved in localStorage (per-viewer). Phase 1 keeps
+// execution out-of-band (the agent runs the emitted spec), so these are author-only artifacts.
+function loadCustomWorkflows() {
+  try {
+    const raw = localStorage.getItem("vivarium.workflows.custom");
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  } catch (_) {
+    return [];
+  }
+}
+function saveCustomWorkflows(list) {
+  try {
+    localStorage.setItem("vivarium.workflows.custom", JSON.stringify(list));
+  } catch (_) {
+    /* storage blocked — draft stays in memory only */
+  }
+}
+
+// The in-progress builder draft (module-scoped so it survives view switches within a session).
+let builderDraft = { name: "", steps: [] };
+
 /** A cross-link: a button labelled inert by name, navigating by SAFE id. `ref` = {id, name, ...}. */
 function xlink(sessionId, ref, extraClass) {
   const b = el("button", "xlink" + (extraClass ? " " + extraClass : ""));
@@ -159,8 +183,8 @@ function codeBlock(text, lang, sessionId, resolve) {
 
 /* ------------------------------------------------------------------ state store + index */
 
-const store = { sessions: {}, build: null };
-let selection = null; // { kind:"session-view"|"build", sessionId?, view? }
+const store = { sessions: {}, build: null, catalog: null };
+let selection = null; // { kind:"session-view"|"build"|"catalog", sessionId?, view? }
 let pendingHighlight = null; // an id to flash after a cross-nav into a table
 
 function ensureSession(id) {
@@ -176,6 +200,7 @@ function ensureSession(id) {
       timeline: [],
       outputs: [],
       verdict: null,
+      workflows: {}, // run id -> merged workflow run
       idIndex: {}, // address id -> { kind, view }
       nameIndex: {}, // symbol name -> id (for code jump-to)
     };
@@ -222,6 +247,8 @@ function treeItem(label, opts) {
 function isActive(kind, sessionId, view) {
   if (!selection) return false;
   if (kind === "build") return selection.kind === "build";
+  if (kind === "catalog") return selection.kind === "catalog";
+  if (kind === "builder") return selection.kind === "builder";
   return (
     selection.kind === "session-view" &&
     selection.sessionId === sessionId &&
@@ -290,9 +317,33 @@ function buildExplorer() {
       kid(o.label || "output " + (idx + 1), "output:" + idx, { icon: "i-code", iconText: "{}" })
     );
     if (s.verdict) kid("Verdict", "verdict", { icon: "i-ver", iconText: "✓" });
+    if (Object.keys(s.workflows).length)
+      kid("Runs", "runs", { icon: "i-run", iconText: "▷", badge: Object.keys(s.workflows).length });
     kid("Timeline", "timeline", { icon: "i-time", iconText: "≡" });
   });
   root.appendChild(g);
+
+  const w = el("div", "tw-group");
+  w.appendChild(el("div", "tw-group-h", "Workflows"));
+  w.appendChild(
+    treeItem("Catalog", {
+      depth: 0,
+      icon: "i-wf",
+      iconText: "▤",
+      active: isActive("catalog"),
+      onClick: () => select({ kind: "catalog" }),
+    })
+  );
+  w.appendChild(
+    treeItem("Builder", {
+      depth: 0,
+      icon: "i-wf",
+      iconText: "+",
+      active: isActive("builder"),
+      onClick: () => select({ kind: "builder" }),
+    })
+  );
+  root.appendChild(w);
 
   const b = el("div", "tw-group");
   b.appendChild(el("div", "tw-group-h", "Build"));
@@ -352,6 +403,10 @@ function renderViewer() {
   const keepScroll = v.scrollTop; // in-place update: preserve scroll
   if (selection.kind === "build") {
     renderBuild();
+  } else if (selection.kind === "catalog") {
+    renderCatalog();
+  } else if (selection.kind === "builder") {
+    renderBuilder();
   } else {
     const s = store.sessions[selection.sessionId];
     if (!s) return;
@@ -364,6 +419,7 @@ function renderViewer() {
     else if (view === "callgraph") renderCallgraph(s);
     else if (view === "verdict") renderVerdict(s.verdict);
     else if (view === "timeline") renderTimeline(s);
+    else if (view === "runs") renderRuns(s);
     else if (view.indexOf("function:") === 0) renderFunction(s, view.slice(9));
     else if (view.indexOf("output:") === 0) renderOutput(s.outputs[+view.slice(7)]);
   }
@@ -1136,6 +1192,298 @@ function renderTimeline(s) {
   root.appendChild(ul);
 }
 
+function renderCatalog() {
+  const root = viewerRoot();
+  setCrumb(["Workflows", "Catalog"]);
+  const cat = store.catalog;
+  vhead(root, "Workflows", "prebuilt RE workflows + operation palette");
+  if (!cat) {
+    root.appendChild(el("p", "muted", "catalog unavailable"));
+    return;
+  }
+  root.appendChild(
+    el(
+      "p",
+      "ghint",
+      "Phase 1: author + visualize. Workflows run via the agent (out-of-band); results stream back " +
+        "into the session views. A custom step-list builder + interactive execution are upcoming."
+    )
+  );
+
+  // prebuilt workflows
+  (cat.workflows || []).forEach((wf) => {
+    const card = el("section", "wfcard");
+    card.appendChild(el("h3", "wfcard-h", wf.name));
+    card.appendChild(el("p", "wfcard-desc", wf.desc || ""));
+    const ol = el("ol", "wfsteps");
+    (wf.steps || []).forEach((st) => {
+      const li = el("li", "wfstep");
+      li.appendChild(el("span", "wfstep-op mono", st.op));
+      li.appendChild(el("span", "wfstep-label", st.label || ""));
+      if (st.gated) li.appendChild(el("span", "wfgated", "gated"));
+      ol.appendChild(li);
+    });
+    card.appendChild(ol);
+    root.appendChild(card);
+  });
+
+  // custom (user-authored) workflows saved on this device
+  const custom = loadCustomWorkflows();
+  if (custom.length) {
+    root.appendChild(el("h3", "card2-h", "Custom workflows"));
+    custom.forEach((wf) => {
+      const card = el("section", "wfcard");
+      const hh = el("div", "vh sub");
+      hh.appendChild(el("h4", "vh-sub-title", wf.name || wf.id));
+      hh.appendChild(el("span", "wfgated", "custom"));
+      card.appendChild(hh);
+      const ol = el("ol", "wfsteps");
+      (wf.steps || []).forEach((st) => {
+        const li = el("li", "wfstep");
+        li.appendChild(el("span", "wfstep-op mono", st.op));
+        li.appendChild(el("span", "wfstep-label", st.label || ""));
+        ol.appendChild(li);
+      });
+      card.appendChild(ol);
+      root.appendChild(card);
+    });
+  }
+
+  // operation palette (covers vivarium functionality)
+  root.appendChild(el("h3", "card2-h", "Operation palette"));
+  const grid = el("div", "opgrid");
+  (cat.op_groups || []).forEach((grp) => {
+    const col = el("section", "opgroup");
+    col.appendChild(el("h4", "opgroup-h", grp.group));
+    const ul = el("ul", "oplist");
+    (grp.ops || []).forEach((op) => {
+      const li = el("li", "oprow");
+      li.appendChild(el("span", "op-name mono", op.op));
+      li.appendChild(el("span", "op-desc", op.desc || ""));
+      if (op.gated) li.appendChild(el("span", "wfgated", "gated"));
+      ul.appendChild(li);
+    });
+    col.appendChild(ul);
+    grid.appendChild(col);
+  });
+  root.appendChild(grid);
+}
+
+/** Custom step-list workflow builder: compose ordered ops from the palette, save, emit a run spec. */
+function renderBuilder() {
+  const root = viewerRoot();
+  setCrumb(["Workflows", "Builder"]);
+  const cat = store.catalog;
+  vhead(root, "Workflow builder", "compose an ordered step list from vivarium operations");
+  if (!cat) {
+    root.appendChild(el("p", "muted", "catalog unavailable"));
+    return;
+  }
+  root.appendChild(
+    el(
+      "p",
+      "ghint",
+      "Add operations to build a workflow, then Save it (stored on this device) and copy its spec — " +
+        "the agent runs the spec and results stream back into the session views (Phase 1)."
+    )
+  );
+
+  const wrap = el("div", "builder");
+
+  // left: op palette
+  const palette = el("div", "bpalette");
+  palette.appendChild(el("h3", "card2-h", "Operations"));
+  (cat.op_groups || []).forEach((grp) => {
+    palette.appendChild(el("div", "opgroup-h", grp.group));
+    (grp.ops || []).forEach((op) => {
+      const b = el("button", "opbtn");
+      b.type = "button";
+      b.appendChild(el("span", "op-name mono", op.op));
+      if (op.gated) b.appendChild(el("span", "wfgated", "gated"));
+      b.title = op.desc || "";
+      b.addEventListener("click", () => {
+        builderDraft.steps.push({ op: op.op, label: op.desc || "", gated: !!op.gated });
+        renderBuilder();
+      });
+      palette.appendChild(b);
+    });
+  });
+  wrap.appendChild(palette);
+
+  // right: draft editor
+  const editor = el("div", "beditor");
+  const nameRow = el("div", "brow");
+  nameRow.appendChild(el("label", "gbar-lab", "name"));
+  const nameInp = el("input", "binput");
+  nameInp.type = "text";
+  nameInp.value = builderDraft.name;
+  nameInp.placeholder = "my workflow";
+  nameInp.addEventListener("input", () => (builderDraft.name = nameInp.value));
+  nameRow.appendChild(nameInp);
+  editor.appendChild(nameRow);
+
+  const ol = el("ol", "bsteps");
+  if (!builderDraft.steps.length) ol.appendChild(el("li", "muted", "no steps — add from the palette"));
+  builderDraft.steps.forEach((st, i) => {
+    const li = el("li", "bstep");
+    li.appendChild(el("span", "bstep-n", String(i + 1)));
+    li.appendChild(el("span", "wfstep-op mono", st.op));
+    if (st.gated) li.appendChild(el("span", "wfgated", "gated"));
+    const up = el("button", "bmini", "↑");
+    up.type = "button";
+    up.title = "move up";
+    up.disabled = i === 0;
+    up.addEventListener("click", () => {
+      const t = builderDraft.steps[i - 1];
+      builderDraft.steps[i - 1] = builderDraft.steps[i];
+      builderDraft.steps[i] = t;
+      renderBuilder();
+    });
+    const down = el("button", "bmini", "↓");
+    down.type = "button";
+    down.title = "move down";
+    down.disabled = i === builderDraft.steps.length - 1;
+    down.addEventListener("click", () => {
+      const t = builderDraft.steps[i + 1];
+      builderDraft.steps[i + 1] = builderDraft.steps[i];
+      builderDraft.steps[i] = t;
+      renderBuilder();
+    });
+    const rm = el("button", "bmini", "✕");
+    rm.type = "button";
+    rm.title = "remove";
+    rm.addEventListener("click", () => {
+      builderDraft.steps.splice(i, 1);
+      renderBuilder();
+    });
+    li.appendChild(up);
+    li.appendChild(down);
+    li.appendChild(rm);
+    ol.appendChild(li);
+  });
+  editor.appendChild(ol);
+
+  // actions
+  const actions = el("div", "brow");
+  const save = el("button", "gbtn", "save");
+  save.type = "button";
+  save.addEventListener("click", () => {
+    if (!builderDraft.steps.length) return;
+    const list = loadCustomWorkflows();
+    const id = "custom-" + Date.now();
+    list.push({
+      id,
+      name: builderDraft.name || "custom workflow",
+      steps: builderDraft.steps.map((s) => ({ op: s.op, label: s.label, gated: s.gated })),
+    });
+    saveCustomWorkflows(list);
+    setStatus("saved workflow: " + (builderDraft.name || id));
+  });
+  const clear = el("button", "gbtn", "clear");
+  clear.type = "button";
+  clear.addEventListener("click", () => {
+    builderDraft = { name: "", steps: [] };
+    renderBuilder();
+  });
+  actions.appendChild(save);
+  actions.appendChild(clear);
+  editor.appendChild(actions);
+
+  // emitted spec (copyable) — the agent runs this out-of-band
+  editor.appendChild(el("h3", "card2-h", "Run spec"));
+  const spec = {
+    workflow: builderDraft.name || "custom workflow",
+    steps: builderDraft.steps.map((s) => ({ op: s.op, label: s.label })),
+  };
+  const specText = JSON.stringify(spec, null, 2);
+  const pre = el("pre", "bspec");
+  pre.textContent = specText; // safe: our own JSON
+  editor.appendChild(pre);
+  const copy = el("button", "gbtn sm", "copy spec");
+  copy.type = "button";
+  copy.addEventListener("click", () => {
+    try {
+      navigator.clipboard.writeText(specText);
+      setStatus("run spec copied");
+    } catch (_) {
+      setStatus("copy unavailable — select the text");
+    }
+  });
+  editor.appendChild(copy);
+
+  wrap.appendChild(editor);
+  root.appendChild(wrap);
+
+  // saved list with delete
+  const saved = loadCustomWorkflows();
+  if (saved.length) {
+    root.appendChild(el("h3", "card2-h", "Saved workflows"));
+    const ul = el("ul", "savedwf");
+    saved.forEach((wf) => {
+      const li = el("li", "savedrow");
+      li.appendChild(el("span", "savedname", wf.name || wf.id));
+      li.appendChild(el("span", "muted", (wf.steps || []).length + " steps"));
+      const load = el("button", "bmini", "load");
+      load.type = "button";
+      load.addEventListener("click", () => {
+        builderDraft = {
+          name: wf.name || "",
+          steps: (wf.steps || []).map((s) => ({ ...s })),
+        };
+        renderBuilder();
+      });
+      const del = el("button", "bmini", "✕");
+      del.type = "button";
+      del.addEventListener("click", () => {
+        saveCustomWorkflows(loadCustomWorkflows().filter((x) => x.id !== wf.id));
+        renderBuilder();
+      });
+      li.appendChild(load);
+      li.appendChild(del);
+      ul.appendChild(li);
+    });
+    root.appendChild(ul);
+  }
+}
+
+const _RUN_STEP_ICON = { done: "✓", running: "▷", failed: "✕", pending: "○" };
+
+function renderRuns(s) {
+  const root = viewerRoot();
+  setCrumb([s.summary.session_id, "Runs"]);
+  const runs = Object.values(s.workflows);
+  vhead(root, "Workflow runs", runs.length + " run(s)");
+  if (!runs.length) {
+    root.appendChild(el("p", "muted", "no workflow runs yet"));
+    return;
+  }
+  runs.forEach((run) => {
+    const card = el("section", "wfcard");
+    const h = el("div", "vh sub");
+    h.appendChild(el("h3", "vh-sub-title", run.name || run.id));
+    h.appendChild(el("span", "run-state state-" + (run.state || "pending"), run.state || "pending"));
+    card.appendChild(h);
+    const ol = el("ol", "runsteps");
+    (run.steps || []).forEach((st) => {
+      const li = el("li", "runstep step-" + (st.state || "pending"));
+      li.appendChild(el("span", "run-ico", _RUN_STEP_ICON[st.state] || "○"));
+      li.appendChild(el("span", "wfstep-op mono", st.op));
+      li.appendChild(el("span", "wfstep-label", st.label || ""));
+      if (st.view) {
+        const link = el("button", "xlink sm", "view →");
+        link.type = "button";
+        link.addEventListener("click", () =>
+          select({ kind: "session-view", sessionId: s.summary.session_id, view: st.view })
+        );
+        li.appendChild(link);
+      }
+      ol.appendChild(li);
+    });
+    card.appendChild(ol);
+    root.appendChild(card);
+  });
+}
+
 function renderBuild() {
   const root = viewerRoot();
   setCrumb(["Build & deliverables"]);
@@ -1212,7 +1560,9 @@ function applyEvent(id, e) {
     indexItems(s, s.strings && s.strings.items, "string", "strings");
   } else if (e.kind === "callgraph") s.callgraph = e.data || null;
   else if (e.kind === "function") mergeFunction(s, e.data);
-  else if (e.kind === "tool") s.timeline.push({ tool: e.tool, label: e.label });
+  else if (e.kind === "workflow") {
+    if (e.data && e.data.id) s.workflows[e.data.id] = { ...s.workflows[e.data.id], ...e.data };
+  } else if (e.kind === "tool") s.timeline.push({ tool: e.tool, label: e.label });
   else if (e.kind === "output") s.outputs.push({ label: e.label, content: e.content });
   else if (e.kind === "verdict") s.verdict = { label: e.label, content: e.content };
 }
@@ -1224,6 +1574,7 @@ function affectsView(e, id) {
   if (e.kind === "tool") return v === "timeline";
   if (e.kind === "output") return true;
   if (e.kind === "function") return v === "function:" + (e.data && e.data.id);
+  if (e.kind === "workflow") return v === "runs";
   return v === e.kind; // imports/exports/strings/callgraph/verdict
 }
 
@@ -1240,6 +1591,7 @@ function explorerShape(id) {
     !!s.callgraph,
     s.outputs.length,
     !!s.verdict,
+    Object.keys(s.workflows).length,
   ];
 }
 
@@ -1264,9 +1616,18 @@ function attachStream(id) {
 
 async function load() {
   try {
-    const [sr, br] = await Promise.all([fetch("/api/sessions"), fetch("/api/build")]);
+    const [sr, br, cr] = await Promise.all([
+      fetch("/api/sessions"),
+      fetch("/api/build"),
+      fetch("/api/catalog"),
+    ]);
     const sd = await sr.json();
     store.build = await br.json();
+    try {
+      store.catalog = await cr.json();
+    } catch (_) {
+      store.catalog = null;
+    }
     (sd.sessions || []).forEach((sum) => {
       ensureSession(sum.session_id).summary = sum;
     });

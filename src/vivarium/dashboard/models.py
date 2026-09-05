@@ -119,9 +119,20 @@ class SessionEvent:
     (a list of :func:`sym_ref` to the functions that use them) so the browser can show back-refs
     and cross-navigate both directions.
 
+    **``workflow`` kind (Runs).** A workflow-run status, keyed by a safe ``id``, streamed by the
+    agent as it executes a prebuilt/custom workflow so the UI shows a step tracker. All safe
+    (closed-vocabulary op names + states); no binary-derived leaves. Shape::
+
+        data = {
+          "id": "run-1", "name": "Triage",
+          "state": "running"|"done"|"failed",
+          "steps": [ {"op": "session_analyze", "label": "analyze",
+                      "state": "pending"|"running"|"done"|"failed", "view": "overview"?} ]
+        }
+
     Attributes:
         kind: ``progress`` | ``tool`` | ``output`` | ``verdict`` | ``metadata`` | ``imports`` |
-            ``exports`` | ``strings`` | ``callgraph`` | ``function`` — safe.
+            ``exports`` | ``strings`` | ``callgraph`` | ``function`` | ``workflow`` — safe.
         session_id: Owning session — safe.
         percent: For ``progress``: ``0..100`` or ``None`` — safe.
         phase: For ``progress``: phase label or ``None`` — safe.
