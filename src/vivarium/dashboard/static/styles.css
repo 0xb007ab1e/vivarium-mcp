@@ -1049,3 +1049,119 @@ body {
 .run-state.state-done { color: var(--good); background: var(--good-bg); }
 .run-state.state-running { color: var(--warn); background: var(--warn-bg); }
 .run-state.state-failed { color: var(--crit); background: var(--crit-bg); }
+
+/* --- workflow builder --- */
+.builder {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) 1fr;
+  gap: 0.9rem;
+  align-items: start;
+}
+@media (max-width: 720px) {
+  .builder { grid-template-columns: 1fr; }
+}
+.bpalette {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 0.5rem 0.6rem;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.opbtn {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: none;
+  font: inherit;
+  padding: 0.2rem 0.3rem;
+  border-radius: 5px;
+  cursor: pointer;
+  color: var(--ink-2);
+}
+.opbtn:hover { background: var(--surface-3); }
+.beditor {
+  min-width: 0;
+}
+.brow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.binput {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  flex: 1;
+}
+.bsteps {
+  list-style: none;
+  margin: 0 0 0.7rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.bstep {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  padding: 0.25rem 0.5rem;
+}
+.bstep-n {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  width: 1.4em;
+}
+.bstep .wfstep-op { flex: 1; }
+.bmini {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-2);
+  border-radius: 5px;
+  font: inherit;
+  font-size: 0.74rem;
+  padding: 0.05rem 0.4rem;
+  cursor: pointer;
+}
+.bmini:hover:not(:disabled) { background: var(--surface-3); }
+.bmini:disabled { opacity: 0.4; cursor: default; }
+.bspec {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--ink-2);
+}
+.savedwf {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.savedrow {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  border-bottom: 1px solid var(--line);
+  padding: 0.2rem 0;
+}
+.savedname { flex: 1; font-size: 0.85rem; }

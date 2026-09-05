@@ -70,6 +70,30 @@ function saveGraphPrefs() {
 // Live graph runtime state (rebuilt when the focus/session changes).
 let graphState = null;
 
+/* ------------------------------------------------------------------ custom workflows (per viewer) */
+
+// Custom workflows are authored client-side and saved in localStorage (per-viewer). Phase 1 keeps
+// execution out-of-band (the agent runs the emitted spec), so these are author-only artifacts.
+function loadCustomWorkflows() {
+  try {
+    const raw = localStorage.getItem("vivarium.workflows.custom");
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  } catch (_) {
+    return [];
+  }
+}
+function saveCustomWorkflows(list) {
+  try {
+    localStorage.setItem("vivarium.workflows.custom", JSON.stringify(list));
+  } catch (_) {
+    /* storage blocked — draft stays in memory only */
+  }
+}
+
+// The in-progress builder draft (module-scoped so it survives view switches within a session).
+let builderDraft = { name: "", steps: [] };
+
 /** A cross-link: a button labelled inert by name, navigating by SAFE id. `ref` = {id, name, ...}. */
 function xlink(sessionId, ref, extraClass) {
   const b = el("button", "xlink" + (extraClass ? " " + extraClass : ""));
@@ -224,6 +248,7 @@ function isActive(kind, sessionId, view) {
   if (!selection) return false;
   if (kind === "build") return selection.kind === "build";
   if (kind === "catalog") return selection.kind === "catalog";
+  if (kind === "builder") return selection.kind === "builder";
   return (
     selection.kind === "session-view" &&
     selection.sessionId === sessionId &&
@@ -309,6 +334,15 @@ function buildExplorer() {
       onClick: () => select({ kind: "catalog" }),
     })
   );
+  w.appendChild(
+    treeItem("Builder", {
+      depth: 0,
+      icon: "i-wf",
+      iconText: "+",
+      active: isActive("builder"),
+      onClick: () => select({ kind: "builder" }),
+    })
+  );
   root.appendChild(w);
 
   const b = el("div", "tw-group");
@@ -371,6 +405,8 @@ function renderViewer() {
     renderBuild();
   } else if (selection.kind === "catalog") {
     renderCatalog();
+  } else if (selection.kind === "builder") {
+    renderBuilder();
   } else {
     const s = store.sessions[selection.sessionId];
     if (!s) return;
@@ -1191,6 +1227,28 @@ function renderCatalog() {
     root.appendChild(card);
   });
 
+  // custom (user-authored) workflows saved on this device
+  const custom = loadCustomWorkflows();
+  if (custom.length) {
+    root.appendChild(el("h3", "card2-h", "Custom workflows"));
+    custom.forEach((wf) => {
+      const card = el("section", "wfcard");
+      const hh = el("div", "vh sub");
+      hh.appendChild(el("h4", "vh-sub-title", wf.name || wf.id));
+      hh.appendChild(el("span", "wfgated", "custom"));
+      card.appendChild(hh);
+      const ol = el("ol", "wfsteps");
+      (wf.steps || []).forEach((st) => {
+        const li = el("li", "wfstep");
+        li.appendChild(el("span", "wfstep-op mono", st.op));
+        li.appendChild(el("span", "wfstep-label", st.label || ""));
+        ol.appendChild(li);
+      });
+      card.appendChild(ol);
+      root.appendChild(card);
+    });
+  }
+
   // operation palette (covers vivarium functionality)
   root.appendChild(el("h3", "card2-h", "Operation palette"));
   const grid = el("div", "opgrid");
@@ -1209,6 +1267,183 @@ function renderCatalog() {
     grid.appendChild(col);
   });
   root.appendChild(grid);
+}
+
+/** Custom step-list workflow builder: compose ordered ops from the palette, save, emit a run spec. */
+function renderBuilder() {
+  const root = viewerRoot();
+  setCrumb(["Workflows", "Builder"]);
+  const cat = store.catalog;
+  vhead(root, "Workflow builder", "compose an ordered step list from vivarium operations");
+  if (!cat) {
+    root.appendChild(el("p", "muted", "catalog unavailable"));
+    return;
+  }
+  root.appendChild(
+    el(
+      "p",
+      "ghint",
+      "Add operations to build a workflow, then Save it (stored on this device) and copy its spec — " +
+        "the agent runs the spec and results stream back into the session views (Phase 1)."
+    )
+  );
+
+  const wrap = el("div", "builder");
+
+  // left: op palette
+  const palette = el("div", "bpalette");
+  palette.appendChild(el("h3", "card2-h", "Operations"));
+  (cat.op_groups || []).forEach((grp) => {
+    palette.appendChild(el("div", "opgroup-h", grp.group));
+    (grp.ops || []).forEach((op) => {
+      const b = el("button", "opbtn");
+      b.type = "button";
+      b.appendChild(el("span", "op-name mono", op.op));
+      if (op.gated) b.appendChild(el("span", "wfgated", "gated"));
+      b.title = op.desc || "";
+      b.addEventListener("click", () => {
+        builderDraft.steps.push({ op: op.op, label: op.desc || "", gated: !!op.gated });
+        renderBuilder();
+      });
+      palette.appendChild(b);
+    });
+  });
+  wrap.appendChild(palette);
+
+  // right: draft editor
+  const editor = el("div", "beditor");
+  const nameRow = el("div", "brow");
+  nameRow.appendChild(el("label", "gbar-lab", "name"));
+  const nameInp = el("input", "binput");
+  nameInp.type = "text";
+  nameInp.value = builderDraft.name;
+  nameInp.placeholder = "my workflow";
+  nameInp.addEventListener("input", () => (builderDraft.name = nameInp.value));
+  nameRow.appendChild(nameInp);
+  editor.appendChild(nameRow);
+
+  const ol = el("ol", "bsteps");
+  if (!builderDraft.steps.length) ol.appendChild(el("li", "muted", "no steps — add from the palette"));
+  builderDraft.steps.forEach((st, i) => {
+    const li = el("li", "bstep");
+    li.appendChild(el("span", "bstep-n", String(i + 1)));
+    li.appendChild(el("span", "wfstep-op mono", st.op));
+    if (st.gated) li.appendChild(el("span", "wfgated", "gated"));
+    const up = el("button", "bmini", "↑");
+    up.type = "button";
+    up.title = "move up";
+    up.disabled = i === 0;
+    up.addEventListener("click", () => {
+      const t = builderDraft.steps[i - 1];
+      builderDraft.steps[i - 1] = builderDraft.steps[i];
+      builderDraft.steps[i] = t;
+      renderBuilder();
+    });
+    const down = el("button", "bmini", "↓");
+    down.type = "button";
+    down.title = "move down";
+    down.disabled = i === builderDraft.steps.length - 1;
+    down.addEventListener("click", () => {
+      const t = builderDraft.steps[i + 1];
+      builderDraft.steps[i + 1] = builderDraft.steps[i];
+      builderDraft.steps[i] = t;
+      renderBuilder();
+    });
+    const rm = el("button", "bmini", "✕");
+    rm.type = "button";
+    rm.title = "remove";
+    rm.addEventListener("click", () => {
+      builderDraft.steps.splice(i, 1);
+      renderBuilder();
+    });
+    li.appendChild(up);
+    li.appendChild(down);
+    li.appendChild(rm);
+    ol.appendChild(li);
+  });
+  editor.appendChild(ol);
+
+  // actions
+  const actions = el("div", "brow");
+  const save = el("button", "gbtn", "save");
+  save.type = "button";
+  save.addEventListener("click", () => {
+    if (!builderDraft.steps.length) return;
+    const list = loadCustomWorkflows();
+    const id = "custom-" + Date.now();
+    list.push({
+      id,
+      name: builderDraft.name || "custom workflow",
+      steps: builderDraft.steps.map((s) => ({ op: s.op, label: s.label, gated: s.gated })),
+    });
+    saveCustomWorkflows(list);
+    setStatus("saved workflow: " + (builderDraft.name || id));
+  });
+  const clear = el("button", "gbtn", "clear");
+  clear.type = "button";
+  clear.addEventListener("click", () => {
+    builderDraft = { name: "", steps: [] };
+    renderBuilder();
+  });
+  actions.appendChild(save);
+  actions.appendChild(clear);
+  editor.appendChild(actions);
+
+  // emitted spec (copyable) — the agent runs this out-of-band
+  editor.appendChild(el("h3", "card2-h", "Run spec"));
+  const spec = {
+    workflow: builderDraft.name || "custom workflow",
+    steps: builderDraft.steps.map((s) => ({ op: s.op, label: s.label })),
+  };
+  const specText = JSON.stringify(spec, null, 2);
+  const pre = el("pre", "bspec");
+  pre.textContent = specText; // safe: our own JSON
+  editor.appendChild(pre);
+  const copy = el("button", "gbtn sm", "copy spec");
+  copy.type = "button";
+  copy.addEventListener("click", () => {
+    try {
+      navigator.clipboard.writeText(specText);
+      setStatus("run spec copied");
+    } catch (_) {
+      setStatus("copy unavailable — select the text");
+    }
+  });
+  editor.appendChild(copy);
+
+  wrap.appendChild(editor);
+  root.appendChild(wrap);
+
+  // saved list with delete
+  const saved = loadCustomWorkflows();
+  if (saved.length) {
+    root.appendChild(el("h3", "card2-h", "Saved workflows"));
+    const ul = el("ul", "savedwf");
+    saved.forEach((wf) => {
+      const li = el("li", "savedrow");
+      li.appendChild(el("span", "savedname", wf.name || wf.id));
+      li.appendChild(el("span", "muted", (wf.steps || []).length + " steps"));
+      const load = el("button", "bmini", "load");
+      load.type = "button";
+      load.addEventListener("click", () => {
+        builderDraft = {
+          name: wf.name || "",
+          steps: (wf.steps || []).map((s) => ({ ...s })),
+        };
+        renderBuilder();
+      });
+      const del = el("button", "bmini", "✕");
+      del.type = "button";
+      del.addEventListener("click", () => {
+        saveCustomWorkflows(loadCustomWorkflows().filter((x) => x.id !== wf.id));
+        renderBuilder();
+      });
+      li.appendChild(load);
+      li.appendChild(del);
+      ul.appendChild(li);
+    });
+    root.appendChild(ul);
+  }
 }
 
 const _RUN_STEP_ICON = { done: "✓", running: "▷", failed: "✕", pending: "○" };

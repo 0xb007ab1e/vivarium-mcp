@@ -26,10 +26,15 @@ Triage, Call-tree exploration, AI annotation pass, Scans & similarity — as ord
 read-only at `/api/catalog`. A per-session **Runs** view renders the streamed `workflow` run kind as
 a step tracker (per-step state + links to each step's produced artifact).
 
+**Workflows → Builder** composes a custom workflow from the operation palette: click ops to append
+steps, reorder or remove them, name it, **save** (persisted per viewer in `localStorage`), and
+**copy its run spec** (JSON) for the agent to execute. Saved workflows load/delete and show in the
+Catalog.
+
 **Phase 1 is author + visualize only:** the dashboard stays read-only and decoupled — workflows are
-executed by the agent out-of-band and their results stream back into the session views. A custom
-**step-list builder** is next; interactive execution (browser → server) and the gated,
-propose-first AI-annotation flow come after a dedicated STRIDE threat model + write-consent/authZ.
+executed by the agent out-of-band and their results stream back into the session views. Interactive
+execution (browser → server) and the gated, propose-first AI-annotation flow come after a dedicated
+STRIDE threat model + write-consent/authZ.
 
 ## Interactive call graph
 
