@@ -8,6 +8,15 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Operational read-only workflow runner (client-side).** Prebuilt and custom workflows now
+  **actually run** from the UI — a **▷ run** button (on each catalog workflow + the builder draft)
+  executes the workflow's steps against the artifacts already streamed into the browser: read-only
+  ops (metadata, strings/imports/exports, functions, **call graph / analyze-recursive**, callers/
+  callees, function context, decompile) resolve immediately and link their artifact in a live **Runs**
+  tracker; steps needing fresh server work or a write (`session_analyze`, scans/similarity, and all
+  writes incl. **`ai_annotate`**) are marked **needs-agent** (run via the agent — propose-first,
+  gated). No server round-trip, no write path — operational over data the dashboard already holds.
+
 - **Dashboard interactive backend — foundation (Phase 2, ADR-076 / threat-model TB9).** The
   groundwork for driving RE workflows from the browser (open/analyze, recurse, apply transform / AI
   annotation), built **the mandated way**: the new browser→server command boundary (**TB9**) is

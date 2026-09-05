@@ -31,8 +31,13 @@ steps, reorder or remove them, name it, **save** (persisted per viewer in `local
 **copy its run spec** (JSON) for the agent to execute. Saved workflows load/delete and show in the
 Catalog.
 
-**Phase 1 is author + visualize only:** the dashboard stays read-only and decoupled — workflows are
-executed by the agent out-of-band and their results stream back into the session views.
+**Read-only workflows run in the UI.** A **▷ run** button (on each catalog workflow and the builder
+draft) executes a workflow's steps against the artifacts already streamed into the browser: read-only
+ops (metadata, strings/imports/exports, functions, **call graph / analyze-recursive**, callers/
+callees, function context, decompile) resolve immediately and link their artifact in the live **Runs**
+tracker. Steps needing fresh server work or a write (`session_analyze`, scans/similarity, and all
+writes incl. **`ai_annotate`**) show as **needs-agent** — run via the agent, propose-first + gated.
+This is client-side over data the dashboard already holds: **no server round-trip, no write path.**
 
 **Phase 2 (interactive) — foundation shipped, default-off.** The browser→server command boundary is
 STRIDE-modeled (`docs/security/threat-model.md` §21, **TB9**) and specified (**ADR-076**). A pure
