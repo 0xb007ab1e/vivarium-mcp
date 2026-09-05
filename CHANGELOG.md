@@ -8,6 +8,12 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Auth scoped to the command surface (browser-loadable with a token set).** The bearer token now
+  gates only mutating requests (`POST /api/command`); read-only GET/HEAD/OPTIONS (the UI + read-only
+  APIs) pass, gated by the tailnet/loopback bind — so the dashboard **loads in a browser even with a
+  token configured** (a browser can't attach a bearer on navigation). A titlebar **token field**
+  (per-viewer localStorage) is sent on command POSTs. Fixes the token-set dashboard 401ing on
+  navigation.
 - **Worker-backed transport — fresh `analyze` from the UI (opt-in).** `VIVARIUM_DASHBOARD_EXECUTOR=worker`
   (with interactive enabled + state + token) wires a `WorkerExecutor` over a live `McpToolCaller` that
   drives a spawned vivarium MCP server (its own Ghidra worker), so **read-only AND compute ops

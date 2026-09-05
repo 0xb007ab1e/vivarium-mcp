@@ -80,12 +80,20 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
-class BearerAuthMiddleware(BaseHTTPMiddleware):
-    """If a shared token is configured, require it on every request (constant-time compare).
+#: HTTP methods that only READ. Read-only viewing is gated by the tailnet bind (the original
+#: posture); the token specifically protects the **command surface** (the sole non-safe route,
+#: ``POST /api/command``). Gating only mutating methods lets a browser LOAD the UI + read-only APIs
+#: over the tailnet (it cannot attach a bearer on navigation) while every command still needs auth.
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
-    Display-only MVP auth: the primary control is the tailnet bind; this is an optional additional
-    gate. A production deployment reuses the server's per-principal authz (ADR-017/019) instead — a
-    tracked follow-up, noted in the README.
+
+class BearerAuthMiddleware(BaseHTTPMiddleware):
+    """If a shared token is configured, require it on **mutating** requests (constant-time compare).
+
+    Read-only GET/HEAD/OPTIONS (the UI + read-only APIs) pass — gated by the tailnet/loopback bind,
+    the dashboard's primary access control. Non-safe methods (``POST /api/command`` — the
+    command surface, the only write/compute path) require the bearer token. A production deployment
+    reuses the server's per-principal authz (ADR-017/019) — a tracked follow-up.
     """
 
     def __init__(self, app: ASGIApp, token: str | None) -> None:
@@ -96,8 +104,8 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        """Enforce the bearer token when configured; otherwise pass through."""
-        if self._token is not None:
+        """Enforce the bearer token on mutating requests when configured; otherwise pass through."""
+        if self._token is not None and request.method not in _SAFE_METHODS:
             presented = request.headers.get("authorization", "")
             expected = f"Bearer {self._token}"
             if not hmac.compare_digest(presented, expected):

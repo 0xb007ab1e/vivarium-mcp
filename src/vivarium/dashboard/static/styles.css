@@ -1213,3 +1213,17 @@ body {
 .diff-arr { color: var(--muted); }
 .proprat { font-size: 0.76rem; color: var(--muted); }
 .propstatus { font-size: 0.78rem; margin-left: 0.6rem; }
+
+/* titlebar token field (required only for interactive commands) */
+.tb-token { display: flex; align-items: center; gap: 0.3rem; }
+.tb-token-lab { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+#token {
+  font: inherit;
+  font-size: 0.78rem;
+  width: 8.5rem;
+  padding: 0.15rem 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--ink);
+}

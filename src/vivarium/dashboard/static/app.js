@@ -34,6 +34,23 @@ function plain(v) {
   return v === null || v === undefined ? "" : String(v);
 }
 
+/** The bearer token the viewer entered (per-viewer, localStorage) — required only for commands. */
+function authToken() {
+  try {
+    return localStorage.getItem("vivarium.dashboard.token") || "";
+  } catch (_) {
+    return "";
+  }
+}
+
+/** Headers for a command POST: JSON + the bearer token when the viewer has entered one. */
+function cmdHeaders() {
+  const h = { "content-type": "application/json" };
+  const t = authToken();
+  if (t) h["authorization"] = "Bearer " + t;
+  return h;
+}
+
 /** Create an SVG element with attributes (SVG uses createElementNS + setAttribute for class). */
 const SVGNS = "http://www.w3.org/2000/svg";
 function svg(tag, attrs) {
@@ -1689,7 +1706,7 @@ function renderProposals(s) {
       try {
         const r = await fetch("/api/command", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: cmdHeaders(),
           body: JSON.stringify({
             op: "ai_annotate",
             params: { proposal_id: set.id, count: items.length },
@@ -1845,7 +1862,26 @@ function attachStream(id) {
 
 /* ------------------------------------------------------------------ boot */
 
+/** Wire the titlebar token field to localStorage (per-viewer; sent only on command POSTs). */
+function initToken() {
+  const ti = document.getElementById("token");
+  if (!ti) return;
+  try {
+    ti.value = localStorage.getItem("vivarium.dashboard.token") || "";
+  } catch (_) {
+    /* ignore */
+  }
+  ti.addEventListener("input", () => {
+    try {
+      localStorage.setItem("vivarium.dashboard.token", ti.value);
+    } catch (_) {
+      /* ignore */
+    }
+  });
+}
+
 async function load() {
+  initToken();
   try {
     const [sr, br, cr] = await Promise.all([
       fetch("/api/sessions"),
