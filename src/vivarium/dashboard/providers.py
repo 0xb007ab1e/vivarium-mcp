@@ -22,6 +22,7 @@ from vivarium.dashboard.models import (
     SessionEvent,
     SessionSummary,
     UiValue,
+    tag,
 )
 
 
@@ -99,6 +100,83 @@ class DemoProvider:
         ):
             yield SessionEvent(kind="progress", session_id=session_id, percent=pct, phase=phase)
             await asyncio.sleep(0.05)
+        yield SessionEvent(
+            kind="metadata",
+            session_id=session_id,
+            label="binary format",
+            data={
+                "fields": [
+                    {"k": "format", "v": "ELF"},
+                    {"k": "arch", "v": "x86:LE:64"},
+                    {"k": "bits", "v": 64},
+                    {"k": "endian", "v": "little"},
+                    {"k": "entry", "v": "0x00401000"},
+                    {"k": "size", "v": 51200},
+                    # program name is binary-derived → tagged untrusted
+                    {"k": "program", "v": tag("demo.elf")},
+                    {"k": "compiler", "v": tag("GCC: (GNU) 13.2.0")},
+                ]
+            },
+        )
+        yield SessionEvent(
+            kind="imports",
+            session_id=session_id,
+            label="imports",
+            data={
+                "total": 3,
+                "truncated": False,
+                "items": [
+                    {"address": "0x00402000", "name": tag("puts"), "library": tag("libc.so.6")},
+                    {"address": "0x00402008", "name": tag("system"), "library": tag("libc.so.6")},
+                    {"address": "0x00402010", "name": tag("<img src=x onerror=alert(1)>")},
+                ],
+            },
+        )
+        yield SessionEvent(
+            kind="exports",
+            session_id=session_id,
+            label="exports",
+            data={
+                "total": 1,
+                "truncated": False,
+                "items": [{"address": "0x00401000", "name": tag("entry")}],
+            },
+        )
+        yield SessionEvent(
+            kind="strings",
+            session_id=session_id,
+            label="strings",
+            data={
+                "total": 2,
+                "truncated": False,
+                "items": [
+                    {"address": "0x00403000", "length": 13, "value": tag("hello, world")},
+                    {
+                        "address": "0x00403010",
+                        "length": 30,
+                        "value": tag("</pre><script>alert(1)</script>"),
+                    },
+                ],
+            },
+        )
+        yield SessionEvent(
+            kind="callgraph",
+            session_id=session_id,
+            label="call graph",
+            data={
+                "truncated": False,
+                "nodes": [
+                    {"id": "0x00401000", "label": tag("main")},
+                    {"id": "0x00401100", "label": tag("FUN_00401100")},
+                    {"id": "0x00402000", "label": tag("puts")},
+                ],
+                "edges": [
+                    {"from": "0x00401000", "to": "0x00401100"},
+                    {"from": "0x00401000", "to": "0x00402000"},
+                    {"from": "0x00401100", "to": "0x00402000"},
+                ],
+            },
+        )
         yield SessionEvent(
             kind="tool", session_id=session_id, tool="decompile_function", label="FUN_00401000"
         )

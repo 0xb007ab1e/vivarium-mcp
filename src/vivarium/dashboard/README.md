@@ -1,9 +1,21 @@
 # Vivarium status dashboard (read-only, display-only MVP)
 
 A small, **separate** Starlette ASGI app that surfaces in-process status for a human to validate in
-real time — live analysis sessions (progress + tool timeline + output for review) and the
-build/deliverable snapshot (tool catalog, gates, PRs, benchmark). It is **read-only**: no tool
-invocation, no mutation, no gated action.
+real time — live analysis sessions (progress + tool timeline + output for review), the richer
+per-session analysis panels (**binary format**, **imports**, **exports**, **strings**, **call
+graph**), and the build/deliverable snapshot (tool catalog, gates, PRs, benchmark). It is
+**read-only**: no tool invocation, no mutation, no gated action.
+
+## Analysis panels (streamed)
+
+Beyond the progress + timeline, the SSE stream carries structured panel events —
+`metadata` (format/arch/bits/endian/entry/size + program/compiler), `imports`, `exports`,
+`strings`, and `callgraph` (rendered as an accessible caller→callees adjacency list). Each carries a
+`data` payload. **Tagging convention (ADR-005):** `data` holds *safe* scalars (counts, hex
+addresses, closed labels); every binary-derived leaf (symbol names, strings, call-graph labels) is a
+tagged value `{"value": …, "untrusted": true}` — never a bare string — and the browser renders every
+tagged leaf **inert** (`textContent`), exactly like a decompiled-output pane. Build a leaf with
+`vivarium.dashboard.models.tag()`.
 
 ## Run
 

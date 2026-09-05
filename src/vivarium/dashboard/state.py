@@ -85,6 +85,7 @@ def _event_from_json(payload: dict[str, Any]) -> SessionEvent:
         tool=payload.get("tool"),
         label=payload.get("label"),
         content=ui,
+        data=payload.get("data"),
     )
 
 

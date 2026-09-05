@@ -8,6 +8,15 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Dashboard analysis panels (streamed).** The dashboard SSE stream now carries the full analysis
+  picture as structured panel events — `metadata` (binary format/arch/bits/endian/entry/size +
+  program/compiler), `imports`, `exports`, `strings`, and `callgraph` (rendered as an accessible
+  caller→callees adjacency list) — each rendered into its own panel in the session card. Events
+  carry a `SessionEvent.data` payload of safe scalars whose binary-derived leaves (symbol names,
+  strings, call-graph labels) are tagged `{"value","untrusted":true}` via the new
+  `vivarium.dashboard.models.tag()` and rendered INERT (`textContent`) in the browser — the ADR-005
+  envelope extends to every panel leaf, never a bare binary-derived string. The `FileStatusProvider`
+  bridge round-trips `data` unchanged.
 - **Read-only status dashboard MVP (display-only).** A small, SEPARATE Starlette ASGI app
   (`vivarium.dashboard`, run via `python -m vivarium.dashboard`, new optional `dashboard` extra for
   uvicorn) surfaces in-process status for real-time human validation: live analysis sessions

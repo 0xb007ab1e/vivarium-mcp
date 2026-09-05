@@ -29,6 +29,117 @@ function renderUntrusted(uiValue, label) {
   return wrap;
 }
 
+/** Render one value as an INERT node. A tagged {value, untrusted} object is rendered via
+ *  textContent (never HTML) — the one contract for binary-derived leaves in event.data (ADR-005);
+ *  a plain scalar renders as text. Returns an element (tagged) or a text node (scalar). */
+function renderValue(v) {
+  if (v && typeof v === "object" && "value" in v && "untrusted" in v) {
+    const span = el("span", v.untrusted ? "u" : "s");
+    span.textContent = String(v.value); // INERT sink for hostile bytes
+    if (v.untrusted) span.title = "binary-derived (untrusted) — shown inert";
+    return span;
+  }
+  return document.createTextNode(v === null || v === undefined ? "" : String(v));
+}
+
+/** Find-or-create a named detail panel in a card; returns its (cleared) body for re-rendering. */
+function getPanel(detail, key, title) {
+  let panel = detail.querySelector('[data-panel="' + key + '"]');
+  if (!panel) {
+    panel = el("section", "panel");
+    panel.dataset.panel = key;
+    panel.appendChild(el("h3", "panel-h", title));
+    panel.appendChild(el("div", "panel-body"));
+    detail.appendChild(panel);
+  }
+  const body = panel.querySelector(".panel-body");
+  body.replaceChildren();
+  return body;
+}
+
+/** Binary-format panel: a key/value grid; each value may be a safe scalar or a tagged leaf. */
+function renderMetadata(body, data) {
+  const dl = el("dl", "kv");
+  (data.fields || []).forEach((f) => {
+    dl.appendChild(el("dt", null, f.k));
+    const dd = el("dd", null);
+    dd.appendChild(renderValue(f.v));
+    dl.appendChild(dd);
+  });
+  body.appendChild(dl);
+}
+
+/** Imports/exports panel: address + (untrusted) name + optional (untrusted) library. */
+function renderSymbols(body, data) {
+  body.appendChild(el("div", "panel-count", (data.total || 0) + (data.truncated ? " (truncated)" : "")));
+  const ul = el("ul", "rows");
+  (data.items || []).forEach((it) => {
+    const row = el("li", "row");
+    if (it.address) row.appendChild(el("span", "addr mono", it.address));
+    row.appendChild(renderValue(it.name)); // untrusted name, inert
+    if (it.library) {
+      const lib = el("span", "lib");
+      lib.appendChild(document.createTextNode("← "));
+      lib.appendChild(renderValue(it.library));
+      row.appendChild(lib);
+    }
+    ul.appendChild(row);
+  });
+  body.appendChild(ul);
+}
+
+/** Strings panel: address + length + the (untrusted) string value, inert. */
+function renderStrings(body, data) {
+  body.appendChild(el("div", "panel-count", (data.total || 0) + (data.truncated ? " (truncated)" : "")));
+  const ul = el("ul", "rows");
+  (data.items || []).forEach((it) => {
+    const row = el("li", "row");
+    if (it.address) row.appendChild(el("span", "addr mono", it.address));
+    if (typeof it.length === "number") row.appendChild(el("span", "len", it.length + "B"));
+    row.appendChild(renderValue(it.value)); // untrusted string, inert
+    ul.appendChild(row);
+  });
+  body.appendChild(ul);
+}
+
+/** Call-graph panel: an accessible adjacency list (caller → callees), labels rendered inert. */
+function renderCallgraph(body, data) {
+  const labels = {};
+  (data.nodes || []).forEach((n) => (labels[n.id] = n.label));
+  const adj = {};
+  (data.edges || []).forEach((e) => {
+    (adj[e.from] = adj[e.from] || []).push(e.to);
+  });
+  body.appendChild(
+    el("div", "panel-count", (data.nodes || []).length + " nodes · " + (data.edges || []).length + " edges" + (data.truncated ? " (truncated)" : ""))
+  );
+  const ul = el("ul", "cg");
+  Object.keys(adj).forEach((from) => {
+    const row = el("li", "cg-row");
+    row.appendChild(renderValue(labels[from] || from));
+    const arrow = el("span", "cg-arrow", " → ");
+    row.appendChild(arrow);
+    const callees = el("span", "cg-callees");
+    adj[from].forEach((to, i) => {
+      if (i) callees.appendChild(document.createTextNode(", "));
+      callees.appendChild(renderValue(labels[to] || to));
+    });
+    row.appendChild(callees);
+    ul.appendChild(row);
+  });
+  body.appendChild(ul);
+}
+
+/** Dispatch a panel event to its renderer. */
+function renderPanel(detail, e) {
+  const d = e.data || {};
+  if (e.kind === "metadata") renderMetadata(getPanel(detail, "metadata", "Binary format"), d);
+  else if (e.kind === "imports") renderSymbols(getPanel(detail, "imports", "Imports"), d);
+  else if (e.kind === "exports") renderSymbols(getPanel(detail, "exports", "Exports"), d);
+  else if (e.kind === "strings") renderStrings(getPanel(detail, "strings", "Strings"), d);
+  else if (e.kind === "callgraph") renderCallgraph(getPanel(detail, "callgraph", "Call graph"), d);
+}
+
 function setConn(text, ok) {
   const c = document.getElementById("conn");
   c.textContent = text;
@@ -69,15 +180,20 @@ function sessionCard(s) {
   if (s.last_tool) meta.appendChild(el("span", "mono last", s.last_tool));
   li.appendChild(meta);
 
+  const detail = el("div", "detail");
+  li.appendChild(detail);
+
   const stream = el("div", "stream");
   li.appendChild(stream);
 
-  attachStream(s.session_id, li, fill, bar, stream);
+  attachStream(s.session_id, li, fill, bar, stream, detail);
   return li;
 }
 
-/** Open the SSE stream for a session; update the progress bar + append outputs/verdicts inert. */
-function attachStream(sid, li, fill, bar, stream) {
+const _PANEL_KINDS = { metadata: 1, imports: 1, exports: 1, strings: 1, callgraph: 1 };
+
+/** Open the SSE stream for a session; update the progress bar, panels, and timeline. */
+function attachStream(sid, li, fill, bar, stream, detail) {
   const src = new EventSource("/api/sessions/" + encodeURIComponent(sid) + "/events");
   src.onmessage = (ev) => {
     let e;
@@ -91,6 +207,8 @@ function attachStream(sid, li, fill, bar, stream) {
       bar.setAttribute("aria-valuenow", String(e.percent));
       const ph = li.querySelector(".phase");
       if (ph && e.phase) ph.textContent = e.phase;
+    } else if (_PANEL_KINDS[e.kind]) {
+      renderPanel(detail, e);
     } else if (e.kind === "tool") {
       const row = el("div", "ev ev-tool");
       row.appendChild(el("span", "mono", e.tool || "tool"));

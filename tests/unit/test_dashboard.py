@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
@@ -21,6 +22,7 @@ from vivarium.dashboard.models import (
     SessionEvent,
     SessionSummary,
     UiValue,
+    tag,
 )
 from vivarium.dashboard.providers import DemoProvider
 
@@ -29,6 +31,23 @@ from vivarium.dashboard.providers import DemoProvider
 def client() -> TestClient:
     """A TestClient over the app with the deterministic demo provider (no token)."""
     return TestClient(build_app(DemoProvider()))
+
+
+def _drain_sse(client: TestClient, session_id: str) -> list[dict[str, Any]]:
+    """Read a session's SSE stream to the terminal verdict, returning the parsed events."""
+    import json
+
+    events: list[dict[str, Any]] = []
+    with client.stream("GET", f"/api/sessions/{session_id}/events") as r:
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/event-stream")
+        for line in r.iter_lines():
+            if line.startswith("data: "):
+                event = json.loads(line[len("data: ") :])
+                events.append(event)
+                if event["kind"] == "verdict":
+                    break
+    return events
 
 
 # --- data contract --------------------------------------------------------------------------------
@@ -67,17 +86,7 @@ def test_sse_stream_tags_untrusted_output(client: TestClient) -> None:
     inert DATA (``untrusted: true``), never as pre-rendered markup — the browser then renders it via
     ``textContent`` only.
     """
-    import json
-
-    with client.stream("GET", "/api/sessions/demo-analyzing/events") as r:
-        assert r.status_code == 200
-        assert r.headers["content-type"].startswith("text/event-stream")
-        events = []
-        for line in r.iter_lines():
-            if line.startswith("data: "):
-                events.append(json.loads(line[len("data: ") :]))
-            if len(events) >= 7:  # 4 progress + tool + output + verdict
-                break
+    events = _drain_sse(client, "demo-analyzing")
     kinds = [e["kind"] for e in events]
     assert "progress" in kinds and "output" in kinds and "verdict" in kinds
     out = next(e for e in events if e["kind"] == "output")
@@ -85,6 +94,31 @@ def test_sse_stream_tags_untrusted_output(client: TestClient) -> None:
     assert (
         "onerror=alert(1)" in out["content"]["value"]
     )  # carried inert as data, not executed markup
+
+
+def test_sse_stream_emits_analysis_panels(client: TestClient) -> None:
+    """The stream carries the richer analysis panels (format, imports/exports, strings, callgraph).
+
+    Every binary-derived leaf inside a panel's ``data`` MUST be a tagged untrusted value
+    (``{"value","untrusted":true}``) — never a bare string — so the browser renders it inert.
+    """
+    events = {e["kind"]: e for e in _drain_sse(client, "demo-analyzing")}
+    for kind in ("metadata", "imports", "exports", "strings", "callgraph"):
+        assert kind in events, f"missing panel kind {kind}"
+
+    # metadata: safe scalars are bare; binary-derived fields (program/compiler) are tagged
+    fields = {f["k"]: f["v"] for f in events["metadata"]["data"]["fields"]}
+    assert fields["format"] == "ELF"  # safe scalar, bare
+    assert fields["program"] == {"value": "demo.elf", "untrusted": True}  # tagged
+
+    # imports: each name is a tagged untrusted leaf; the injection-shaped one is carried inert
+    imp = events["imports"]["data"]["items"]
+    assert all(i["name"]["untrusted"] is True for i in imp)
+    assert any("onerror=alert(1)" in i["name"]["value"] for i in imp)
+
+    # strings + callgraph labels are tagged untrusted too
+    assert all(s["value"]["untrusted"] is True for s in events["strings"]["data"]["items"])
+    assert all(n["label"]["untrusted"] is True for n in events["callgraph"]["data"]["nodes"])
 
 
 # --- security posture -----------------------------------------------------------------------------
@@ -215,6 +249,24 @@ def test_main_no_warning_with_token(
 def test_uivalue_json_shape() -> None:
     """UiValue serializes to the {value, untrusted} contract the browser keys off."""
     assert UiValue("x", untrusted=True).json() == {"value": "x", "untrusted": True}
+
+
+def test_tag_builds_untrusted_leaf() -> None:
+    """tag() builds the tagged untrusted-leaf shape used inside SessionEvent.data."""
+    assert tag("puts") == {"value": "puts", "untrusted": True}
+
+
+def test_session_event_data_roundtrips() -> None:
+    """A panel event's structured ``data`` (with tagged leaves) survives json() serialization."""
+    ev = SessionEvent(
+        kind="imports",
+        session_id="s",
+        label="imports",
+        data={"total": 1, "items": [{"address": "0x1", "name": tag("system")}]},
+    )
+    j = ev.json()
+    assert j["kind"] == "imports"
+    assert j["data"]["items"][0]["name"] == {"value": "system", "untrusted": True}
 
 
 # --- live file bridge -----------------------------------------------------------------------------
@@ -357,6 +409,31 @@ def test_file_state_sse_tail_preserves_untrusted(tmp_path: Path) -> None:
     out = next(e for e in got if e.kind == "output")
     assert out.content is not None and out.content.untrusted is True
     assert "onerror=alert(1)" in out.content.value
+
+
+def test_file_state_preserves_panel_data(tmp_path: Path) -> None:
+    """The bridge round-trips a panel event's structured ``data`` (tagged leaves intact)."""
+    from vivarium.dashboard.state import DashboardState, FileStatusProvider
+
+    state_file = tmp_path / "state.json"
+    DashboardState(state_file).append_event(
+        SessionEvent(
+            kind="callgraph",
+            session_id="s",
+            data={"nodes": [{"id": "0x1", "label": tag("main")}], "edges": []},
+        )
+    )
+    DashboardState(state_file).append_event(SessionEvent(kind="verdict", session_id="s"))
+
+    provider = FileStatusProvider(state_file)
+
+    async def _drain() -> list[SessionEvent]:
+        return [e async for e in provider.session_events("s")]
+
+    got = asyncio.run(_drain())
+    cg = next(e for e in got if e.kind == "callgraph")
+    assert cg.data is not None
+    assert cg.data["nodes"][0]["label"] == {"value": "main", "untrusted": True}
 
 
 def test_select_provider_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

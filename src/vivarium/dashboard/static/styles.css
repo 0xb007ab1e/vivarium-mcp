@@ -162,3 +162,82 @@ main {
 }
 
 @media (prefers-reduced-motion: reduce) { .bar-fill { transition: none; } }
+
+/* --- Analysis detail panels (binary format, imports/exports, strings, call graph) --- */
+.detail {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 0.5rem 0.6rem;
+  min-width: 0;
+}
+.panel-h {
+  margin: 0 0 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.panel-body {
+  font-size: 0.8rem;
+  color: var(--ink-2);
+  overflow-x: auto;
+}
+.panel-count {
+  color: var(--muted);
+  font-size: 0.72rem;
+  margin-bottom: 0.25rem;
+}
+.kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.15rem 0.6rem;
+  margin: 0;
+}
+.kv dt {
+  color: var(--muted);
+}
+.kv dd {
+  margin: 0;
+  font-family: var(--mono);
+  word-break: break-all;
+}
+.rows,
+.cg {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.row,
+.cg-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem;
+  word-break: break-all;
+}
+.addr,
+.len {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+.lib {
+  color: var(--muted);
+}
+.cg-arrow {
+  color: var(--accent);
+}
+/* Untrusted (binary-derived) leaves rendered inert — visually marked. */
+.panel-body .u {
+  border-bottom: 1px dotted var(--warn);
+}
