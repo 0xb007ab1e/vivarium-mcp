@@ -8,6 +8,15 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Interactive executor core (`ReadOnlyExecutor`).** The security-critical, transport-agnostic core
+  of the interactive backend: a pure executor that **re-evaluates every command** (defense in depth)
+  and forwards ONLY read-only `allow` decisions to an injected `ToolCaller` transport — any
+  gated/unknown op raises (never a write path). Writes stay on the gated write-consent path. Wired
+  into `build_app` as the command executor; the concrete transport (MCP stdio client to a running
+  vivarium server) + the enablement flag are the operator's gated step (enabling spawns workers).
+  100% covered; endpoint test confirms read-only executes while gated ops stop at 202 (never reach
+  the transport).
+
 - **Apply transform / AI annotation — propose-first review flow (operational).** The dashboard now
   surfaces AI-annotation **proposals** (a new streamed `annotations` kind: per-item rename/comment
   with `current`→`proposed` + rationale, all untrusted-tagged) in a **Proposals** view: review each

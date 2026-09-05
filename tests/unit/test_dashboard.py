@@ -355,6 +355,59 @@ def test_command_endpoint_executor_failure_is_safe() -> None:
         del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
 
 
+def test_readonly_executor_forwards_and_refuses() -> None:
+    """ReadOnlyExecutor forwards read-only ops and REFUSES gated/unknown (defense in depth)."""
+    from vivarium.dashboard.catalog import catalog
+    from vivarium.dashboard.executor import ReadOnlyExecutor
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class _Caller:
+        def call(self, op: str, params: dict[str, Any], /) -> dict[str, Any]:
+            calls.append((op, params))
+            return {"echo": op}
+
+    ex = ReadOnlyExecutor(catalog(), _Caller())
+    # read-only op is forwarded
+    assert ex({"op": "list_strings", "params": {"limit": 5}}) == {"echo": "list_strings"}
+    assert calls == [("list_strings", {"limit": 5})]
+    # gated op is refused BY THE EXECUTOR even if it somehow reached it (defense in depth)
+    with pytest.raises(PermissionError):
+        ex({"op": "rename_function", "params": {}})
+    with pytest.raises(PermissionError):
+        ex({"op": "does_not_exist"})
+    assert len(calls) == 1  # no gated/unknown op ever forwarded to the transport
+
+
+def test_readonly_executor_wires_into_endpoint() -> None:
+    """A ReadOnlyExecutor wired into build_app executes read-only ops; gated still 202 (not run)."""
+    import os
+
+    from vivarium.dashboard.catalog import catalog
+    from vivarium.dashboard.executor import ReadOnlyExecutor
+
+    forwarded: list[str] = []
+
+    class _Caller:
+        def call(self, op: str, params: dict[str, Any], /) -> dict[str, Any]:
+            forwarded.append(op)
+            return {"ok": op}
+
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = "tok"  # noqa: S105 - test fixture
+    try:
+        c = TestClient(build_app(DemoProvider(), executor=ReadOnlyExecutor(catalog(), _Caller())))
+        hdr = {"authorization": "Bearer tok"}
+        r = c.post("/api/command", json={"op": "list_strings"}, headers=hdr)
+        assert r.status_code == 200 and r.json()["result"] == {"ok": "list_strings"}
+        # gated op stops at the endpoint (202) — never reaches the executor/transport
+        assert (
+            c.post("/api/command", json={"op": "rename_function"}, headers=hdr).status_code == 202
+        )
+        assert forwarded == ["list_strings"]
+    finally:
+        del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
+
+
 # --- security posture -----------------------------------------------------------------------------
 
 
