@@ -10,6 +10,9 @@ Config (env):
 - ``VIVARIUM_DASHBOARD_BIND`` — ``host:port`` (default ``127.0.0.1:8760``). Host must be loopback
   or a ``100.x.y.z`` tailnet IP.
 - ``VIVARIUM_DASHBOARD_TOKEN`` — optional shared bearer token gating every request (see ``app.py``).
+- ``VIVARIUM_DASHBOARD_STATE`` — optional path to a JSON state file. When set, the dashboard serves
+  LIVE data from it via :class:`~vivarium.dashboard.state.FileStatusProvider` (a producer driving a
+  real analysis writes it); unset, the deterministic :class:`DemoProvider` is used.
 
 Pattern (`topic-tailnet-dev-access`): run one instance bound to loopback for on-host tooling and one
 bound to the tailnet IP for phone/laptop access — e.g. ``VIVARIUM_DASHBOARD_BIND=100.x.y.z:8760``.
@@ -20,6 +23,10 @@ from __future__ import annotations
 import ipaddress
 import os
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vivarium.dashboard.providers import StatusProvider
 
 _DEFAULT_BIND = "127.0.0.1:8760"
 
@@ -68,6 +75,19 @@ def _check_bind(bind: str) -> tuple[str, int]:
     return host, port
 
 
+def _select_provider() -> StatusProvider | None:
+    """Return a live :class:`FileStatusProvider` if ``VIVARIUM_DASHBOARD_STATE`` is set, else None.
+
+    ``None`` lets :func:`build_app` fall back to its default deterministic ``DemoProvider``.
+    """
+    state_path = os.environ.get("VIVARIUM_DASHBOARD_STATE")
+    if not state_path:
+        return None
+    from vivarium.dashboard.state import FileStatusProvider
+
+    return FileStatusProvider(state_path)
+
+
 def main() -> None:
     """Validate the bind and run the app under uvicorn (loopback/tailnet only)."""
     import uvicorn
@@ -82,7 +102,13 @@ def main() -> None:
             "before any wider exposure).",
             file=sys.stderr,
         )
-    uvicorn.run(build_app(), host=host, port=port, log_level="info")
+    provider = _select_provider()
+    print(
+        f"vivarium dashboard: {'live (file state)' if provider else 'demo'} provider on "
+        f"http://{host}:{port}",
+        file=sys.stderr,
+    )
+    uvicorn.run(build_app(provider), host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":

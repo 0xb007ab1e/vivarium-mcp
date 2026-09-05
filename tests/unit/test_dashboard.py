@@ -7,12 +7,21 @@ events) — including the load-bearing rule that binary-derived content is deliv
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 import pytest
 from starlette.testclient import TestClient
 
 from vivarium.dashboard.__main__ import _check_bind, _is_tailnet_or_loopback, _parse_bind
 from vivarium.dashboard.app import build_app
-from vivarium.dashboard.models import UiValue
+from vivarium.dashboard.models import (
+    BuildSnapshot,
+    GateStatus,
+    SessionEvent,
+    SessionSummary,
+    UiValue,
+)
 from vivarium.dashboard.providers import DemoProvider
 
 
@@ -206,3 +215,155 @@ def test_main_no_warning_with_token(
 def test_uivalue_json_shape() -> None:
     """UiValue serializes to the {value, untrusted} contract the browser keys off."""
     assert UiValue("x", untrusted=True).json() == {"value": "x", "untrusted": True}
+
+
+# --- live file bridge -----------------------------------------------------------------------------
+
+
+def test_file_state_roundtrip(tmp_path: Path) -> None:
+    """DashboardState written rows read back identically through FileStatusProvider."""
+    from vivarium.dashboard.state import DashboardState, FileStatusProvider
+
+    state_file = tmp_path / "state.json"
+    writer = DashboardState(state_file)
+    writer.upsert_session(
+        SessionSummary(
+            session_id="live-1",
+            state="analyzing",
+            progress_percent=10,
+            phase="importing",
+            binary_sha256="ab" * 32,
+            tool_count=1,
+            last_tool="session_analyze",
+            started_at="2026-09-05T00:00:00Z",
+        )
+    )
+    writer.set_build(
+        BuildSnapshot(
+            tool_count=78,
+            read_only_count=62,
+            gates=[GateStatus("quality", "pass")],
+            recent_prs=["#317 dashboard"],
+            benchmark={"cases": 1},
+        )
+    )
+
+    provider = FileStatusProvider(state_file)
+    sessions = provider.list_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].session_id == "live-1" and sessions[0].progress_percent == 10
+    snap = provider.build_snapshot()
+    assert snap.tool_count == 78
+    assert snap.gates[0].name == "quality"
+    assert snap.recent_prs == ["#317 dashboard"]
+
+
+def test_file_state_missing_is_empty(tmp_path: Path) -> None:
+    """A missing/never-written state file reads as empty, never raising."""
+    from vivarium.dashboard.state import FileStatusProvider
+
+    provider = FileStatusProvider(tmp_path / "absent.json")
+    assert provider.list_sessions() == []
+    assert provider.build_snapshot().tool_count == 0
+
+
+def test_file_state_corrupt_is_empty(tmp_path: Path) -> None:
+    """A torn/invalid-JSON state file degrades to empty (fail-soft), never raising."""
+    from vivarium.dashboard.state import FileStatusProvider
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("{ not json", encoding="utf-8")
+    provider = FileStatusProvider(bad)
+    assert provider.list_sessions() == []
+
+
+def test_file_state_non_dict_is_empty(tmp_path: Path) -> None:
+    """A valid-JSON-but-non-object state file (e.g. a bare list) degrades to empty."""
+    from vivarium.dashboard.state import FileStatusProvider
+
+    f = tmp_path / "list.json"
+    f.write_text("[]", encoding="utf-8")
+    assert FileStatusProvider(f).list_sessions() == []
+
+
+def test_file_state_tail_ends_on_idle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A stream with no terminal verdict ends after the bounded idle window (no infinite tail)."""
+    from vivarium.dashboard import state as state_mod
+    from vivarium.dashboard.state import DashboardState, FileStatusProvider
+
+    monkeypatch.setattr(state_mod, "_TAIL_INTERVAL_S", 0.0)
+    monkeypatch.setattr(state_mod, "_TAIL_MAX_IDLE", 2)
+    state_file = tmp_path / "state.json"
+    DashboardState(state_file).append_event(
+        SessionEvent(kind="progress", session_id="s", percent=10)
+    )
+    provider = FileStatusProvider(state_file)
+
+    async def _drain() -> list[SessionEvent]:
+        return [e async for e in provider.session_events("s")]
+
+    got = asyncio.run(_drain())
+    assert [e.kind for e in got] == ["progress"]  # yielded, then stream closed on idle timeout
+
+
+def test_dashboard_state_cleans_temp_on_write_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed persist raises and leaves no orphan temp file (atomic-write cleanup)."""
+    import json
+
+    from vivarium.dashboard.state import DashboardState
+
+    state_file = tmp_path / "state.json"
+    writer = DashboardState(state_file)
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(json, "dump", _boom)
+    with pytest.raises(RuntimeError, match="disk full"):
+        writer.append_event(SessionEvent(kind="progress", session_id="s", percent=1))
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_file_state_sse_tail_preserves_untrusted(tmp_path: Path) -> None:
+    """The SSE tail replays events and preserves the untrusted tag on binary-derived content."""
+    from vivarium.dashboard.state import DashboardState, FileStatusProvider
+
+    state_file = tmp_path / "state.json"
+    writer = DashboardState(state_file)
+    writer.append_event(SessionEvent(kind="progress", session_id="live-1", percent=50, phase="x"))
+    writer.append_event(
+        SessionEvent(
+            kind="output",
+            session_id="live-1",
+            label="decompile",
+            content=UiValue("<img src=x onerror=alert(1)>", untrusted=True),
+        )
+    )
+    writer.append_event(
+        SessionEvent(kind="verdict", session_id="live-1", content=UiValue("benign"))
+    )
+
+    provider = FileStatusProvider(state_file)
+
+    async def _drain() -> list[SessionEvent]:
+        return [e async for e in provider.session_events("live-1")]
+
+    got = asyncio.run(_drain())
+
+    kinds = [e.kind for e in got]
+    assert kinds == ["progress", "output", "verdict"]  # stops after the terminal verdict
+    out = next(e for e in got if e.kind == "output")
+    assert out.content is not None and out.content.untrusted is True
+    assert "onerror=alert(1)" in out.content.value
+
+
+def test_select_provider_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """_select_provider returns a file provider iff VIVARIUM_DASHBOARD_STATE is set."""
+    from vivarium.dashboard.__main__ import _select_provider
+
+    monkeypatch.delenv("VIVARIUM_DASHBOARD_STATE", raising=False)
+    assert _select_provider() is None
+    monkeypatch.setenv("VIVARIUM_DASHBOARD_STATE", str(tmp_path / "s.json"))
+    assert _select_provider() is not None

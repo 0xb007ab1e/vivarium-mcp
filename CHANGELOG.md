@@ -16,9 +16,11 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   binary-derived field is tagged `UiValue{untrusted:true}` and rendered INERT (`textContent`) under
   a strict, inline-free CSP (ADR-005); hardening headers; GET-only; fail-closed loopback/tailnet
   bind (refuses `0.0.0.0`/public); optional constant-time bearer gate. Data source is pluggable
-  (`StatusProvider`); the MVP ships a deterministic `DemoProvider`. The live provider (over
-  `session_status` / `$/progress` / streaming jobs / metrics) and a dedicated STRIDE pass over the
-  new browser trust boundary are tracked follow-ups (`src/vivarium/dashboard/README.md`).
+  (`StatusProvider`): a deterministic `DemoProvider` (default) plus a **live** `FileStatusProvider`
+  (`VIVARIUM_DASHBOARD_STATE`) that reads + tails a JSON state file a producer writes via
+  `DashboardState` while driving a real analysis — binary-derived content stays tagged `untrusted`
+  end to end. A direct server-tapping provider and a dedicated STRIDE pass over the new browser
+  trust boundary are tracked follow-ups (`src/vivarium/dashboard/README.md`).
 - **Seeded the `family_match` corpus (ADR-073 D3).** `vivarium.data.family_corpus` advances
   `corpus-1` (empty) → `corpus-2` with the four confirmed-family validation-benchmark samples —
   **Win32.Kelihos**, **OSX.Wirenet**, **Win32.LuckyCat**, **Win32.BumbleBee** — each keyed by its

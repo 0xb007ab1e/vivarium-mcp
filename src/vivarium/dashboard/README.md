@@ -18,6 +18,7 @@ Config (env):
 |---|---|---|
 | `VIVARIUM_DASHBOARD_BIND` | `host:port`. Host MUST be loopback or a `100.64.0.0/10` tailnet IP. | `127.0.0.1:8760` |
 | `VIVARIUM_DASHBOARD_TOKEN` | Optional shared bearer token gating every request (constant-time compare). | unset |
+| `VIVARIUM_DASHBOARD_STATE` | Optional path to a JSON state file. When set, the dashboard serves **live** data from it (`FileStatusProvider`); unset, it serves the deterministic `DemoProvider`. | unset |
 
 Tailnet pattern (`topic-tailnet-dev-access`): run one instance on loopback for on-host tooling and
 one on the tailnet IP for phone/laptop access, e.g. `VIVARIUM_DASHBOARD_BIND=100.x.y.z:8760`.
@@ -39,9 +40,17 @@ one on the tailnet IP for phone/laptop access, e.g. `VIVARIUM_DASHBOARD_BIND=100
 ## Architecture
 
 The data source is pluggable via the `StatusProvider` Protocol so the UI is decoupled from its
-source. The MVP ships `DemoProvider` — deterministic synthetic data (no I/O, clock, or randomness)
-that exercises every render path, so the frontend and the untrusted-render harness are buildable and
-reviewable before a live provider exists.
+source:
+
+- **`DemoProvider`** — deterministic synthetic data (no I/O, clock, or randomness) that exercises
+  every render path; the default, for building/reviewing the frontend + untrusted-render harness.
+- **`FileStatusProvider`** (`state.py`) — the first **live** path: reads a JSON **state file** and
+  tails it for SSE. A producer driving a real analysis through the vivarium MCP tools writes the
+  file via `DashboardState` (`upsert_session` / `append_event` / `set_build`, atomic replace on each
+  save). This is an intentionally decoupled bridge — the dashboard process never links the MCP
+  server; the file is the channel. Binary-derived event `content` stays tagged `untrusted` end to
+  end (the bridge never downgrades the ADR-005 envelope). The state file is a local dev artifact
+  (loopback/tailnet only) holding no secret.
 
 ## Follow-ups (before any wider exposure)
 
@@ -50,5 +59,6 @@ reviewable before a live provider exists.
   over this TB (aligned with `docs/security/threat-model.md`) is required before production.
 - **Reuse the server's principals.** Production auth reuses the server's per-principal authZ
   (ADR-017/019), never invents its own — the MVP bearer gate is an interim, tailnet-scoped control.
-- **Live provider.** A live `StatusProvider` over `session_status` + `$/progress` (ADR-030) +
-  streaming jobs (ADR-040) + metrics (ADR-044) and `gh`/CI — same interface, no UI change.
+- **Direct live provider.** The file bridge is the first live path; a provider that taps the server
+  directly (`session_status` + `$/progress` (ADR-030) + streaming jobs (ADR-040) + metrics
+  (ADR-044) and `gh`/CI) is the next step — same `StatusProvider` interface, no UI change.
