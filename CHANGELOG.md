@@ -8,6 +8,13 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Interactive execution ENABLED (read-only, opt-in).** `POST /api/command` can now execute
+  read-only ops for real: set `VIVARIUM_DASHBOARD_INTERACTIVE=1` (plus a state file + a token —
+  fail-closed without them) to wire a `ReadOnlyExecutor` over a `StateFileToolCaller` that answers
+  listings/metadata/call-graph/callers-callees/decompile from the live state file (no worker spawn,
+  ADR-001 preserved). Gated ops/writes are refused (202/PermissionError); a worker-backed transport
+  for fresh analysis remains the operator's next step. STRIDE/TB9 controls enforced (auth + allow-
+  list + gating + audit + inert results).
 - **Interactive executor core (`ReadOnlyExecutor`).** The security-critical, transport-agnostic core
   of the interactive backend: a pure executor that **re-evaluates every command** (defense in depth)
   and forwards ONLY read-only `allow` decisions to an injected `ToolCaller` transport — any

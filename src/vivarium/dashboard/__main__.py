@@ -26,6 +26,7 @@ import sys
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from vivarium.dashboard.commands import CommandExecutor
     from vivarium.dashboard.providers import StatusProvider
 
 _DEFAULT_BIND = "127.0.0.1:8760"
@@ -88,6 +89,31 @@ def _select_provider() -> StatusProvider | None:
     return FileStatusProvider(state_path)
 
 
+def _select_executor() -> CommandExecutor | None:
+    """Return an interactive executor iff explicitly enabled AND its safety preconditions hold.
+
+    Fail closed: interactive requires ``VIVARIUM_DASHBOARD_INTERACTIVE`` set AND a state file
+    (``VIVARIUM_DASHBOARD_STATE``) AND an auth token (``VIVARIUM_DASHBOARD_TOKEN``). Missing any →
+    ``None`` (disabled; the command endpoint returns 503). The wired transport is read-only
+    (:class:`StateFileToolCaller`) — it spawns no worker; gated ops/writes are refused by the
+    executor + endpoint (ADR-076 / TB9).
+    """
+    if not os.environ.get("VIVARIUM_DASHBOARD_INTERACTIVE"):
+        return None
+    state_path = os.environ.get("VIVARIUM_DASHBOARD_STATE")
+    if not state_path or not os.environ.get("VIVARIUM_DASHBOARD_TOKEN"):
+        print(
+            "warning: interactive requested but requires VIVARIUM_DASHBOARD_STATE + "
+            "VIVARIUM_DASHBOARD_TOKEN — interactive DISABLED (fail closed).",
+            file=sys.stderr,
+        )
+        return None
+    from vivarium.dashboard.catalog import catalog
+    from vivarium.dashboard.executor import ReadOnlyExecutor, StateFileToolCaller
+
+    return ReadOnlyExecutor(catalog(), StateFileToolCaller(state_path))
+
+
 def main() -> None:
     """Validate the bind and run the app under uvicorn (loopback/tailnet only)."""
     import uvicorn
@@ -103,12 +129,13 @@ def main() -> None:
             file=sys.stderr,
         )
     provider = _select_provider()
+    executor = _select_executor()
     print(
-        f"vivarium dashboard: {'live (file state)' if provider else 'demo'} provider on "
-        f"http://{host}:{port}",
+        f"vivarium dashboard: {'live (file state)' if provider else 'demo'} provider · "
+        f"interactive {'ON (read-only)' if executor else 'off'} on http://{host}:{port}",
         file=sys.stderr,
     )
-    uvicorn.run(build_app(provider), host=host, port=port, log_level="info")
+    uvicorn.run(build_app(provider, executor), host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":

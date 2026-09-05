@@ -104,6 +104,7 @@ Config (env):
 | `VIVARIUM_DASHBOARD_BIND` | `host:port`. Host MUST be loopback or a `100.64.0.0/10` tailnet IP. | `127.0.0.1:8760` |
 | `VIVARIUM_DASHBOARD_TOKEN` | Optional shared bearer token gating every request (constant-time compare). | unset |
 | `VIVARIUM_DASHBOARD_STATE` | Optional path to a JSON state file. When set, the dashboard serves **live** data from it (`FileStatusProvider`); unset, it serves the deterministic `DemoProvider`. | unset |
+| `VIVARIUM_DASHBOARD_INTERACTIVE` | Enable the interactive command endpoint (`POST /api/command`). **Fail-closed:** also REQUIRES `VIVARIUM_DASHBOARD_STATE` + `VIVARIUM_DASHBOARD_TOKEN`, else interactive stays disabled (503). The wired transport is **read-only** (`StateFileToolCaller`) — answers read-only ops from the state file; gated ops/writes are refused (202). | unset (off) |
 
 Tailnet pattern (`topic-tailnet-dev-access`): run one instance on loopback for on-host tooling and
 one on the tailnet IP for phone/laptop access, e.g. `VIVARIUM_DASHBOARD_BIND=100.x.y.z:8760`.
