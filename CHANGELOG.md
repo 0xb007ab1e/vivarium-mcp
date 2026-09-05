@@ -8,6 +8,19 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Dashboard interactive backend — foundation (Phase 2, ADR-076 / threat-model TB9).** The
+  groundwork for driving RE workflows from the browser (open/analyze, recurse, apply transform / AI
+  annotation), built **the mandated way**: the new browser→server command boundary (**TB9**) is
+  STRIDE-modeled (`docs/security/threat-model.md` §21) and specified (**ADR-076**) *before*
+  implementation. A pure gating policy (`vivarium.dashboard.commands`) validates a command against
+  the served catalog and returns **allow** (read-only), **needs-approval** (gated: import/analyze/
+  close, all writes, `ai_annotate` — default-deny, human write-consent only, propose-first), or
+  **deny** (unknown/malformed — CWE-20). A new `POST /api/command` endpoint is **default-OFF +
+  fail-closed**: with no executor wired it returns 503, and interactive **requires auth** (403 if no
+  token) — so the dashboard's read-only posture is byte-for-byte preserved and the browser has **no
+  live execution path** yet. Live wiring to the session manager + production enablement are
+  **gated actions** (human approval) — this increment adds no live attack surface.
+
 - **Dashboard workflows foundation (RE workbench, Phase 1).** First step toward the dashboard
   covering vivarium end-to-end with RE workflows. A new read-only `/api/catalog` serves an
   **operation palette** (vivarium tools grouped: session / listing / code / graph-xrefs / scans /

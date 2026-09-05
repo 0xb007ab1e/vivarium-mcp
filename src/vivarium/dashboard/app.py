@@ -34,6 +34,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp
 
 from vivarium.dashboard.catalog import catalog
+from vivarium.dashboard.commands import INVALID_JSON, CommandExecutor, dispatch
 from vivarium.dashboard.providers import DemoProvider, StatusProvider
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -109,17 +110,24 @@ def _sse_format(data: dict[str, object]) -> bytes:
     return f"data: {json.dumps(data)}\n\n".encode()
 
 
-def build_app(provider: StatusProvider | None = None) -> Starlette:
-    """Construct the read-only dashboard ASGI app.
+def build_app(  # noqa: C901 - composition root: one nested handler per route (wiring, not logic)
+    provider: StatusProvider | None = None, executor: CommandExecutor | None = None
+) -> Starlette:
+    """Construct the dashboard ASGI app.
 
     Args:
-        provider: The data source. Defaults to the deterministic :class:`DemoProvider` (MVP); a live
-            provider (same Protocol) is injected here at the composition root in a later increment.
+        provider: The read-only data source. Defaults to the deterministic :class:`DemoProvider`.
+        executor: OPTIONAL interactive command executor (Phase 2 — ADR-076 / TB9). Default ``None``
+            keeps the app **read-only + fail-closed**: ``POST /api/command`` returns 503 (disabled)
+            and no execution path exists. A live executor is wired only by the (gated) integration,
+            and interactive requires auth (a token) — enforced fail-closed below.
 
     Returns:
-        A configured :class:`starlette.applications.Starlette` app (GET-only, hardened).
+        A configured :class:`starlette.applications.Starlette` app (hardened; GET-only unless an
+        interactive executor is wired).
     """
     source: StatusProvider = provider if provider is not None else DemoProvider()
+    token = os.environ.get(_TOKEN_ENV) or None
 
     async def health(_request: Request) -> JSONResponse:
         """Liveness — the dashboard process is up (does not assert upstream health in the MVP)."""
@@ -136,6 +144,20 @@ def build_app(provider: StatusProvider | None = None) -> Starlette:
     async def catalog_route(_request: Request) -> JSONResponse:
         """The static workflow + operation catalog (read-only, safe metadata)."""
         return JSONResponse(catalog())
+
+    async def command_route(request: Request) -> JSONResponse:
+        """Interactive command endpoint (Phase 2 — ADR-076 / TB9). Default OFF + fail closed.
+
+        Thin: parse the body (or a sentinel) and defer the disabled/auth/gate/execute decision to
+        :func:`commands.dispatch`. No executor wired ⇒ 503; no token ⇒ 403; gated op ⇒ 202
+        (not executed — human write-consent only); read-only ⇒ executed via the injected executor.
+        """
+        try:
+            body: object = await request.json()
+        except Exception:  # any parse failure → the INVALID_JSON sentinel (handled after auth)
+            body = INVALID_JSON
+        status, payload = dispatch(catalog(), executor, token is not None, body)
+        return JSONResponse(payload, status_code=status)
 
     async def session_events(request: Request) -> StreamingResponse:
         """Stream one session's live events as Server-Sent Events (progress/tool/output/verdict)."""
@@ -159,10 +181,10 @@ def build_app(provider: StatusProvider | None = None) -> Starlette:
         Route("/api/sessions/{session_id}/events", session_events, methods=["GET"]),
         Route("/api/build", build, methods=["GET"]),
         Route("/api/catalog", catalog_route, methods=["GET"]),
+        Route("/api/command", command_route, methods=["POST"]),
         Mount("/", app=StaticFiles(directory=_STATIC_DIR, html=True), name="static"),
     ]
 
-    token = os.environ.get(_TOKEN_ENV) or None
     middleware = [
         Middleware(SecurityHeadersMiddleware),
         Middleware(BearerAuthMiddleware, token=token),

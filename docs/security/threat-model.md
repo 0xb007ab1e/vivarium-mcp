@@ -1420,3 +1420,44 @@ ADR-002 kill + verified-wipe; every binary-derived output is `Untrusted`-envelop
 concrete escape this analysis surfaced, now fixed + regression-tested (#299). Follow-ups tracked in
 the round-11 register (AA5/AA6/AA7 cap overshoots, AA15 emulation CPU) are self-inflicted +
 deadline/SSA-bounded, not containment breaks.
+
+## 21. TB9 — Dashboard interactive backend (Phase 2 — ADR-076, PROPOSED)
+
+> **New trust boundary.** Phase 1 of the status dashboard (`vivarium.dashboard`) is read-only,
+> GET-only, and decoupled from the server (it visualizes a file/demo provider). Phase 2 adds an
+> **interactive command channel** so an operator can drive RE workflows from the browser
+> (open/analyze, list parents/children, recurse, scans, and gated **apply transform / AI
+> annotation**). This is a **browser → server write/command boundary** — modeled here BEFORE
+> implementation (`workflow-threat-model`). It reuses, and never weakens, the existing controls:
+> the ADR-011/017/019 authenticated HTTP surface (TB6), the ADR-012/013 gated write path (TB7), and
+> ADR-001/002/004 worker isolation. The dashboard **never** gains its own JVM or write primitive.
+
+**Posture (secure-by-default, fail closed):**
+- **Default OFF.** Interactive is disabled unless explicitly enabled by config AND an executor is
+  wired; with neither, every command endpoint returns *disabled* (503) — Phase-1 behavior is
+  byte-for-byte preserved. No executor ⇒ no execution path exists.
+- **Auth required when on.** Enabling interactive REQUIRES authentication (bearer/mTLS/OAuth via
+  TB6, per-principal — ADR-017/019); an interactive bind with no auth fails closed at startup.
+- **Reuse the server, don't reinvent.** Commands execute only through the existing MCP tool
+  registry + session manager (owner-checked per principal, BOLA-closed — ADR-017) and the gated
+  write path (write-consent — ADR-012). The dashboard is a thin command *forwarder*, not an
+  executor of privileged logic.
+
+| STRIDE | Threat | Mitigation (control) |
+|---|---|---|
+| **S** | Unauthenticated/forged browser drives the server | Interactive requires TB6 auth (per-principal); no-auth interactive refused at startup (fail closed); commands bound to the authenticated principal |
+| **T** | Malicious/oversized command payload; parameter injection | Commands **allow-listed against the served catalog** (`commands.py`), typed + bounded params, validated server-side before dispatch (CWE-20); unknown op / bad params → reject, no dispatch |
+| **R** | Operator denies issuing a destructive command | Every command audited (principal, op, params-digest, decision, outcome) — `topic-logging-observability`; write ops additionally audited by TB7 |
+| **I** | Cross-session / cross-principal read or write (BOLA) | Session ownership enforced per principal (ADR-017) — a command for a foreign session id gets the same `SESSION_INVALID`, no oracle; results still cross TB4 as `Untrusted` |
+| **D** | Command flood / expensive-op abuse (analyze/AI storms; cost-DoS) | Per-principal rate limits + concurrency caps (TB6); bounded op params; **gated compute** (analyze/AI) requires approval so it can't be spammed; worker caps + kill-on-timeout unchanged (ADR-002) |
+| **E** | Browser escalates to run gated/write ops without approval (LLM08 excessive agency) | **Two-tier op policy:** read-only ops may run under auth+limits; **gated ops (import/analyze/close, all writes, `ai_annotate`) are default-deny** and return *needs-approval* — applied only via the TB7 write-consent human-in-the-loop, never auto from the browser. **AI annotation is propose-first:** the agent produces rename/comment proposals, a diff is shown, and application is a separate approved write (reversible via `session_undo`). |
+
+**Data classification / rendering.** Command *results* are the same confidential, hostile-origin
+artifacts as everywhere else — they cross TB4 as `Untrusted[...]` and the dashboard renders them
+inert (`textContent`, ADR-005), exactly as in Phase 1.
+
+**Residual risk & status.** PROPOSED (ADR-076). The interactive backend ships **default-off +
+fail-closed + auth-required**, with the command-validation + gating **policy** (`commands.py`)
+implemented and tested first; **live wiring to the session manager and any production enablement are
+gated actions** requiring human approval (`workflow-gated-actions`). Until then the browser has no
+execution path (503), so TB9 adds no live attack surface.

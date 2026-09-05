@@ -32,9 +32,16 @@ steps, reorder or remove them, name it, **save** (persisted per viewer in `local
 Catalog.
 
 **Phase 1 is author + visualize only:** the dashboard stays read-only and decoupled — workflows are
-executed by the agent out-of-band and their results stream back into the session views. Interactive
-execution (browser → server) and the gated, propose-first AI-annotation flow come after a dedicated
-STRIDE threat model + write-consent/authZ.
+executed by the agent out-of-band and their results stream back into the session views.
+
+**Phase 2 (interactive) — foundation shipped, default-off.** The browser→server command boundary is
+STRIDE-modeled (`docs/security/threat-model.md` §21, **TB9**) and specified (**ADR-076**). A pure
+gating policy (`commands.py`) classifies each command **allow** (read-only) / **needs-approval**
+(gated: import/analyze/close, writes, `ai_annotate` — default-deny, human write-consent only,
+propose-first) / **deny** (unknown/malformed). `POST /api/command` is **default-OFF + fail-closed**:
+no executor wired ⇒ 503, and interactive **requires auth** ⇒ 403 without a token. So there is **no
+live execution path** until an executor is wired to the session manager — a **gated action** needing
+human approval. Applying AI annotations/transforms remains propose-first + reversible (`session_undo`).
 
 ## Interactive call graph
 
