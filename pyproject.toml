@@ -80,6 +80,13 @@ sast = [
 mutation = [
   "mutmut>=3.6",       # mutation testing on the critical modules (master §4: test-quality gate).
 ]
+
+# Read-only status dashboard runtime (`python -m vivarium.dashboard`). Starlette is already a base
+# dep (the app itself); uvicorn is the ASGI server used ONLY to run the dashboard. Optional so the
+# core MCP server (stdio) never pulls a web server it doesn't need.
+dashboard = [
+  "uvicorn>=0.30",     # ASGI server for the display-only dashboard. BSD-3-Clause.
+]
 # NOTE: the ground-truth e2e job's two extra tools (pyelftools, capstone — used by
 # tests/fixtures/oss/extract_ground_truth.py and scripts/naming_eval.py) are pinned out-of-band in
 # `requirements-groundtruth.lock` (compiled from `requirements-groundtruth.in` with

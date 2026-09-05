@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Vivarium Status</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">▣</span>
+        <div>
+          <h1>Vivarium Status</h1>
+          <p class="sub" id="conn" role="status" aria-live="polite">connecting…</p>
+        </div>
+      </div>
+      <p class="mvp" title="Read-only display MVP">read-only · display-only</p>
+    </header>
+
+    <main id="main">
+      <section aria-labelledby="sessions-h" class="col">
+        <div class="sec-head">
+          <h2 id="sessions-h">Live sessions</h2>
+          <span class="rule"></span>
+          <span class="hint">analysis in progress · output for validation</span>
+        </div>
+        <ul id="sessions" class="sessions" aria-live="polite"></ul>
+      </section>
+
+      <section aria-labelledby="build-h" class="col">
+        <div class="sec-head">
+          <h2 id="build-h">Build &amp; deliverables</h2>
+          <span class="rule"></span>
+          <span class="hint">what the agent shipped</span>
+        </div>
+        <div id="build" class="build"></div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <span id="foot-note">All binary-derived output is rendered inert (ADR-005).</span>
+    </footer>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
