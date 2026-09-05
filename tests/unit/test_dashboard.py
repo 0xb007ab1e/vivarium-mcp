@@ -219,6 +219,111 @@ def test_file_bridge_roundtrips_function_data(tmp_path: Path) -> None:
     assert fn.data["callees"][0] == {"id": "0x2", "name": {"value": "puts", "untrusted": True}}
 
 
+# --- interactive command backend (Phase 2 — fail-closed) ------------------------------------------
+
+
+def test_command_policy_evaluate() -> None:
+    """evaluate gates ops: read-only=allow, gated=needs-approval, unknown/malformed=deny."""
+    from vivarium.dashboard.catalog import catalog
+    from vivarium.dashboard.commands import evaluate
+
+    cat = catalog()
+    assert evaluate(cat, {"op": "decompile_function"})["decision"] == "allow"
+    assert evaluate(cat, {"op": "list_strings"})["decision"] == "allow"
+    assert evaluate(cat, {"op": "session_analyze"})["decision"] == "needs-approval"
+    assert evaluate(cat, {"op": "rename_function"})["decision"] == "needs-approval"
+    assert evaluate(cat, {"op": "ai_annotate"})["decision"] == "needs-approval"
+    assert evaluate(cat, {"op": "does_not_exist"})["decision"] == "deny"
+    assert evaluate(cat, {"op": "list_strings", "params": []})["decision"] == "deny"
+    assert evaluate(cat, {})["decision"] == "deny"
+
+
+def test_command_endpoint_disabled_by_default() -> None:
+    """With no executor wired, POST /api/command is fail-closed 503 (read-only preserved)."""
+    c = TestClient(build_app(DemoProvider()))
+    assert c.post("/api/command", json={"op": "list_strings"}).status_code == 503
+
+
+def _noop_exec(cmd: dict[str, Any]) -> dict[str, Any]:
+    """A trivial executor for endpoint tests."""
+    return {"ok": True}
+
+
+def test_command_endpoint_requires_auth() -> None:
+    """An executor wired but no token configured fails closed (interactive needs auth)."""
+    import os
+
+    os.environ.pop("VIVARIUM_DASHBOARD_TOKEN", None)
+    c = TestClient(build_app(DemoProvider(), executor=_noop_exec))
+    assert c.post("/api/command", json={"op": "list_strings"}).status_code == 403
+
+
+def test_command_endpoint_gates_and_executes() -> None:
+    """With executor + token: read-only → executes; gated → 202 (not run); unknown → 400."""
+    import os
+
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = "tok"  # noqa: S105 - test fixture
+    calls: list[dict[str, Any]] = []
+
+    def _exec(cmd: dict[str, Any]) -> dict[str, Any]:
+        calls.append(cmd)
+        return {"ran": cmd["op"]}
+
+    try:
+        c = TestClient(build_app(DemoProvider(), executor=_exec))
+        hdr = {"authorization": "Bearer tok"}
+        # gated op → 202 needs-approval, executor NOT called
+        r = c.post("/api/command", json={"op": "session_analyze"}, headers=hdr)
+        assert r.status_code == 202 and r.json()["decision"] == "needs-approval"
+        # unknown op → 400 deny
+        assert c.post("/api/command", json={"op": "nope"}, headers=hdr).status_code == 400
+        # read-only op → executed
+        r = c.post("/api/command", json={"op": "list_strings"}, headers=hdr)
+        assert r.status_code == 200 and r.json()["result"] == {"ran": "list_strings"}
+        assert [x["op"] for x in calls] == ["list_strings"]  # only the allowed op ran
+    finally:
+        del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
+
+
+def test_command_endpoint_invalid_json_and_bad_params() -> None:
+    """Malformed body → 400 invalid-json; too many params → 400 deny (never dispatched)."""
+    import os
+
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = "tok"  # noqa: S105 - test fixture
+    try:
+        c = TestClient(build_app(DemoProvider(), executor=_noop_exec))
+        hdr = {"authorization": "Bearer tok"}
+        r = c.post("/api/command", content=b"not json", headers=hdr)
+        assert r.status_code == 400 and r.json()["error"] == "invalid-json"
+        big = {"op": "list_strings", "params": {str(i): i for i in range(40)}}
+        assert c.post("/api/command", json=big, headers=hdr).status_code == 400
+    finally:
+        del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
+
+
+def test_command_endpoint_executor_failure_is_safe() -> None:
+    """An executor exception collapses to a 500 that leaks no internals (fail closed)."""
+    import os
+
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = "tok"  # noqa: S105 - test fixture
+
+    def _boom(cmd: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("secret internal detail")
+
+    try:
+        c = TestClient(build_app(DemoProvider(), executor=_boom), raise_server_exceptions=False)
+        r = c.post(
+            "/api/command",
+            json={"op": "list_strings"},
+            headers={"authorization": "Bearer tok"},
+        )
+        assert r.status_code == 500
+        assert r.json() == {"error": "command-failed", "op": "list_strings"}
+        assert "secret internal detail" not in r.text
+    finally:
+        del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
+
+
 # --- security posture -----------------------------------------------------------------------------
 
 
