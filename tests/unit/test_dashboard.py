@@ -129,6 +129,22 @@ def test_sse_stream_emits_workflow_run(client: TestClient) -> None:
     assert d["steps"] and all("op" in st and "state" in st for st in d["steps"])
 
 
+def test_sse_stream_emits_ai_proposals(client: TestClient) -> None:
+    """The stream carries AI annotation proposals (apply-transform, propose-first) — tagged leaves.
+
+    Each proposal item's current/proposed/rationale + target name are binary-derived → tagged
+    untrusted; applying is gated (write-consent), never carried as a bare/executable value.
+    """
+    props = [e for e in _drain_sse(client, "demo-analyzing") if e["kind"] == "annotations"]
+    assert props, "no AI annotation proposals streamed"
+    d = props[0]["data"]
+    assert d["id"] and d["items"]
+    it = d["items"][0]
+    assert it["kind"] in ("rename", "comment")
+    assert it["proposed"]["untrusted"] is True
+    assert it["target"]["id"] and it["target"]["name"]["untrusted"] is True
+
+
 def test_sse_stream_tags_untrusted_output(client: TestClient) -> None:
     """The SSE stream delivers an OUTPUT event whose binary-derived content is tagged untrusted.
 

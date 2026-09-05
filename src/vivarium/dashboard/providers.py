@@ -257,6 +257,33 @@ class DemoProvider:
                 "provenance": {"tool": "function_context", "address": "0x00401000"},
             },
         )
+        # AI-annotation proposals (apply-transform, propose-first). The agent proposes; the UI
+        # reviews (diff) + approves; applying is a GATED write (write-consent), never auto here.
+        yield SessionEvent(
+            kind="annotations",
+            session_id=session_id,
+            label="AI annotation proposals",
+            data={
+                "id": "prop-1",
+                "function_id": "0x00401000",
+                "items": [
+                    {
+                        "kind": "rename",
+                        "target": sym_ref("0x00401100", "FUN_00401100"),
+                        "current": tag("FUN_00401100"),
+                        "proposed": tag("parse_args"),
+                        "rationale": tag("reads argv, dispatches on option chars (getopt-like)"),
+                    },
+                    {
+                        "kind": "comment",
+                        "target": sym_ref("0x00401000", "main"),
+                        "current": tag(""),
+                        "proposed": tag("entry: setup locale + parse args + dispatch"),
+                        "rationale": tag("summarizes the observed prologue behavior"),
+                    },
+                ],
+            },
+        )
         # a workflow run tracker (agent-executed; the UI shows the step progress)
         yield SessionEvent(
             kind="workflow",
