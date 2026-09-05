@@ -33,6 +33,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp
 
+from vivarium.dashboard.catalog import catalog
 from vivarium.dashboard.providers import DemoProvider, StatusProvider
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -132,6 +133,10 @@ def build_app(provider: StatusProvider | None = None) -> Starlette:
         """The build/deliverable snapshot (catalog, gates, PRs, benchmark)."""
         return JSONResponse(source.build_snapshot().json())
 
+    async def catalog_route(_request: Request) -> JSONResponse:
+        """The static workflow + operation catalog (read-only, safe metadata)."""
+        return JSONResponse(catalog())
+
     async def session_events(request: Request) -> StreamingResponse:
         """Stream one session's live events as Server-Sent Events (progress/tool/output/verdict)."""
         session_id = request.path_params["session_id"]
@@ -153,6 +158,7 @@ def build_app(provider: StatusProvider | None = None) -> Starlette:
         Route("/api/sessions", sessions, methods=["GET"]),
         Route("/api/sessions/{session_id}/events", session_events, methods=["GET"]),
         Route("/api/build", build, methods=["GET"]),
+        Route("/api/catalog", catalog_route, methods=["GET"]),
         Mount("/", app=StaticFiles(directory=_STATIC_DIR, html=True), name="static"),
     ]
 

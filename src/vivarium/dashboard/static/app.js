@@ -159,8 +159,8 @@ function codeBlock(text, lang, sessionId, resolve) {
 
 /* ------------------------------------------------------------------ state store + index */
 
-const store = { sessions: {}, build: null };
-let selection = null; // { kind:"session-view"|"build", sessionId?, view? }
+const store = { sessions: {}, build: null, catalog: null };
+let selection = null; // { kind:"session-view"|"build"|"catalog", sessionId?, view? }
 let pendingHighlight = null; // an id to flash after a cross-nav into a table
 
 function ensureSession(id) {
@@ -176,6 +176,7 @@ function ensureSession(id) {
       timeline: [],
       outputs: [],
       verdict: null,
+      workflows: {}, // run id -> merged workflow run
       idIndex: {}, // address id -> { kind, view }
       nameIndex: {}, // symbol name -> id (for code jump-to)
     };
@@ -222,6 +223,7 @@ function treeItem(label, opts) {
 function isActive(kind, sessionId, view) {
   if (!selection) return false;
   if (kind === "build") return selection.kind === "build";
+  if (kind === "catalog") return selection.kind === "catalog";
   return (
     selection.kind === "session-view" &&
     selection.sessionId === sessionId &&
@@ -290,9 +292,24 @@ function buildExplorer() {
       kid(o.label || "output " + (idx + 1), "output:" + idx, { icon: "i-code", iconText: "{}" })
     );
     if (s.verdict) kid("Verdict", "verdict", { icon: "i-ver", iconText: "✓" });
+    if (Object.keys(s.workflows).length)
+      kid("Runs", "runs", { icon: "i-run", iconText: "▷", badge: Object.keys(s.workflows).length });
     kid("Timeline", "timeline", { icon: "i-time", iconText: "≡" });
   });
   root.appendChild(g);
+
+  const w = el("div", "tw-group");
+  w.appendChild(el("div", "tw-group-h", "Workflows"));
+  w.appendChild(
+    treeItem("Catalog", {
+      depth: 0,
+      icon: "i-wf",
+      iconText: "▤",
+      active: isActive("catalog"),
+      onClick: () => select({ kind: "catalog" }),
+    })
+  );
+  root.appendChild(w);
 
   const b = el("div", "tw-group");
   b.appendChild(el("div", "tw-group-h", "Build"));
@@ -352,6 +369,8 @@ function renderViewer() {
   const keepScroll = v.scrollTop; // in-place update: preserve scroll
   if (selection.kind === "build") {
     renderBuild();
+  } else if (selection.kind === "catalog") {
+    renderCatalog();
   } else {
     const s = store.sessions[selection.sessionId];
     if (!s) return;
@@ -364,6 +383,7 @@ function renderViewer() {
     else if (view === "callgraph") renderCallgraph(s);
     else if (view === "verdict") renderVerdict(s.verdict);
     else if (view === "timeline") renderTimeline(s);
+    else if (view === "runs") renderRuns(s);
     else if (view.indexOf("function:") === 0) renderFunction(s, view.slice(9));
     else if (view.indexOf("output:") === 0) renderOutput(s.outputs[+view.slice(7)]);
   }
@@ -1136,6 +1156,99 @@ function renderTimeline(s) {
   root.appendChild(ul);
 }
 
+function renderCatalog() {
+  const root = viewerRoot();
+  setCrumb(["Workflows", "Catalog"]);
+  const cat = store.catalog;
+  vhead(root, "Workflows", "prebuilt RE workflows + operation palette");
+  if (!cat) {
+    root.appendChild(el("p", "muted", "catalog unavailable"));
+    return;
+  }
+  root.appendChild(
+    el(
+      "p",
+      "ghint",
+      "Phase 1: author + visualize. Workflows run via the agent (out-of-band); results stream back " +
+        "into the session views. A custom step-list builder + interactive execution are upcoming."
+    )
+  );
+
+  // prebuilt workflows
+  (cat.workflows || []).forEach((wf) => {
+    const card = el("section", "wfcard");
+    card.appendChild(el("h3", "wfcard-h", wf.name));
+    card.appendChild(el("p", "wfcard-desc", wf.desc || ""));
+    const ol = el("ol", "wfsteps");
+    (wf.steps || []).forEach((st) => {
+      const li = el("li", "wfstep");
+      li.appendChild(el("span", "wfstep-op mono", st.op));
+      li.appendChild(el("span", "wfstep-label", st.label || ""));
+      if (st.gated) li.appendChild(el("span", "wfgated", "gated"));
+      ol.appendChild(li);
+    });
+    card.appendChild(ol);
+    root.appendChild(card);
+  });
+
+  // operation palette (covers vivarium functionality)
+  root.appendChild(el("h3", "card2-h", "Operation palette"));
+  const grid = el("div", "opgrid");
+  (cat.op_groups || []).forEach((grp) => {
+    const col = el("section", "opgroup");
+    col.appendChild(el("h4", "opgroup-h", grp.group));
+    const ul = el("ul", "oplist");
+    (grp.ops || []).forEach((op) => {
+      const li = el("li", "oprow");
+      li.appendChild(el("span", "op-name mono", op.op));
+      li.appendChild(el("span", "op-desc", op.desc || ""));
+      if (op.gated) li.appendChild(el("span", "wfgated", "gated"));
+      ul.appendChild(li);
+    });
+    col.appendChild(ul);
+    grid.appendChild(col);
+  });
+  root.appendChild(grid);
+}
+
+const _RUN_STEP_ICON = { done: "✓", running: "▷", failed: "✕", pending: "○" };
+
+function renderRuns(s) {
+  const root = viewerRoot();
+  setCrumb([s.summary.session_id, "Runs"]);
+  const runs = Object.values(s.workflows);
+  vhead(root, "Workflow runs", runs.length + " run(s)");
+  if (!runs.length) {
+    root.appendChild(el("p", "muted", "no workflow runs yet"));
+    return;
+  }
+  runs.forEach((run) => {
+    const card = el("section", "wfcard");
+    const h = el("div", "vh sub");
+    h.appendChild(el("h3", "vh-sub-title", run.name || run.id));
+    h.appendChild(el("span", "run-state state-" + (run.state || "pending"), run.state || "pending"));
+    card.appendChild(h);
+    const ol = el("ol", "runsteps");
+    (run.steps || []).forEach((st) => {
+      const li = el("li", "runstep step-" + (st.state || "pending"));
+      li.appendChild(el("span", "run-ico", _RUN_STEP_ICON[st.state] || "○"));
+      li.appendChild(el("span", "wfstep-op mono", st.op));
+      li.appendChild(el("span", "wfstep-label", st.label || ""));
+      if (st.view) {
+        const link = el("button", "xlink sm", "view →");
+        link.type = "button";
+        link.addEventListener("click", () =>
+          select({ kind: "session-view", sessionId: s.summary.session_id, view: st.view })
+        );
+        li.appendChild(link);
+      }
+      ol.appendChild(li);
+    });
+    card.appendChild(ol);
+    root.appendChild(card);
+  });
+}
+
 function renderBuild() {
   const root = viewerRoot();
   setCrumb(["Build & deliverables"]);
@@ -1212,7 +1325,9 @@ function applyEvent(id, e) {
     indexItems(s, s.strings && s.strings.items, "string", "strings");
   } else if (e.kind === "callgraph") s.callgraph = e.data || null;
   else if (e.kind === "function") mergeFunction(s, e.data);
-  else if (e.kind === "tool") s.timeline.push({ tool: e.tool, label: e.label });
+  else if (e.kind === "workflow") {
+    if (e.data && e.data.id) s.workflows[e.data.id] = { ...s.workflows[e.data.id], ...e.data };
+  } else if (e.kind === "tool") s.timeline.push({ tool: e.tool, label: e.label });
   else if (e.kind === "output") s.outputs.push({ label: e.label, content: e.content });
   else if (e.kind === "verdict") s.verdict = { label: e.label, content: e.content };
 }
@@ -1224,6 +1339,7 @@ function affectsView(e, id) {
   if (e.kind === "tool") return v === "timeline";
   if (e.kind === "output") return true;
   if (e.kind === "function") return v === "function:" + (e.data && e.data.id);
+  if (e.kind === "workflow") return v === "runs";
   return v === e.kind; // imports/exports/strings/callgraph/verdict
 }
 
@@ -1240,6 +1356,7 @@ function explorerShape(id) {
     !!s.callgraph,
     s.outputs.length,
     !!s.verdict,
+    Object.keys(s.workflows).length,
   ];
 }
 
@@ -1264,9 +1381,18 @@ function attachStream(id) {
 
 async function load() {
   try {
-    const [sr, br] = await Promise.all([fetch("/api/sessions"), fetch("/api/build")]);
+    const [sr, br, cr] = await Promise.all([
+      fetch("/api/sessions"),
+      fetch("/api/build"),
+      fetch("/api/catalog"),
+    ]);
     const sd = await sr.json();
     store.build = await br.json();
+    try {
+      store.catalog = await cr.json();
+    } catch (_) {
+      store.catalog = null;
+    }
     (sd.sessions || []).forEach((sum) => {
       ensureSession(sum.session_id).summary = sum;
     });
