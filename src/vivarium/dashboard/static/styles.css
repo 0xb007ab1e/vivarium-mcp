@@ -635,3 +635,172 @@ body {
 .sb-spacer {
   flex: 1;
 }
+
+/* --- RE browser: functions, cross-links, lineage --- */
+.tw-sub {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  padding: 0.3rem 0.6rem 0.1rem calc(0.6rem + 1.1rem);
+}
+.i-fn {
+  color: var(--kw);
+  font-style: italic;
+}
+.sig {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--ty);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.4rem 0.6rem;
+  margin-bottom: 0.7rem;
+  overflow-x: auto;
+}
+.vh.sub {
+  margin: 0.9rem 0 0.4rem;
+}
+.vh-sub-title {
+  margin: 0;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.relgrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.8rem;
+  margin: 0.9rem 0;
+}
+@media (max-width: 720px) {
+  .relgrid {
+    grid-template-columns: 1fr;
+  }
+}
+.refpanel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 0.5rem 0.7rem;
+  margin-bottom: 0.8rem;
+}
+.refpanel-h {
+  margin: 0 0 0.4rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.reflist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.refrow {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+.reftag {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: var(--surface-3);
+  border-radius: 3px;
+  padding: 0 0.3rem;
+  flex: none;
+}
+/* cross-link buttons (callers/callees/xrefs/referenced-by) */
+.xlink {
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 0.82rem;
+  color: var(--sym);
+  cursor: pointer;
+  padding: 0.05rem 0.2rem;
+  border-radius: 4px;
+  text-align: left;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+}
+.xlink:hover {
+  background: var(--accent-bg);
+  text-decoration: underline;
+}
+.xlink:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.xlink.sm {
+  font-size: 0.76rem;
+}
+.xat {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+/* jump-to links inside colorized code */
+.c-link {
+  border: 0;
+  background: none;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+  color: var(--sym);
+  border-bottom: 1px dotted var(--sym);
+}
+.c-link:hover {
+  background: var(--accent-bg);
+}
+.c-link:focus-visible {
+  outline: 1px solid var(--accent);
+}
+/* lineage footer */
+.lineage {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--line);
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.lin-h {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+}
+.lin-item {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.05rem 0.45rem;
+}
+/* row flash after cross-navigation */
+.grid tbody tr.flash {
+  animation: flashrow 1.6s ease;
+}
+@keyframes flashrow {
+  0%,
+  40% {
+    background: var(--accent-bg);
+  }
+  100% {
+    background: transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .grid tbody tr.flash {
+    animation: none;
+    background: var(--accent-bg);
+  }
+}

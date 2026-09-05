@@ -17,6 +17,23 @@ format, an adjacency list for the call graph. Syntax colorization is a small sel
 tokenizer in `app.js` (no external libraries — strict CSP) that emits **every** token via
 `textContent`, so binary-derived content stays inert even while highlighted (ADR-005).
 
+## RE browser (functions, cross-references, lineage)
+
+The viewer is a reverse-engineering browser. The Explorer lists each session's **functions**;
+selecting one opens a **call-hierarchy** view: decompiled C (colorized, with **jump-to-symbol**
+links) plus **Callers**, **Callees**, and **Cross-references** panels and a **variables/params**
+table. Every relationship is a clickable cross-link that navigates by address; strings, imports, and
+exports carry `referenced_by` back-references, so you can walk both directions (jumping to a table
+highlights the target row). Each artifact shows a **lineage** footer (source tool + address).
+
+Per-function data streams as the `function` event kind (keyed by a safe address `id`) and may arrive
+in parts — a stub (name + callers/callees) first, then a hydration event with the same `id` adding
+decompile / variables / xrefs. The browser **merges by id** (progressive hydrate) and updates an
+open artifact **in place** (scroll preserved). Build a navigable reference with
+`vivarium.dashboard.models.sym_ref(address, name, **safe_extras)` — a safe `id` + a tagged untrusted
+`name`. Every link label is rendered `textContent`-only, so content stays inert even while navigable
+(ADR-005).
+
 ## Analysis panels (streamed)
 
 Beyond the progress + timeline, the SSE stream carries structured panel events —

@@ -6,6 +6,23 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Dashboard RE browser: navigable functions, cross-references, and lineage.** The dashboard is
+  now a reverse-engineering browser. A new streamed `function` kind carries a per-function context
+  artifact (keyed by a safe address `id`): name, signature, callers, callees, cross-references
+  (to strings/imports/data), variables/params, and decompiled C — and it may arrive in parts (a
+  stub first, then a hydration event with the same `id`; the browser **merges by id**, progressive
+  hydrate). The viewer gained a **call-hierarchy** function view (decompile + Callers/Callees/Xrefs
+  panels + a variables table); **every relationship is a clickable cross-link** that navigates by
+  address, decompiled code has **jump-to-symbol** links, strings/imports/exports carry
+  `referenced_by` back-references for reverse navigation (highlighting the target row), and each
+  artifact shows a **lineage** footer (source tool + address). New `models.sym_ref()` builds a
+  navigable reference (safe `id` + tagged untrusted `name`). Open artifacts **update in place**
+  (scroll preserved) as new data streams. All links/labels remain `textContent`-only — untrusted
+  content stays inert even while navigable (ADR-005). Frontend + producer + schema; data contract
+  additive.
+
 ### Changed
 
 - **Dashboard redesigned as a VSCode-style workbench.** The dashboard UI moved from stacked

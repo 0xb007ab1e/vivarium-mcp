@@ -22,6 +22,7 @@ from vivarium.dashboard.models import (
     SessionEvent,
     SessionSummary,
     UiValue,
+    sym_ref,
     tag,
 )
 from vivarium.dashboard.providers import DemoProvider
@@ -88,12 +89,16 @@ def test_sse_stream_tags_untrusted_output(client: TestClient) -> None:
     """
     events = _drain_sse(client, "demo-analyzing")
     kinds = [e["kind"] for e in events]
-    assert "progress" in kinds and "output" in kinds and "verdict" in kinds
-    out = next(e for e in events if e["kind"] == "output")
-    assert out["content"]["untrusted"] is True
-    assert (
-        "onerror=alert(1)" in out["content"]["value"]
-    )  # carried inert as data, not executed markup
+    assert "progress" in kinds and "function" in kinds and "verdict" in kinds
+    # the injection-shaped decompiled C is carried inert as a tagged function.decompile leaf
+    decompiles = [
+        e["data"]["decompile"]
+        for e in events
+        if e["kind"] == "function" and e["data"].get("decompile")
+    ]
+    assert decompiles, "no function carried decompiled code"
+    assert decompiles[0]["untrusted"] is True
+    assert "onerror=alert(1)" in decompiles[0]["value"]  # inert data, not executed markup
 
 
 def test_sse_stream_emits_analysis_panels(client: TestClient) -> None:
@@ -119,6 +124,65 @@ def test_sse_stream_emits_analysis_panels(client: TestClient) -> None:
     # strings + callgraph labels are tagged untrusted too
     assert all(s["value"]["untrusted"] is True for s in events["strings"]["data"]["items"])
     assert all(n["label"]["untrusted"] is True for n in events["callgraph"]["data"]["nodes"])
+
+
+def test_sse_stream_emits_function_context_progressively(client: TestClient) -> None:
+    """The stream emits per-function context, keyed by id, hydrated across multiple events.
+
+    A function first appears as a stub (name + callers/callees), then a later event with the SAME
+    id adds decompile + variables + xrefs — the browser merges by id (progressive hydrate). Every
+    binary-derived leaf (names, decompile, xref labels) is tagged untrusted.
+    """
+    fn_events = [e for e in _drain_sse(client, "demo-analyzing") if e["kind"] == "function"]
+    assert fn_events, "no function events streamed"
+
+    main = [e for e in fn_events if e["data"]["id"] == "0x00401000"]
+    assert len(main) >= 2, "main should arrive as a stub then a hydration event"
+    # the stub carries relationships as sym_ref (safe id + tagged name)
+    stub = main[0]["data"]
+    assert stub["callees"][0]["name"]["untrusted"] is True
+    assert stub["callees"][0]["id"]  # safe navigation id present
+    # a later event hydrates decompile + variables + xrefs (untrusted leaves tagged)
+    merged: dict[str, Any] = {}
+    for e in main:
+        merged.update(e["data"])
+    assert merged["decompile"]["untrusted"] is True
+    assert merged["variables"][0]["name"]["untrusted"] is True
+    xref = merged["xrefs"][0]
+    assert xref["kind"] in ("string", "import", "data") and xref["name"]["untrusted"] is True
+
+
+def test_sse_stream_symbols_carry_backrefs(client: TestClient) -> None:
+    """Imports/strings items carry a SAFE id + referenced_by (sym_ref) for cross-navigation."""
+    events = {e["kind"]: e for e in _drain_sse(client, "demo-analyzing")}
+    imp = events["imports"]["data"]["items"][0]
+    assert imp["id"] and imp["referenced_by"][0]["id"]
+    assert imp["referenced_by"][0]["name"]["untrusted"] is True
+    st = events["strings"]["data"]["items"][0]
+    assert st["id"] and st["referenced_by"][0]["name"]["untrusted"] is True
+
+
+def test_file_bridge_roundtrips_function_data(tmp_path: Path) -> None:
+    """The file bridge round-trips a function event's structured data (tagged leaves intact)."""
+    from vivarium.dashboard.state import DashboardState, FileStatusProvider
+
+    f = tmp_path / "state.json"
+    DashboardState(f).append_event(
+        SessionEvent(
+            kind="function",
+            session_id="s",
+            data={"id": "0x1", "name": tag("main"), "callees": [sym_ref("0x2", "puts")]},
+        )
+    )
+    DashboardState(f).append_event(SessionEvent(kind="verdict", session_id="s"))
+
+    async def _drain() -> list[SessionEvent]:
+        return [e async for e in FileStatusProvider(f).session_events("s")]
+
+    got = asyncio.run(_drain())
+    fn = next(e for e in got if e.kind == "function")
+    assert fn.data is not None
+    assert fn.data["callees"][0] == {"id": "0x2", "name": {"value": "puts", "untrusted": True}}
 
 
 # --- security posture -----------------------------------------------------------------------------
@@ -254,6 +318,14 @@ def test_uivalue_json_shape() -> None:
 def test_tag_builds_untrusted_leaf() -> None:
     """tag() builds the tagged untrusted-leaf shape used inside SessionEvent.data."""
     assert tag("puts") == {"value": "puts", "untrusted": True}
+
+
+def test_sym_ref_shape() -> None:
+    """sym_ref() pairs a SAFE id with a tagged untrusted name plus optional safe extras."""
+    assert sym_ref("0x1", "main") == {"id": "0x1", "name": {"value": "main", "untrusted": True}}
+    r = sym_ref("0x2", "puts", kind="import", at="0x40")
+    assert r["id"] == "0x2" and r["kind"] == "import" and r["at"] == "0x40"
+    assert r["name"] == {"value": "puts", "untrusted": True}
 
 
 def test_session_event_data_roundtrips() -> None:

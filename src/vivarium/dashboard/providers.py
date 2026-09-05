@@ -22,6 +22,7 @@ from vivarium.dashboard.models import (
     SessionEvent,
     SessionSummary,
     UiValue,
+    sym_ref,
     tag,
 )
 
@@ -126,9 +127,25 @@ class DemoProvider:
                 "total": 3,
                 "truncated": False,
                 "items": [
-                    {"address": "0x00402000", "name": tag("puts"), "library": tag("libc.so.6")},
-                    {"address": "0x00402008", "name": tag("system"), "library": tag("libc.so.6")},
-                    {"address": "0x00402010", "name": tag("<img src=x onerror=alert(1)>")},
+                    {
+                        "id": "0x00402000",
+                        "address": "0x00402000",
+                        "name": tag("puts"),
+                        "library": tag("libc.so.6"),
+                        "referenced_by": [sym_ref("0x00401000", "main")],
+                    },
+                    {
+                        "id": "0x00402008",
+                        "address": "0x00402008",
+                        "name": tag("system"),
+                        "library": tag("libc.so.6"),
+                        "referenced_by": [sym_ref("0x00401100", "FUN_00401100")],
+                    },
+                    {
+                        "id": "0x00402010",
+                        "address": "0x00402010",
+                        "name": tag("<img src=x onerror=alert(1)>"),
+                    },
                 ],
             },
         )
@@ -150,11 +167,19 @@ class DemoProvider:
                 "total": 2,
                 "truncated": False,
                 "items": [
-                    {"address": "0x00403000", "length": 13, "value": tag("hello, world")},
                     {
+                        "id": "0x00403000",
+                        "address": "0x00403000",
+                        "length": 13,
+                        "value": tag("hello, world"),
+                        "referenced_by": [sym_ref("0x00401000", "main")],
+                    },
+                    {
+                        "id": "0x00403010",
                         "address": "0x00403010",
                         "length": 30,
                         "value": tag("</pre><script>alert(1)</script>"),
+                        "referenced_by": [sym_ref("0x00401100", "FUN_00401100")],
                     },
                 ],
             },
@@ -177,15 +202,60 @@ class DemoProvider:
                 ],
             },
         )
+        # --- functions: streamed as STUBS first (name + callers/callees), then hydrated with
+        # decompile/variables/xrefs by a later event with the same id (progressive hydrate). ---
         yield SessionEvent(
-            kind="tool", session_id=session_id, tool="decompile_function", label="FUN_00401000"
+            kind="function",
+            session_id=session_id,
+            label="main",
+            data={
+                "id": "0x00401000",
+                "name": tag("main"),
+                "callers": [sym_ref("0x00401200", "entry")],
+                "callees": [sym_ref("0x00401100", "FUN_00401100"), sym_ref("0x00402000", "puts")],
+                "provenance": {"tool": "call_graph", "address": "0x00401000"},
+            },
         )
         yield SessionEvent(
-            kind="output",
+            kind="function",
             session_id=session_id,
-            tool="decompile_function",
-            label="decompile FUN_00401000",
-            content=UiValue(_DEMO_UNTRUSTED_OUTPUT, untrusted=True),
+            label="FUN_00401100",
+            data={
+                "id": "0x00401100",
+                "name": tag("FUN_00401100"),
+                "callers": [sym_ref("0x00401000", "main")],
+                "callees": [sym_ref("0x00402008", "system")],
+                "provenance": {"tool": "call_graph", "address": "0x00401100"},
+            },
+        )
+        await asyncio.sleep(0.05)
+        yield SessionEvent(
+            kind="tool", session_id=session_id, tool="decompile_function", label="main"
+        )
+        # hydrate main with decompiled C + variables + xrefs (same id → merged in the browser)
+        yield SessionEvent(
+            kind="function",
+            session_id=session_id,
+            label="main",
+            data={
+                "id": "0x00401000",
+                "signature": tag("int main(int argc, char **argv)"),
+                "decompile": tag(_DEMO_UNTRUSTED_OUTPUT),
+                "variables": [
+                    {"name": tag("argc"), "type": tag("int"), "kind": "param", "storage": "EDI"},
+                    {
+                        "name": tag("argv"),
+                        "type": tag("char **"),
+                        "kind": "param",
+                        "storage": "RSI",
+                    },
+                ],
+                "xrefs": [
+                    sym_ref("0x00403000", "hello, world", kind="string", at="0x00401040"),
+                    sym_ref("0x00402000", "puts", kind="import", at="0x00401048"),
+                ],
+                "provenance": {"tool": "function_context", "address": "0x00401000"},
+            },
         )
         yield SessionEvent(
             kind="verdict",

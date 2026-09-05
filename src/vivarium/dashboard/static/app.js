@@ -1,17 +1,16 @@
-/* Vivarium status dashboard — VSCode-style shell (read-only, display-only).
+/* Vivarium status dashboard — VSCode-style RE browser (read-only, display-only).
  *
  * SECURITY (ADR-005): every binary-derived value arrives tagged {value, untrusted:true}. This
- * script renders ALL such content — including inside the syntax colorizer — ONLY via textContent
- * (never innerHTML / insertAdjacentHTML / any DOM-string sink), so hostile bytes appear verbatim and
- * inert. The colorizer splits text into tokens and appends each as a <span> whose text is set with
- * textContent; tokenizing never changes that guarantee. The strict, inline-free CSP is the
- * defense-in-depth backstop. All DOM is built with createElement + textContent.
+ * script renders ALL such content — including inside the syntax colorizer and every cross-link —
+ * ONLY via textContent (never innerHTML / insertAdjacentHTML / any DOM-string sink), so hostile
+ * bytes appear verbatim and inert. Links carry a SAFE address id in a data-* attribute and a
+ * textContent label; clicking navigates by id. The strict, inline-free CSP is the defense-in-depth
+ * backstop. All DOM is built with createElement + textContent.
  */
 "use strict";
 
 /* ------------------------------------------------------------------ DOM helpers */
 
-/** Create an element with an optional class and safe text (textContent — never HTML). */
 function el(tag, cls, text) {
   const node = document.createElement(tag);
   if (cls) node.className = cls;
@@ -19,8 +18,7 @@ function el(tag, cls, text) {
   return node;
 }
 
-/** Render one value inert: a tagged {value, untrusted} object → textContent span (the sink for
- *  hostile bytes); a plain scalar → text node. */
+/** Render one value inert: a tagged {value, untrusted} object → textContent span; scalar → text. */
 function renderValue(v) {
   if (v && typeof v === "object" && "value" in v && "untrusted" in v) {
     const span = el("span", v.untrusted ? "u" : "s");
@@ -29,6 +27,25 @@ function renderValue(v) {
     return span;
   }
   return document.createTextNode(v === null || v === undefined ? "" : String(v));
+}
+
+function plain(v) {
+  if (v && typeof v === "object" && "value" in v) return String(v.value);
+  return v === null || v === undefined ? "" : String(v);
+}
+
+/** A cross-link: a button labelled inert by name, navigating by SAFE id. `ref` = {id, name, ...}. */
+function xlink(sessionId, ref, extraClass) {
+  const b = el("button", "xlink" + (extraClass ? " " + extraClass : ""));
+  b.type = "button";
+  b.dataset.id = ref.id || "";
+  b.appendChild(renderValue(ref.name)); // inert label
+  if (ref.at) {
+    const at = el("span", "xat mono", "@" + ref.at);
+    b.appendChild(at);
+  }
+  b.addEventListener("click", () => navigateById(sessionId, ref.id));
+  return b;
 }
 
 /* ------------------------------------------------------------------ C colorizer */
@@ -44,62 +61,71 @@ const C_TYPES = new Set([
   "undefined2", "undefined4", "undefined8", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
   "int8_t", "int16_t", "int32_t", "int64_t", "wchar_t",
 ]);
-// One combined, backtracking-safe tokenizer: block comment | line comment | string | char |
-// number | identifier. Anything unmatched is emitted as plain text between matches.
 const C_TOKEN =
   /\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|0[xX][0-9a-fA-F]+|\b\d+\b|[A-Za-z_]\w*/g;
 
-/** Classify a matched token into a colorizer class (or null for a bare identifier). */
 function classifyToken(tok) {
   if (tok.startsWith("/*") || tok.startsWith("//")) return "c-com";
   if (tok[0] === '"' || tok[0] === "'") return "c-str";
   if (/^[0-9]/.test(tok)) return "c-num";
   if (C_KEYWORDS.has(tok)) return "c-kw";
   if (C_TYPES.has(tok)) return "c-ty";
-  if (/^(FUN_|LAB_|DAT_|PTR_|UNK_|switchD_|code_)/.test(tok)) return "c-sym"; // Ghidra auto-names
+  if (/^(FUN_|LAB_|DAT_|PTR_|UNK_|switchD_|code_)/.test(tok)) return "c-sym";
   return null;
 }
 
-/** Append one line of C, colorized, into `lineEl` — every token via textContent (inert). */
-function colorizeInto(lineEl, line) {
+/** Colorize one line into `lineEl`. If `resolve(name)` returns a nav target, the identifier becomes
+ *  a clickable jump-to link (still textContent-only). */
+function colorizeInto(lineEl, line, sessionId, resolve) {
   C_TOKEN.lastIndex = 0;
   let last = 0;
   let m;
   while ((m = C_TOKEN.exec(line)) !== null) {
     if (m.index > last) lineEl.appendChild(document.createTextNode(line.slice(last, m.index)));
-    const cls = classifyToken(m[0]);
-    if (cls) {
+    const tok = m[0];
+    const cls = classifyToken(tok);
+    const target = resolve && /^[A-Za-z_]/.test(tok) ? resolve(tok) : null;
+    if (target) {
+      const b = el("button", "c-link" + (cls ? " " + cls : ""));
+      b.type = "button";
+      b.textContent = tok; // INERT
+      b.dataset.id = target;
+      b.title = "jump to " + tok;
+      b.addEventListener("click", () => navigateById(sessionId, target));
+      lineEl.appendChild(b);
+    } else if (cls) {
       const s = el("span", cls);
-      s.textContent = m[0]; // INERT
+      s.textContent = tok; // INERT
       lineEl.appendChild(s);
     } else {
-      lineEl.appendChild(document.createTextNode(m[0]));
+      lineEl.appendChild(document.createTextNode(tok));
     }
-    last = m.index + m[0].length;
+    last = m.index + tok.length;
   }
   if (last < line.length) lineEl.appendChild(document.createTextNode(line.slice(last)));
 }
 
-/** Build a colorized code block with a line-number gutter. `text` is untrusted; rendered inert. */
-function codeBlock(text, lang) {
+/** Colorized code block with a line-number gutter; `text` is untrusted, rendered inert. */
+function codeBlock(text, lang, sessionId, resolve) {
   const wrap = el("div", "codeblock");
   if (lang) wrap.dataset.lang = lang;
-  const lines = String(text).split("\n");
-  lines.forEach((line, i) => {
-    const gutter = el("span", "ln", String(i + 1));
-    const code = el("span", "lc");
-    if (lang === "c") colorizeInto(code, line);
-    else code.textContent = line; // non-C: plain inert text
-    wrap.appendChild(gutter);
-    wrap.appendChild(code);
-  });
+  String(text)
+    .split("\n")
+    .forEach((line, i) => {
+      wrap.appendChild(el("span", "ln", String(i + 1)));
+      const code = el("span", "lc");
+      if (lang === "c") colorizeInto(code, line, sessionId, resolve);
+      else code.textContent = line;
+      wrap.appendChild(code);
+    });
   return wrap;
 }
 
-/* ------------------------------------------------------------------ state store */
+/* ------------------------------------------------------------------ state store + index */
 
 const store = { sessions: {}, build: null };
-let selection = null; // { kind: "session-view"|"build", sessionId?, view? }
+let selection = null; // { kind:"session-view"|"build", sessionId?, view? }
+let pendingHighlight = null; // an id to flash after a cross-nav into a table
 
 function ensureSession(id) {
   if (!store.sessions[id]) {
@@ -110,12 +136,21 @@ function ensureSession(id) {
       exports: null,
       strings: null,
       callgraph: null,
+      functions: {}, // id -> merged function context
       timeline: [],
       outputs: [],
       verdict: null,
+      idIndex: {}, // address id -> { kind, view }
+      nameIndex: {}, // symbol name -> id (for code jump-to)
     };
   }
   return store.sessions[id];
+}
+
+/** Record an address id + optional name so it becomes navigable. */
+function indexSymbol(s, id, kind, view, name) {
+  if (id) s.idIndex[id] = { kind, view };
+  if (name && !(name in s.nameIndex)) s.nameIndex[name] = id;
 }
 
 /* ------------------------------------------------------------------ connection / status */
@@ -126,7 +161,6 @@ function setConn(text, ok) {
   c.classList.toggle("ok", !!ok);
   c.classList.toggle("bad", ok === false);
 }
-
 function setStatus(text) {
   document.getElementById("status-left").textContent = text;
 }
@@ -139,7 +173,8 @@ function treeItem(label, opts) {
   btn.type = "button";
   btn.style.setProperty("--depth", String(opts.depth || 0));
   if (opts.icon) btn.appendChild(el("span", "tw-icon " + opts.icon, opts.iconText || ""));
-  btn.appendChild(el("span", "tw-label", label));
+  if (opts.labelNode) btn.appendChild(opts.labelNode);
+  else btn.appendChild(el("span", "tw-label", label));
   if (opts.badge !== undefined && opts.badge !== null)
     btn.appendChild(el("span", "tw-badge", String(opts.badge)));
   if (opts.state) btn.appendChild(el("span", "tw-state state-" + opts.state, opts.state));
@@ -162,14 +197,14 @@ function buildExplorer() {
   const root = document.getElementById("explorer");
   root.replaceChildren();
 
-  const sessGroup = el("div", "tw-group");
-  sessGroup.appendChild(el("div", "tw-group-h", "Sessions"));
+  const g = el("div", "tw-group");
+  g.appendChild(el("div", "tw-group-h", "Sessions"));
   const ids = Object.keys(store.sessions);
-  if (!ids.length) sessGroup.appendChild(el("div", "tw-none", "no active sessions"));
+  if (!ids.length) g.appendChild(el("div", "tw-none", "no active sessions"));
 
   ids.forEach((id) => {
     const s = store.sessions[id];
-    sessGroup.appendChild(
+    g.appendChild(
       treeItem(id, {
         depth: 0,
         icon: "i-sess",
@@ -179,7 +214,7 @@ function buildExplorer() {
       })
     );
     const kid = (label, view, opts) =>
-      sessGroup.appendChild(
+      g.appendChild(
         treeItem(label, {
           depth: 1,
           icon: (opts && opts.icon) || "i-doc",
@@ -191,6 +226,26 @@ function buildExplorer() {
       );
 
     kid("Overview", "overview", { icon: "i-info", iconText: "ⓘ" });
+
+    const fns = Object.values(s.functions);
+    if (fns.length) {
+      g.appendChild(el("div", "tw-sub", "Functions · " + fns.length));
+      fns.forEach((fn) => {
+        const lab = el("span", "tw-label");
+        lab.appendChild(renderValue(fn.name)); // inert name
+        g.appendChild(
+          treeItem(null, {
+            depth: 2,
+            icon: "i-fn",
+            iconText: "ƒ",
+            labelNode: lab,
+            active: isActive("session-view", id, "function:" + fn.id),
+            onClick: () => select({ kind: "session-view", sessionId: id, view: "function:" + fn.id }),
+          })
+        );
+      });
+    }
+
     if (s.imports) kid("Imports", "imports", { icon: "i-imp", iconText: "↓", badge: s.imports.total });
     if (s.exports) kid("Exports", "exports", { icon: "i-exp", iconText: "↑", badge: s.exports.total });
     if (s.strings) kid("Strings", "strings", { icon: "i-str", iconText: '"', badge: s.strings.total });
@@ -201,11 +256,11 @@ function buildExplorer() {
     if (s.verdict) kid("Verdict", "verdict", { icon: "i-ver", iconText: "✓" });
     kid("Timeline", "timeline", { icon: "i-time", iconText: "≡" });
   });
-  root.appendChild(sessGroup);
+  root.appendChild(g);
 
-  const bGroup = el("div", "tw-group");
-  bGroup.appendChild(el("div", "tw-group-h", "Build"));
-  bGroup.appendChild(
+  const b = el("div", "tw-group");
+  b.appendChild(el("div", "tw-group-h", "Build"));
+  b.appendChild(
     treeItem("Build & deliverables", {
       depth: 0,
       icon: "i-build",
@@ -214,10 +269,10 @@ function buildExplorer() {
       onClick: () => select({ kind: "build" }),
     })
   );
-  root.appendChild(bGroup);
+  root.appendChild(b);
 }
 
-/* ------------------------------------------------------------------ selection + viewer */
+/* ------------------------------------------------------------------ selection + navigation */
 
 function select(sel) {
   selection = sel;
@@ -225,12 +280,27 @@ function select(sel) {
   renderViewer();
 }
 
+/** Navigate to any indexed symbol by its SAFE address id (function detail, or table + highlight). */
+function navigateById(sessionId, id) {
+  const s = store.sessions[sessionId];
+  if (!s || !id) return;
+  const hit = s.idIndex[id];
+  if (!hit) return;
+  if (hit.kind === "function") {
+    select({ kind: "session-view", sessionId, view: "function:" + id });
+  } else {
+    pendingHighlight = id;
+    select({ kind: "session-view", sessionId, view: hit.view });
+  }
+}
+
 function setCrumb(parts) {
   const c = document.getElementById("crumb");
   c.replaceChildren();
   parts.forEach((p, i) => {
     if (i) c.appendChild(el("span", "crumb-sep", "›"));
-    c.appendChild(el("span", "crumb-part", p));
+    if (p && p.nodeType) c.appendChild(p);
+    else c.appendChild(el("span", "crumb-part", p));
   });
 }
 
@@ -240,40 +310,87 @@ function viewerRoot() {
   return v;
 }
 
-function viewTitle(view) {
-  if (view === "overview") return "Overview";
-  if (view && view.indexOf("output:") === 0) return "Decompiled output";
-  return view ? view.charAt(0).toUpperCase() + view.slice(1) : "";
-}
-
 function renderViewer() {
   if (!selection) return;
-  if (selection.kind === "build") return renderBuild();
-  const s = store.sessions[selection.sessionId];
-  if (!s) return;
-  const view = selection.view;
-  setCrumb([selection.sessionId, viewTitle(view)]);
-  setStatus(selection.sessionId + " · " + s.summary.state);
-  if (view === "overview") return renderOverview(s);
-  if (view === "imports") return renderTable(s.imports, ["address", "name", "library"], "Imports");
-  if (view === "exports") return renderTable(s.exports, ["address", "name"], "Exports");
-  if (view === "strings") return renderStrings(s.strings);
-  if (view === "callgraph") return renderCallgraph(s.callgraph);
-  if (view === "verdict") return renderVerdict(s.verdict);
-  if (view === "timeline") return renderTimeline(s);
-  if (view && view.indexOf("output:") === 0) return renderOutput(s.outputs[+view.slice(7)]);
+  const v = document.getElementById("viewer");
+  const keepScroll = v.scrollTop; // in-place update: preserve scroll
+  if (selection.kind === "build") {
+    renderBuild();
+  } else {
+    const s = store.sessions[selection.sessionId];
+    if (!s) return;
+    const view = selection.view;
+    setStatus(selection.sessionId + " · " + s.summary.state);
+    if (view === "overview") renderOverview(s);
+    else if (view === "imports") renderTable(s, s.imports, ["address", "name", "library"], "Imports");
+    else if (view === "exports") renderTable(s, s.exports, ["address", "name"], "Exports");
+    else if (view === "strings") renderStrings(s);
+    else if (view === "callgraph") renderCallgraph(s);
+    else if (view === "verdict") renderVerdict(s.verdict);
+    else if (view === "timeline") renderTimeline(s);
+    else if (view.indexOf("function:") === 0) renderFunction(s, view.slice(9));
+    else if (view.indexOf("output:") === 0) renderOutput(s.outputs[+view.slice(7)]);
+  }
+  document.getElementById("viewer").scrollTop = keepScroll;
+  if (pendingHighlight) {
+    const row = document.querySelector('[data-row-id="' + cssEscape(pendingHighlight) + '"]');
+    if (row) {
+      row.classList.add("flash");
+      row.scrollIntoView({ block: "center" });
+    }
+    pendingHighlight = null;
+  }
 }
 
-function panelTitle(root, text, sub) {
+function cssEscape(s) {
+  return String(s).replace(/["\\]/g, "\\$&");
+}
+
+/* ------------------------------------------------------------------ viewer: shared bits */
+
+function vhead(root, title, sub, badgeUntrusted) {
   const h = el("div", "vh");
-  h.appendChild(el("h2", "vh-title", text));
+  h.appendChild(el("h2", "vh-title", title));
   if (sub) h.appendChild(el("span", "vh-sub", sub));
+  if (badgeUntrusted) h.appendChild(el("span", "badge-untrusted", "untrusted"));
   root.appendChild(h);
 }
 
+/** Lineage footer: where an artifact came from (source tool + address) — self-documenting. */
+function lineage(root, prov, extra) {
+  const box = el("div", "lineage");
+  box.appendChild(el("span", "lin-h", "lineage"));
+  if (prov && prov.tool) box.appendChild(el("span", "lin-item", "source: " + prov.tool));
+  if (prov && prov.address) box.appendChild(el("span", "lin-item mono", prov.address));
+  (extra || []).forEach((t) => box.appendChild(el("span", "lin-item", t)));
+  root.appendChild(box);
+}
+
+/** A titled sub-panel of cross-links (callers/callees/xrefs/referenced-by). */
+function refPanel(root, title, sessionId, refs, emptyText) {
+  const sec = el("section", "refpanel");
+  sec.appendChild(el("h3", "refpanel-h", title + " · " + (refs ? refs.length : 0)));
+  if (!refs || !refs.length) {
+    sec.appendChild(el("div", "muted", emptyText || "none"));
+  } else {
+    const ul = el("ul", "reflist");
+    refs.forEach((r) => {
+      const li = el("li", "refrow");
+      if (r.kind) li.appendChild(el("span", "reftag", r.kind));
+      li.appendChild(xlink(sessionId, r));
+      ul.appendChild(li);
+    });
+    sec.appendChild(ul);
+  }
+  root.appendChild(sec);
+}
+
+/* ------------------------------------------------------------------ viewer: views */
+
 function renderOverview(s) {
   const root = viewerRoot();
-  panelTitle(root, "Overview", s.summary.state);
+  setCrumb([s.summary.session_id, "Overview"]);
+  vhead(root, "Overview", s.summary.state);
 
   const bar = el("div", "ov-bar");
   const fill = el("div", "ov-fill");
@@ -307,32 +424,121 @@ function renderOverview(s) {
   }
 }
 
-function renderTable(data, cols, title) {
+function renderFunction(s, id) {
   const root = viewerRoot();
+  const fn = s.functions[id];
+  if (!fn) {
+    root.appendChild(el("p", "muted", "function not found: " + id));
+    return;
+  }
+  const crumbName = el("span", "crumb-part");
+  crumbName.appendChild(renderValue(fn.name));
+  setCrumb([s.summary.session_id, "Functions", crumbName]);
+
+  const h = el("div", "vh");
+  const title = el("h2", "vh-title");
+  title.appendChild(renderValue(fn.name));
+  h.appendChild(title);
+  h.appendChild(el("span", "vh-sub mono", fn.id));
+  root.appendChild(h);
+
+  if (fn.signature) {
+    const sig = el("div", "sig");
+    sig.appendChild(renderValue(fn.signature));
+    root.appendChild(sig);
+  }
+
+  const resolve = (name) => (name in s.nameIndex ? s.nameIndex[name] : null);
+
+  // decompiled code (or a hydration hint)
+  if (fn.decompile) {
+    const ch = el("div", "vh sub");
+    ch.appendChild(el("h3", "vh-sub-title", "Decompiled"));
+    ch.appendChild(el("span", "badge-untrusted", "untrusted"));
+    root.appendChild(ch);
+    root.appendChild(codeBlock(plain(fn.decompile), "c", s.summary.session_id, resolve));
+  } else {
+    root.appendChild(el("p", "muted", "decompiled code not yet streamed (hydrating…)"));
+  }
+
+  // relationships
+  const rels = el("div", "relgrid");
+  const cA = el("div");
+  refPanel(cA, "Callers", s.summary.session_id, fn.callers, "no known callers");
+  refPanel(cA, "Callees", s.summary.session_id, fn.callees, "no known callees");
+  rels.appendChild(cA);
+  const cB = el("div");
+  refPanel(cB, "Cross-references", s.summary.session_id, fn.xrefs, "no cross-references");
+  rels.appendChild(cB);
+  root.appendChild(rels);
+
+  // variables / params
+  if (fn.variables && fn.variables.length) {
+    const sec = el("section", "refpanel");
+    sec.appendChild(el("h3", "refpanel-h", "Variables · " + fn.variables.length));
+    const scroll = el("div", "tscroll");
+    const table = el("table", "grid");
+    const thead = el("thead");
+    const hr = el("tr");
+    ["kind", "name", "type", "storage"].forEach((c) => hr.appendChild(el("th", null, c)));
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    const tb = el("tbody");
+    fn.variables.forEach((v) => {
+      const tr = el("tr");
+      tr.appendChild(el("td", null, v.kind || ""));
+      const ntd = el("td");
+      ntd.appendChild(renderValue(v.name));
+      tr.appendChild(ntd);
+      const ttd = el("td", "mono");
+      ttd.appendChild(renderValue(v.type));
+      tr.appendChild(ttd);
+      tr.appendChild(el("td", "mono", v.storage || ""));
+      tb.appendChild(tr);
+    });
+    table.appendChild(tb);
+    scroll.appendChild(table);
+    sec.appendChild(scroll);
+    root.appendChild(sec);
+  }
+
+  lineage(root, fn.provenance, [
+    (fn.callers || []).length + " callers",
+    (fn.callees || []).length + " callees",
+  ]);
+}
+
+function renderTable(s, data, cols, title) {
+  const root = viewerRoot();
+  setCrumb([s.summary.session_id, title]);
   if (!data) {
     root.appendChild(el("p", "muted", "not yet streamed"));
     return;
   }
-  panelTitle(
-    root,
-    title,
-    (data.total || (data.items || []).length) + (data.truncated ? " (truncated)" : "")
-  );
+  vhead(root, title, (data.total || (data.items || []).length) + (data.truncated ? " (truncated)" : ""));
   const scroll = el("div", "tscroll");
   const table = el("table", "grid");
   const thead = el("thead");
   const hr = el("tr");
   cols.forEach((c) => hr.appendChild(el("th", null, c)));
+  hr.appendChild(el("th", null, "referenced by"));
   thead.appendChild(hr);
   table.appendChild(thead);
   const tb = el("tbody");
   (data.items || []).forEach((it) => {
     const tr = el("tr");
+    if (it.id) tr.dataset.rowId = it.id;
     cols.forEach((c) => {
       const td = el("td", c === "address" ? "mono addr" : null);
       td.appendChild(renderValue(it[c]));
       tr.appendChild(td);
     });
+    const rtd = el("td");
+    (it.referenced_by || []).forEach((r, i) => {
+      if (i) rtd.appendChild(document.createTextNode(" "));
+      rtd.appendChild(xlink(s.summary.session_id, r, "sm"));
+    });
+    tr.appendChild(rtd);
     tb.appendChild(tr);
   });
   table.appendChild(tb);
@@ -340,23 +546,26 @@ function renderTable(data, cols, title) {
   root.appendChild(scroll);
 }
 
-function renderStrings(data) {
+function renderStrings(s) {
   const root = viewerRoot();
+  setCrumb([s.summary.session_id, "Strings"]);
+  const data = s.strings;
   if (!data) {
     root.appendChild(el("p", "muted", "not yet streamed"));
     return;
   }
-  panelTitle(root, "Strings", (data.total || 0) + (data.truncated ? " (truncated)" : ""));
+  vhead(root, "Strings", (data.total || 0) + (data.truncated ? " (truncated)" : ""));
   const scroll = el("div", "tscroll");
   const table = el("table", "grid");
   const thead = el("thead");
   const hr = el("tr");
-  ["address", "len", "value"].forEach((c) => hr.appendChild(el("th", null, c)));
+  ["address", "len", "value", "referenced by"].forEach((c) => hr.appendChild(el("th", null, c)));
   thead.appendChild(hr);
   table.appendChild(thead);
   const tb = el("tbody");
   (data.items || []).forEach((it) => {
     const tr = el("tr");
+    if (it.id) tr.dataset.rowId = it.id;
     const atd = el("td", "mono addr");
     atd.textContent = it.address || "";
     tr.appendChild(atd);
@@ -364,6 +573,12 @@ function renderStrings(data) {
     const vtd = el("td");
     vtd.appendChild(renderValue(it.value));
     tr.appendChild(vtd);
+    const rtd = el("td");
+    (it.referenced_by || []).forEach((r, i) => {
+      if (i) rtd.appendChild(document.createTextNode(" "));
+      rtd.appendChild(xlink(s.summary.session_id, r, "sm"));
+    });
+    tr.appendChild(rtd);
     tb.appendChild(tr);
   });
   table.appendChild(tb);
@@ -371,8 +586,10 @@ function renderStrings(data) {
   root.appendChild(scroll);
 }
 
-function renderCallgraph(data) {
+function renderCallgraph(s) {
   const root = viewerRoot();
+  setCrumb([s.summary.session_id, "Call graph"]);
+  const data = s.callgraph;
   if (!data) {
     root.appendChild(el("p", "muted", "not yet streamed"));
     return;
@@ -381,24 +598,20 @@ function renderCallgraph(data) {
   (data.nodes || []).forEach((n) => (labels[n.id] = n.label));
   const adj = {};
   (data.edges || []).forEach((e) => (adj[e.from] = adj[e.from] || []).push(e.to));
-  panelTitle(
+  vhead(
     root,
     "Call graph",
-    (data.nodes || []).length +
-      " nodes · " +
-      (data.edges || []).length +
-      " edges" +
-      (data.truncated ? " (truncated)" : "")
+    (data.nodes || []).length + " nodes · " + (data.edges || []).length + " edges" + (data.truncated ? " (truncated)" : "")
   );
   const ul = el("ul", "cg");
   Object.keys(adj).forEach((from) => {
     const li = el("li", "cg-row");
-    li.appendChild(renderValue(labels[from] || from));
+    li.appendChild(xlink(s.summary.session_id, { id: from, name: labels[from] || { value: from, untrusted: false } }));
     li.appendChild(el("span", "cg-arrow", " → "));
     const callees = el("span", "cg-callees");
     adj[from].forEach((to, i) => {
       if (i) callees.appendChild(document.createTextNode(", "));
-      callees.appendChild(renderValue(labels[to] || to));
+      callees.appendChild(xlink(s.summary.session_id, { id: to, name: labels[to] || { value: to, untrusted: false } }));
     });
     li.appendChild(callees);
     ul.appendChild(li);
@@ -412,23 +625,20 @@ function renderOutput(out) {
     root.appendChild(el("p", "muted", "output not found"));
     return;
   }
-  const head = el("div", "vh");
-  head.appendChild(el("h2", "vh-title", out.label || "output"));
-  if (out.content && out.content.untrusted)
-    head.appendChild(el("span", "badge-untrusted", "untrusted"));
-  root.appendChild(head);
-  root.appendChild(codeBlock(out.content ? out.content.value : "", "c"));
+  setCrumb([selection.sessionId, out.label || "output"]);
+  vhead(root, out.label || "output", null, out.content && out.content.untrusted);
+  root.appendChild(codeBlock(out.content ? out.content.value : "", "c", selection.sessionId, null));
 }
 
 function renderVerdict(v) {
   const root = viewerRoot();
+  setCrumb([selection.sessionId, "Verdict"]);
   if (!v) {
     root.appendChild(el("p", "muted", "no verdict yet"));
     return;
   }
-  panelTitle(root, "Analyst verdict");
+  vhead(root, "Analyst verdict", null, v.content && v.content.untrusted);
   const box = el("div", "verdict");
-  if (v.content && v.content.untrusted) box.appendChild(el("span", "badge-untrusted", "untrusted"));
   const p = el("p", "verdict-text");
   p.appendChild(renderValue(v.content));
   box.appendChild(p);
@@ -437,7 +647,8 @@ function renderVerdict(v) {
 
 function renderTimeline(s) {
   const root = viewerRoot();
-  panelTitle(root, "Timeline", s.timeline.length + " tool calls");
+  setCrumb([s.summary.session_id, "Timeline"]);
+  vhead(root, "Timeline", s.timeline.length + " tool calls");
   const ul = el("ul", "timeline");
   s.timeline.forEach((t) => {
     const li = el("li", "tl-row");
@@ -453,7 +664,7 @@ function renderBuild() {
   const root = viewerRoot();
   setCrumb(["Build & deliverables"]);
   const b = store.build || {};
-  panelTitle(root, "Build & deliverables");
+  vhead(root, "Build & deliverables");
   const tiles = el("div", "tiles");
   const t1 = el("div", "tile");
   t1.appendChild(el("div", "tile-num mono", b.tool_count || 0));
@@ -484,16 +695,47 @@ function renderBuild() {
 
 /* ------------------------------------------------------------------ live streaming */
 
+/** Merge a function-context event into the store by id (progressive hydrate). */
+function mergeFunction(s, d) {
+  if (!d || !d.id) return;
+  const cur = s.functions[d.id] || { id: d.id };
+  ["name", "signature", "decompile", "provenance"].forEach((k) => {
+    if (d[k] !== undefined && d[k] !== null) cur[k] = d[k];
+  });
+  ["callers", "callees", "xrefs", "variables"].forEach((k) => {
+    if (Array.isArray(d[k])) cur[k] = d[k];
+  });
+  s.functions[d.id] = cur;
+  indexSymbol(s, d.id, "function", "function:" + d.id, cur.name ? plain(cur.name) : null);
+  // index xref targets by name so code jump-to can resolve imports/strings referenced here
+  (cur.xrefs || []).forEach((r) => {
+    if (r.id && r.name) s.nameIndex[plain(r.name)] = r.id;
+  });
+}
+
+function indexItems(s, items, kind, view) {
+  (items || []).forEach((it) => {
+    if (it.id) indexSymbol(s, it.id, kind, view, it.name ? plain(it.name) : null);
+  });
+}
+
 function applyEvent(id, e) {
   const s = ensureSession(id);
   if (e.kind === "progress") {
     if (typeof e.percent === "number") s.summary.progress_percent = e.percent;
     if (e.phase) s.summary.phase = e.phase;
   } else if (e.kind === "metadata") s.metadata = e.data || null;
-  else if (e.kind === "imports") s.imports = e.data || null;
-  else if (e.kind === "exports") s.exports = e.data || null;
-  else if (e.kind === "strings") s.strings = e.data || null;
-  else if (e.kind === "callgraph") s.callgraph = e.data || null;
+  else if (e.kind === "imports") {
+    s.imports = e.data || null;
+    indexItems(s, s.imports && s.imports.items, "import", "imports");
+  } else if (e.kind === "exports") {
+    s.exports = e.data || null;
+    indexItems(s, s.exports && s.exports.items, "export", "exports");
+  } else if (e.kind === "strings") {
+    s.strings = e.data || null;
+    indexItems(s, s.strings && s.strings.items, "string", "strings");
+  } else if (e.kind === "callgraph") s.callgraph = e.data || null;
+  else if (e.kind === "function") mergeFunction(s, e.data);
   else if (e.kind === "tool") s.timeline.push({ tool: e.tool, label: e.label });
   else if (e.kind === "output") s.outputs.push({ label: e.label, content: e.content });
   else if (e.kind === "verdict") s.verdict = { label: e.label, content: e.content };
@@ -505,15 +747,17 @@ function affectsView(e, id) {
   if (e.kind === "progress" || e.kind === "metadata") return v === "overview";
   if (e.kind === "tool") return v === "timeline";
   if (e.kind === "output") return true;
+  if (e.kind === "function") return v === "function:" + (e.data && e.data.id);
   return v === e.kind; // imports/exports/strings/callgraph/verdict
 }
 
-/** A cheap signature of what the explorer shows for a session, to decide when to rebuild it. */
+/** Signature of what the explorer shows for a session (rebuild only when it changes). */
 function explorerShape(id) {
   const s = store.sessions[id];
   if (!s) return null;
   return [
     s.summary.state,
+    Object.keys(s.functions).length,
     s.imports ? s.imports.total : 0,
     s.exports ? s.exports.total : 0,
     s.strings ? s.strings.total : 0,
@@ -537,7 +781,7 @@ function attachStream(id) {
     if (JSON.stringify(explorerShape(id)) !== before) buildExplorer();
     if (affectsView(e, id)) renderViewer();
   };
-  src.onerror = () => src.close(); // one-shot demo stream; a live provider reconnects w/ backoff
+  src.onerror = () => src.close();
 }
 
 /* ------------------------------------------------------------------ boot */
