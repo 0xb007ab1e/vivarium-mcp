@@ -7,40 +7,39 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <a class="skip" href="#main">Skip to content</a>
-    <header class="top">
-      <div class="brand">
-        <span class="mark" aria-hidden="true">▣</span>
-        <div>
-          <h1>Vivarium Status</h1>
-          <p class="sub" id="conn" role="status" aria-live="polite">connecting…</p>
-        </div>
-      </div>
-      <p class="mvp" title="Read-only display MVP">read-only · display-only</p>
+    <a class="skip" href="#viewer">Skip to viewer</a>
+
+    <header class="titlebar">
+      <span class="tb-mark" aria-hidden="true">▣</span>
+      <span class="tb-title">Vivarium</span>
+      <span class="tb-sub">status</span>
+      <span class="tb-spacer"></span>
+      <span id="conn" class="tb-conn" role="status" aria-live="polite">connecting…</span>
+      <span class="tb-ro" title="Read-only display surface">read-only</span>
     </header>
 
-    <main id="main">
-      <section aria-labelledby="sessions-h" class="col">
-        <div class="sec-head">
-          <h2 id="sessions-h">Live sessions</h2>
-          <span class="rule"></span>
-          <span class="hint">analysis in progress · output for validation</span>
-        </div>
-        <ul id="sessions" class="sessions" aria-live="polite"></ul>
-      </section>
+    <div class="workbench">
+      <nav class="sidebar" aria-label="Explorer">
+        <div class="side-head">Explorer</div>
+        <div id="explorer" class="tree" role="tree" aria-label="Analysis artifacts"></div>
+      </nav>
 
-      <section aria-labelledby="build-h" class="col">
-        <div class="sec-head">
-          <h2 id="build-h">Build &amp; deliverables</h2>
-          <span class="rule"></span>
-          <span class="hint">what the agent shipped</span>
-        </div>
-        <div id="build" class="build"></div>
-      </section>
-    </main>
+      <main class="editor" id="main">
+        <div class="breadcrumb" id="crumb" aria-live="polite"></div>
+        <section class="viewer" id="viewer" tabindex="-1" aria-label="Artifact viewer">
+          <div class="empty" id="empty">
+            <p class="empty-mark" aria-hidden="true">▣</p>
+            <p>Select an artifact from the Explorer.</p>
+            <p class="empty-sub">Sessions, binary format, imports, exports, strings, call graph, and decompiled output appear on the left as analysis streams in.</p>
+          </div>
+        </section>
+      </main>
+    </div>
 
-    <footer class="foot">
-      <span id="foot-note">All binary-derived output is rendered inert (ADR-005).</span>
+    <footer class="statusbar" id="status" aria-live="polite">
+      <span id="status-left">idle</span>
+      <span class="sb-spacer"></span>
+      <span id="status-right">binary-derived output rendered inert (ADR-005)</span>
     </footer>
 
     <script src="/app.js"></script>
