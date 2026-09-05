@@ -8,6 +8,17 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Read-only status dashboard MVP (display-only).** A small, SEPARATE Starlette ASGI app
+  (`vivarium.dashboard`, run via `python -m vivarium.dashboard`, new optional `dashboard` extra for
+  uvicorn) surfaces in-process status for real-time human validation: live analysis sessions
+  (progress + tool timeline + output) and the build/deliverable snapshot (catalog, gates, PRs,
+  benchmark). Read-only — no tool invocation, mutation, or gated action. Security baked in: every
+  binary-derived field is tagged `UiValue{untrusted:true}` and rendered INERT (`textContent`) under
+  a strict, inline-free CSP (ADR-005); hardening headers; GET-only; fail-closed loopback/tailnet
+  bind (refuses `0.0.0.0`/public); optional constant-time bearer gate. Data source is pluggable
+  (`StatusProvider`); the MVP ships a deterministic `DemoProvider`. The live provider (over
+  `session_status` / `$/progress` / streaming jobs / metrics) and a dedicated STRIDE pass over the
+  new browser trust boundary are tracked follow-ups (`src/vivarium/dashboard/README.md`).
 - **Seeded the `family_match` corpus (ADR-073 D3).** `vivarium.data.family_corpus` advances
   `corpus-1` (empty) → `corpus-2` with the four confirmed-family validation-benchmark samples —
   **Win32.Kelihos**, **OSX.Wirenet**, **Win32.LuckyCat**, **Win32.BumbleBee** — each keyed by its
