@@ -20,11 +20,20 @@ from typing import Any
 # Operation palette — grouped, closed-vocabulary vivarium tool names + descriptions. `gated=True`
 # marks an operation that computes/costs or WRITES (analyze / annotate / type edits) and therefore
 # runs only via the agent under write-consent + human approval, never autonomously from the UI.
-def _op(op: str, desc: str, gated: bool = False) -> dict[str, Any]:
-    """One palette op entry (``gated`` marks a compute/write op — agent + write-consent only)."""
+def _op(op: str, desc: str, gated: bool = False, write: bool = False) -> dict[str, Any]:
+    """One palette op entry.
+
+    ``gated`` marks a compute/write op (never auto-run from the UI). ``write`` further marks an op
+    that MUTATES the program (rename/comment/type/consent/undo/ai_annotate) — a write is always
+    gated, and even a worker-backed executor refuses it (writes go only through the human-approved
+    write-consent path). A ``gated`` op that is not a ``write`` is **compute** (import/analyze) — a
+    worker-backed executor may run it once interactive is enabled.
+    """
     entry: dict[str, Any] = {"op": op, "desc": desc}
-    if gated:
+    if gated or write:
         entry["gated"] = True
+    if write:
+        entry["write"] = True
     return entry
 
 
@@ -39,12 +48,12 @@ _OP_GROUPS: list[dict[str, Any]] = [
             _op("session_import", "Load a binary (path under the import root)", gated=True),
             _op("session_analyze", "Run Ghidra auto-analysis", gated=True),
             _op("session_status", "Session state / TTL"),
-            _op("session_close", "Close + verified store wipe", gated=True),
-            _op("session_enable_writes", "Enable write consent for the session", gated=True),
-            _op("session_disable_writes", "Disable write consent", gated=True),
-            _op("session_undo", "Undo the last write", gated=True),
+            _op("session_close", "Close + verified store wipe", write=True),
+            _op("session_enable_writes", "Enable write consent for the session", write=True),
+            _op("session_disable_writes", "Disable write consent", write=True),
+            _op("session_undo", "Undo the last write", write=True),
             _op("session_export_annotations", "Export annotations (names/comments/types)"),
-            _op("session_import_annotations", "Import + replay an annotation document", gated=True),
+            _op("session_import_annotations", "Import + replay an annotation document", write=True),
         ],
     },
     {
@@ -128,24 +137,24 @@ _OP_GROUPS: list[dict[str, Any]] = [
         "group": "Types (write — gated)",
         "ops": [
             _op("recover_struct", "Propose a struct layout (read-only)"),
-            _op("define_struct", "Define a struct", gated=True),
-            _op("define_union", "Define a union", gated=True),
-            _op("define_types", "Define composite types (batch)", gated=True),
-            _op("apply_data_type", "Apply a data type", gated=True),
-            _op("apply_type_archive", "Apply a type archive", gated=True),
-            _op("delete_type", "Delete a type", gated=True),
+            _op("define_struct", "Define a struct", write=True),
+            _op("define_union", "Define a union", write=True),
+            _op("define_types", "Define composite types (batch)", write=True),
+            _op("apply_data_type", "Apply a data type", write=True),
+            _op("apply_type_archive", "Apply a type archive", write=True),
+            _op("delete_type", "Delete a type", write=True),
         ],
     },
     {
         "group": "Annotate (write — gated)",
         "ops": [
-            _op("rename_function", "Rename a function", gated=True),
-            _op("rename_local_variable", "Rename a local", gated=True),
-            _op("rename_parameter", "Rename a parameter", gated=True),
-            _op("rename_symbol", "Rename a symbol", gated=True),
-            _op("set_comment", "Set a comment", gated=True),
-            _op("set_function_signature", "Set a signature", gated=True),
-            _op("ai_annotate", "AI propose renames/comments (propose-first)", gated=True),
+            _op("rename_function", "Rename a function", write=True),
+            _op("rename_local_variable", "Rename a local", write=True),
+            _op("rename_parameter", "Rename a parameter", write=True),
+            _op("rename_symbol", "Rename a symbol", write=True),
+            _op("set_comment", "Set a comment", write=True),
+            _op("set_function_signature", "Set a signature", write=True),
+            _op("ai_annotate", "AI propose renames/comments (propose-first)", write=True),
         ],
     },
     {

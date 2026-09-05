@@ -8,6 +8,14 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Worker-backed transport — fresh `analyze` from the UI (opt-in).** `VIVARIUM_DASHBOARD_EXECUTOR=worker`
+  (with interactive enabled + state + token) wires a `WorkerExecutor` over a live `McpToolCaller` that
+  drives a spawned vivarium MCP server (its own Ghidra worker), so **read-only AND compute ops
+  (session_import / session_analyze) run for real** on demand. A finer op class (read-only / **compute**
+  / **write**) gates this: compute executes only on a worker-capable executor; **writes** (rename/
+  comment/type/consent/undo/`ai_annotate`) are ALWAYS refused (202, write-consent only) — even by the
+  worker executor. Reuses the server's auth/gating/owner-checks + ADR-002 worker isolation; the live
+  transport is the operator's gated enablement (it starts hostile-binary analysis).
 - **Interactive execution ENABLED (read-only, opt-in).** `POST /api/command` can now execute
   read-only ops for real: set `VIVARIUM_DASHBOARD_INTERACTIVE=1` (plus a state file + a token —
   fail-closed without them) to wire a `ReadOnlyExecutor` over a `StateFileToolCaller` that answers

@@ -109,6 +109,19 @@ def _select_executor() -> CommandExecutor | None:
         )
         return None
     from vivarium.dashboard.catalog import catalog
+
+    mode = (os.environ.get("VIVARIUM_DASHBOARD_EXECUTOR") or "state").lower()
+    if mode == "worker":
+        # Worker-backed: drives a live vivarium server (spawns a Ghidra worker) for read-only +
+        # COMPUTE ops (fresh import/analyze). Writes still refused (write-consent only). This is the
+        # operator's gated enablement — it starts hostile-binary analysis on demand.
+        from vivarium.dashboard.executor import McpToolCaller, WorkerExecutor
+
+        print(
+            "vivarium dashboard: interactive WORKER transport (spawns a Ghidra worker)",
+            file=sys.stderr,
+        )
+        return WorkerExecutor(catalog(), McpToolCaller())
     from vivarium.dashboard.executor import ReadOnlyExecutor, StateFileToolCaller
 
     return ReadOnlyExecutor(catalog(), StateFileToolCaller(state_path))

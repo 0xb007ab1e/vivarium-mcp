@@ -408,6 +408,74 @@ def test_readonly_executor_wires_into_endpoint() -> None:
         del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
 
 
+def test_op_class_read_only_compute_write() -> None:
+    """op_class distinguishes read-only / compute (import/analyze) / write (mutation) / unknown."""
+    from vivarium.dashboard.catalog import catalog
+    from vivarium.dashboard.commands import op_class
+
+    cat = catalog()
+    assert op_class(cat, "list_strings") == "read-only"
+    assert op_class(cat, "call_graph") == "read-only"
+    assert op_class(cat, "session_analyze") == "compute"
+    assert op_class(cat, "session_import") == "compute"
+    assert op_class(cat, "rename_function") == "write"
+    assert op_class(cat, "ai_annotate") == "write"
+    assert op_class(cat, "session_undo") == "write"
+    assert op_class(cat, "nope") == "unknown"
+
+
+def test_worker_executor_runs_compute_refuses_write() -> None:
+    """WorkerExecutor forwards read-only + compute; refuses writes (defense in depth)."""
+    from vivarium.dashboard.catalog import catalog
+    from vivarium.dashboard.executor import WorkerExecutor
+
+    seen: list[str] = []
+
+    class _Caller:
+        def call(self, op: str, params: dict[str, Any], /) -> dict[str, Any]:
+            seen.append(op)
+            return {"ran": op}
+
+    ex = WorkerExecutor(catalog(), _Caller())
+    assert ex.supports_compute is True
+    assert ex({"op": "session_analyze", "params": {}}) == {"ran": "session_analyze"}  # compute
+    assert ex({"op": "list_strings"}) == {"ran": "list_strings"}  # read-only
+    with pytest.raises(PermissionError):
+        ex({"op": "rename_function", "params": {}})  # write refused
+    assert seen == ["session_analyze", "list_strings"]
+
+
+def test_endpoint_routes_compute_only_to_worker_executor() -> None:
+    """Compute runs on a worker executor but 202s on a read-only one; writes always 202."""
+    import os
+
+    from vivarium.dashboard.catalog import catalog
+    from vivarium.dashboard.executor import ReadOnlyExecutor, WorkerExecutor
+
+    class _Caller:
+        def call(self, op: str, params: dict[str, Any], /) -> dict[str, Any]:
+            return {"ran": op}
+
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = "tok"  # noqa: S105 - test fixture
+    hdr = {"authorization": "Bearer tok"}
+    try:
+        # worker executor: compute (analyze) executes
+        cw = TestClient(build_app(DemoProvider(), executor=WorkerExecutor(catalog(), _Caller())))
+        r = cw.post("/api/command", json={"op": "session_analyze"}, headers=hdr)
+        assert r.status_code == 200 and r.json()["result"] == {"ran": "session_analyze"}
+        # write still 202 even on the worker executor (never auto-run)
+        assert (
+            cw.post("/api/command", json={"op": "rename_function"}, headers=hdr).status_code == 202
+        )
+        # read-only (state) executor: compute analyze is NOT run → 202
+        cs = TestClient(build_app(DemoProvider(), executor=ReadOnlyExecutor(catalog(), _Caller())))
+        assert (
+            cs.post("/api/command", json={"op": "session_analyze"}, headers=hdr).status_code == 202
+        )
+    finally:
+        del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
+
+
 def test_state_tool_caller_answers_readonly(tmp_path: Path) -> None:
     """StateFileToolCaller answers read-only ops from the state file; unknown → unavailable."""
     from vivarium.dashboard.executor import StateFileToolCaller

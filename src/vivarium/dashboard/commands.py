@@ -40,6 +40,23 @@ def classify(catalog: dict[str, Any], op: str) -> str:
     return "gated" if entry.get("gated") else "read-only"
 
 
+def op_class(catalog: dict[str, Any], op: str) -> str:
+    """Finer class: ``read-only`` / ``compute`` / ``write`` / ``unknown``.
+
+    ``write`` mutates the program (rename/comment/type/consent/undo/ai_annotate) — always gated,
+    never executed by any dashboard executor (write-consent path only). ``compute`` (import/analyze)
+    is gated but may be executed by a worker-backed executor once interactive is enabled.
+    """
+    entry = _op_index(catalog).get(op)
+    if entry is None:
+        return "unknown"
+    if entry.get("write"):
+        return "write"
+    if entry.get("gated"):
+        return "compute"
+    return "read-only"
+
+
 def decision(kind: str, op: str, reason: str) -> dict[str, Any]:
     """Build a decision record (``allow`` | ``needs-approval`` | ``deny``)."""
     return {"decision": kind, "op": op, "reason": reason}
@@ -102,9 +119,19 @@ def dispatch(
     if verdict["decision"] == "deny":
         return 400, verdict
     if verdict["decision"] == "needs-approval":
+        # A COMPUTE op (import/analyze) may run on a worker-capable executor; a WRITE never does.
+        if op_class(catalog, verdict["op"]) == "compute" and getattr(
+            executor, "supports_compute", False
+        ):
+            return _run(executor, body, verdict["op"])
         return 202, verdict
+    return _run(executor, body, verdict["op"])
+
+
+def _run(executor: CommandExecutor, body: Any, op: str) -> tuple[int, dict[str, Any]]:
+    """Execute an approved command via the executor, collapsing any failure to a safe 500."""
     try:
         result = executor(body)
     except Exception:  # fail closed; never leak internals to the client
-        return 500, {"error": "command-failed", "op": verdict["op"]}
-    return 200, {"decision": "allow", "op": verdict["op"], "result": result}
+        return 500, {"error": "command-failed", "op": op}
+    return 200, {"decision": "allow", "op": op, "result": result}
