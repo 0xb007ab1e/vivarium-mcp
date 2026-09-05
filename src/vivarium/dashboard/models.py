@@ -39,6 +39,18 @@ def tag(value: str) -> dict[str, Any]:
     return UiValue(value, untrusted=True).json()
 
 
+def sym_ref(address: str, name: str, **extra: Any) -> dict[str, Any]:
+    """Build a cross-reference to a symbol: a SAFE ``id`` (address) + a tagged UNTRUSTED ``name``.
+
+    The canonical shape for every navigable link in the RE browser — callers/callees, call-graph
+    nodes, and the ``referenced_by`` back-references on strings/imports/exports. ``id`` is the
+    server-computed address (safe, the navigation key); ``name`` is binary-derived (tagged inert).
+    Extra safe scalars (e.g. ``at`` for a call-site address, ``kind`` for an xref category) may be
+    attached via kwargs.
+    """
+    return {"id": address, "name": tag(name), **extra}
+
+
 @dataclass(frozen=True, slots=True)
 class SessionSummary:
     """One analysis session's live status — all fields SAFE server scalars.
@@ -86,9 +98,30 @@ class SessionEvent:
     The producer (:mod:`vivarium.dashboard.state` helpers) is responsible for the tagging; the
     dashboard never emits a raw binary-derived string outside a tagged value.
 
+    **``function`` kind (RE browser).** A per-function context artifact, keyed by a canonical safe
+    ``id`` (address). It may arrive in parts — a stub (name + callers/callees) first, then a later
+    event with the same ``id`` hydrates ``decompile`` / ``variables`` / ``xrefs``; the browser
+    merges by ``id`` (progressive hydrate). Shape (untrusted leaves via :func:`tag`)::
+
+        data = {
+          "id": "00104c00",                       # address, SAFE navigation key
+          "name": tag("main"),                    # UNTRUSTED
+          "signature": tag("int main(int, char **)"),   # UNTRUSTED (optional)
+          "decompile": tag("<C source>"),         # UNTRUSTED (optional, may hydrate later)
+          "callers":  [ sym_ref(addr, name), ... ],     # who calls this
+          "callees":  [ sym_ref(addr, name), ... ],     # what this calls
+          "xrefs":    [ sym_ref(addr, label, kind="string"|"data"|"import", at=addr), ... ],
+          "variables":[ {"name": tag(..), "type": tag(..), "kind": "param"|"local", "storage": s} ],
+          "provenance": {"tool": "function_context", "address": "00104c00"}   # SAFE lineage
+        }
+
+    Strings / imports / exports items may carry ``id`` (address, safe) + ``referenced_by``
+    (a list of :func:`sym_ref` to the functions that use them) so the browser can show back-refs
+    and cross-navigate both directions.
+
     Attributes:
         kind: ``progress`` | ``tool`` | ``output`` | ``verdict`` | ``metadata`` | ``imports`` |
-            ``exports`` | ``strings`` | ``callgraph`` — safe.
+            ``exports`` | ``strings`` | ``callgraph`` | ``function`` — safe.
         session_id: Owning session — safe.
         percent: For ``progress``: ``0..100`` or ``None`` — safe.
         phase: For ``progress``: phase label or ``None`` — safe.
