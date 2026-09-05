@@ -8,6 +8,11 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Full vivarium op palette in the dashboard.** `/api/catalog`'s operation palette now covers the
+  **entire Tier-1 tool surface** (78 ops across 9 groups: session · program/listing · code ·
+  graph/xrefs · scans · similarity · types · annotate · utility), each marked read-only vs **gated**
+  (compute/write). Custom workflows can be composed from any vivarium operation.
+
 - **Operational read-only workflow runner (client-side).** Prebuilt and custom workflows now
   **actually run** from the UI — a **▷ run** button (on each catalog workflow + the builder draft)
   executes the workflow's steps against the artifacts already streamed into the browser: read-only
