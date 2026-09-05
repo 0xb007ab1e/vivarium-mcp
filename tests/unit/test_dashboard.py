@@ -90,9 +90,24 @@ def test_catalog_endpoint(client: TestClient) -> None:
     assert ai["steps"] and any(st.get("gated") for st in ai["steps"])
     # the op palette groups real vivarium tools and marks gated (compute/write) ops
     ops = {op["op"] for grp in c["op_groups"] for op in grp["ops"]}
-    assert {"decompile_function", "call_graph", "ioc_scan", "rename_function"} <= ops
+    # the palette covers the full vivarium tool surface (read-only + gated)
+    assert {
+        "decompile_function",
+        "call_graph",
+        "ioc_scan",
+        "rename_function",
+        "emulate",
+        "xrefs_to",
+        "define_struct",
+        "version_track",
+        "demangle",
+        "program_summary",
+    } <= ops
+    assert len(ops) >= 60  # substantially the whole Tier-1 catalog
     gated = {op["op"] for grp in c["op_groups"] for op in grp["ops"] if op.get("gated")}
-    assert "session_analyze" in gated and "rename_function" in gated
+    assert {"session_analyze", "rename_function", "define_struct", "ai_annotate"} <= gated
+    # read-only ops are NOT gated
+    assert "decompile_function" not in gated and "call_graph" not in gated
 
 
 def test_catalog_module_shape() -> None:
