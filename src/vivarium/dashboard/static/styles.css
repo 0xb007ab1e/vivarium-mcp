@@ -170,18 +170,90 @@ body {
   border-radius: 999px;
 }
 
+/* titlebar hamburger — toggles the explorer sidebar (collapse on desktop, off-canvas on mobile) */
+.tb-burger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.9rem;
+  height: 1.6rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 1rem;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.tb-burger:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+.tb-burger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* workbench */
 .workbench {
   display: grid;
   grid-template-columns: minmax(220px, 300px) 1fr;
   min-height: 0;
   overflow: hidden;
+  position: relative; /* anchor the mobile off-canvas sidebar + scrim */
 }
 .sidebar {
   background: var(--surface-2);
   border-right: 1px solid var(--line);
   overflow-y: auto;
   min-width: 0;
+}
+/* Collapsed (desktop): reclaim the whole width for the main pane. */
+body.sidebar-hidden .workbench {
+  grid-template-columns: 1fr;
+}
+body.sidebar-hidden .sidebar {
+  display: none;
+}
+/* Scrim behind the mobile overlay sidebar — inert on desktop. */
+.scrim {
+  display: none;
+}
+
+/* Phone: the sidebar becomes an off-canvas overlay so the main pane is always full-width
+   (fixes horizontal overflow); the hamburger / scrim / Esc toggle it. */
+@media (max-width: 760px) {
+  .workbench {
+    grid-template-columns: 1fr; /* main pane owns the full width */
+  }
+  .sidebar {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(82vw, 320px);
+    z-index: 30;
+    transform: translateX(0);
+    transition: transform 0.18s ease;
+    box-shadow: 2px 0 14px rgba(0, 0, 0, 0.4);
+    border-right: 1px solid var(--line);
+  }
+  body.sidebar-hidden .sidebar {
+    display: block; /* keep it in flow so it can slide, not vanish */
+    transform: translateX(-100%);
+    box-shadow: none;
+  }
+  .scrim {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 25;
+    background: rgba(0, 0, 0, 0.45);
+  }
+  body.sidebar-hidden .scrim {
+    display: none;
+  }
 }
 .side-head {
   font-size: 0.7rem;

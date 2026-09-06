@@ -10,6 +10,16 @@
     <a class="skip" href="#viewer">Skip to viewer</a>
 
     <header class="titlebar">
+      <button
+        id="sidebar-toggle"
+        class="tb-burger"
+        type="button"
+        aria-label="Toggle explorer"
+        aria-controls="sidebar"
+        aria-expanded="true"
+      >
+        <span aria-hidden="true">☰</span>
+      </button>
       <span class="tb-mark" aria-hidden="true">▣</span>
       <span class="tb-title">Vivarium</span>
       <span class="tb-sub">status</span>
@@ -23,10 +33,11 @@
     </header>
 
     <div class="workbench">
-      <nav class="sidebar" aria-label="Explorer">
+      <nav class="sidebar" id="sidebar" aria-label="Explorer">
         <div class="side-head">Explorer</div>
         <div id="explorer" class="tree" role="tree" aria-label="Analysis artifacts"></div>
       </nav>
+      <div id="scrim" class="scrim" tabindex="-1" aria-hidden="true"></div>
 
       <main class="editor" id="main">
         <div class="breadcrumb" id="crumb" aria-live="polite"></div>
