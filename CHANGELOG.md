@@ -6,6 +6,16 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in private-mesh bind (ZeroTier and similar).** The dashboard's fail-closed bind guard now
+  accepts one additional private mesh subnet named by `VIVARIUM_DASHBOARD_MESH_CIDR` (e.g.
+  `10.121.16.0/24`), so a ZeroTier device (like a phone) can reach it at `http://<zt-ip>:8760`
+  alongside Tailscale. The CIDR must be private (RFC1918/ULA) and no broader than /16 — a public or
+  over-broad range is refused, and unset stays tailnet/loopback-only (no implicit widening). Still
+  never binds `0.0.0.0`. Run one instance per interface, sharing one state file
+  (`topic-tailnet-dev-access`).
+
 ### Changed
 
 - **Repin the trusted worker image to the current signed build** (`.github/worker-image.pin`
