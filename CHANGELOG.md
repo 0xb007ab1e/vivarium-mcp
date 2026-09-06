@@ -6,6 +6,14 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Repin the trusted worker image to the current signed build** (`.github/worker-image.pin`
+  → `sha256:a55be6dd…`). The previous pin predated the ADR-073/075 worker verbs
+  (`program_fingerprint`, `crypto_instructions`) and PR #331's honest `method-not-found` /
+  `invalid-request` dispatch slugs; the new cosign-signed digest (built from `main`) bakes them in,
+  so the "test what you ship" live-regression path exercises the current worker.
+
 ### Fixed
 
 - **Honest error when the worker lacks a verb (fixes #329, #330).** A tool whose verb the running
