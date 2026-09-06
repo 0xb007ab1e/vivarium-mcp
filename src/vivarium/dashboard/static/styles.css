@@ -679,6 +679,22 @@ body.sidebar-hidden .sidebar {
   line-height: 1.5;
 }
 
+/* Free-form output text — wraps to the pane width (no narrow, tall, side-scrolling column). */
+.outtext {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: var(--ink-2);
+  white-space: pre-wrap; /* preserve newlines, WRAP long lines */
+  overflow-wrap: anywhere; /* break unbreakable tokens (hashes, ids) */
+  max-width: 46rem;
+}
+
 /* timeline */
 .timeline {
   list-style: none;

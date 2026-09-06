@@ -8,6 +8,7 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Output panels wrap (readable on mobile).** Free-form tool output (crypto_detect, ioc_scan, notes, messages) now renders in a wrapping block (`white-space:pre-wrap; overflow-wrap:anywhere`) instead of a non-wrapping code block, so long text folds to the pane width instead of a narrow, tall, side-scrolling column. Decompiled C keeps its own scrollable code block.
 - **Mobile overflow polish.** The breadcrumb now scrolls a long session id within its own bar (never off the page), the statusbar truncates its left item and drops the trailing info note on phones, and both are `overflow`-contained — so nothing clips off the right edge on a narrow screen.
 - **Mobile-friendly layout: collapsible / off-canvas explorer sidebar.** A titlebar hamburger
   toggles the explorer; on phones (≤760px) the sidebar becomes an off-canvas overlay (with a scrim,
