@@ -14,7 +14,13 @@ from typing import Any
 import pytest
 from starlette.testclient import TestClient
 
-from vivarium.dashboard.__main__ import _check_bind, _is_tailnet_or_loopback, _parse_bind
+from vivarium.dashboard.__main__ import (
+    _MESH_CIDR_ENV,
+    _check_bind,
+    _extra_mesh_network,
+    _is_tailnet_or_loopback,
+    _parse_bind,
+)
 from vivarium.dashboard.app import build_app
 from vivarium.dashboard.models import (
     BuildSnapshot,
@@ -625,6 +631,50 @@ def test_check_bind_exits_on_public() -> None:
     with pytest.raises(SystemExit):
         _check_bind("0.0.0.0:8760")
     assert _check_bind("127.0.0.1:8760") == ("127.0.0.1", 8760)
+
+
+def test_extra_mesh_network_unset_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset ⇒ None (fail-closed default: tailnet/loopback only)."""
+    monkeypatch.delenv(_MESH_CIDR_ENV, raising=False)
+    assert _extra_mesh_network() is None
+
+
+def test_extra_mesh_network_accepts_private_subnet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A private mesh subnet (e.g. a ZeroTier /24) parses."""
+    monkeypatch.setenv(_MESH_CIDR_ENV, "10.121.16.0/24")
+    net = _extra_mesh_network()
+    assert net is not None and str(net) == "10.121.16.0/24"
+
+
+@pytest.mark.parametrize(
+    "cidr",
+    ["8.8.8.0/24", "0.0.0.0/0", "10.0.0.0/8", "1.2.3.0/24", "not-a-cidr"],
+)
+def test_extra_mesh_network_refuses_public_or_broad_or_bad(
+    monkeypatch: pytest.MonkeyPatch, cidr: str
+) -> None:
+    """Public, over-broad (< /16), or malformed mesh CIDRs are refused (fail closed)."""
+    monkeypatch.setenv(_MESH_CIDR_ENV, cidr)
+    with pytest.raises(SystemExit):
+        _extra_mesh_network()
+
+
+def test_bind_allows_opt_in_mesh_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the mesh subnet set, an IP inside it binds; one outside still refuses."""
+    monkeypatch.setenv(_MESH_CIDR_ENV, "10.121.16.0/24")
+    mesh = _extra_mesh_network()
+    assert _is_tailnet_or_loopback("10.121.16.254", mesh) is True
+    assert _is_tailnet_or_loopback("10.121.17.5", mesh) is False  # neighbouring subnet, not allowed
+    # _check_bind honours the env end-to-end.
+    assert _check_bind("10.121.16.254:8760") == ("10.121.16.254", 8760)
+
+
+def test_bind_mesh_ip_refused_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without the opt-in env, a private mesh IP is still refused (no implicit widening)."""
+    monkeypatch.delenv(_MESH_CIDR_ENV, raising=False)
+    assert _is_tailnet_or_loopback("10.121.16.254") is False
+    with pytest.raises(SystemExit):
+        _check_bind("10.121.16.254:8760")
 
 
 def test_parse_bind_rejects_malformed() -> None:
