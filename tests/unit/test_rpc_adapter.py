@@ -401,6 +401,66 @@ def test_resource_exhausted_via_make_error_maps() -> None:
     assert env.title == "Worker out of resources"
 
 
+def test_worker_method_error_from_method_not_found_is_actionable() -> None:
+    """``-32601`` (worker lacks the verb) → an honest NOT_FOUND, never the opaque INTERNAL 500.
+
+    Regression for #329/#330: a worker image predating a tool emits ``-32601`` with NO matching
+    slug (older ``_SLUG_BY_CODE``), so a slug-only mapping fell through to ``internal-error`` → 500.
+    Keying off the numeric code fixes it regardless of worker image. Detail stays leak-free and
+    points at the real cause (rebuild/repin the worker image).
+    """
+    from vivarium.ghidra import _errors
+
+    # slug=None models the old-worker fallback (no slug for -32601); slug present must not matter.
+    for slug in (None, "internal-error"):
+        env = _errors.worker_method_error_from(-32601, slug, correlation_id="cid").envelope
+        assert env.type is ErrorType.NOT_FOUND
+        assert env.status == 404
+        assert env.correlation_id == "cid"
+        assert "not supported" in env.detail and "worker image" in env.detail
+        # Disclosure safety: no traceback / host path / binary content.
+        assert "Traceback" not in env.detail and "/" not in env.detail
+
+
+def test_worker_method_error_from_invalid_request_maps_validation() -> None:
+    """``-32600`` (invalid request envelope) → VALIDATION (400)."""
+    from vivarium.ghidra import _errors
+
+    env = _errors.worker_method_error_from(-32600, None).envelope
+    assert env.type is ErrorType.VALIDATION
+    assert env.status == 400
+
+
+def test_worker_method_error_from_defers_to_slug_for_other_codes() -> None:
+    """Every non-protocol code keeps the existing slug-based mapping (unchanged behaviour)."""
+    from vivarium.ghidra import _errors
+
+    assert (
+        _errors.worker_method_error_from(-32004, "not-found").envelope.type is ErrorType.NOT_FOUND
+    )
+    assert (
+        _errors.worker_method_error_from(-32010, "analysis-failed").envelope.type
+        is ErrorType.ANALYSIS_FAILED
+    )
+    # Unknown slug on a non-protocol code still fails closed to INTERNAL.
+    assert _errors.worker_method_error_from(-32603, "bogus").envelope.type is ErrorType.INTERNAL
+
+
+def test_map_worker_slug_handles_new_protocol_slugs() -> None:
+    """A newer worker emitting proper protocol slugs also maps correctly (defense in depth)."""
+    from vivarium.ghidra import _errors
+
+    assert _errors.map_worker_slug("method-not-found") is ErrorType.NOT_FOUND
+    assert _errors.map_worker_slug("invalid-request") is ErrorType.VALIDATION
+
+
+def test_dispatch_build_error_gives_method_not_found_slug() -> None:
+    """The worker now emits an honest ``method-not-found`` slug for ``-32601`` (was fallback)."""
+    frame = dispatch.build_error("rid", dispatch.CODE_METHOD_NOT_FOUND, "unknown method")
+    assert frame["error"]["data"]["type"] == "method-not-found"
+    assert frame["error"]["code"] == dispatch.CODE_METHOD_NOT_FOUND
+
+
 def test_oom_worker_death_maps_to_resource_exhausted(tmp_path: Path) -> None:
     """A transport failure on an OOM-killed worker → distinct, non-retryable resource-exhausted."""
     srv, wrk = socket.socketpair(socket.AF_UNIX)

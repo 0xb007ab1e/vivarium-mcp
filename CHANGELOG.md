@@ -6,6 +6,18 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Honest error when the worker lacks a verb (fixes #329, #330).** A tool whose verb the running
+  worker image does not implement (e.g. an image predating the tool — `program_fingerprint`,
+  `crypto_detect`/`crypto_instructions`, `family_match`) returned an opaque **500 internal-error**:
+  the worker emits JSON-RPC `-32601` (method-not-found), which older workers carry with no matching
+  slug, so the slug-only server mapping fell through to `internal-error`. The adapter now keys off
+  the numeric JSON-RPC **code** (preserved by every worker), surfacing an actionable **404**
+  ("operation not supported by the running worker — the worker image may predate this tool; rebuild
+  or re-pin"), and `-32600` → 400. The worker also emits proper `method-not-found` / `invalid-request`
+  slugs now (defense in depth). Detail stays leak-free; the worker's own message remains log-only.
+
 ### Added
 
 - **Collapsible explorer sessions/groups and viewer panels (save viewport space).** Every explorer
