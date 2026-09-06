@@ -497,6 +497,7 @@ function select(sel) {
   selection = sel;
   buildExplorer();
   renderViewer();
+  closeSidebarOnMobile(); // on a phone, reveal the main pane after picking an artifact
 }
 
 /** Navigate to any indexed symbol by its SAFE address id (function detail, or table + highlight). */
@@ -1993,8 +1994,68 @@ function initToken() {
   });
 }
 
+/* ------------------------------------------------------------------ sidebar (collapse / mobile) */
+
+// Whether the viewport is phone-width (off-canvas sidebar territory).
+function isNarrow() {
+  return window.matchMedia("(max-width: 760px)").matches;
+}
+
+// Reflect the current sidebar-hidden state onto <body>, the toggle button, and the scrim.
+function applySidebar() {
+  const hidden = document.body.classList.contains("sidebar-hidden");
+  const btn = document.getElementById("sidebar-toggle");
+  if (btn) btn.setAttribute("aria-expanded", String(!hidden));
+  const scrim = document.getElementById("scrim");
+  if (scrim) scrim.setAttribute("aria-hidden", String(hidden || !isNarrow()));
+}
+
+function setSidebarHidden(hidden) {
+  document.body.classList.toggle("sidebar-hidden", hidden);
+  try {
+    localStorage.setItem("vivarium.dashboard.sidebar", hidden ? "hidden" : "shown");
+  } catch (_) {
+    /* storage blocked — state holds for this view only */
+  }
+  applySidebar();
+}
+
+// On a phone, collapse the (overlay) sidebar after picking an item so the main pane is visible.
+function closeSidebarOnMobile() {
+  if (isNarrow()) setSidebarHidden(true);
+}
+
+function initSidebar() {
+  const btn = document.getElementById("sidebar-toggle");
+  const scrim = document.getElementById("scrim");
+  // Default: hidden on a phone (main pane full-width), shown on desktop — unless the viewer chose.
+  let hidden = isNarrow();
+  try {
+    const pref = localStorage.getItem("vivarium.dashboard.sidebar");
+    if (pref === "hidden") hidden = true;
+    else if (pref === "shown") hidden = false;
+  } catch (_) {
+    /* ignore */
+  }
+  document.body.classList.toggle("sidebar-hidden", hidden);
+  applySidebar();
+  if (btn)
+    btn.addEventListener("click", () =>
+      setSidebarHidden(!document.body.classList.contains("sidebar-hidden"))
+    );
+  if (scrim) scrim.addEventListener("click", () => setSidebarHidden(true));
+  // Esc closes the overlay on a phone.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && isNarrow() && !document.body.classList.contains("sidebar-hidden"))
+      setSidebarHidden(true);
+  });
+  // Keep the scrim/aria correct across rotate/resize.
+  window.addEventListener("resize", applySidebar);
+}
+
 async function load() {
   initToken();
+  initSidebar();
   try {
     const [sr, br, cr] = await Promise.all([
       fetch("/api/sessions"),

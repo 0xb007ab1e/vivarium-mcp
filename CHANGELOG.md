@@ -8,6 +8,13 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Mobile-friendly layout: collapsible / off-canvas explorer sidebar.** A titlebar hamburger
+  toggles the explorer; on phones (≤760px) the sidebar becomes an off-canvas overlay (with a scrim,
+  Esc-to-close, and auto-close after picking an artifact) so the main content pane is always
+  full-width — fixing horizontal overflow where the main text ran off-screen. State persists
+  per-viewer (`vivarium.dashboard.sidebar`); defaults collapsed on phones, shown on desktop.
+  Keyboard-operable (`aria-expanded`/`aria-controls`), all `textContent`/`createElement` (CSP +
+  ADR-005 unchanged).
 - **Opt-in private-mesh bind (ZeroTier and similar).** The dashboard's fail-closed bind guard now
   accepts one additional private mesh subnet named by `VIVARIUM_DASHBOARD_MESH_CIDR` (e.g.
   `10.121.16.0/24`), so a ZeroTier device (like a phone) can reach it at `http://<zt-ip>:8760`
