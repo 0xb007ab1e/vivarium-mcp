@@ -1298,7 +1298,13 @@ function renderOutput(out) {
   }
   setCrumb([selection.sessionId, out.label || "output"]);
   vhead(root, out.label || "output", null, out.content && out.content.untrusted);
-  root.appendChild(codeBlock(out.content ? out.content.value : "", "c", selection.sessionId, null));
+  // Output is free-form text (a tool summary, note, or message) — render it WRAPPING and inert
+  // (textContent via renderValue), so long lines fold to the pane width instead of a narrow, tall,
+  // horizontally-scrolling column. Newlines are preserved (pre-wrap); long unbroken tokens break.
+  // (Decompiled C keeps its own non-wrapping codeBlock in renderFunction — that stays scrollable.)
+  const box = el("pre", "outtext");
+  box.appendChild(renderValue(out.content || ""));
+  root.appendChild(box);
 }
 
 function renderVerdict(v) {
