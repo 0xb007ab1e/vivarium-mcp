@@ -65,8 +65,13 @@ CODE_LIMIT_EXCEEDED = -32008
 CODE_ANALYSIS_FAILED = -32010
 CODE_INTERNAL = -32603
 
-# Slug per code (the server maps these to public ErrorTypes).
+# Slug per code (the server maps these to public ErrorTypes). The two JSON-RPC protocol codes
+# (invalid-request / method-not-found) carry honest slugs too, so a method a build does not
+# implement surfaces as an actionable client error, never an opaque ``internal-error`` fallback
+# (the server also keys off the numeric code, so older workers without these slugs are handled).
 _SLUG_BY_CODE = {
+    CODE_INVALID_REQUEST: "invalid-request",
+    CODE_METHOD_NOT_FOUND: "method-not-found",
     CODE_INVALID_PARAMS: "invalid-params",
     CODE_NOT_FOUND: "not-found",
     CODE_LIMIT_EXCEEDED: "limit-exceeded",

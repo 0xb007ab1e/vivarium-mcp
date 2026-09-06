@@ -861,13 +861,13 @@ class RpcGhidraAdapter:
             _log.warning(
                 "stream.worker_error",
                 extra={
+                    "code": exc.error.code,
                     "slug": exc.error.type_slug,
                     "detail": exc.error.detail,
                     "worker_message": exc.error.message,
                 },
             )
-            etype = _errors.map_worker_slug(exc.error.type_slug)
-            raise _errors.worker_method_error(etype) from exc
+            raise _errors.worker_method_error_from(exc.error.code, exc.error.type_slug) from exc
         except TimeoutError as exc:
             _log.warning("stream.rpc_failed", extra={"cause": "timeout", "detail": str(exc)[:300]})
             self.kill_worker(sid)
@@ -2454,13 +2454,13 @@ class RpcGhidraAdapter:
                 "worker.method_error",
                 extra={
                     "method": method,
+                    "code": exc.error.code,
                     "slug": exc.error.type_slug,
                     "detail": exc.error.detail,
                     "worker_message": exc.error.message,
                 },
             )
-            etype = _errors.map_worker_slug(exc.error.type_slug)
-            raise _errors.worker_method_error(etype) from exc
+            raise _errors.worker_method_error_from(exc.error.code, exc.error.type_slug) from exc
         except TimeoutError as exc:
             _log.warning(
                 "worker.rpc_failed",

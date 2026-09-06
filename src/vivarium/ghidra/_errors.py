@@ -12,6 +12,15 @@ from __future__ import annotations
 
 from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 
+# JSON-RPC protocol error codes we special-case (rpc-protocol.md §5). ``-32601`` (method-not-found)
+# is emitted by the worker for a verb its build does not implement — e.g. when the running worker
+# image predates a tool added to the server. It carries NO matching slug in the worker's
+# ``_SLUG_BY_CODE`` (older builds), so a slug-only mapping would fall through to ``INTERNAL`` (an
+# opaque 500). We therefore key off the numeric CODE, which every worker preserves, to surface an
+# honest, actionable error regardless of the worker image version.
+_JSONRPC_METHOD_NOT_FOUND = -32601
+_JSONRPC_INVALID_REQUEST = -32600
+
 # Map the worker's JSON-RPC ``data.type`` slug → public ErrorType (rpc-protocol.md §5).
 _WORKER_SLUG_TO_TYPE: dict[str, ErrorType] = {
     "invalid-params": ErrorType.VALIDATION,
@@ -19,6 +28,10 @@ _WORKER_SLUG_TO_TYPE: dict[str, ErrorType] = {
     "limit-exceeded": ErrorType.LIMIT_EXCEEDED,
     "analysis-failed": ErrorType.ANALYSIS_FAILED,
     "internal-error": ErrorType.INTERNAL,
+    # Present so a NEWER worker that emits proper slugs for the protocol codes maps correctly even
+    # if the numeric-code fast-path below is ever bypassed (defense in depth).
+    "method-not-found": ErrorType.NOT_FOUND,
+    "invalid-request": ErrorType.VALIDATION,
 }
 
 _STATUS: dict[ErrorType, int] = {
@@ -118,6 +131,42 @@ def worker_method_error(
     """
     detail = _WORKER_METHOD_DETAIL.get(error_type, "the worker reported an error")
     return make_error(error_type, detail, correlation_id=correlation_id)
+
+
+def worker_method_error_from(
+    code: int, slug: str | None, *, correlation_id: str | None = None
+) -> GhidraMcpError:
+    """Build a client error for a worker JSON-RPC **method** error, honest about method-not-found.
+
+    Keys off the numeric JSON-RPC ``code`` first: ``-32601`` (method-not-found) becomes an
+    actionable ``NOT_FOUND`` — the worker does not implement this verb (commonly a worker image
+    that predates the tool) — rather than the opaque ``INTERNAL`` a slug-only mapping produced
+    (older workers emit no slug for ``-32601``, so it fell through to ``internal-error`` → 500).
+    ``-32600`` (invalid-request) maps to ``VALIDATION``. Every other code defers to the existing
+    slug mapping (:func:`map_worker_slug` + :func:`worker_method_error`), unchanged.
+
+    Args:
+        code: The worker's numeric JSON-RPC error code (from the decoded ``RpcError``).
+        slug: The worker's ``data.type`` slug, or ``None``.
+        correlation_id: Optional id tying the error to redacted server-side logs.
+
+    Returns:
+        A ready-to-raise :class:`GhidraMcpError` with a fixed, safe detail.
+    """
+    if code == _JSONRPC_METHOD_NOT_FOUND:
+        return make_error(
+            ErrorType.NOT_FOUND,
+            "operation not supported by the running worker "
+            "(the worker image may predate this tool — rebuild or re-pin the worker image)",
+            correlation_id=correlation_id,
+        )
+    if code == _JSONRPC_INVALID_REQUEST:
+        return make_error(
+            ErrorType.VALIDATION,
+            _WORKER_METHOD_DETAIL[ErrorType.VALIDATION],
+            correlation_id=correlation_id,
+        )
+    return worker_method_error(map_worker_slug(slug), correlation_id=correlation_id)
 
 
 def session_invalid(correlation_id: str | None = None) -> GhidraMcpError:
