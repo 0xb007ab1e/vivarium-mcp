@@ -254,6 +254,10 @@ body.sidebar-hidden .sidebar {
   body.sidebar-hidden .scrim {
     display: none;
   }
+  /* The trailing informational note is low-value on a phone — drop it so the statusbar stays clean. */
+  #status-right {
+    display: none;
+  }
 }
 .side-head {
   font-size: 0.7rem;
@@ -427,6 +431,16 @@ body.sidebar-hidden .sidebar {
   font-size: 0.78rem;
   color: var(--muted);
   flex: none;
+  /* A long (unbreakable) session id scrolls WITHIN the breadcrumb, never off the page. */
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+.breadcrumb::-webkit-scrollbar {
+  display: none;
+}
+.breadcrumb > * {
+  flex: 0 0 auto;
 }
 .crumb-part:last-child {
   color: var(--ink-2);
@@ -758,6 +772,12 @@ body.sidebar-hidden .sidebar {
   border-top: 1px solid var(--line);
   font-size: 0.74rem;
   color: var(--muted);
+  overflow: hidden;
+  white-space: nowrap;
+}
+#status-left {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .sb-spacer {
   flex: 1;

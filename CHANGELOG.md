@@ -8,6 +8,7 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Mobile overflow polish.** The breadcrumb now scrolls a long session id within its own bar (never off the page), the statusbar truncates its left item and drops the trailing info note on phones, and both are `overflow`-contained — so nothing clips off the right edge on a narrow screen.
 - **Mobile-friendly layout: collapsible / off-canvas explorer sidebar.** A titlebar hamburger
   toggles the explorer; on phones (≤760px) the sidebar becomes an off-canvas overlay (with a scrim,
   Esc-to-close, and auto-close after picking an artifact) so the main content pane is always
