@@ -13,10 +13,13 @@ on:
   # auto-run `pull_request` workflows (GitHub loop-prevention), but `workflow_dispatch` DOES fire
   # even when invoked with GITHUB_TOKEN (the documented exception). The dispatched run posts the
   # same named check-runs onto the branch head SHA, satisfying branch-protection required checks.
+  # Hosted CI is restricted to RELEASE TAGS + explicit dispatch to conserve GitHub Actions
+  # minutes (account spend hold): routine push/PR validation runs LOCALLY first (see docs/ci-cd.md).
+  # `workflow_dispatch` still lets worker-image's `propose-pin-bump` job post the required
+  # check-runs onto a PR branch head, and lets a maintainer run the gates on demand.
   workflow_dispatch:
-  pull_request:
   push:
-    branches: [main]
+    tags: ["v*"]
 
 permissions:
   contents: read   # least privilege; raise per-job only when a step needs it.
