@@ -250,6 +250,32 @@ Likelihood × Impact → severity (master §7). "L/M/H".
 >   separately-loaded reference at similarity 1.0; vectors survive release), re-proven by the gated
 >   `test_bsim_search_corpus.py` live-regression hard gate.
 
+> **TB3 delta — bundled third-party JieLi pi32 SLEIGH processor module (ADR-077, GH #338 — PROPOSED
+> 2026-10-19).** The worker image bundles `kagaimiq/ghidra-jieli` (Apache-2.0) so JieLi AC6xxx
+> (pi32/pi32v2/q32s) firmware can be disassembled. This is **not a new trust boundary** — it is a
+> **less-audited disassembly grammar operating inside the EXISTING TB3** (binary → analyzer). What it
+> adds, and why it stays contained:
+> - **Declarative data, not linked native code.** A SLEIGH processor module is a `.slaspec`/`.sinc`
+>   grammar **interpreted by Ghidra's own SLEIGH engine**; we do not compile or link attacker-reachable
+>   native code into the worker. The added surface is "a malformed/hostile instruction stream drives
+>   the SLEIGH interpreter over a community-authored grammar" — the **same class** of threat TB3
+>   already carries for *every* processor, now over a grammar with less upstream review (the stock
+>   NSA modules are more scrutinized). No new STRIDE category; the risk is **E/D within TB3**.
+> - **Containment unchanged.** The module runs only in the disposable, network-isolated, non-root,
+>   read-only-rootfs, all-caps-dropped, gVisor/seccomp-confined worker, killed on timeout/eviction and
+>   wiped (ADR-002/003/004). A SLEIGH-decode bug (DoS, excess work, a bad p-code lift) is bounded by
+>   the wall-clock + mem/pids/cpu caps and cannot reach the host, the server, or another session. The
+>   worker remains a single-session fault domain.
+> - **Supply-chain integrity (build-time — see §4).** The module is fetched **pinned by commit SHA +
+>   SHA-256-verified before use** and **SLEIGH-compiled during the image build** (a compile error
+>   fails the build, fail-closed); no `.sla` is produced at runtime (ro-rootfs). License (Apache-2.0)
+>   and provenance recorded. The **unpinned runtime-mount alternative was rejected** (ADR-077 D5) —
+>   unverified code into TB3.
+> - **Output safe.** pi32 disassembly/decompilation is binary-derived → untrusted-enveloped like all
+>   other analyzer output (ADR-005); the client renders it inert. pi32v2/q32s are early-maturity
+>   upstream → *lower-fidelity* disassembly, not *unsafe* disassembly (a wrong lift is still inert
+>   data). **Residual risk: Low**, given the unchanged containment.
+
 ### TB4 — Worker → Server → LLM (untrusted output)
 | STRIDE | Threat | L×I | Mitigation |
 |--------|--------|-----|------------|
@@ -347,6 +373,7 @@ enforced — closing the BOLA gap that ADR-011 §6 deferred (TB6-I).
 |--------|-----|------------|
 | Compromised/typosquatted Python dep | M×H=**High** | pin + hash lockfile; vet new deps; SCA (pip-audit) gate (`std-supplychain`, `workflow-cve-management`) |
 | Tag-mutated / poisoned Ghidra/JDK image | M×H=**High** | pin **by digest** (ADR-003); SBOM; gated image pulls; CVE tracking + digest-bump runbook |
+| Poisoned/tampered bundled third-party **SLEIGH processor module** (`kagaimiq/ghidra-jieli`, ADR-077) | L×M=**Low** | fetch **pinned by commit SHA + SHA-256-verified before use**; **SLEIGH-compiled at build** (compile error fails closed); Apache-2.0 license + provenance recorded; dormant upstream (narrow change window); runtime-mount alternative **rejected** (ADR-077 D5). A malicious grammar is still inert declarative data confined to the disposable worker (TB3 containment — §3) |
 | Compromised CI action | L×H=**Med** | pin CI actions **by digest**; least-privilege OIDC; ephemeral runners (`workflow-cicd`) |
 | Compromised **repin GitHub App key** (`REPIN_APP_PRIVATE_KEY`) opens a PR advancing the worker trust pin | L×H=**Med** | **human-merge gate** (the auto-opened pin bump is a *reviewed* PR — no autonomous advance); downstream **cosign identity-verify** of the pinned digest at every pull (a wrong/forged digest fails closed at use); least-privilege App perms (Contents+PR write only) + repo-secret storage; fail-safe skip if the key is absent/partial (V3); rotate per `runbooks/secret-rotation.md` (§4 delta below) |
 

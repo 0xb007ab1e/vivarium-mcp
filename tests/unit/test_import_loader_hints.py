@@ -36,6 +36,8 @@ def test_supported_language_ids_are_sorted_and_nonempty() -> None:
     assert {"x86:LE:32:default", "x86:LE:64:default"} <= ids  # desktop x86
     assert {"MIPS:BE:32:default", "PowerPC:BE:32:default"} <= ids  # router/embedded
     assert "Xtensa:LE:32:default" in ids  # ESP32/IoT
+    # JieLi custom cores — bundled third-party SLEIGH module (ADR-077, GH #338).
+    assert {"pi32:LE:32:default", "pi32v2:LE:32:default", "q32s:LE:32:default"} <= ids
 
 
 def test_is_supported_language_is_exact_match_only() -> None:
@@ -57,6 +59,9 @@ def test_is_supported_language_is_exact_match_only() -> None:
         ("x86:LE:64:default", 64),
         ("z80:LE:16:default", 16),
         ("dsPIC30F:LE:24:default", 24),
+        ("pi32:LE:32:default", 32),  # JieLi (ADR-077/#338)
+        ("pi32v2:LE:32:default", 32),
+        ("q32s:LE:32:default", 32),
     ],
 )
 def test_address_bits(language_id: str, bits: int) -> None:
@@ -136,6 +141,21 @@ def test_pdb_ref_rejected_with_non_auto_loader() -> None:
         s.SessionImportIn(session_id="s", source_ref="m", loader="macho", pdb_ref="p.pdb")
     with pytest.raises(ValidationError):  # dex + PDB
         s.SessionImportIn(session_id="s", source_ref="d", loader="dex", pdb_ref="p.pdb")
+
+
+def test_jieli_pi32_import_accepted() -> None:
+    """The #338 acceptance shape: a raw JieLi image at the real AC632N base validates (ADR-077).
+
+    ``pi32:LE:32:default`` is the bundled third-party LanguageID; ``0x1E00120`` is the decrypted
+    AC632N ``app.bin`` entry/base. pi32v2/q32s accept the same way (all 32-bit).
+    """
+    for lang in ("pi32:LE:32:default", "pi32v2:LE:32:default", "q32s:LE:32:default"):
+        m = s.SessionImportIn.model_validate(_binary(processor=lang, base_addr=0x1E00120))
+        assert m.processor == lang
+        assert m.base_addr == 0x1E00120
+    # 32-bit core ⇒ a base beyond 2**32 is still rejected (width bound holds for bundled ids too).
+    with pytest.raises(ValidationError):
+        s.SessionImportIn.model_validate(_binary(processor="pi32:LE:32:default", base_addr=1 << 32))
 
 
 def test_unsupported_processor_rejected() -> None:

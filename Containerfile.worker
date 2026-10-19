@@ -44,6 +44,8 @@
 #
 #   GATED ITEM W-BASE: cgr.dev/chainguard/wolfi-base (build + runtime; pinned by digest)
 #   GATED ITEM W3: Ghidra 12.1.2 release artifact (downloaded + SHA-256-verified, not pulled as image)
+#   GATED ITEM W-JIELI: kagaimiq/ghidra-jieli processor module (pinned by commit SHA, compiled at
+#                       build; ADR-077 / GH #338 — see the jieli-sleigh stage below)
 # =============================================================================
 
 # --- ARGs (set at build; pinned values are GATED — see notes above) -----------------------------
@@ -191,6 +193,64 @@ RUN set -eux; \
     python3.12 -m build --wheel --outdir /build/dist /build
 
 # =============================================================================
+# Stage: jieli-sleigh — fetch + SLEIGH-compile the pinned third-party JieLi processor module.
+# =============================================================================
+# ADR-077 / GH #338. Adds disassembly for JieLi AC6xxx custom cores (pi32/pi32v2/q32s) via the
+# community module kagaimiq/ghidra-jieli (Apache-2.0, permissive). Bases on `ghidra-fetch` to REUSE
+# the already-unpacked /opt/ghidra (its `support/sleigh` compiler); adds a build-only JDK + git.
+#
+# GATED ITEM W-JIELI: the module is pinned BY COMMIT SHA. Git's content-addressed object hash commits
+# the WHOLE tree, so the SHA *is* the integrity pin (analogous to pinning a CI action by SHA) — a
+# tarball sha256 pin is NOT used here because GitHub archive tarballs are not byte-reproducible. The
+# checkout is asserted to equal the pin (fail closed). The module is SLEIGH-COMPILED during the build
+# and a compile error FAILS THE BUILD (fail closed) — nothing produces a `.sla` at runtime (ro-rootfs).
+# Only the compiled module tree ships to runtime; the git checkout + toolchain stay in this stage.
+# Threat model: TB3 §3 (JieLi delta) + §4 (supply chain). The unpinned runtime-mount alternative was
+# REJECTED (ADR-077 D5 — unverified code into TB3).
+#
+# NOTE (build-time drift guard, ADR-077 D1/D3): the LanguageIDs that compile here MUST equal the JieLi
+# ids in `src/vivarium/core/languages.py` (pi32/pi32v2/q32s:LE:32:default). If a variant fails to
+# compile under this Ghidra's SLEIGH, DROP it from BOTH the `for` assertion below AND the allow-list
+# (keep list == installed — ADR-045 §D2).
+FROM ghidra-fetch AS jieli-sleigh
+
+# Pinned source (GATED). Override only on a deliberate, reviewed bump.
+ARG JIELI_REPO_URL=https://github.com/kagaimiq/ghidra-jieli.git
+ARG JIELI_COMMIT=b5e60122b6cd3e6b615387035994b8bed0ea1a26
+
+# Build-only: JDK 21 for the SLEIGH compiler, git to fetch the exact commit, and bash + coreutils
+# because Ghidra's `support/sleigh` launcher is a `#!/usr/bin/env bash` script using dirname/readlink
+# (wolfi-base ships none of these). All build-only — none ships to the runtime stage.
+RUN set -eux; apk add --no-cache git openjdk-21 bash coreutils
+ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+ENV PATH="/usr/lib/jvm/java-21-openjdk/bin:${PATH}"
+
+# Fetch the EXACT pinned commit (shallow) and ASSERT the checkout matches the pin (git object hash =
+# integrity). A mismatch or an unreachable remote fails the build (fail closed).
+WORKDIR /opt/jieli-src
+RUN set -eux; \
+    git init -q; \
+    git remote add origin "${JIELI_REPO_URL}"; \
+    git fetch -q --depth 1 origin "${JIELI_COMMIT}"; \
+    git -c advice.detachedHead=false checkout -q FETCH_HEAD; \
+    test "$(git rev-parse HEAD)" = "${JIELI_COMMIT}"
+
+# Assemble the Ghidra processor-module layout, then SLEIGH-COMPILE every .slaspec (fail closed).
+#   * A processor module is Module.manifest + data/languages/{*.slaspec,*.sinc,*.pspec,*.cspec,*.ldefs}.
+#   * `support/sleigh -a <dir>` compiles ALL specs under the dir to `.sla`; any spec error exits non-0.
+#   * Then verify a non-empty `.sla` exists for EVERY bundled LanguageID (must mirror the allow-list).
+RUN set -eux; \
+    mod=/opt/jieli-module; \
+    mkdir -p "${mod}/data/languages"; \
+    cp /opt/jieli-src/Module.manifest "${mod}/Module.manifest"; \
+    cp /opt/jieli-src/data/languages/* "${mod}/data/languages/"; \
+    /opt/ghidra/support/sleigh -a "${mod}/data/languages"; \
+    for sla in pi32 pi32v2 q32s; do \
+        test -s "${mod}/data/languages/${sla}.sla" \
+            || { echo "SLEIGH did not produce ${sla}.sla (ADR-077: drop it from the allow-list too)" >&2; exit 1; }; \
+    done
+
+# =============================================================================
 # Stage 3: runtime — Wolfi + Python 3.12 + JDK 21 + Ghidra + PyGhidra + the worker code. No build
 # tools beyond what apk/ensurepip need for the offline install.
 # =============================================================================
@@ -235,6 +295,11 @@ ENV PATH="/usr/lib/jvm/java-21-openjdk/bin:${PATH}"
 
 # --- Ghidra (from the fetch stage; upstream zip already SHA-256-verified) ------------------------
 COPY --from=ghidra-fetch --chown=root:root /opt/ghidra /opt/ghidra
+# Bundled third-party JieLi pi32/pi32v2/q32s processor module, SLEIGH-compiled in the jieli-sleigh
+# stage (ADR-077 / GH #338; pinned by commit SHA, compiled at build). Dropped in as a standard Ghidra
+# processor module so DefaultLanguageService enumerates its LanguageIDs (keeps core/languages.py's
+# allow-list == the installed set — ADR-045 §D2). Root-owned under the read-only rootfs.
+COPY --from=jieli-sleigh --chown=root:root /opt/jieli-module /opt/ghidra/Ghidra/Processors/JieLi
 ENV GHIDRA_INSTALL_DIR=/opt/ghidra
 ENV PATH="/opt/ghidra/support:${PATH}"
 
