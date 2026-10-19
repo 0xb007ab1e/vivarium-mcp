@@ -9,12 +9,17 @@ image and fails closed if absent — so drift between this list and the pinned G
 never silent (ADR-045 §D2).
 
 **This list is the FULL set of languages installed in the pinned worker's Ghidra** (generated, not
-hand-curated). Regenerate on a Ghidra version bump by enumerating
+hand-curated) — which, as of ADR-077 (GH #338), is **stock Ghidra plus one bundled third-party
+processor module** (``kagaimiq/ghidra-jieli``: the JieLi ``pi32``/``pi32v2``/``q32s`` cores,
+compiled into the worker image at build, pinned by commit + SHA-256). Regenerate on a Ghidra
+version bump (or a bundled-module change) by enumerating
 ``DefaultLanguageService.getLanguageService().getLanguageDescriptions(False)`` in the worker and
-emitting ``{getLanguageID(): getSize()}``; a CI check should assert this list equals the installed
-set (the ADR-045 §D2 drift guard). Keeping the full set (rather than a hand-picked subset) maximizes
-raw-import coverage — x86, MIPS, PowerPC, AVR, 8051/PIC, MSP430, Xtensa, SuperH, tricore, 68k, and
-every ARM/AARCH64/RISC-V variant Ghidra ships — while preserving the positive-validation property.
+emitting ``{getLanguageID(): getSize()}`` — this enumeration already reflects the bundled module, so
+no separate "extra" list is needed; a CI check should assert this list equals that installed set
+(the ADR-045 §D2 drift guard). Keeping the full set (rather than a hand-picked subset) maximizes
+raw-import coverage — x86, MIPS, PowerPC, AVR, 8051/PIC, MSP430, Xtensa, SuperH, tricore, 68k, the
+bundled JieLi cores, and every ARM/AARCH64/RISC-V variant Ghidra ships — while preserving the
+positive-validation property.
 
 This module is pure (no I/O, no JVM) — part of the functional core; the values are plain strings and
 integers validated at the boundary.
@@ -186,6 +191,13 @@ _SUPPORTED_LANGUAGES: dict[str, int] = {
     "eBPF:BE:64:default": 64,
     "eBPF:LE:64:default": 64,
     "pa-risc:BE:32:default": 32,
+    # JieLi custom 32-bit cores — bundled third-party SLEIGH module kagaimiq/ghidra-jieli
+    # (ADR-077, GH #338). NOT stock Ghidra: compiled into the worker image at build (pinned by
+    # commit + SHA-256). Kept here because the worker's INSTALLED set now includes them, preserving
+    # the list == installed invariant (ADR-045 §D2). pi32v2/q32s are early-maturity upstream.
+    "pi32:LE:32:default": 32,
+    "pi32v2:LE:32:default": 32,
+    "q32s:LE:32:default": 32,
     "sparc:BE:32:default": 32,
     "sparc:BE:64:default": 64,
     "tricore:LE:32:default": 32,

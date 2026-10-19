@@ -14,6 +14,17 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **JieLi pi32 processor support — disassemble JieLi AC6xxx firmware (fixes #338).** The worker
+  image now bundles the third-party `kagaimiq/ghidra-jieli` SLEIGH module (Apache-2.0, pinned by
+  commit SHA + SLEIGH-compiled at build, fail-closed), adding three JieLi custom-core LanguageIDs —
+  `pi32:LE:32:default`, `pi32v2:LE:32:default`, `q32s:LE:32:default` — to the raw-import allow-list
+  (`core/languages.py`). A JieLi AC632N `app.bin` imported with
+  `session_import(loader="binary", processor="pi32:LE:32:default", base_addr=0x1E00120)` now yields
+  real `disassemble`/`decompile_function` output instead of garbage under a placeholder arch. The
+  module is a less-audited disassembly grammar inside the existing hostile-input boundary (TB3) —
+  containment is unchanged (ADR-077; threat-model §3 JieLi delta + §4). `pi32v2`/`q32s` are
+  early-maturity upstream (lower-fidelity disassembly, not unsafe). The unpinned runtime-mount
+  alternative (#338 ask #2) was rejected as a supply-chain hole; #338 asks #3/#4 are deferred.
 - **Output panels wrap (readable on mobile).** Free-form tool output (crypto_detect, ioc_scan, notes, messages) now renders in a wrapping block (`white-space:pre-wrap; overflow-wrap:anywhere`) instead of a non-wrapping code block, so long text folds to the pane width instead of a narrow, tall, side-scrolling column. Decompiled C keeps its own scrollable code block.
 - **Mobile overflow polish.** The breadcrumb now scrolls a long session id within its own bar (never off the page), the statusbar truncates its left item and drops the trailing info note on phones, and both are `overflow`-contained — so nothing clips off the right edge on a narrow screen.
 - **Mobile-friendly layout: collapsible / off-canvas explorer sidebar.** A titlebar hamburger
