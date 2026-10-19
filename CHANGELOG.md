@@ -6,6 +6,10 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+### Security
+
+- **Dependency CVE bump — anyio / PyJWT / mcp.** Regenerated `requirements.lock` (+ `requirements-dev.lock`) to clear fresh advisories the SCA gate flagged: `anyio` 4.13.0 → 4.14.2 (PYSEC-2026-4024 process-pool stderr-pipe deadlock, PYSEC-2026-4025 IDNA-2003 TLS hostname confusion), `pyjwt` 2.13.0 → 2.15.1 (the PYSEC-2026-41xx cluster), `mcp` 1.28.1 → 1.30.0 (CVE-2026-59951 — stateful Streamable-HTTP sessions never reclaimed → unbounded memory DoS). `pip-audit --strict` over `requirements.lock` is clean; full unit suite green on mcp 1.30.0. `mcp` is capped `<2` (2.x is a major FastMCP API migration, out of scope); the pyproject floors stay low so the `sast` extra (semgrep hard-pins old mcp/pyjwt) still resolves — the lockfile is the source of truth. Dev-only `urllib3`/`msgpack` advisories in `requirements-dev.lock` are pre-existing, not shipped, and tracked separately (scheduled-rescan, not a merge gate).
+
 ### Added
 
 - **Output panels wrap (readable on mobile).** Free-form tool output (crypto_detect, ioc_scan, notes, messages) now renders in a wrapping block (`white-space:pre-wrap; overflow-wrap:anywhere`) instead of a non-wrapping code block, so long text folds to the pane width instead of a narrow, tall, side-scrolling column. Decompiled C keeps its own scrollable code block.
