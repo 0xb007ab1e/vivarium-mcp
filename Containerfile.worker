@@ -163,13 +163,15 @@ RUN set -eux; \
         a="${pair%%:*}"; sha="${pair##*:}"; jar="${a}-jdk18on-${BC_VERSION}.jar"; \
         curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 60 --proto '=https' --tlsv1.2 \
             -o "/tmp/${jar}" "${BC_MAVEN_BASE}/${a}-jdk18on/${BC_VERSION}/${jar}"; \
-        echo "${sha}  /tmp/${jar}" | sha256sum -c -; \
-        rm -f "${lib}/${a}-jdk18on-"*.jar; \
+        printf '%s  %s\n' "${sha}" "/tmp/${jar}" > "/tmp/${jar}.sum"; \
+        sha256sum -c "/tmp/${jar}.sum"; \
+        rm -f "/tmp/${jar}.sum" "${lib}/${a}-jdk18on-"*.jar; \
         mv "/tmp/${jar}" "${lib}/${jar}"; \
     done; \
-    # Fail closed: exactly the three upgraded jars must be present, and no 1.84 jar may remain.
-    test "$(ls "${lib}"/bc*-jdk18on-${BC_VERSION}.jar | wc -l)" -eq 3; \
-    ! ls "${lib}"/bc*-jdk18on-1.84.jar 2>/dev/null
+    # Fail closed: all three upgraded jars present (test per jar — no `ls`), and no 1.84 jar remains
+    # (find, not `ls`, per SC2012). No pipes in this RUN (DL4006).
+    for a in bcprov bcpkix bcutil; do test -s "${lib}/${a}-jdk18on-${BC_VERSION}.jar"; done; \
+    test -z "$(find "${lib}" -name 'bc*-jdk18on-1.84.jar')"
 
 # =============================================================================
 # Stage 2: pybuilder — build the vivarium wheel (PEP 517) so the runtime install is OFFLINE.
