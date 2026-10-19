@@ -250,7 +250,12 @@ RUN set -eux; \
     for sla in pi32 pi32v2 q32s; do \
         test -s "${mod}/data/languages/${sla}.sla" \
             || { echo "SLEIGH did not produce ${sla}.sla (ADR-077: drop it from the allow-list too)" >&2; exit 1; }; \
-    done
+    done; \
+    chmod -R a+rX "${mod}"
+# World-readable module (dirs 0755 / files 0644): the SLEIGH compiler writes .sla under a 027 umask
+# (0640 root:root), but the runtime worker runs as USER 65532 — without this, Ghidra cannot READ the
+# compiled .sla and SILENTLY skips the pi32/pi32v2/q32s languages, so session_import rejects them as
+# "not-found" (ADR-077 / GH #338). The COPY below preserves these perms into the runtime image.
 
 # =============================================================================
 # Stage 3: runtime — Wolfi + Python 3.12 + JDK 21 + Ghidra + PyGhidra + the worker code. No build
