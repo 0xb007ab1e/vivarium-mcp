@@ -52,6 +52,19 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Fixed
 
+- **JieLi pi32 languages were unreadable by the worker — import rejected them as "not-found"
+  (fixes #338 regression).** The `jieli-sleigh` stage SLEIGH-compiled `pi32.sla`/`pi32v2.sla`/
+  `q32s.sla` under the build's `027` umask, so the COPYed module shipped the compiled grammars as
+  `0640 root:root`. The runtime worker runs as `USER 65532`, which **cannot read** those files, so
+  Ghidra **silently skipped** all three JieLi LanguageIDs and `session_import(loader="binary",
+  processor="pi32:LE:32:default", …)` failed with a worker **`not-found`** — the bundled module
+  from #338 was present but never usable. The stage now `chmod -R a+rX` the module before the COPY
+  (dirs `0755` / files `0644`); the worker reads the grammars and a JieLi AC632N `app.bin` imports +
+  disassembles (validated end-to-end: import populates `binary_sha256`; with the correct core —
+  `q32s:LE:32:default`, `base_addr=0x1E00000` — analysis recovers **401 functions** and a clean
+  C-runtime reset handler, vs. **0** before the fix when the language was skipped). No other stage is
+  affected; the module stays world-readable only (no write).
+
 - **Honest error when the worker lacks a verb (fixes #329, #330).** A tool whose verb the running
   worker image does not implement (e.g. an image predating the tool — `program_fingerprint`,
   `crypto_detect`/`crypto_instructions`, `family_match`) returned an opaque **500 internal-error**:
