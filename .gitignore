@@ -1,3 +1,6 @@
+# Nested standalone project — its own git repo (ADR 0008, memory-graph/docs)
+memory-graph/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -56,3 +59,6 @@ samples/        # binary samples are not committed; tests use synthetic fixtures
 
 # Claude Code local state (agent worktrees, session) — never commit
 .claude/
+
+# archify diagram artifacts (local, not tracked)
+.archify/
