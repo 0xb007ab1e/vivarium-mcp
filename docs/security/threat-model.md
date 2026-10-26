@@ -1488,3 +1488,80 @@ fail-closed + auth-required**, with the command-validation + gating **policy** (
 implemented and tested first; **live wiring to the session manager and any production enablement are
 gated actions** requiring human approval (`workflow-gated-actions`). Until then the browser has no
 execution path (503), so TB9 adds no live attack surface.
+
+## 22. TB10 — Analysis artifact → generated document (ADR-078, PROPOSED)
+
+> **New trust boundary.** A proposed capability generates **navigable documentation of an analyzed
+> target** (an archify-style atlas, diagrams, finding records; optionally an LLM narrative) as part
+> of the RE workflow. It takes **CONFIDENTIAL, HOSTILE-ORIGIN** artifacts (symbol names, strings,
+> decompiled text, comments, inferred types, decoded strings — already across TB4 as `Untrusted`)
+> and **renders them into a persisted, portable document**. This is distinct from **TB9**: TB9
+> renders results *inert in a live browser* (`textContent`, ADR-005) under the dashboard's
+> guarantees; a TB10 document **outlives the session, travels off-box, and may be opened anywhere or
+> fed to a downstream LLM** — none of TB9's inert-render promises hold once it leaves. Modeled here
+> BEFORE implementation (`workflow-threat-model`). It reuses, and never weakens: the read-only tool
+> catalog + envelope (TB1/TB4/ADR-005), `session_export_annotations` (TB8 export side), and
+> owner-scoping (TB6/ADR-017). Generation **never** runs in the worker, is **never** a write
+> primitive, and **never** bypasses the envelope.
+
+**Posture (secure-by-default, fail closed):**
+- **Tier-invariant rendering safety (amended 2026-10-26, red-team F1).** Safety is NOT a per-tier
+  variable. Every tier applies: **(C)** allow-list projection of binary-derived values
+  (names→`[A-Za-z0-9_$.]`, strings→hex + **format-escaped** printable preview — markup-active bytes
+  `< > & " ' [ ] ( ) : backtick` entity-encoded/`\xNN` at the chokepoint, not passed verbatim —
+  addrs→hex) so no raw hostile byte is markup in ANY consumer; **(B)** structured-data + a trusted auto-escaping renderer (`textContent`, never
+  `innerHTML`); **(A)** self-contained HTML wrapped in strict CSP that **starts `default-src 'none'`**
+  (every fetch directive fails closed) then opens only what is needed (`default-src 'none'; script-src
+  'none'; connect-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; base-uri 'none';
+  form-action 'none'; frame-ancestors 'none'`) + `<iframe sandbox>` — `connect-src 'none'` alone
+  leaves `object`/`font`/CSS `url()` loads as uncovered exfil, so `default-src 'none'` is load-bearing.
+  **No standalone
+  raw-Markdown artifact is shipped** — it cannot be (A)-wrapped and its consumers render active
+  links / beacon images; "deterministic" ≠ "inert."
+- **Tiers = scope + autonomy.** Tier 0 (ship first): bounded on-demand (A+B+C) report + finding
+  records, written to the **ephemeral session store** (wipe-on-evict). Tier 1 (gated): whole-program
+  atlas. Tier 2 (gated, default-OFF): LLM narrative (not originally requested).
+- **One input only: the envelope.** Generation consumes `Untrusted[...]` tool outputs + the existing
+  export; it adds no analysis path and runs at the **output edge** (server- or client-side), never
+  in the worker (ADR-001 preserved).
+- **Opt-in, bounded, owner-scoped.** Not fired on every step — an explicit read-only tool
+  (`session_generate_report`-style), hard-capped, killable; output classified **confidential**,
+  owner-scoped (ADR-017); Tier 0 persists only to the ADR-002 ephemeral session store by default
+  (persist-outside = gated — F2).
+
+| STRIDE | Threat | Mitigation (control) |
+|---|---|---|
+| **S** | Document misattributes provenance, or presents **inferred** findings as **observed** (false authority) | Provenance manifest stamped from envelope metadata (program SHA-256, session id, tool + revision, caps); every finding tagged **observed vs inferred**; integrity hash on the output |
+| **T** | **Hostile artifact content injected into the rendered document** — HTML/JS in a symbol name (**CWE-79**), Markdown link/image injection, `<script>`/SVG, diagram-label injection, `javascript:`/`data:` URLs | **A+B+C defense-in-depth (tier-invariant):** (C) allow-list projection makes binary-derived values non-markup **in any consumer** (incl. raw Markdown / LLM); (B) structured-data + auto-escaping renderer, **no `innerHTML`**, labels projected before entering diagram JSON; (A) self-contained strict CSP + `<iframe sandbox>` for the HTML path. No raw-Markdown artifact (unwrappable — F1) |
+| **R** | Who generated what, from which program, when — denied | Generation event audited (principal, session, program hash, scope caps, output location — `topic-logging-observability`); manifest embedded in the document |
+| **I** | Document is a **new persisted copy of confidential hostile artifacts** — leak via shared disk, a beaconing opened HTML page, verbatim `secret_scan`/IOC hits, over-inclusion ("dump everything"), cross-session mixing | Output = **confidential**, owner-scoped, never cross-session; **Tier 0 written to the ephemeral session store** (wipe-on-evict, ADR-002 — F2); **CSP starting `default-src 'none'` (so `object`/`font`/CSS loads fail closed, not just `connect-src`) + restricted `img-src` + sandbox** so an opened document cannot exfiltrate; **redaction** masks secret/IOC hits (no verbatim keys); **bounded on-demand scope** (not whole-program by default); persist-outside = explicit path + documented retention + **gated** (master §5, `workflow-data-lifecycle`) |
+| **D** | "Every edge / all surfaces" on a large binary → combinatorial graph, OOM, giant file, LLM cost-storm (**CWE-400**, API4, LLM04) | **Bounded on-demand scope** (per-function/subtree composed — never whole-program materialization in Tier 0 — F3) dissolves the combinatorial case structurally; plus hard caps (functions, nodes, edges, strings, bytes, doc size), opt-in, killable, shard/paginate, no-LLM default; fail closed with partial + notice, never OOM |
+| **E** | LLM narrative steered by indirect prompt injection in artifact text (**LLM01**); model output rendered unsanitized (**LLM02**); the document, opened by a downstream agent, carries injected instructions | Narrative **default-off**; model output is **untrusted → same sanitizing chokepoint**; system instructions separated from artifact content; read-only tool, not a write path; nothing in the document is ever executed/followed |
+
+**Data classification / rendering.** The generated document is the same confidential, hostile-origin
+data as everywhere else, now **concentrated and persisted**. Tier 0 persists to the **ADR-002
+ephemeral session store** (wipe-on-evict); any persist-outside / share exports confidential artifacts
+(master §5, gated). Inertness does **not** rest on a single control: **(C)** projection makes the
+bytes non-markup in every consumer, **(B)** keeps hostile data out of markup construction, and
+**(A)** CSP + sandbox contains the HTML path we control. This extends ADR-005 — the generator is
+where the envelope's "never render" rule is deliberately relaxed, so neutralization (C) + encoding
+(B) + containment (A) are enforced together there.
+
+**Abuse-case list (QA acceptance — #1–#5 and #9 are Tier-0 merge gates; all apply at every tier):**
+1. Function named `<img src=x onerror=alert(1)>` → (C)-projected to inert literal; no script in any consumer.
+2. Identifier/string `](javascript:evil)` → projected **with markup bytes format-escaped at the chokepoint** (F3); no active link in a browser, GitHub/mkdocs, VS Code preview, or an LLM reader.
+3. SVG/`<script>` embedded in a string → projected/encoded; diagrams carry no live SVG.
+4. `secret_scan` / IOC hit → masked in the document, not verbatim.
+5. Opened HTML document attempts a network beacon — via fetch/XHR **or** an `object`/`font`/CSS `url()` load → blocked by CSP starting `default-src 'none'` (not `connect-src` alone — F2) + sandbox.
+6. Prompt-injection text in a string, narrative ON (Tier 2) → does not steer output; rendered inert.
+7. Report request for a foreign session id → `SESSION_INVALID`, no oracle (ADR-017).
+8. Whole-program request on a 50k-function binary → bounded/on-demand scope or caps hit; partial + notice; no OOM / cost blowout.
+9. Artifact opened in a **renderer we do not control** (raw `.md` on GitHub, mkdocs, an LLM) → (C) projection ensures no field is active markup; confirms safety does not depend on (A).
+
+**Residual risk & status.** PROPOSED (ADR-078; amended 2026-10-26 after red-team scope review). Tier
+0 is a bounded on-demand (A+B+C) report written to the ephemeral session store, shipping with abuse
+cases #1–#5 / #9 as its **own** merge gates (F1); **Tier 1 (whole-program atlas) and Tier 2 (LLM
+narrative) remain gated actions** requiring human approval and the full abuse suite
+(`workflow-gated-actions`). Residual: (C) projection is lossy for human reading (mitigated by (B)'s
+trusted view); any persist-outside / share of a document exports confidential hostile artifacts
+(master §5) — operator-owned, gated, with documented retention.

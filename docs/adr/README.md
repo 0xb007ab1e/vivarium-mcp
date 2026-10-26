@@ -1,6 +1,6 @@
 # Architecture Decision Records (ADR) index
 
-This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-075).
+This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-078).
 Each ADR captures one significant decision: its context, the decision, alternatives, and consequences.
 Records are **point-in-time** — a `Status:` of *Proposed* reflects the record when it was written; what
 actually shipped in each release is tracked in [`../../CHANGELOG.md`](../../CHANGELOG.md) and the
@@ -65,6 +65,13 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 - **ADR-073** — Program-level fingerprint (`program_fingerprint`) + offline family-match corpus (`family_match`) — **Accepted** (`program_fingerprint` D1 + `family_match` D2 implemented; VT-hashes/TLSH-fuzzy + signed external corpus fast-follow).
 - **ADR-074** — Capability detection + MITRE ATT&CK tagging (`capability_scan`, capa-style) — **Accepted** (built-in rule pack implemented; external signed capa-rules pack fast-follow).
 - **ADR-075** — Crypto detection by API/import/instruction (`crypto_detect`; complements `crypto_constant_scan`) — **Accepted** (import + api_name sources implemented; instruction/code_pattern fast-follow).
+
+### Processor modules & firmware loaders
+- **ADR-077** — JieLi `pi32` processor (SLEIGH) module for AC6xxx firmware — **Accepted**.
+
+### Output surfaces & interactive UI (new trust boundaries)
+- **ADR-076** — Dashboard interactive command backend (Phase 2; browser → server write/command — TB9) — **Proposed** (default-off, fail-closed, auth-required; live wiring gated).
+- **ADR-078** — Generated target documentation (analysis report + finding records; artifact → persisted document — TB10) — **Proposed** (tier-invariant A+B+C rendering safety; Tier 0 = bounded on-demand CSP-wrapped, allow-list-projected HTML report + finding records to the ephemeral session store; whole-program atlas + LLM-narrative tiers gated. No raw-Markdown artifact — amended 2026-10-26, red-team F1).
 
 ### Read/analysis tools
 - **ADR-007** — Semantic-naming support tools (call graph, leaf-first ordering, function context).

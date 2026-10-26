@@ -8,6 +8,19 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Security
 
+- **Threat model TB10 + ADR-078 (generated target documentation) — modeled before implementation.**
+  A new output-edge trust boundary — **hostile-origin artifact → persisted/rendered document** — for
+  the standing goal of auto-generating navigable documentation of an *analyzed target* (an
+  archify-style atlas + ADR-shaped finding records). STRIDE-modeled (`docs/security/threat-model.md`
+  §22, **TB10**) and specified (**ADR-078**) *before* any code (`workflow-threat-model`), because a
+  generated document is a new persisted copy of **CONFIDENTIAL, HOSTILE-ORIGIN** artifacts (symbol
+  names, strings, decompiled text) that may travel off-box or reach an LLM — distinct from TB9, which
+  renders results *inert in a live browser*. Rendering safety is **tier-invariant A+B+C**: (A)
+  self-contained HTML + strict CSP (`default-src 'none'` …) + `<iframe sandbox>`; (B) data/template
+  separation (`textContent`, no `innerHTML`); (C) allow-list projection of binary-derived values
+  (the only control that holds in a renderer we don't own — no raw-Markdown artifact ships). No code
+  yet; every tier is a separate **gated** increment. Amended 2026-10-26 after `sdlc-red-team` (F1/F2/F3)
+  + `sdlc-reviewer` (CSP `default-src`, string-escape projection) review (PR #347).
 - **Dependency CVE bump — certifi.** Regenerated `requirements.lock` to clear the SCA gate's fresh advisory: `certifi` 2026.10.18 → 2026.10.19 (**PYSEC-2026-4320**). The 2026.10.18 bundle carried the `emSign ECC Root CA - G3` root; eight eMudhra intermediates chaining to it have compromised private keys (revoked by the CA), so an on-path attacker holding one could forge valid-looking certs for any host and intercept TLS from clients trusting the bundle (`requests`/`urllib3`/`pip`). 2026.10.19 restores only the unaffected emSign roots. `pip-audit --strict` over `requirements.lock` is clean; certifi-only diff (version + hashes).
 - **Clear container image-scan CVEs (worker + server).** The Trivy image-scan gate flagged HIGH/CRITICAL
   CVEs in both images; cleared by upgrade (no waivers added — `.trivyignore.yaml` stays empty). **Worker — BouncyCastle 1.84 → 1.85:** Ghidra 12.1.2 bundles `bcprov`/`bcpkix`/`bcutil-jdk18on` at 1.84, carrying **CVE-2026-8763** (CRITICAL) + **CVE-2026-13506** (HIGH) in bcprov; the build now replaces the whole family with 1.85 from Maven Central, each SHA-256-verified before swap (fail-closed). Smoke-verified Ghidra still boots + disassembles under 1.85. **Worker — `python-3.12` pinned ≥ 3.12.15-r0:** Wolfi shipped 3.12.14-r6 with cpython **CVE-2026-3644/4224/7210/82049** (HIGH); the pin forces the fixed build and busts the layer cache. **Server — time-boxed VEX waiver for `py3-pip-wheel`** (**CVE-2026-97687/97689**, bundled urllib3 HIGH, in the distroless base's system layer): **not affected** — the server runtime never executes system pip (the venv's pip is uninstalled; the app uses its own hash-pinned `urllib3`), so the vulnerable code is unreachable. The upstream fix ships only on Chainguard `python:latest` (now Python **3.15**), but the server is pinned to Python **3.14** (hash-locked wheels; 3.15 needs a separate lock regen + cffi/libffi build migration) and the free tier exposes no fixed `python:3.14` tag — so an upgrade isn't currently available. Waiver auto-expires 2027-01-19 (re-blocks CI), tracked for removal on the 3.15 migration. Verified locally: `trivy image` (HIGH/CRITICAL) exits clean on the rebuilt worker image.
