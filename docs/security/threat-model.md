@@ -1488,3 +1488,61 @@ fail-closed + auth-required**, with the command-validation + gating **policy** (
 implemented and tested first; **live wiring to the session manager and any production enablement are
 gated actions** requiring human approval (`workflow-gated-actions`). Until then the browser has no
 execution path (503), so TB9 adds no live attack surface.
+
+## 22. TB10 — Analysis artifact → generated document (ADR-078, PROPOSED)
+
+> **New trust boundary.** A proposed capability generates **navigable documentation of an analyzed
+> target** (an archify-style atlas, diagrams, finding records; optionally an LLM narrative) as part
+> of the RE workflow. It takes **CONFIDENTIAL, HOSTILE-ORIGIN** artifacts (symbol names, strings,
+> decompiled text, comments, inferred types, decoded strings — already across TB4 as `Untrusted`)
+> and **renders them into a persisted, portable document**. This is distinct from **TB9**: TB9
+> renders results *inert in a live browser* (`textContent`, ADR-005) under the dashboard's
+> guarantees; a TB10 document **outlives the session, travels off-box, and may be opened anywhere or
+> fed to a downstream LLM** — none of TB9's inert-render promises hold once it leaves. Modeled here
+> BEFORE implementation (`workflow-threat-model`). It reuses, and never weakens: the read-only tool
+> catalog + envelope (TB1/TB4/ADR-005), `session_export_annotations` (TB8 export side), and
+> owner-scoping (TB6/ADR-017). Generation **never** runs in the worker, is **never** a write
+> primitive, and **never** bypasses the envelope.
+
+**Posture (secure-by-default, fail closed):**
+- **Tiered, default-safe.** Tier 0 (default, ship first): **deterministic Markdown only** — no HTML
+  render, no diagrams, no LLM. Tier 1 (gated on this model + abuse tests): HTML/diagram atlas via
+  the single sanitizing renderer. Tier 2: LLM narrative — **default-OFF**.
+- **One input only: the envelope.** Generation consumes `Untrusted[...]` tool outputs + the existing
+  export; it adds no analysis path and runs at the **output edge** (server- or client-side), never
+  in the worker (ADR-001 preserved).
+- **Opt-in, bounded, owner-scoped.** Not fired on every step — an explicit read-only tool
+  (`session_generate_report`-style), hard-capped, killable; output classified **confidential**,
+  owner-scoped (ADR-017).
+
+| STRIDE | Threat | Mitigation (control) |
+|---|---|---|
+| **S** | Document misattributes provenance, or presents **inferred** findings as **observed** (false authority) | Provenance manifest stamped from envelope metadata (program SHA-256, session id, tool + revision, caps); every finding tagged **observed vs inferred**; integrity hash on the output |
+| **T** | **Hostile artifact content injected into the rendered document** — HTML/JS in a symbol name (**CWE-79**), Markdown link/image injection, `<script>`/SVG, diagram-label injection (archify embeds binary labels), `javascript:`/`data:` URLs | **The single sanitizing chokepoint** — one renderer, context-aware output encoding at point of use, **no `innerHTML`**; labels sanitized *before* entering diagram JSON; binary-derived URLs never auto-linked (encoded as text); **strict CSP** (no inline/eval, no remote scripts, SRI) |
+| **R** | Who generated what, from which program, when — denied | Generation event audited (principal, session, program hash, scope caps, output location — `topic-logging-observability`); manifest embedded in the document |
+| **I** | Document is a **new persisted copy of confidential hostile artifacts** — leak via shared disk, a beaconing opened HTML page, verbatim `secret_scan`/IOC hits, over-inclusion ("dump everything"), cross-session mixing | Output = **confidential**, owner-scoped, never cross-session; **CSP `connect-src 'none'` + restricted `img-src`** so an opened document cannot exfiltrate; **redaction pass** masks secret/IOC hits (no verbatim keys); bounded scope; explicit output path + documented retention; no auto-persist outside the session store (master §5, `workflow-data-lifecycle`) |
+| **D** | "Every edge / all surfaces" on a large binary → combinatorial graph, OOM, giant file, LLM cost-storm (**CWE-400**, API4, LLM04) | Hard caps (functions, nodes, edges, strings, bytes, doc size); opt-in; bounded + killable; shard/paginate; deterministic no-LLM default; fail closed with partial + notice, never OOM |
+| **E** | LLM narrative steered by indirect prompt injection in artifact text (**LLM01**); model output rendered unsanitized (**LLM02**); the document, opened by a downstream agent, carries injected instructions | Narrative **default-off**; model output is **untrusted → same sanitizing chokepoint**; system instructions separated from artifact content; read-only tool, not a write path; nothing in the document is ever executed/followed |
+
+**Data classification / rendering.** The generated document is the same confidential, hostile-origin
+data as everywhere else, now **concentrated and persisted**. HTML output must open safely with
+**zero network capability** (`connect-src 'none'`) and every binary-derived field rendered as inert,
+encoded text — the renderer is the sole place the envelope's "never render" rule is deliberately
+relaxed, so it is the sole place sanitization is enforced (extends ADR-005).
+
+**Abuse-case list (QA acceptance — Tier 1 cannot merge without these green):**
+1. Function named `<img src=x onerror=alert(1)>` → rendered inert, literal text, no script.
+2. String `](javascript:evil)` → no active link (Markdown + HTML).
+3. SVG/`<script>` embedded in a string → stripped/encoded.
+4. `secret_scan` API-key hit → masked in the document, not verbatim.
+5. Opened HTML document attempts a network beacon → blocked by CSP (`connect-src 'none'`).
+6. Prompt-injection text in a string, narrative ON → does not steer output; rendered inert.
+7. Report request for a foreign session id → `SESSION_INVALID`, no oracle (ADR-017).
+8. 50k-function binary → caps hit, partial + notice, no OOM / cost blowout.
+
+**Residual risk & status.** PROPOSED (ADR-078). Tier 0 (deterministic Markdown + finding records) is
+low-risk and the proposed first increment; **Tier 1 (HTML/diagram) and Tier 2 (LLM narrative) are
+gated actions** requiring human approval and the abuse suite above as a merge gate
+(`workflow-gated-actions`). A persisted confidential document leaving the session is a
+data-lifecycle concern — retention/deletion must be defined, and **sharing a document = exporting
+confidential hostile artifacts** (master §5), operator-owned and documented.
