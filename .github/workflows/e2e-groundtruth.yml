@@ -144,6 +144,22 @@ jobs:
           mkdir -p "$VIVARIUM_RPC_SOCKET_DIR"
           pytest tests/e2e/test_groundtruth_oss.py -m integration -v --no-cov
 
+      - name: Run generate-report e2e (ADR-078 Tier-0/Tier-1 docs pipeline — TB10)
+        env:
+          VIVARIUM_INTEGRATION: "1"
+          VIVARIUM_FIXTURES: ${{ github.workspace }}/_fixtures
+          VIVARIUM_CONTAINER_ENGINE: podman
+          VIVARIUM_WORKER_RUNTIME: crun
+          VIVARIUM_E2E_TIMEOUT: "900"
+        run: |
+          set -euo pipefail
+          # Same HOST-run server + uid/gid + short socket-dir shim as the ground-truth step above.
+          export VIVARIUM_RPC_SOCKET_DIR="/tmp/gmcp-run"
+          export VIVARIUM_WORKER_UID="$(id -u)"
+          export VIVARIUM_WORKER_GID="$(id -g)"
+          mkdir -p "$VIVARIUM_RPC_SOCKET_DIR"
+          pytest tests/e2e/test_generate_report_oss.py -m integration -v --no-cov
+
       - name: Run abuse e2e (TB3 containment + TB7 composite/structural/batch — G4 Phase 1/B1/B2/B3)
         env:
           VIVARIUM_INTEGRATION: "1"

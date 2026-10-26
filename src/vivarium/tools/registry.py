@@ -2290,7 +2290,14 @@ def _signature_from_model(model: type[s._In], *, with_context: bool = False) -> 
     parameters: list[inspect.Parameter] = []
     for field_name, field in model.model_fields.items():
         annotation = field.annotation if field.annotation is not None else Any
-        default = inspect.Parameter.empty if field.is_required() else field.get_default()
+        # ``call_default_factory=True`` is required: a ``Field(default_factory=...)`` field (e.g. an
+        # optional ``list[str] = []`` input) otherwise returns ``PydanticUndefined`` here, which the
+        # SDK treats as a MISSING/required arg — so a client omitting it fails input validation.
+        default = (
+            inspect.Parameter.empty
+            if field.is_required()
+            else field.get_default(call_default_factory=True)
+        )
         parameters.append(
             inspect.Parameter(
                 field_name,

@@ -475,6 +475,22 @@ def ctx() -> reg.ToolContext:
     )
 
 
+def test_signature_propagates_default_factory_defaults() -> None:
+    # Regression (found by the ADR-078 generate_report e2e): a ``Field(default_factory=list)`` input
+    # must carry its DEFAULT into the built signature. ``FieldInfo.get_default()`` returns
+    # ``PydanticUndefined`` for a factory field unless ``call_default_factory=True``; without it the
+    # MCP SDK marks the arg REQUIRED and a client that omits it fails input validation with "Field
+    # required". TWO registered tool inputs use ``default_factory`` and were both latently broken:
+    # ``session_generate_report`` (scope) and ``set_function_signature`` (parameters).
+    scope = reg._signature_from_model(s.SessionGenerateReportIn).parameters["scope"]
+    assert scope.default == []
+    assert scope.default is not inspect.Parameter.empty
+
+    params = reg._signature_from_model(s.SetFunctionSignatureIn).parameters["parameters"]
+    assert params.default == []
+    assert params.default is not inspect.Parameter.empty
+
+
 def test_catalog_is_exactly_79_unique_tools() -> None:
     # 22 Tier-1 + 5 v1.1 semantic-naming (ADR-007) + 8 v1.1 Tier-2 metrics (ADR-008; READ-ONLY)
     # + 1 Function ID library-match (ADR-042 Phase 1: identify_functions; READ-ONLY)

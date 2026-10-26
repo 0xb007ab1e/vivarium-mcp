@@ -107,6 +107,15 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Fixed
 
+- **`default_factory` tool-arg defaults were dropped from the MCP input schema (two tools).** The
+  tool-signature builder (`_signature_from_model`) used `FieldInfo.get_default()`, which returns
+  `PydanticUndefined` for a `Field(default_factory=...)` field — so FastMCP marked such a field
+  **required**, and a real MCP client omitting it got **"Field required"**. This silently broke two
+  already-shipped tools: **`session_generate_report`** (omitting `scope`) and
+  **`set_function_signature`** (omitting `parameters` to set a zero-argument signature). Fixed with
+  `get_default(call_default_factory=True)` so the factory default (`[]`) is carried into the
+  signature (a no-op for plain-default / required fields; no gate changed). Caught by the new
+  ADR-078 real-worker docs-pipeline e2e; regression-tested for both tools.
 - **Honest error when the worker lacks a verb (fixes #329, #330).** A tool whose verb the running
   worker image does not implement (e.g. an image predating the tool — `program_fingerprint`,
   `crypto_detect`/`crypto_instructions`, `family_match`) returned an opaque **500 internal-error**:
