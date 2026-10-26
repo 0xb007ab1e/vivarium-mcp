@@ -16,7 +16,11 @@
   (mirrors ADR-040 streaming jobs) — not an on-disk file: production runs `store_root=None` (the only
   on-disk store is the worker's in-container tmpfs, off-limits to the output edge), so the ADR-002
   "ephemeral session store / wipe-on-evict" guarantee is met in memory. Composed free-text (comments)
-  is additionally secret-redacted on detection (abuse #4). Tiers 1 and 2 remain unbuilt/gated.
+  is additionally secret-redacted on detection (abuse #4). **Tier 1 first slice implemented
+  2026-10-26** — a default-OFF `atlas` flag on `session_generate_report` composes a bounded, static,
+  scriptless whole-program atlas (program summary + call-graph adjacency + function index) by reusing
+  the read-only tools (no new worker capability). Interactive atlas / rasterized diagrams / Tier 2
+  remain unbuilt + gated.
 - **Date:** 2026-10-25
 - **Deciders:** Human operator (ratification + scoping pending). Any live/HTML/LLM tier, and any
   write of a report outside the ephemeral session store, is a **gated action**
@@ -117,10 +121,19 @@ CSP-wrapped, allow-list-projected HTML report**, not raw Markdown.
    retention and is a **gated** action (`workflow-data-lifecycle`, master §5). Composed free-text
    (comments) is secret-redacted on detection before projection, so a key an analyst pasted cannot
    travel off-box verbatim (abuse #4; `secret_scan`/ADR-072, master §5).
-2. **Tier 1 — whole-program navigable atlas (gated).** "Every edge / all surfaces," interactive,
-   larger caps, more diagram types — the capability the original request named. Same A+B+C controls;
-   diagrams via (B) `textContent` labels or (D) rasterization, **never live SVG**. Gated on the TB10
-   abuse-test suite green and on any persist-outside-session.
+2. **Tier 1 — whole-program navigable atlas (first slice IMPLEMENTED 2026-10-26).** "Every edge /
+   all surfaces" — the capability the original request named. Shipped as a **default-OFF `atlas`
+   flag** on `session_generate_report`: a **bounded, static, scriptless** whole-program atlas composed
+   by **reusing the existing read-only tools** (`program_summary` + `call_graph(root=None)` +
+   `list_functions`; no new worker capability / no new analysis path — ADR-001). Content = a program
+   cover page + a call-graph **adjacency table** (nodes/edges) + a function index + the Tier-0
+   findings, with an in-document table-of-contents (anchors only). Same A+B+C controls; diagrams via
+   (B) `textContent`/table labels, **never live SVG** and **no scripts** (CSP `script-src 'none'`), so
+   the atlas is static-navigable, not interactive. Modest hard caps (`_MAX_ATLAS_NODES/EDGES/
+   FUNCTIONS` = 2k/8k/2k) with `truncated` honesty (abuse #8). **Still deferred:** interactive
+   search/filter (needs scripts — conflicts with the CSP), rasterized (D) diagrams, xref edges, and
+   larger caps. Gated on the TB10 abuse suite green (atlas #8 + injection cases added) + the merge
+   review; any persist-outside-session remains gated.
 3. **Tier 2 — LLM narrative (gated, default-OFF; not originally requested).** The request asked for a
    deterministic atlas, not generated prose (red-team F5) — Tier 2 is recorded for completeness with
    **no commitment**. If built, model output is **untrusted**, passes through the same A+B+C path,

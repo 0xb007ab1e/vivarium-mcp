@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import html
 
-from vivarium.tools.schemas import FindingRecord, ReportManifest
+from vivarium.tools.schemas import AtlasData, FindingRecord, ReportManifest
 
 __all__ = ["REPORT_CSP", "render_report_html"]
 
@@ -83,11 +83,116 @@ def _finding_row(f: FindingRecord) -> str:
     )
 
 
+def _bool(flag: bool) -> str:
+    return "yes" if flag else "no"
+
+
+def _atlas_html(atlas: AtlasData) -> str:
+    """Render the whole-program atlas (ADR-078 Tier-1) — static, navigable, escaped, scriptless."""
+    s = atlas.summary
+    rows: dict[str, str] = {
+        "Program SHA-256": s.program_sha256,
+        "Format": s.format,
+        "Architecture": s.architecture,
+        "Endianness": s.endianness,
+        "Size (bytes)": str(s.size_bytes),
+        "Entry point": s.entry_point or "—",
+        "Compiler": s.compiler.value if s.compiler is not None else "—",
+        "Functions": str(s.function_count),
+        "Imports": str(s.import_count),
+        "Exports": str(s.export_count),
+        "Strings": str(s.string_count),
+    }
+    for label, value in (
+        ("Leaf functions", s.leaf_count),
+        ("Root functions", s.root_count),
+        ("Recursive components", s.recursive_component_count),
+        ("Unresolved callers", s.unresolved_caller_count),
+    ):
+        if value is not None:
+            rows[label] = str(value)
+    summary_dl = (
+        "<dl>"
+        + "".join(f"<dt>{_esc(k)}</dt><dd><code>{_esc(v)}</code></dd>" for k, v in rows.items())
+        + "</dl>"
+    )
+
+    node_rows = "".join(
+        "<tr>"
+        f"<td><code>{_esc(n.address)}</code></td>"
+        f"<td><code>{_esc(n.name.value)}</code></td>"
+        f"<td>{_bool(n.is_external)}</td><td>{_bool(n.has_unresolved_calls)}</td>"
+        "</tr>"
+        for n in atlas.nodes
+    )
+    nodes_tbl = (
+        "<table><thead><tr>"
+        '<th scope="col">Address</th><th scope="col">Name</th>'
+        '<th scope="col">External</th><th scope="col">Unresolved calls</th>'
+        f"</tr></thead><tbody>{node_rows}</tbody></table>"
+        if atlas.nodes
+        else "<p>No call-graph nodes.</p>"
+    )
+    edge_rows = "".join(
+        f"<tr><td><code>{_esc(e.from_address)}</code></td>"
+        f"<td><code>{_esc(e.to_address)}</code></td></tr>"
+        for e in atlas.edges
+    )
+    edges_tbl = (
+        "<table><thead><tr>"
+        '<th scope="col">From</th><th scope="col">To</th>'
+        f"</tr></thead><tbody>{edge_rows}</tbody></table>"
+        if atlas.edges
+        else "<p>No call edges.</p>"
+    )
+    fn_rows = "".join(
+        "<tr>"
+        f"<td><code>{_esc(f.address)}</code></td>"
+        f"<td><code>{_esc(f.name.value)}</code></td>"
+        f"<td>{f.size}</td>"
+        "</tr>"
+        for f in atlas.functions
+    )
+    fns_tbl = (
+        "<table><thead><tr>"
+        '<th scope="col">Address</th><th scope="col">Name</th><th scope="col">Size</th>'
+        f"</tr></thead><tbody>{fn_rows}</tbody></table>"
+        if atlas.functions
+        else "<p>No functions.</p>"
+    )
+    trunc = (
+        '<p class="note" role="note">Atlas truncated to fit caps — partial view.</p>'
+        if atlas.truncated
+        else ""
+    )
+    return (
+        '<section aria-labelledby="atlas-sum"><h2 id="atlas-sum">Program</h2>'
+        f"{trunc}{summary_dl}</section>"
+        '<section aria-labelledby="atlas-graph"><h2 id="atlas-graph">Call graph</h2>'
+        f"<h3>Nodes</h3>{nodes_tbl}<h3>Edges</h3>{edges_tbl}</section>"
+        '<section aria-labelledby="atlas-fns"><h2 id="atlas-fns">Functions</h2>'
+        f"{fns_tbl}</section>"
+    )
+
+
+def _nav(atlas: AtlasData | None) -> str:
+    """A static in-document table of contents (anchors only — scriptless)."""
+    items = ['<a href="#prov">Provenance</a>', '<a href="#find">Findings</a>']
+    if atlas is not None:
+        items += [
+            '<a href="#atlas-sum">Program</a>',
+            '<a href="#atlas-graph">Call graph</a>',
+            '<a href="#atlas-fns">Functions</a>',
+        ]
+    return '<nav aria-label="Contents">' + " · ".join(items) + "</nav>"
+
+
 def render_report_html(
     *,
     title: str,
     manifest: ReportManifest,
     findings: list[FindingRecord],
+    atlas: AtlasData | None = None,
 ) -> str:
     """Render a generated report to a self-contained, CSP-wrapped HTML document (ADR-078 (A)+(B)).
 
@@ -95,6 +200,7 @@ def render_report_html(
         title: The already-projected report title (interpolated through :func:`html.escape`).
         manifest: The provenance manifest (evidence of record).
         findings: The composed, (C)-projected finding records.
+        atlas: The whole-program atlas (ADR-078 Tier-1), or ``None`` for a Tier-0 report.
 
     Returns:
         A complete ``<!doctype html>`` string. Scriptless; carries :data:`REPORT_CSP`; every dynamic
@@ -112,6 +218,7 @@ def render_report_html(
         )
     else:
         body = "<p>No findings in scope.</p>"
+    atlas_section = _atlas_html(atlas) if atlas is not None else ""
 
     return (
         "<!doctype html>"
@@ -124,9 +231,11 @@ def render_report_html(
         "<main>"
         '<p class="note" role="note">This report renders content derived from an analyzed binary. '
         "All values are allow-list-projected and inert; do not execute or follow anything here.</p>"
+        f"{_nav(atlas)}"
         '<section aria-labelledby="prov"><h2 id="prov">Provenance</h2>'
         f"{_manifest_html(manifest)}</section>"
         '<section aria-labelledby="find"><h2 id="find">Findings</h2>'
         f"{body}</section>"
+        f"{atlas_section}"
         "</main></body></html>"
     )

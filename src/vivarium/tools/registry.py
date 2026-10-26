@@ -42,6 +42,7 @@ from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from vivarium.ghidra.port import GhidraPort, OnProgress
 from vivarium.jobs import streaming as st
 from vivarium.logging import get_logger
+from vivarium.report.atlas import compose_atlas
 from vivarium.report.findings import compose_findings
 from vivarium.report.projection import project_string
 from vivarium.report.render import render_report_html
@@ -1540,20 +1541,51 @@ def _handle_session_generate_report(
     findings, truncated = compose_findings(
         export.document, scope=list(args.scope), max_findings=s._MAX_REPORT_FINDINGS
     )
+    generated_from = ["session_export_annotations"]
+    # Tier-1 (ADR-078): whole-program atlas composed by REUSING the existing read-only tools
+    # (no new worker capability / no new analysis path — ADR-001). Each sibling handler
+    # re-authorizes (idempotent) and delegates to ctx.port; results are projected + bounded.
+    atlas: s.AtlasData | None = None
+    if args.atlas:
+        program_summary = _handle_program_summary(
+            ctx, s.ProgramSummaryIn(session_id=args.session_id, include_call_graph=True)
+        )
+        call_graph = _handle_call_graph(
+            ctx,
+            s.CallGraphIn(
+                session_id=args.session_id,
+                max_nodes=s._MAX_ATLAS_NODES,
+                max_edges=s._MAX_ATLAS_EDGES,
+            ),
+        )
+        function_list = _handle_list_functions(
+            ctx, s.ListFunctionsIn(session_id=args.session_id, limit=s._MAX_ATLAS_FUNCTIONS)
+        )
+        atlas = compose_atlas(
+            program_summary,
+            call_graph,
+            function_list,
+            max_nodes=s._MAX_ATLAS_NODES,
+            max_edges=s._MAX_ATLAS_EDGES,
+            max_functions=s._MAX_ATLAS_FUNCTIONS,
+        )
+        generated_from += ["program_summary", "call_graph", "list_functions"]
     manifest = s.ReportManifest(
         program_sha256=export.document.binary.sha256,
         session_id=args.session_id,
         tool_revision=_REPORT_TOOL_REVISION,
-        generated_from=["session_export_annotations"],
+        generated_from=generated_from,
         finding_count=len(findings),
-        truncated=truncated,
+        truncated=truncated or (atlas.truncated if atlas is not None else False),
     )
     html: str | None = None
     if args.include_html:
         # The client-supplied title is projected (C) before it enters the rendered document.
         title = project_string(args.title).preview if args.title else "Vivarium target report"
-        html = render_report_html(title=title, manifest=manifest, findings=findings)
-    stored = ctx.report_store.put(args.session_id, manifest=manifest, findings=findings, html=html)
+        html = render_report_html(title=title, manifest=manifest, findings=findings, atlas=atlas)
+    stored = ctx.report_store.put(
+        args.session_id, manifest=manifest, findings=findings, html=html, atlas=atlas
+    )
     _log.info(
         "tool.session_generate_report",
         extra={
@@ -1562,8 +1594,9 @@ def _handle_session_generate_report(
             "principal_id": ctx.caller_id,
             "report_id": stored.report_id,
             "finding_count": len(findings),
-            "truncated": truncated,
+            "truncated": manifest.truncated,
             "html": html is not None,
+            "atlas": atlas is not None,
         },
     )
     # The HTML is synthesized over hostile-origin (projected) content — return it Untrusted
@@ -1582,6 +1615,7 @@ def _handle_session_generate_report(
         report_id=stored.report_id,
         manifest=manifest,
         findings=findings,
+        atlas=atlas,
         html=wrapped,
     )
 
