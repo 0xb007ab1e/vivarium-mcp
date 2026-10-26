@@ -69,3 +69,23 @@ def test_report_ids_are_unique() -> None:
     store = ReportStore()
     ids = {_put(store) for _ in range(20)}
     assert len(ids) == 20
+
+
+def test_byte_budget_evicts_oldest_beyond_budget() -> None:
+    # Budget fits ~2 reports of ~100-byte html; a 3rd drops the oldest (reviewer Low).
+    store = ReportStore(max_bytes_per_session=250)
+    big = "x" * 100
+    r1 = _put(store, html=big)
+    r2 = _put(store, html=big)
+    r3 = _put(store, html=big)
+    assert store.get("sess-1", r1) is None  # oldest dropped to fit the byte budget
+    assert store.get("sess-1", r2) is not None
+    assert store.get("sess-1", r3) is not None
+
+
+def test_byte_budget_keeps_at_least_the_newest() -> None:
+    # Even a single report larger than the whole budget is retained (keep >=1).
+    store = ReportStore(max_bytes_per_session=10)
+    rid = _put(store, html="x" * 1000)
+    assert store.get("sess-1", rid) is not None
+    assert store.count("sess-1") == 1

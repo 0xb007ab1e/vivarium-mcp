@@ -25,7 +25,29 @@ from vivarium.tools.schemas import AtlasData, FindingRecord, ReportManifest
 __all__ = ["ReportStore", "StoredReport"]
 
 _REPORT_ID_BYTES = 16  # CSPRNG report-handle entropy (opaque, unguessable)
-_MAX_REPORTS_PER_SESSION = 32  # ring-buffer cap per session (bounded memory — CWE-400)
+_MAX_REPORTS_PER_SESSION = 32  # ring-buffer COUNT cap per session (bounded memory — CWE-400)
+# A per-session BYTE budget on top of the count cap: a Tier-1 atlas report is far larger than a
+# Tier-0 one (up to 2k nodes + 8k edges + 2k functions + the rendered HTML blob), so a fixed count
+# of 32 is a large byte multiplier. Bound the actual retained bytes too (CWE-400; reviewer Low).
+_MAX_REPORT_BYTES_PER_SESSION = 32 * 1024 * 1024  # 32 MiB of retained reports per session
+# Rough per-row byte estimates for the structured (non-HTML) retained state.
+_EST_FINDING_BYTES = 256
+_EST_NODE_BYTES = 96
+_EST_EDGE_BYTES = 48
+_EST_FUNCTION_BYTES = 96
+
+
+def _estimate_bytes(
+    html: str | None, findings: list[FindingRecord], atlas: AtlasData | None
+) -> int:
+    """Approximate the retained byte footprint of a report (HTML blob + structured state)."""
+    total = len(html or "")
+    total += len(findings) * _EST_FINDING_BYTES
+    if atlas is not None:
+        total += len(atlas.nodes) * _EST_NODE_BYTES
+        total += len(atlas.edges) * _EST_EDGE_BYTES
+        total += len(atlas.functions) * _EST_FUNCTION_BYTES
+    return total
 
 
 class StoredReport(BaseModel):
@@ -38,6 +60,7 @@ class StoredReport(BaseModel):
         atlas: The whole-program atlas (ADR-078 Tier-1), or ``None`` (Tier-0 report).
         html: The self-contained CSP-wrapped HTML artifact, or ``None`` if not rendered.
         created_monotonic: Creation time (monotonic) — for ordering/eviction.
+        approx_bytes: Estimated retained byte footprint — drives the per-session byte budget.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -48,6 +71,7 @@ class StoredReport(BaseModel):
     atlas: AtlasData | None = None
     html: str | None = None
     created_monotonic: float
+    approx_bytes: int = Field(default=0, ge=0)
 
 
 class ReportStore:
@@ -61,16 +85,20 @@ class ReportStore:
         self,
         *,
         max_per_session: int = _MAX_REPORTS_PER_SESSION,
+        max_bytes_per_session: int = _MAX_REPORT_BYTES_PER_SESSION,
         clock: object = time.monotonic,
     ) -> None:
         """Initialize an empty store.
 
         Args:
-            max_per_session: Ring-buffer cap per session; when exceeded the oldest report for that
-                session is dropped (reports are cheaply regenerable). Bounds memory (CWE-400).
+            max_per_session: Ring-buffer COUNT cap per session; when exceeded the oldest report for
+                that session is dropped (reports are regenerable). Bounds memory (CWE-400).
+            max_bytes_per_session: BYTE budget per session; the oldest reports are dropped until the
+                session's retained bytes fit (a Tier-1 atlas report is far larger than Tier-0).
             clock: Injected monotonic clock (deterministic ordering in tests).
         """
         self._max_per_session = max_per_session
+        self._max_bytes_per_session = max_bytes_per_session
         self._clock = clock  # callable[[], float]
         self._by_session: dict[str, list[StoredReport]] = {}
         self._lock = threading.RLock()
@@ -104,13 +132,18 @@ class ReportStore:
             atlas=atlas,
             html=html,
             created_monotonic=now,
+            approx_bytes=_estimate_bytes(html, findings, atlas),
         )
         with self._lock:
             bucket = self._by_session.setdefault(session_id, [])
             bucket.append(report)
-            # Ring-buffer: drop the oldest beyond the per-session cap (bounded memory).
-            if len(bucket) > self._max_per_session:
-                del bucket[0 : len(bucket) - self._max_per_session]
+            # Drop the oldest while the session exceeds EITHER the count cap OR the byte budget,
+            # always keeping the just-added report (bounded memory — CWE-400).
+            while len(bucket) > 1 and (
+                len(bucket) > self._max_per_session
+                or sum(r.approx_bytes for r in bucket) > self._max_bytes_per_session
+            ):
+                del bucket[0]
         return report
 
     def get(self, session_id: str, report_id: str) -> StoredReport | None:
