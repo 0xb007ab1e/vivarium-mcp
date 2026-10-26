@@ -1566,10 +1566,17 @@ def _handle_session_generate_report(
         xrefs: list[s.Xref] = []
         metrics = program_summary.call_graph_metrics
         used_xrefs = False
+        # "Honest partial view" (TB10 #8): the drill-down drops data in three ways that must each
+        # flag truncation — more functions ranked than we probe, a target with more referrers than
+        # its page, or the total cap hit mid-loop. The compose-time `len(src_xrefs) > max_xrefs`
+        # check is dead for this path (we pre-cap to exactly _MAX_ATLAS_XREFS), so track it here.
+        xrefs_truncated = False
         if metrics is not None:
             used_xrefs = True
+            xrefs_truncated = len(metrics.top_fan_in) > s._MAX_ATLAS_XREF_TARGETS
             for ranking in metrics.top_fan_in[: s._MAX_ATLAS_XREF_TARGETS]:
                 if len(xrefs) >= s._MAX_ATLAS_XREFS:
+                    xrefs_truncated = True
                     break
                 result = _handle_xrefs_to(
                     ctx,
@@ -1579,6 +1586,8 @@ def _handle_session_generate_report(
                         limit=s._MAX_ATLAS_XREFS_PER_TARGET,
                     ),
                 )
+                if result.truncated:  # a hot function with more referrers than the per-target page
+                    xrefs_truncated = True
                 xrefs.extend(result.xrefs[: s._MAX_ATLAS_XREFS - len(xrefs)])
         atlas = compose_atlas(
             program_summary,
@@ -1589,6 +1598,7 @@ def _handle_session_generate_report(
             max_functions=s._MAX_ATLAS_FUNCTIONS,
             xrefs=xrefs,
             max_xrefs=s._MAX_ATLAS_XREFS,
+            xrefs_truncated=xrefs_truncated,
         )
         generated_from += ["program_summary", "call_graph", "list_functions"]
         if used_xrefs:

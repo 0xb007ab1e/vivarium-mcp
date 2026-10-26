@@ -55,6 +55,7 @@ def compose_atlas(
     max_functions: int,
     xrefs: list[Xref] | None = None,
     max_xrefs: int = 0,
+    xrefs_truncated: bool = False,
 ) -> AtlasData:
     """Compose a bounded whole-program atlas from reused read-only tool outputs (ADR-078 Tier-1).
 
@@ -68,6 +69,10 @@ def compose_atlas(
         xrefs: Optional cross-references into the top-referenced functions (from ``xrefs_to``,
             fetched by the handler) — all server-safe scalars, no projection needed.
         max_xrefs: Cap on xref edges rendered.
+        xrefs_truncated: Set by the handler when the drill-down itself dropped data upstream —
+            a target had more referrers than the per-target page, more functions ranked than
+            ``_MAX_ATLAS_XREF_TARGETS``, or the total cap was hit mid-loop. OR-ed into
+            ``truncated`` so the "honest partial view" invariant holds end-to-end (TB10 #8).
 
     Returns:
         The projected, bounded :class:`AtlasData`; ``truncated`` is set if any source was capped
@@ -126,6 +131,7 @@ def compose_atlas(
         or len(graph.edges) > max_edges
         or len(functions.functions) > max_functions
         or len(src_xrefs) > max_xrefs
+        or xrefs_truncated
     )
     return AtlasData(
         summary=atlas_summary,
