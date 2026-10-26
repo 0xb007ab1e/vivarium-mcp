@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+from typing import TypedDict
+
 from vivarium.core.envelope import DataOrigin, Untrusted, wrap
 from vivarium.report.atlas import compose_atlas
 from vivarium.tools import schemas as s
+
+
+class _Caps(TypedDict):
+    max_nodes: int
+    max_edges: int
+    max_functions: int
 
 
 def _u(value: str) -> Untrusted[str]:
@@ -66,7 +74,7 @@ def _funcs(funcs: list[s.FunctionSummary], truncated: bool = False) -> s.Functio
     return s.FunctionListOut(functions=funcs, total=len(funcs), truncated=truncated)
 
 
-_CAPS = {"max_nodes": 100, "max_edges": 100, "max_functions": 100}
+_CAPS: _Caps = {"max_nodes": 100, "max_edges": 100, "max_functions": 100}
 
 
 def test_summary_counts_and_metrics_surfaced() -> None:
@@ -123,4 +131,30 @@ def test_caps_bound_and_flag_truncation() -> None:
 
 def test_source_truncation_propagates() -> None:
     atlas = compose_atlas(_summary(), _graph([], [], truncated=True), _funcs([]), **_CAPS)
+    assert atlas.truncated is True
+
+
+def _xref(frm: str, to: str, ref_type: str = "CALL") -> s.Xref:
+    return s.Xref(from_address=frm, to_address=to, ref_type=ref_type)
+
+
+def test_xrefs_absent_default_empty() -> None:
+    atlas = compose_atlas(_summary(), _graph([], []), _funcs([]), **_CAPS)
+    assert atlas.xrefs == []
+
+
+def test_xrefs_pass_through_server_safe_scalars() -> None:
+    xrefs = [_xref("0x401000", "0x401100", "CONDITIONAL_CALL")]
+    atlas = compose_atlas(
+        _summary(), _graph([], []), _funcs([]), xrefs=xrefs, max_xrefs=100, **_CAPS
+    )
+    assert atlas.xrefs[0].from_address == "0x401000"
+    assert atlas.xrefs[0].to_address == "0x401100"
+    assert atlas.xrefs[0].ref_type == "CONDITIONAL_CALL"
+
+
+def test_xrefs_capped_and_flag_truncation() -> None:
+    xrefs = [_xref(f"0x{i:x}", "0x401000") for i in range(10)]
+    atlas = compose_atlas(_summary(), _graph([], []), _funcs([]), xrefs=xrefs, max_xrefs=3, **_CAPS)
+    assert len(atlas.xrefs) == 3
     assert atlas.truncated is True

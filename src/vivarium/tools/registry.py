@@ -1561,6 +1561,25 @@ def _handle_session_generate_report(
         function_list = _handle_list_functions(
             ctx, s.ListFunctionsIn(session_id=args.session_id, limit=s._MAX_ATLAS_FUNCTIONS)
         )
+        # Xref drill-down (ADR-078 Tier-1): xrefs are per-target, so pull ``xrefs_to`` only for the
+        # top-fan-in (most-referenced) functions, bounded by target count + per-target page + total.
+        xrefs: list[s.Xref] = []
+        metrics = program_summary.call_graph_metrics
+        used_xrefs = False
+        if metrics is not None:
+            used_xrefs = True
+            for ranking in metrics.top_fan_in[: s._MAX_ATLAS_XREF_TARGETS]:
+                if len(xrefs) >= s._MAX_ATLAS_XREFS:
+                    break
+                result = _handle_xrefs_to(
+                    ctx,
+                    s.XrefsIn(
+                        session_id=args.session_id,
+                        target=ranking.address,
+                        limit=s._MAX_ATLAS_XREFS_PER_TARGET,
+                    ),
+                )
+                xrefs.extend(result.xrefs[: s._MAX_ATLAS_XREFS - len(xrefs)])
         atlas = compose_atlas(
             program_summary,
             call_graph,
@@ -1568,8 +1587,12 @@ def _handle_session_generate_report(
             max_nodes=s._MAX_ATLAS_NODES,
             max_edges=s._MAX_ATLAS_EDGES,
             max_functions=s._MAX_ATLAS_FUNCTIONS,
+            xrefs=xrefs,
+            max_xrefs=s._MAX_ATLAS_XREFS,
         )
         generated_from += ["program_summary", "call_graph", "list_functions"]
+        if used_xrefs:
+            generated_from.append("xrefs_to")
     manifest = s.ReportManifest(
         program_sha256=export.document.binary.sha256,
         session_id=args.session_id,

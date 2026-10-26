@@ -2080,3 +2080,23 @@ def test_tb10_atlas_hostile_node_name_is_inert() -> None:
     )
     name = atlas.nodes[0].name.value
     assert not (set(name) & (_TB10_MARKUP - {"\\"}))
+
+
+def test_tb10_case8_atlas_xrefs_are_hard_capped() -> None:
+    """#8 (xref drill-down): an unbounded xref flood into the atlas is total-capped and flagged
+    truncated — the per-target pull cannot blow up the whole-program report."""
+    xrefs = [
+        s.Xref(from_address=f"0x{i:x}", to_address="0x401000", ref_type="CALL") for i in range(5000)
+    ]
+    atlas = compose_atlas(
+        _atlas_summary(),
+        s.CallGraphOut(nodes=[], edges=[], unresolved_callers=[], truncated=False),
+        s.FunctionListOut(functions=[], total=0, truncated=False),
+        max_nodes=100,
+        max_edges=100,
+        max_functions=100,
+        xrefs=xrefs,
+        max_xrefs=50,
+    )
+    assert len(atlas.xrefs) == 50
+    assert atlas.truncated is True

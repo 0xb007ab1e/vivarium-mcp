@@ -160,6 +160,21 @@ def _atlas_html(atlas: AtlasData) -> str:
         if atlas.functions
         else "<p>No functions.</p>"
     )
+    xref_rows = "".join(
+        "<tr>"
+        f"<td><code>{_esc(x.from_address)}</code></td>"
+        f"<td><code>{_esc(x.to_address)}</code></td>"
+        f"<td>{_esc(x.ref_type)}</td>"
+        "</tr>"
+        for x in atlas.xrefs
+    )
+    xrefs_tbl = (
+        "<table><thead><tr>"
+        '<th scope="col">From</th><th scope="col">To</th><th scope="col">Type</th>'
+        f"</tr></thead><tbody>{xref_rows}</tbody></table>"
+        if atlas.xrefs
+        else "<p>No cross-references in scope.</p>"
+    )
     trunc = (
         '<p class="note" role="note">Atlas truncated to fit caps — partial view.</p>'
         if atlas.truncated
@@ -172,6 +187,9 @@ def _atlas_html(atlas: AtlasData) -> str:
         f"<h3>Nodes</h3>{nodes_tbl}<h3>Edges</h3>{edges_tbl}</section>"
         '<section aria-labelledby="atlas-fns"><h2 id="atlas-fns">Functions</h2>'
         f"{fns_tbl}</section>"
+        '<section aria-labelledby="atlas-xrefs"><h2 id="atlas-xrefs">Cross-references</h2>'
+        "<p>References to the most-referenced (top fan-in) functions.</p>"
+        f"{xrefs_tbl}</section>"
     )
 
 
@@ -183,6 +201,7 @@ def _nav(atlas: AtlasData | None) -> str:
             '<a href="#atlas-sum">Program</a>',
             '<a href="#atlas-graph">Call graph</a>',
             '<a href="#atlas-fns">Functions</a>',
+            '<a href="#atlas-xrefs">Cross-references</a>',
         ]
     return '<nav aria-label="Contents">' + " · ".join(items) + "</nav>"
 

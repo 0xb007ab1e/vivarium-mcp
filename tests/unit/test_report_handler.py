@@ -79,6 +79,34 @@ class FakePort:
             import_count=0,
             export_count=0,
             string_count=0,
+            call_graph_metrics=s.CallGraphMetricsOut(
+                function_count=1,
+                edge_count=1,
+                leaf_count=0,
+                root_count=1,
+                recursive_component_count=0,
+                self_recursive_count=0,
+                unresolved_caller_count=0,
+                top_fan_in=[
+                    s.FanRanking(
+                        address="0x401000",
+                        name=wrap("decrypt", origin=DataOrigin.BINARY),
+                        count=2,
+                    )
+                ],
+                top_fan_out=[],
+            ),
+        )
+
+    def xrefs_to(self, sid: str, a: s.XrefsIn) -> s.XrefsOut:
+        # Synthetic references into the requested target — all server-safe scalars.
+        return s.XrefsOut(
+            xrefs=[
+                s.Xref(from_address="0x401200", to_address=a.target, ref_type="CALL"),
+                s.Xref(from_address="0x401300", to_address=a.target, ref_type="CONDITIONAL_CALL"),
+            ],
+            total=2,
+            truncated=False,
         )
 
     def call_graph(self, sid: str, a: s.CallGraphIn) -> s.CallGraphOut:
@@ -170,11 +198,20 @@ def test_atlas_mode_composes_whole_program_atlas() -> None:
     )
     assert out.atlas is not None
     assert out.atlas.summary.program_sha256 == "e" * 64
-    assert set(out.manifest.generated_from) >= {"program_summary", "call_graph", "list_functions"}
+    assert set(out.manifest.generated_from) >= {
+        "program_summary",
+        "call_graph",
+        "list_functions",
+        "xrefs_to",
+    }
     # the hostile call-graph node name is projected inert in the atlas + the rendered HTML
     assert "<img" not in out.atlas.nodes[0].name.value
     assert out.html is not None
     assert "<img" not in out.html.value.lower()
+    # xref drill-down populated from the top-fan-in target (server-safe scalars)
+    assert len(out.atlas.xrefs) == 2
+    assert out.atlas.xrefs[0].to_address == "0x401000"
+    assert out.atlas.xrefs[0].ref_type == "CALL"
     assert store.get("s1", out.report_id) is not None
 
 

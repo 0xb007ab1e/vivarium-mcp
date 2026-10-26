@@ -68,6 +68,12 @@ _MAX_REPORT_TITLE = 200  # cap on a client-supplied report title (projected befo
 _MAX_ATLAS_NODES = 2_000  # call-graph nodes rendered in the atlas
 _MAX_ATLAS_EDGES = 8_000  # call-graph edges rendered in the atlas
 _MAX_ATLAS_FUNCTIONS = 2_000  # function-inventory rows rendered in the atlas
+# Xref edges are per-target (no whole-program dump), so the atlas pulls ``xrefs_to`` for a small
+# bounded set of the most-referenced (top fan-in) functions only — K targets x a per-target page,
+# hard-capped overall (CWE-400). Zero untrusted leaves (addresses + ref_type).
+_MAX_ATLAS_XREF_TARGETS = 16  # top-fan-in functions whose referrers are pulled
+_MAX_ATLAS_XREFS_PER_TARGET = 64  # xrefs_to page size per target
+_MAX_ATLAS_XREFS = 1_000  # total xref edges rendered in the atlas
 
 
 class _In(BaseModel):
@@ -4382,6 +4388,20 @@ class AtlasEdge(_Out):
     to_address: str
 
 
+class AtlasXref(_Out):
+    """A cross-reference edge into a top-referenced function — all fields server-safe.
+
+    Attributes:
+        from_address: Source address (hex) — safe.
+        to_address: Referenced target address (hex) — safe.
+        ref_type: Reference kind (``"CALL"``/``"READ"``/``"DATA"``...) — closed-vocab, safe.
+    """
+
+    from_address: str
+    to_address: str
+    ref_type: str
+
+
 class AtlasFunction(_Out):
     """A function-inventory row — ``name`` projected + ``Untrusted``; address/size safe."""
 
@@ -4398,13 +4418,16 @@ class AtlasData(_Out):
         nodes: Call-graph nodes (bounded by ``_MAX_ATLAS_NODES``).
         edges: Resolved call edges (bounded by ``_MAX_ATLAS_EDGES``).
         functions: The function inventory (bounded by ``_MAX_ATLAS_FUNCTIONS``).
-        truncated: Whether any source (graph or inventory) was capped — honest partial view.
+        xrefs: Cross-reference edges into the top-referenced (top fan-in) functions — a bounded
+            drill-down (``_MAX_ATLAS_XREFS``), all server-safe scalars.
+        truncated: Whether any source (graph / inventory / xrefs) was capped — honest partial view.
     """
 
     summary: AtlasSummary
     nodes: list[AtlasNode] = Field(default_factory=list)
     edges: list[AtlasEdge] = Field(default_factory=list)
     functions: list[AtlasFunction] = Field(default_factory=list)
+    xrefs: list[AtlasXref] = Field(default_factory=list)
     truncated: bool = False
 
 

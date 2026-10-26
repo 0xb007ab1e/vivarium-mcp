@@ -23,9 +23,11 @@ from vivarium.tools.schemas import (
     AtlasFunction,
     AtlasNode,
     AtlasSummary,
+    AtlasXref,
     CallGraphOut,
     FunctionListOut,
     ProgramSummary,
+    Xref,
 )
 
 __all__ = ["compose_atlas"]
@@ -51,6 +53,8 @@ def compose_atlas(
     max_nodes: int,
     max_edges: int,
     max_functions: int,
+    xrefs: list[Xref] | None = None,
+    max_xrefs: int = 0,
 ) -> AtlasData:
     """Compose a bounded whole-program atlas from reused read-only tool outputs (ADR-078 Tier-1).
 
@@ -61,6 +65,9 @@ def compose_atlas(
         max_nodes: Cap on call-graph nodes rendered (DoS guard — CWE-400).
         max_edges: Cap on call-graph edges rendered.
         max_functions: Cap on function-inventory rows rendered.
+        xrefs: Optional cross-references into the top-referenced functions (from ``xrefs_to``,
+            fetched by the handler) — all server-safe scalars, no projection needed.
+        max_xrefs: Cap on xref edges rendered.
 
     Returns:
         The projected, bounded :class:`AtlasData`; ``truncated`` is set if any source was capped
@@ -106,17 +113,25 @@ def compose_atlas(
         for f in functions.functions[:max_functions]
     ]
 
+    src_xrefs = xrefs or []
+    atlas_xrefs = [
+        AtlasXref(from_address=x.from_address, to_address=x.to_address, ref_type=x.ref_type)
+        for x in src_xrefs[:max_xrefs]
+    ]
+
     truncated = (
         graph.truncated
         or functions.truncated
         or len(graph.nodes) > max_nodes
         or len(graph.edges) > max_edges
         or len(functions.functions) > max_functions
+        or len(src_xrefs) > max_xrefs
     )
     return AtlasData(
         summary=atlas_summary,
         nodes=nodes,
         edges=edges,
         functions=atlas_functions,
+        xrefs=atlas_xrefs,
         truncated=truncated,
     )
