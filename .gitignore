@@ -39,6 +39,9 @@ ghidra_projects/
 mutants/
 .mutmut-cache
 samples/        # binary samples are not committed; tests use synthetic fixtures
+# Built OSS e2e fixtures (tests/fixtures/oss/build_fixtures.py --out _fixtures; also CI's
+# $github.workspace/_fixtures) — generated binaries + extracted source trees, never committed.
+/_fixtures/
 
 # Bundled FID databases (ADR-043) — packed binary artifacts + their intermediates are GENERATED
 # (PM-gated build), never committed; deploy/fid/sources.toml + README.md ARE committed (above rules
