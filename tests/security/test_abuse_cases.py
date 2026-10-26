@@ -1878,13 +1878,13 @@ from vivarium.tools import schemas as s  # noqa: E402
 _TB10_MARKUP = set("<>&\"'[]():!*_~|\\`#{}")
 
 
-def _tb10_doc(entries: list[object]) -> s.ExportedAnnotationDocument:
+def _tb10_doc(entries: list[s.ExportedEntry]) -> s.ExportedAnnotationDocument:
     return s.ExportedAnnotationDocument(
         schema_version=1, binary=s.ExportedBinaryRef(sha256="d" * 64), entries=entries
     )
 
 
-def _tb10_report_html(entries: list[object]) -> str:
+def _tb10_report_html(entries: list[s.ExportedEntry]) -> str:
     findings, _ = compose_findings(_tb10_doc(entries), max_findings=1000)
     manifest = s.ReportManifest(
         program_sha256="d" * 64,

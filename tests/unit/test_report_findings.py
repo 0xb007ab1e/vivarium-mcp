@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from vivarium.core.envelope import DataOrigin, wrap
+from vivarium.core.envelope import DataOrigin, Untrusted, wrap
 from vivarium.report.findings import compose_findings
 from vivarium.tools import schemas as s
 
 
-def _u(value: str) -> object:
+def _u(value: str) -> Untrusted[str]:
     return wrap(value, origin=DataOrigin.BINARY)
 
 
@@ -15,7 +15,7 @@ def _typeref(name: str | None = "mytype") -> s.ExportedTypeRef:
     return s.ExportedTypeRef(base=None, named=_u(name) if name is not None else None)
 
 
-def _doc(entries: list[object], sha: str = "a" * 64) -> s.ExportedAnnotationDocument:
+def _doc(entries: list[s.ExportedEntry], sha: str = "a" * 64) -> s.ExportedAnnotationDocument:
     return s.ExportedAnnotationDocument(
         schema_version=1,
         binary=s.ExportedBinaryRef(sha256=sha),
@@ -23,7 +23,7 @@ def _doc(entries: list[object], sha: str = "a" * 64) -> s.ExportedAnnotationDocu
     )
 
 
-def _all_kinds() -> list[object]:
+def _all_kinds() -> list[s.ExportedEntry]:
     return [
         s.ExportedRenameFunctionEntry(
             kind="rename_function", function="0x401000", new_name=_u("decrypt")

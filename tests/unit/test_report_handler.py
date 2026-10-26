@@ -48,7 +48,7 @@ class FakeSessions:
 
 
 class FakePort:
-    def __init__(self, entries: list[object]) -> None:
+    def __init__(self, entries: list[s.ExportedEntry]) -> None:
         self._entries = entries
 
     def export_annotations(
@@ -78,7 +78,7 @@ def _config() -> Config:
     )
 
 
-def _entries() -> list[object]:
+def _entries() -> list[s.ExportedEntry]:
     return [
         s.ExportedRenameFunctionEntry(
             kind="rename_function",
@@ -93,7 +93,7 @@ def _entries() -> list[object]:
     ]
 
 
-def _ctx(entries: list[object], *, store: ReportStore | None) -> reg.ToolContext:
+def _ctx(entries: list[s.ExportedEntry], *, store: ReportStore | None) -> reg.ToolContext:
     return reg.ToolContext(
         config=_config(),
         sessions=cast(SessionManager, FakeSessions()),

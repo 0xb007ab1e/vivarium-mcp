@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from vivarium.core.envelope import DataOrigin, wrap
+from vivarium.core.envelope import DataOrigin, Untrusted, wrap
 from vivarium.report.render import REPORT_CSP, render_report_html
 from vivarium.tools import schemas as s
 
 
-def _u(value: str) -> object:
+def _u(value: str) -> Untrusted[str]:
     return wrap(value, origin=DataOrigin.GHIDRA)
 
 
