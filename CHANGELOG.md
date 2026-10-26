@@ -43,6 +43,15 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **ADR-076 / TB9 — live dashboard interactive backend e2e (`McpToolCaller`).** A gated real-worker
+  e2e (`tests/e2e/test_dashboard_interactive_oss.py`) closes the `pragma: no cover` gap on the live
+  transport: it drives the dashboard `POST /api/command` endpoint through a `WorkerExecutor` +
+  `McpToolCaller` against a REAL `python -m vivarium` server (which spawns a Ghidra worker), proving
+  the TB9 invariants end-to-end — a read-only op returns a live result with binary-derived leaves
+  `Untrusted`-wrapped (ADR-005), compute ops run only via the explicitly-wired worker-capable
+  executor, and a **write op stops at the endpoint with 202 needs-approval, never executed live**
+  (ADR-012 write-consent). Wired into `.github/workflows/e2e-groundtruth.yml`. Test-only; no runtime
+  change; no catalog change. Confirmed green against the cJSON fixture (13.5s).
 - **ADR-078 Tier-1 atlas — cross-reference drill-down (TB10).** The `atlas` flag now also composes a
   bounded **cross-reference table** (references *into* the most-referenced functions) by reusing the
   read-only `xrefs_to` tool: the handler pulls `xrefs_to` only for the top `_MAX_ATLAS_XREF_TARGETS`
