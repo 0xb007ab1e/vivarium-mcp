@@ -57,6 +57,11 @@ _MAX_EMULATE_MEM_READ = 65_536  # cap on a single read_memory region length
 # --- demangler bound (ADR-050; a hostile mangled name is untrusted input — CWE-400/CWE-20) ---
 _MAX_MANGLED_LEN = 8_192  # cap on a mangled symbol string (heavy templates are long; bound DoS)
 
+# --- generated-report bounds (ADR-078 Tier-0; bound the output-edge composition — CWE-400/LLM04) -
+_MAX_REPORT_SCOPE = 256  # max scope selectors (function/address/symbol) accepted per report
+_MAX_REPORT_FINDINGS = 2_000  # hard cap on finding records composed into one report
+_MAX_REPORT_TITLE = 200  # cap on a client-supplied report title (projected before render)
+
 
 class _In(BaseModel):
     """Base for tool *input* models: immutable, reject unknown fields."""
@@ -4210,6 +4215,118 @@ class SessionExportAnnotationsOut(_Out):
     """
 
     document: ExportedAnnotationDocument
+
+
+# --- generated target documentation (ADR-078 Tier-0, TB10) --------------------------------------
+# Output-edge report composition. Every binary-derived leaf below is (C)-allow-list-PROJECTED
+# (vivarium.report.projection) to an inert form before it reaches these models — so the structured
+# finding fields are plain ``str`` holding inert, projected content (not ``Untrusted``). The one
+# renderable blob (``html``) is still ``Untrusted``-wrapped (ADR-005): it is a client-owned artifact
+# the client saves/opens, never instructions. Provenance lives in :class:`ReportManifest`.
+
+#: The source annotation kinds a finding can be composed from (mirrors the ExportedEntry union
+#: discriminators) plus ``"structural"`` for a purely-observed context finding — all server-safe.
+FindingKind = Literal[
+    "rename_function",
+    "rename_symbol",
+    "rename_local_variable",
+    "rename_parameter",
+    "set_comment",
+    "set_function_signature",
+    "apply_data_type",
+    "define_struct",
+    "define_union",
+    "define_types",
+    "structural",
+]
+
+
+class FindingRecord(_Out):
+    """One ADR-shaped finding record (observation -> inference -> evidence) — ADR-078 Tier-0.
+
+    Composed from the session's exported annotations: an in-session USER_DEFINED annotation is the
+    analyst's (or agent's) reasoning captured as an *inference*, with the annotation's structural
+    facts as the *observations* and the provenance manifest as the *evidence*. Every string leaf is
+    already (C)-allow-list-projected (inert in any consumer); the provenance is the manifest.
+
+    Attributes:
+        subject: The projected identifier/address the finding is about (e.g. a function address).
+        kind: The source annotation kind (:data:`FindingKind`) — server-safe closed vocab.
+        confidence: ``"inferred"`` for an analyst-authored annotation (human/agent interpretation);
+            ``"observed"`` for a purely structural fact read from a tool.
+        observation: Projected observed facts (what the tools/export report about the subject).
+        inference: The projected analyst-authored value (new name / comment text / composite name) —
+            the reasoning capture; ``None`` for a purely-observed finding.
+    """
+
+    subject: str
+    kind: FindingKind
+    confidence: Literal["observed", "inferred"]
+    observation: list[str] = Field(default_factory=list)
+    inference: str | None = None
+
+
+class ReportManifest(_Out):
+    """Provenance manifest stamped onto a generated report — ADR-078 Tier-0 (evidence of record).
+
+    Attributes:
+        program_sha256: The session program's server-computed hash (authoritative, safe).
+        session_id: The owning session (opaque).
+        tool: The generating tool name — always ``"session_generate_report"``.
+        tool_revision: The report-format revision (bumped when the composition/render changes).
+        generated_from: The read-only sources composed (e.g. ``["session_export_annotations"]``).
+        finding_count: Number of finding records in the report.
+        truncated: Whether composition hit a cap (findings/scope) — honest partial view.
+    """
+
+    program_sha256: str
+    session_id: str
+    tool: str = "session_generate_report"
+    tool_revision: str
+    generated_from: list[str] = Field(default_factory=list)
+    finding_count: int = Field(ge=0)
+    truncated: bool = False
+
+
+class SessionGenerateReportIn(_SessionScopedIn):
+    """Arguments for ``session_generate_report`` — ADR-078 Tier-0 (read-only, output-edge).
+
+    Bounded, on-demand, owner-scoped. Composes the session's exported annotations (optionally
+    filtered to a scope) into finding records plus a self-contained, CSP-wrapped HTML report held
+    in-memory for the session (discarded on evict). It is NOT a write primitive and never runs in
+    the worker (ADR-001).
+
+    Attributes:
+        scope: Optional selectors (function/symbol names or addresses) to filter findings to; empty
+            means the whole in-session annotation set (still hard-capped). Each is projected before
+            use; a selector is matched against entry targets by normalized identity.
+        title: Optional client-supplied report title (projected before render).
+        include_html: Whether to render + retain the HTML artifact (default true); when false, only
+            structured findings + manifest are returned (lighter).
+    """
+
+    scope: list[str] = Field(default_factory=list, max_length=_MAX_REPORT_SCOPE)
+    title: str | None = Field(default=None, max_length=_MAX_REPORT_TITLE)
+    include_html: bool = True
+
+
+class SessionGenerateReportOut(_Out):
+    """Result of ``session_generate_report`` (ADR-078 Tier-0).
+
+    Attributes:
+        report_id: Opaque id of the report retained in the in-memory per-session store (fetchable
+            within the session until evict).
+        manifest: The provenance manifest (evidence of record).
+        findings: The composed, (C)-projected finding records (inert structured data).
+        html: The self-contained, CSP-wrapped HTML report, ``Untrusted``-wrapped (ADR-005) — a
+            client-owned artifact to save/open in a sandbox, never instructions; ``None`` when
+            ``include_html`` was false.
+    """
+
+    report_id: str
+    manifest: ReportManifest
+    findings: list[FindingRecord] = Field(default_factory=list)
+    html: Untrusted[str] | None = None
 
 
 class SessionImportAnnotationsIn(_SessionScopedIn):
