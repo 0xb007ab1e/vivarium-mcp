@@ -99,7 +99,14 @@ def test_dashboard_interactive_live_mcptoolcaller() -> None:
         assert r.status_code == 200, r.text
         fns = r.json()["result"]["functions"]
         assert fns, "expected functions from a real analyzed binary"
-        assert _unwrap(fns[0]["name"]) is not None
+        # Assert the ENVELOPE shape, not just presence (`_unwrap` passes bare values through):
+        # FunctionListOut.name is Untrusted[str], so it must arrive wrapped (ADR-005) — a regression
+        # that stopped wrapping would be caught here, which `_unwrap(...) is not None` alone misses.
+        raw_name = fns[0]["name"]
+        assert isinstance(raw_name, dict) and "value" in raw_name, (
+            f"expected an Untrusted envelope for a binary-derived name, got {raw_name!r}"
+        )
+        assert _unwrap(raw_name) is not None
 
         # A WRITE op stops at the endpoint — 202 needs-approval, NEVER executed against the live
         # program (ADR-012 write-consent; the worker-capable executor is not even consulted).
