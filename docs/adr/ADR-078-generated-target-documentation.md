@@ -67,18 +67,28 @@ A generated document is only as safe as its *least-trusted consumer*. No single 
 - **(C) Allow-list projection (content level — survives consumers we don't own).** Every
   binary-derived value is projected before it enters the document: symbol/identifier names to a
   `[A-Za-z0-9_$.]` class (else `\xNN`), strings to a hex dump + printable-ASCII preview, addresses to
-  canonical hex. The document therefore never carries a raw hostile byte sequence that can be markup
-  **in any consumer** — browser, GitHub/mkdocs Markdown, VS Code preview, or an LLM. This is the only
+  canonical hex. **The string preview is format-escaped at the projection chokepoint** — the
+  markup/Markdown-active bytes that printable ASCII would otherwise pass verbatim
+  (`< > & " ' [ ] ( ) : ! * _` and backtick) are HTML-entity-encoded (and, for any future
+  inline-code Markdown export, escaped/stripped) or rendered `\xNN`, exactly as names are. Without this
+  a verbatim preview of `](javascript:evil)` would stay active markup in raw Markdown and read as an
+  instruction to an LLM — so the escape is what makes (C) true for strings, not only names. The
+  document therefore never carries a raw hostile byte sequence that can be markup **in any consumer** —
+  browser, GitHub/mkdocs Markdown, VS Code preview, or an LLM. This is the only
   control that holds in a renderer we do not control.
 - **(B) Data/template separation (parse-don't-validate at the edge).** Generation emits a
   **structured data file** (findings/graph JSON) whose binary-derived fields are plain strings; a
   **separate trusted renderer** consumes it via an auto-escaping template / DOM `textContent` only —
   never string-built markup, never `innerHTML`. (The existing `.archify` model.)
 - **(A) Inert-by-container (artifact level — defense-in-depth for the path we control).** Any HTML we
-  emit is **self-contained** with an embedded **strict CSP**
-  (`script-src 'none'; connect-src 'none'; img-src 'self' data:; frame-ancestors 'none'`) and renders
-  dynamic content inside an `<iframe sandbox>` (no `allow-scripts`/`allow-same-origin`), so a
-  surviving injection can neither execute nor beacon.
+  emit is **self-contained** with an embedded **strict CSP** that **starts `default-src 'none'`** so
+  every fetch directive fails closed, then opens only what the document needs
+  (`default-src 'none'; script-src 'none'; connect-src 'none'; img-src 'self' data:; style-src
+  'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`) and renders dynamic
+  content inside an `<iframe sandbox>` (no `allow-scripts`/`allow-same-origin`), so a surviving
+  injection can neither execute nor beacon. `default-src 'none'` is load-bearing: `connect-src`
+  governs only fetch/XHR/beacon, so without it an `object`/`font`/CSS `url()` load would be an
+  uncovered exfiltration channel (OWASP CSP cheat sheet — start `default-src 'none'`, then open up).
 
 **No standalone raw-Markdown artifact is shipped.** Markdown is the one format that cannot be wrapped
 by (A): a raw `.md` opened in GitHub/mkdocs renders active `[x](javascript:…)` links and auto-loading
