@@ -20,7 +20,7 @@ import time
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from vivarium.tools.schemas import FindingRecord, ReportManifest
+from vivarium.tools.schemas import AtlasData, FindingRecord, ReportManifest
 
 __all__ = ["ReportStore", "StoredReport"]
 
@@ -35,6 +35,7 @@ class StoredReport(BaseModel):
         report_id: Opaque CSPRNG handle.
         manifest: The provenance manifest.
         findings: The composed, (C)-projected finding records.
+        atlas: The whole-program atlas (ADR-078 Tier-1), or ``None`` (Tier-0 report).
         html: The self-contained CSP-wrapped HTML artifact, or ``None`` if not rendered.
         created_monotonic: Creation time (monotonic) — for ordering/eviction.
     """
@@ -44,6 +45,7 @@ class StoredReport(BaseModel):
     report_id: str
     manifest: ReportManifest
     findings: list[FindingRecord] = Field(default_factory=list)
+    atlas: AtlasData | None = None
     html: str | None = None
     created_monotonic: float
 
@@ -80,6 +82,7 @@ class ReportStore:
         manifest: ReportManifest,
         findings: list[FindingRecord],
         html: str | None,
+        atlas: AtlasData | None = None,
     ) -> StoredReport:
         """Store a freshly composed report for an (already-authorized) session; return it.
 
@@ -88,6 +91,7 @@ class ReportStore:
             manifest: The report's provenance manifest.
             findings: The composed finding records.
             html: The rendered HTML artifact, or ``None``.
+            atlas: The whole-program atlas (ADR-078 Tier-1), or ``None``.
 
         Returns:
             The :class:`StoredReport` (its ``report_id`` is the opaque handle).
@@ -97,6 +101,7 @@ class ReportStore:
             report_id=secrets.token_urlsafe(_REPORT_ID_BYTES),
             manifest=manifest,
             findings=findings,
+            atlas=atlas,
             html=html,
             created_monotonic=now,
         )

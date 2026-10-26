@@ -61,6 +61,52 @@ class FakePort:
         )
         return s.SessionExportAnnotationsOut(document=doc)
 
+    # --- Tier-1 atlas sources (reused read-only tools) ---
+    def program_summary(self, sid: str, a: s.ProgramSummaryIn) -> s.ProgramSummary:
+        return s.ProgramSummary(
+            metadata=s.ProgramMetadata(
+                sha256="e" * 64,
+                size_bytes=1024,
+                format="ELF",
+                architecture="x86:LE:64:default",
+                endianness="little",
+                compiler=None,
+                entry_point="0x401000",
+                function_count=1,
+                analysis_complete=True,
+            ),
+            function_count=1,
+            import_count=0,
+            export_count=0,
+            string_count=0,
+        )
+
+    def call_graph(self, sid: str, a: s.CallGraphIn) -> s.CallGraphOut:
+        return s.CallGraphOut(
+            nodes=[
+                s.CallGraphNode(
+                    address="0x401000",
+                    name=wrap("<img src=x onerror=alert(1)>", origin=DataOrigin.BINARY),
+                    is_external=False,
+                    has_unresolved_calls=False,
+                )
+            ],
+            edges=[s.CallEdge(from_address="0x401000", to_address="0x401100")],
+            unresolved_callers=[],
+            truncated=False,
+        )
+
+    def list_functions(self, sid: str, a: s.ListFunctionsIn) -> s.FunctionListOut:
+        return s.FunctionListOut(
+            functions=[
+                s.FunctionSummary(
+                    address="0x401000", name=wrap("decrypt", origin=DataOrigin.BINARY), size=16
+                )
+            ],
+            total=1,
+            truncated=False,
+        )
+
 
 def _config() -> Config:
     return Config(
@@ -114,6 +160,29 @@ def test_happy_path_returns_findings_html_and_retains() -> None:
     assert out.html.encoding == "html"
     assert "<script" not in out.html.value.lower()
     assert store.count("s1") == 1
+
+
+def test_atlas_mode_composes_whole_program_atlas() -> None:
+    store = ReportStore()
+    ctx = _ctx(_entries(), store=store)
+    out = reg._handle_session_generate_report(
+        ctx, s.SessionGenerateReportIn(session_id="s1", atlas=True)
+    )
+    assert out.atlas is not None
+    assert out.atlas.summary.program_sha256 == "e" * 64
+    assert set(out.manifest.generated_from) >= {"program_summary", "call_graph", "list_functions"}
+    # the hostile call-graph node name is projected inert in the atlas + the rendered HTML
+    assert "<img" not in out.atlas.nodes[0].name.value
+    assert out.html is not None
+    assert "<img" not in out.html.value.lower()
+    assert store.get("s1", out.report_id) is not None
+
+
+def test_atlas_off_by_default() -> None:
+    ctx = _ctx(_entries(), store=ReportStore())
+    out = reg._handle_session_generate_report(ctx, s.SessionGenerateReportIn(session_id="s1"))
+    assert out.atlas is None
+    assert "program_summary" not in out.manifest.generated_from
 
 
 def test_include_html_false_omits_artifact() -> None:

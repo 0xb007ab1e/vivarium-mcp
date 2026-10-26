@@ -69,6 +69,55 @@ def test_dynamic_values_are_html_escaped() -> None:
     assert "x&lt;y" in html
 
 
+def _atlas() -> s.AtlasData:
+    return s.AtlasData(
+        summary=s.AtlasSummary(
+            program_sha256="b" * 64,
+            format="ELF",
+            architecture="x86:LE:64:default",
+            endianness="little",
+            size_bytes=1024,
+            entry_point="0x401000",
+            compiler=_u("gcc"),
+            function_count=2,
+            import_count=1,
+            export_count=0,
+            string_count=3,
+            leaf_count=1,
+        ),
+        nodes=[s.AtlasNode(address="0x401000", name=_u("decrypt"))],
+        edges=[s.AtlasEdge(from_address="0x401000", to_address="0x401100")],
+        functions=[s.AtlasFunction(address="0x401000", name=_u("decrypt"), size=16)],
+    )
+
+
+def test_atlas_sections_rendered_scriptless() -> None:
+    html = render_report_html(
+        title="t", manifest=_manifest(), findings=[_finding()], atlas=_atlas()
+    )
+    assert "<script" not in html.lower()
+    assert f'content="{REPORT_CSP}"' in html
+    for heading in (">Program<", ">Call graph<", ">Functions<"):
+        assert heading in html
+    assert "0x401000" in html and "0x401100" in html
+    assert "decrypt" in html
+    assert '<nav aria-label="Contents">' in html
+
+
+def test_atlas_hostile_node_name_is_escaped() -> None:
+    atlas = _atlas().model_copy(
+        update={"nodes": [s.AtlasNode(address="0x401000", name=_u("a<b>c"))]}
+    )
+    html = render_report_html(title="t", manifest=_manifest(), findings=[], atlas=atlas)
+    assert "a<b>c" not in html
+    assert "a&lt;b&gt;c" in html
+
+
+def test_no_atlas_section_without_atlas() -> None:
+    html = render_report_html(title="t", manifest=_manifest(), findings=[_finding()])
+    assert ">Call graph<" not in html
+
+
 def test_empty_findings_message() -> None:
     html = render_report_html(title="t", manifest=_manifest(0), findings=[])
     assert "No findings in scope." in html

@@ -2000,3 +2000,83 @@ def test_tb10_case4_secret_in_comment_is_redacted_not_verbatim() -> None:
     assert inf.startswith("redacted-secret ")
     # the marker itself carries no markup-active byte (inert in any consumer)
     assert not (set(inf) & (_TB10_MARKUP - {"\\"}))
+
+
+# --- TB10 Tier-1 atlas (ADR-078) — whole-program DoS bound (#8) + injection inertness ---
+from vivarium.report.atlas import compose_atlas  # noqa: E402 — grouped with the TB10 block
+
+
+def _atlas_node(addr: str, name: str) -> s.CallGraphNode:
+    return s.CallGraphNode(
+        address=addr,
+        name=wrap(name, origin=DataOrigin.BINARY),
+        is_external=False,
+        has_unresolved_calls=False,
+    )
+
+
+def _atlas_summary() -> s.ProgramSummary:
+    return s.ProgramSummary(
+        metadata=s.ProgramMetadata(
+            sha256="d" * 64,
+            size_bytes=16,
+            format="ELF",
+            architecture="x86:LE:64:default",
+            endianness="little",
+            compiler=None,
+            entry_point=None,
+            function_count=0,
+            analysis_complete=True,
+        ),
+        function_count=0,
+        import_count=0,
+        export_count=0,
+        string_count=0,
+    )
+
+
+@pytest.mark.critical
+def test_tb10_case8_atlas_is_hard_capped_no_unbounded_blowup() -> None:
+    """#8: a huge whole-program graph is bounded by the atlas caps (no OOM/combinatorial blowup);
+    the overflow is dropped and flagged truncated (honest partial)."""
+    nodes = [_atlas_node(f"0x{i:x}", f"fn_{i}") for i in range(5000)]
+    edges = [s.CallEdge(from_address="0x0", to_address=f"0x{i:x}") for i in range(5000)]
+    funcs = [
+        s.FunctionSummary(
+            address=f"0x{i:x}", name=wrap(f"fn_{i}", origin=DataOrigin.BINARY), size=1
+        )
+        for i in range(5000)
+    ]
+    atlas = compose_atlas(
+        _atlas_summary(),
+        s.CallGraphOut(nodes=nodes, edges=edges, unresolved_callers=[], truncated=False),
+        s.FunctionListOut(functions=funcs, total=5000, truncated=False),
+        max_nodes=100,
+        max_edges=100,
+        max_functions=100,
+    )
+    assert len(atlas.nodes) == 100
+    assert len(atlas.edges) == 100
+    assert len(atlas.functions) == 100
+    assert atlas.truncated is True
+
+
+@pytest.mark.critical
+def test_tb10_atlas_hostile_node_name_is_inert() -> None:
+    """A hostile function name in a call-graph node is (C)-projected inert in the composed atlas."""
+    graph = s.CallGraphOut(
+        nodes=[_atlas_node("0x401000", "<script>alert(1)</script>")],
+        edges=[],
+        unresolved_callers=[],
+        truncated=False,
+    )
+    atlas = compose_atlas(
+        _atlas_summary(),
+        graph,
+        s.FunctionListOut(functions=[], total=0, truncated=False),
+        max_nodes=100,
+        max_edges=100,
+        max_functions=100,
+    )
+    name = atlas.nodes[0].name.value
+    assert not (set(name) & (_TB10_MARKUP - {"\\"}))

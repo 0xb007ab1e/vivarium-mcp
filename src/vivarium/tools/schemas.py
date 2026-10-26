@@ -62,6 +62,13 @@ _MAX_REPORT_SCOPE = 256  # max scope selectors (function/address/symbol) accepte
 _MAX_REPORT_FINDINGS = 2_000  # hard cap on finding records composed into one report
 _MAX_REPORT_TITLE = 200  # cap on a client-supplied report title (projected before render)
 
+# --- Tier-1 whole-program atlas bounds (ADR-078 Tier-1; static navigable atlas — CWE-400/LLM04) ---
+# Modest caps passed to the reused read-only tools so a whole-program atlas stays bounded (not the
+# tools' own 10k/40k defaults). Honesty via ``truncated`` when a cap clips (ADR-005).
+_MAX_ATLAS_NODES = 2_000  # call-graph nodes rendered in the atlas
+_MAX_ATLAS_EDGES = 8_000  # call-graph edges rendered in the atlas
+_MAX_ATLAS_FUNCTIONS = 2_000  # function-inventory rows rendered in the atlas
+
 
 class _In(BaseModel):
     """Base for tool *input* models: immutable, reject unknown fields."""
@@ -4307,21 +4314,109 @@ class SessionGenerateReportIn(_SessionScopedIn):
         title: Optional client-supplied report title (projected before render).
         include_html: Whether to render + retain the HTML artifact (default true); when false, only
             structured findings + manifest are returned (lighter).
+        atlas: Whether to compose a **whole-program atlas** (ADR-078 Tier-1) — a bounded,
+            static-navigable structure view (program summary + call-graph adjacency + function
+            index) in addition to the findings, by reusing the existing read-only tools
+            (``program_summary``/``call_graph``/``list_functions``; no new worker capability —
+            ADR-001). Default ``False`` (Tier-0 behavior). Still read-only + owner-scoped + capped.
     """
 
     scope: list[str] = Field(default_factory=list, max_length=_MAX_REPORT_SCOPE)
     title: str | None = Field(default=None, max_length=_MAX_REPORT_TITLE)
     include_html: bool = True
+    atlas: bool = False
+
+
+# --- Tier-1 whole-program atlas models (ADR-078 Tier-1, TB10) ------------------------------------
+# Composed from the reused read-only tools; every binary-derived ``name``/``compiler`` leaf is
+# (C)-projected AND ``Untrusted``-wrapped (same discipline as FindingRecord). Addresses / counts /
+# closed-vocab strings are server-safe scalars (left bare).
+
+
+class AtlasSummary(_Out):
+    """The atlas cover page — program metadata + whole-program counts (ADR-078 Tier-1).
+
+    Attributes:
+        program_sha256: Server-computed program hash (authoritative, safe).
+        format: Container format (closed-vocab, safe). architecture/endianness likewise.
+        architecture: Processor/arch id (safe).
+        endianness: Endianness (safe).
+        size_bytes: Program size (server scalar, safe).
+        entry_point: Entry-point address (hex, safe), or ``None``.
+        compiler: Format-reported compiler — binary-derived → projected + ``Untrusted``; ``None``.
+        function_count/import_count/export_count/string_count: Whole-program counts (safe).
+        leaf_count/root_count/recursive_component_count/unresolved_caller_count: Call-graph
+            structure metrics (safe scalars), ``None`` if metrics were unavailable.
+    """
+
+    program_sha256: str
+    format: str
+    architecture: str
+    endianness: str
+    size_bytes: int
+    entry_point: str | None = None
+    compiler: Untrusted[str] | None = None
+    function_count: int = Field(ge=0)
+    import_count: int = Field(ge=0)
+    export_count: int = Field(ge=0)
+    string_count: int = Field(ge=0)
+    leaf_count: int | None = None
+    root_count: int | None = None
+    recursive_component_count: int | None = None
+    unresolved_caller_count: int | None = None
+
+
+class AtlasNode(_Out):
+    """A call-graph node (function) in the atlas — ``name`` projected + ``Untrusted``."""
+
+    address: str
+    name: Untrusted[str]
+    is_external: bool = False
+    has_unresolved_calls: bool = False
+
+
+class AtlasEdge(_Out):
+    """A resolved caller→callee call edge — both endpoints are server-safe hex addresses."""
+
+    from_address: str
+    to_address: str
+
+
+class AtlasFunction(_Out):
+    """A function-inventory row — ``name`` projected + ``Untrusted``; address/size safe."""
+
+    address: str
+    name: Untrusted[str]
+    size: int = Field(ge=0)
+
+
+class AtlasData(_Out):
+    """The composed whole-program atlas (ADR-078 Tier-1) — all leaves projected + ``Untrusted``.
+
+    Attributes:
+        summary: The cover-page metadata + counts.
+        nodes: Call-graph nodes (bounded by ``_MAX_ATLAS_NODES``).
+        edges: Resolved call edges (bounded by ``_MAX_ATLAS_EDGES``).
+        functions: The function inventory (bounded by ``_MAX_ATLAS_FUNCTIONS``).
+        truncated: Whether any source (graph or inventory) was capped — honest partial view.
+    """
+
+    summary: AtlasSummary
+    nodes: list[AtlasNode] = Field(default_factory=list)
+    edges: list[AtlasEdge] = Field(default_factory=list)
+    functions: list[AtlasFunction] = Field(default_factory=list)
+    truncated: bool = False
 
 
 class SessionGenerateReportOut(_Out):
-    """Result of ``session_generate_report`` (ADR-078 Tier-0).
+    """Result of ``session_generate_report`` (ADR-078 Tier-0/Tier-1).
 
     Attributes:
         report_id: Opaque id of the report retained in the in-memory per-session store (fetchable
             within the session until evict).
         manifest: The provenance manifest (evidence of record).
         findings: The composed, (C)-projected finding records (inert structured data).
+        atlas: The whole-program atlas (ADR-078 Tier-1), or ``None`` when ``atlas`` was false.
         html: The self-contained, CSP-wrapped HTML report, ``Untrusted``-wrapped (ADR-005) — a
             client-owned artifact to save/open in a sandbox, never instructions; ``None`` when
             ``include_html`` was false.
@@ -4330,6 +4425,7 @@ class SessionGenerateReportOut(_Out):
     report_id: str
     manifest: ReportManifest
     findings: list[FindingRecord] = Field(default_factory=list)
+    atlas: AtlasData | None = None
     html: Untrusted[str] | None = None
 
 

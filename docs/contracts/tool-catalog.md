@@ -43,8 +43,10 @@
   `capability_scan`; read-only, ATT&CK-mapped)** — plus **1 offline family-match tool (ADR-073 D2:
   `family_match`; read-only)** — plus **1 generated target-documentation tool (ADR-078 Tier-0:
   `session_generate_report`; read-only, output-edge — composes the export doc into finding records +
-  a CSP-wrapped HTML report, held in-memory per-session, discarded on evict)**. That is **63 read-only
-  + 16 mutation/write**
+  a CSP-wrapped HTML report, held in-memory per-session, discarded on evict; a default-OFF `atlas`
+  flag (ADR-078 Tier-1) adds a bounded static whole-program atlas by reusing `program_summary`/
+  `call_graph`/`list_functions` — additive, no new tool)**. That is **63 read-only + 16
+  mutation/write**
   (the 16 = the 6
   ADR-012 write tools + the 9 structural-write tools + the gated `session_import_annotations`; it
   matches the `WRITE_TOOLS` frozenset in `registry.py`).
