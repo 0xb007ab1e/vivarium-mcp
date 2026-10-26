@@ -1526,8 +1526,10 @@ execution path (503), so TB9 adds no live attack surface.
   **No standalone
   raw-Markdown artifact is shipped** — it cannot be (A)-wrapped and its consumers render active
   links / beacon images; "deterministic" ≠ "inert."
-- **Tiers = scope + autonomy.** Tier 0 (ship first): bounded on-demand (A+B+C) report + finding
-  records, written to the **ephemeral session store** (wipe-on-evict). Tier 1 (gated): whole-program
+- **Tiers = scope + autonomy.** Tier 0 (**implemented 2026-10-26** — `session_generate_report`):
+  bounded on-demand (A+B+C) report + finding records, retained in the **ephemeral session store**
+  (wipe-on-evict) — realized **in-memory, per-session, discarded on evict** (mirrors ADR-040; prod has
+  no on-disk server store, `store_root=None`), not an on-disk file. Tier 1 (gated): whole-program
   atlas. Tier 2 (gated, default-OFF): LLM narrative (not originally requested).
 - **One input only: the envelope.** Generation consumes `Untrusted[...]` tool outputs + the existing
   export; it adds no analysis path and runs at the **output edge** (server- or client-side), never
@@ -1542,7 +1544,7 @@ execution path (503), so TB9 adds no live attack surface.
 | **S** | Document misattributes provenance, or presents **inferred** findings as **observed** (false authority) | Provenance manifest stamped from envelope metadata (program SHA-256, session id, tool + revision, caps); every finding tagged **observed vs inferred**; integrity hash on the output |
 | **T** | **Hostile artifact content injected into the rendered document** — HTML/JS in a symbol name (**CWE-79**), Markdown link/image injection, `<script>`/SVG, diagram-label injection, `javascript:`/`data:` URLs | **A+B+C defense-in-depth (tier-invariant):** (C) allow-list projection makes binary-derived values non-markup **in any consumer** (incl. raw Markdown / LLM); (B) structured-data + auto-escaping renderer, **no `innerHTML`**, labels projected before entering diagram JSON; (A) self-contained strict CSP + `<iframe sandbox>` for the HTML path. No raw-Markdown artifact (unwrappable — F1) |
 | **R** | Who generated what, from which program, when — denied | Generation event audited (principal, session, program hash, scope caps, output location — `topic-logging-observability`); manifest embedded in the document |
-| **I** | Document is a **new persisted copy of confidential hostile artifacts** — leak via shared disk, a beaconing opened HTML page, verbatim `secret_scan`/IOC hits, over-inclusion ("dump everything"), cross-session mixing | Output = **confidential**, owner-scoped, never cross-session; **Tier 0 written to the ephemeral session store** (wipe-on-evict, ADR-002 — F2); **CSP starting `default-src 'none'` (so `object`/`font`/CSS loads fail closed, not just `connect-src`) + restricted `img-src` + sandbox** so an opened document cannot exfiltrate; **redaction** masks secret/IOC hits (no verbatim keys); **bounded on-demand scope** (not whole-program by default); persist-outside = explicit path + documented retention + **gated** (master §5, `workflow-data-lifecycle`) |
+| **I** | Document is a **new persisted copy of confidential hostile artifacts** — leak via shared disk, a beaconing opened HTML page, verbatim `secret_scan`/IOC hits, over-inclusion ("dump everything"), cross-session mixing | Output = **confidential**, owner-scoped, never cross-session; **Tier 0 retained in-memory per-session, discarded on evict** (realizes the ephemeral store / wipe-on-evict, ADR-002 — F2; no on-disk server store exists); **CSP starting `default-src 'none'` (so `object`/`font`/CSS loads fail closed, not just `connect-src`) + restricted `img-src` + sandbox** so an opened document cannot exfiltrate; **composed free-text is secret-redacted on detection** (a pasted key is replaced by a non-disclosing marker, never emitted verbatim — abuse #4); **bounded on-demand scope** (not whole-program by default); persist-outside = explicit path + documented retention + **gated** (master §5, `workflow-data-lifecycle`) |
 | **D** | "Every edge / all surfaces" on a large binary → combinatorial graph, OOM, giant file, LLM cost-storm (**CWE-400**, API4, LLM04) | **Bounded on-demand scope** (per-function/subtree composed — never whole-program materialization in Tier 0 — F3) dissolves the combinatorial case structurally; plus hard caps (functions, nodes, edges, strings, bytes, doc size), opt-in, killable, shard/paginate, no-LLM default; fail closed with partial + notice, never OOM |
 | **E** | LLM narrative steered by indirect prompt injection in artifact text (**LLM01**); model output rendered unsanitized (**LLM02**); the document, opened by a downstream agent, carries injected instructions | Narrative **default-off**; model output is **untrusted → same sanitizing chokepoint**; system instructions separated from artifact content; read-only tool, not a write path; nothing in the document is ever executed/followed |
 
@@ -1559,17 +1561,20 @@ where the envelope's "never render" rule is deliberately relaxed, so neutralizat
 1. Function named `<img src=x onerror=alert(1)>` → (C)-projected to inert literal; no script in any consumer.
 2. Identifier/string `](javascript:evil)` → projected **with markup bytes format-escaped at the chokepoint** (F3); no active link in a browser, GitHub/mkdocs, VS Code preview, or an LLM reader.
 3. SVG/`<script>` embedded in a string → projected/encoded; diagrams carry no live SVG.
-4. `secret_scan` / IOC hit → masked in the document, not verbatim.
+4. A secret pasted into a composed comment → secret-scanned and replaced by a non-disclosing marker (category + salted hash), never emitted verbatim; the marker carries no markup byte.
 5. Opened HTML document attempts a network beacon — via fetch/XHR **or** an `object`/`font`/CSS `url()` load → blocked by CSP starting `default-src 'none'` (not `connect-src` alone — F2) + sandbox.
 6. Prompt-injection text in a string, narrative ON (Tier 2) → does not steer output; rendered inert.
 7. Report request for a foreign session id → `SESSION_INVALID`, no oracle (ADR-017).
 8. Whole-program request on a 50k-function binary → bounded/on-demand scope or caps hit; partial + notice; no OOM / cost blowout.
 9. Artifact opened in a **renderer we do not control** (raw `.md` on GitHub, mkdocs, an LLM) → (C) projection ensures no field is active markup; confirms safety does not depend on (A).
 
-**Residual risk & status.** PROPOSED (ADR-078; amended 2026-10-26 after red-team scope review). Tier
-0 is a bounded on-demand (A+B+C) report written to the ephemeral session store, shipping with abuse
-cases #1–#5 / #9 as its **own** merge gates (F1); **Tier 1 (whole-program atlas) and Tier 2 (LLM
-narrative) remain gated actions** requiring human approval and the full abuse suite
-(`workflow-gated-actions`). Residual: (C) projection is lossy for human reading (mitigated by (B)'s
-trusted view); any persist-outside / share of a document exports confidential hostile artifacts
-(master §5) — operator-owned, gated, with documented retention.
+**Residual risk & status.** Tier 0 **IMPLEMENTED 2026-10-26** (`session_generate_report`,
+`src/vivarium/report/`; ADR-078 amended after red-team + reviewer review). A bounded on-demand
+(A+B+C) report + finding records, retained in-memory per-session and discarded on evict, landed with
+abuse cases #1–#5 / #9 as its merge gates (all green, `tests/security/test_abuse_cases.py`); #4 is
+realized as secret-redaction-on-detection of composed free-text. **Tier 1 (whole-program atlas) and
+Tier 2 (LLM narrative) remain unbuilt, gated actions** requiring human approval and the full abuse
+suite (`workflow-gated-actions`). Residual: (C) projection is lossy for human reading (mitigated by
+(B)'s trusted view); the secret-redactor's false positives can mask a benign comment in the report
+(the in-session annotation is untouched); any persist-outside / share of a document exports
+confidential hostile artifacts (master §5) — operator-owned, gated, with documented retention.
