@@ -43,6 +43,19 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **ADR-078 Tier-1 whole-program atlas — `session_generate_report` `atlas` flag (TB10).** A
+  **default-OFF** `atlas` flag extends the Tier-0 report with a bounded, **static, scriptless**
+  whole-program atlas: a program cover page + a call-graph **adjacency table** (nodes/edges) + a
+  function index + the Tier-0 findings, with an in-document table-of-contents (anchors only).
+  Composed by **reusing the existing read-only tools** (`program_summary` + `call_graph(root=None)` +
+  `list_functions`) exactly as Tier 0 reused the export tool — **no new worker capability / no new
+  analysis path** (ADR-001). Every binary-derived `name`/`compiler` leaf is (C)-projected +
+  `Untrusted`-wrapped; addresses/counts are server-safe. Same **A+B+C** safety (CSP `script-src
+  'none'` — no JS, so static-navigable not interactive); modest hard caps (`_MAX_ATLAS_NODES/EDGES/
+  FUNCTIONS` = 2k/8k/2k) with `truncated` honesty. New `src/vivarium/report/atlas.py`; TB10 abuse
+  cases **#8 (DoS-bound)** + call-graph-node-name injection added. Interactive atlas, rasterized
+  diagrams, xref edges, and Tier 2 (LLM narrative) remain unbuilt + gated. No catalog change
+  (additive flag on the existing tool).
 - **Generated target documentation — ADR-078 Tier-0 `session_generate_report` (TB10).** A new
   read-only, output-edge tool (catalog 78 → 79) composes the session's exported annotations into
   ADR-shaped **finding records** (observation → inference → evidence, observed/inferred-tagged) plus a

@@ -1529,8 +1529,12 @@ execution path (503), so TB9 adds no live attack surface.
 - **Tiers = scope + autonomy.** Tier 0 (**implemented 2026-10-26** — `session_generate_report`):
   bounded on-demand (A+B+C) report + finding records, retained in the **ephemeral session store**
   (wipe-on-evict) — realized **in-memory, per-session, discarded on evict** (mirrors ADR-040; prod has
-  no on-disk server store, `store_root=None`), not an on-disk file. Tier 1 (gated): whole-program
-  atlas. Tier 2 (gated, default-OFF): LLM narrative (not originally requested).
+  no on-disk server store, `store_root=None`), not an on-disk file. **Tier 1 first slice IMPLEMENTED
+  2026-10-26** — a default-OFF `atlas` flag composes a bounded, static, scriptless whole-program atlas
+  (program summary + call-graph adjacency table + function index) by reusing the read-only tools
+  (`program_summary`/`call_graph`/`list_functions`; no new worker capability), hard-capped with
+  `truncated` honesty; interactive atlas / rasterized diagrams remain gated. Tier 2 (gated,
+  default-OFF): LLM narrative (not originally requested).
 - **One input only: the envelope.** Generation consumes `Untrusted[...]` tool outputs + the existing
   export; it adds no analysis path and runs at the **output edge** (server- or client-side), never
   in the worker (ADR-001 preserved).
@@ -1565,16 +1569,19 @@ where the envelope's "never render" rule is deliberately relaxed, so neutralizat
 5. Opened HTML document attempts a network beacon — via fetch/XHR **or** an `object`/`font`/CSS `url()` load → blocked by CSP starting `default-src 'none'` (not `connect-src` alone — F2) + sandbox.
 6. Prompt-injection text in a string, narrative ON (Tier 2) → does not steer output; rendered inert.
 7. Report request for a foreign session id → `SESSION_INVALID`, no oracle (ADR-017).
-8. Whole-program request on a 50k-function binary → bounded/on-demand scope or caps hit; partial + notice; no OOM / cost blowout.
+8. Whole-program atlas on a 50k-function binary → bounded by the atlas caps (`_MAX_ATLAS_NODES/EDGES/FUNCTIONS`); overflow dropped + `truncated` flagged; no OOM / cost blowout (now a real Tier-1 test).
 9. Artifact opened in a **renderer we do not control** (raw `.md` on GitHub, mkdocs, an LLM) → (C) projection ensures no field is active markup; confirms safety does not depend on (A).
 
 **Residual risk & status.** Tier 0 **IMPLEMENTED 2026-10-26** (`session_generate_report`,
 `src/vivarium/report/`; ADR-078 amended after red-team + reviewer review). A bounded on-demand
 (A+B+C) report + finding records, retained in-memory per-session and discarded on evict, landed with
 abuse cases #1–#5 / #9 as its merge gates (all green, `tests/security/test_abuse_cases.py`); #4 is
-realized as secret-redaction-on-detection of composed free-text. **Tier 1 (whole-program atlas) and
-Tier 2 (LLM narrative) remain unbuilt, gated actions** requiring human approval and the full abuse
-suite (`workflow-gated-actions`). Residual: (C) projection is lossy for human reading (mitigated by
+realized as secret-redaction-on-detection of composed free-text. **Tier 1 first slice IMPLEMENTED
+2026-10-26** — a default-OFF `atlas` flag on `session_generate_report` composes a bounded, static,
+scriptless whole-program atlas (program summary + call-graph adjacency + function index) by reusing
+the read-only tools (no new worker capability), with atlas abuse cases #8 (DoS-bound) + node-name
+injection added. **The full interactive atlas, rasterized diagrams, and Tier 2 (LLM narrative) remain
+unbuilt, gated actions** requiring human approval and the full abuse suite (`workflow-gated-actions`). Residual: (C) projection is lossy for human reading (mitigated by
 (B)'s trusted view); the secret-redactor's false positives can mask a benign comment in the report
 (the in-session annotation is untouched); any persist-outside / share of a document exports
 confidential hostile artifacts (master §5) — operator-owned, gated, with documented retention.
