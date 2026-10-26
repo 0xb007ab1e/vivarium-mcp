@@ -107,15 +107,16 @@ def test_inference_and_observation_projected() -> None:
         ]
     )
     (f,) = compose_findings(doc, max_findings=100)[0]
-    assert f.subject == "0x401000"
-    assert f.inference == "decrypt"
-    assert f.observation == ["function renamed in session"]
+    assert f.subject.value == "0x401000"
+    assert f.inference is not None
+    assert f.inference.value == "decrypt"
+    assert [o.value for o in f.observation] == ["function renamed in session"]
 
 
 def test_scope_filters_by_projected_subject() -> None:
     doc = _doc(_all_kinds())
     findings, _ = compose_findings(doc, scope=["0x401100"], max_findings=100)
-    assert {f.subject for f in findings} == {"0x401100"}
+    assert {f.subject.value for f in findings} == {"0x401100"}
 
 
 def test_empty_scope_keeps_all() -> None:

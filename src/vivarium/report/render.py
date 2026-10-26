@@ -69,11 +69,12 @@ def _manifest_html(manifest: ReportManifest) -> str:
 
 
 def _finding_row(f: FindingRecord) -> str:
-    obs = "<br>".join(_esc(o) for o in f.observation) or "—"
-    inf = _esc(f.inference) if f.inference is not None else "—"
+    # FindingRecord string leaves are Untrusted-wrapped (ADR-005); read .value, then escape (B).
+    obs = "<br>".join(_esc(o.value) for o in f.observation) or "—"
+    inf = _esc(f.inference.value) if f.inference is not None else "—"
     return (
         "<tr>"
-        f"<td><code>{_esc(f.subject)}</code></td>"
+        f"<td><code>{_esc(f.subject.value)}</code></td>"
         f"<td>{_esc(f.kind)}</td>"
         f'<td><span class="tag">{_esc(f.confidence)}</span></td>'
         f"<td>{obs}</td>"

@@ -1922,9 +1922,10 @@ def test_tb10_case2_markdown_link_injection_is_inert_in_any_consumer() -> None:
     findings, _ = compose_findings(_tb10_doc([entry]), max_findings=10)
     (f,) = findings
     assert f.inference is not None
+    inf = f.inference.value
     for ch in "]():":
-        assert ch not in f.inference
-    assert "javascript:" not in f.inference
+        assert ch not in inf
+    assert "javascript:" not in inf
 
 
 @pytest.mark.critical
@@ -1993,8 +1994,9 @@ def test_tb10_case4_secret_in_comment_is_redacted_not_verbatim() -> None:
     findings, _ = compose_findings(_tb10_doc([entry]), max_findings=10)
     (f,) = findings
     assert f.inference is not None
-    assert "PRIVATE KEY" not in f.inference
-    assert "MIIEvQ" not in f.inference
-    assert f.inference.startswith("redacted-secret ")
+    inf = f.inference.value
+    assert "PRIVATE KEY" not in inf
+    assert "MIIEvQ" not in inf
+    assert inf.startswith("redacted-secret ")
     # the marker itself carries no markup-active byte (inert in any consumer)
-    assert not (set(f.inference) & (_TB10_MARKUP - {"\\"}))
+    assert not (set(inf) & (_TB10_MARKUP - {"\\"}))

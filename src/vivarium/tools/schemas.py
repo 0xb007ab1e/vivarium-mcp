@@ -4219,10 +4219,11 @@ class SessionExportAnnotationsOut(_Out):
 
 # --- generated target documentation (ADR-078 Tier-0, TB10) --------------------------------------
 # Output-edge report composition. Every binary-derived leaf below is (C)-allow-list-PROJECTED
-# (vivarium.report.projection) to an inert form before it reaches these models — so the structured
-# finding fields are plain ``str`` holding inert, projected content (not ``Untrusted``). The one
-# renderable blob (``html``) is still ``Untrusted``-wrapped (ADR-005): it is a client-owned artifact
-# the client saves/opens, never instructions. Provenance lives in :class:`ReportManifest`.
+# (vivarium.report.projection) to an inert form AND then ``Untrusted``-wrapped (ADR-005): projection
+# makes it safe to render in any consumer, and the envelope keeps the frozen "all binary-derived
+# output is tagged" invariant uniform + auditable (defense in depth). Server-composed phrases that
+# embed a projected value are conservatively over-tagged too (as at the export chokepoint). The
+# renderable ``html`` blob is likewise ``Untrusted``-wrapped. Provenance: :class:`ReportManifest`.
 
 #: The source annotation kinds a finding can be composed from (mirrors the ExportedEntry union
 #: discriminators) plus ``"structural"`` for a purely-observed context finding — all server-safe.
@@ -4249,6 +4250,9 @@ class FindingRecord(_Out):
     facts as the *observations* and the provenance manifest as the *evidence*. Every string leaf is
     already (C)-allow-list-projected (inert in any consumer); the provenance is the manifest.
 
+    All string leaves are (C)-projected (inert in any consumer) AND ``Untrusted``-wrapped (ADR-005);
+    the client reads ``.value`` for display. ``kind``/``confidence`` are server-safe closed vocab.
+
     Attributes:
         subject: The projected identifier/address the finding is about (e.g. a function address).
         kind: The source annotation kind (:data:`FindingKind`) — server-safe closed vocab.
@@ -4259,11 +4263,11 @@ class FindingRecord(_Out):
             the reasoning capture; ``None`` for a purely-observed finding.
     """
 
-    subject: str
+    subject: Untrusted[str]
     kind: FindingKind
     confidence: Literal["observed", "inferred"]
-    observation: list[str] = Field(default_factory=list)
-    inference: str | None = None
+    observation: list[Untrusted[str]] = Field(default_factory=list)
+    inference: Untrusted[str] | None = None
 
 
 class ReportManifest(_Out):

@@ -132,7 +132,7 @@ def test_scope_filters_through_handler() -> None:
     out = reg._handle_session_generate_report(
         ctx, s.SessionGenerateReportIn(session_id="s1", scope=["0x401100"])
     )
-    assert [f.subject for f in out.findings] == ["0x401100"]
+    assert [f.subject.value for f in out.findings] == ["0x401100"]
 
 
 def test_foreign_session_is_session_invalid_no_oracle() -> None:

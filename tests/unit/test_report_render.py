@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from vivarium.core.envelope import DataOrigin, wrap
 from vivarium.report.render import REPORT_CSP, render_report_html
 from vivarium.tools import schemas as s
+
+
+def _u(value: str) -> object:
+    return wrap(value, origin=DataOrigin.GHIDRA)
 
 
 def _manifest(n: int = 1, truncated: bool = False) -> s.ReportManifest:
@@ -19,11 +24,11 @@ def _manifest(n: int = 1, truncated: bool = False) -> s.ReportManifest:
 
 def _finding(inference: str | None = "decrypt") -> s.FindingRecord:
     return s.FindingRecord(
-        subject="0x401000",
+        subject=_u("0x401000"),
         kind="rename_function",
         confidence="inferred",
-        observation=["function renamed in session"],
-        inference=inference,
+        observation=[_u("function renamed in session")],
+        inference=_u(inference) if inference is not None else None,
     )
 
 
@@ -51,11 +56,11 @@ def test_rendered_doc_embeds_csp_and_has_no_script() -> None:
 def test_dynamic_values_are_html_escaped() -> None:
     # Even though values are (C)-projected upstream, the renderer escapes defensively (B).
     f = s.FindingRecord(
-        subject="s",
+        subject=_u("s"),
         kind="set_comment",
         confidence="inferred",
-        observation=['a<b&"c'],
-        inference="x<y",
+        observation=[_u('a<b&"c')],
+        inference=_u("x<y"),
     )
     html = render_report_html(title="<b>T</b>", manifest=_manifest(), findings=[f])
     assert "<b>T</b>" not in html

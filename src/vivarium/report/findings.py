@@ -13,6 +13,7 @@ never in the worker (ADR-001), and is never a write primitive.
 
 from __future__ import annotations
 
+from vivarium.core.envelope import DataOrigin, Untrusted, wrap
 from vivarium.core.secretscan import scan_secrets
 from vivarium.report.projection import project_identifier, project_string
 from vivarium.tools.schemas import (
@@ -55,6 +56,16 @@ def _text(raw: str) -> str:
     return project_string(raw).preview
 
 
+def _w(value: str) -> Untrusted[str]:
+    """Tag an already-(C)-projected leaf ``Untrusted`` (ADR-005 uniform envelope; origin GHIDRA).
+
+    The value is inert by projection; the envelope keeps the "all binary-derived output is tagged"
+    invariant uniform and auditable (defense in depth). Server-composed phrases that embed a
+    projected value are conservatively over-tagged too (consistent with the export chokepoint).
+    """
+    return wrap(value, origin=DataOrigin.GHIDRA)
+
+
 def _match_scope(subject: str, scope: frozenset[str]) -> bool:
     """Keep a finding when no scope is given, or its subject matches a projected scope selector."""
     return not scope or subject in scope
@@ -84,7 +95,7 @@ def compose_findings(
 
     for entry in document.entries:
         record = _compose_entry(entry)
-        if record is None or not _match_scope(record.subject, scope_set):
+        if record is None or not _match_scope(record.subject.value, scope_set):
             continue
         if len(out) >= max_findings:
             truncated = True
@@ -98,89 +109,89 @@ def _compose_entry(entry: object) -> FindingRecord | None:  # noqa: C901 — fla
     """Map one exported entry to a projected :class:`FindingRecord` (``None`` if unrecognized)."""
     if isinstance(entry, ExportedRenameFunctionEntry):
         return FindingRecord(
-            subject=_ident(entry.function),
+            subject=_w(_ident(entry.function)),
             kind="rename_function",
             confidence="inferred",
-            observation=["function renamed in session"],
-            inference=_ident(entry.new_name.value),
+            observation=[_w("function renamed in session")],
+            inference=_w(_ident(entry.new_name.value)),
         )
     if isinstance(entry, ExportedRenameSymbolEntry):
         return FindingRecord(
-            subject=_ident(entry.identifier),
+            subject=_w(_ident(entry.identifier)),
             kind="rename_symbol",
             confidence="inferred",
-            observation=["symbol renamed in session"],
-            inference=_ident(entry.new_name.value),
+            observation=[_w("symbol renamed in session")],
+            inference=_w(_ident(entry.new_name.value)),
         )
     if isinstance(entry, ExportedRenameLocalVariableEntry):
         return FindingRecord(
-            subject=_ident(entry.function),
+            subject=_w(_ident(entry.function)),
             kind="rename_local_variable",
             confidence="inferred",
-            observation=[f"local variable {_ident(entry.variable.value)} renamed"],
-            inference=_ident(entry.new_name.value),
+            observation=[_w(f"local variable {_ident(entry.variable.value)} renamed")],
+            inference=_w(_ident(entry.new_name.value)),
         )
     if isinstance(entry, ExportedRenameParameterEntry):
         return FindingRecord(
-            subject=_ident(entry.function),
+            subject=_w(_ident(entry.function)),
             kind="rename_parameter",
             confidence="inferred",
-            observation=[f"parameter {_ident(entry.parameter.value)} renamed"],
-            inference=_ident(entry.new_name.value),
+            observation=[_w(f"parameter {_ident(entry.parameter.value)} renamed")],
+            inference=_w(_ident(entry.new_name.value)),
         )
     if isinstance(entry, ExportedSetCommentEntry):
         return FindingRecord(
-            subject=_ident(entry.address),
+            subject=_w(_ident(entry.address)),
             kind="set_comment",
             confidence="inferred",
-            observation=[f"comment slot {_ident(entry.comment_type)}"],
-            inference=_text(entry.text.value),
+            observation=[_w(f"comment slot {_ident(entry.comment_type)}")],
+            inference=_w(_text(entry.text.value)),
         )
     if isinstance(entry, ExportedSetFunctionSignatureEntry):
-        obs = [f"{len(entry.parameters)} parameter(s)"]
+        obs = [_w(f"{len(entry.parameters)} parameter(s)")]
         if entry.calling_convention:
-            obs.append(f"calling convention {_ident(entry.calling_convention)}")
+            obs.append(_w(f"calling convention {_ident(entry.calling_convention)}"))
         ret = entry.return_type.named
         return FindingRecord(
-            subject=_ident(entry.function),
+            subject=_w(_ident(entry.function)),
             kind="set_function_signature",
             confidence="inferred",
             observation=obs,
-            inference=_ident(ret.value) if ret is not None else None,
+            inference=_w(_ident(ret.value)) if ret is not None else None,
         )
     if isinstance(entry, ExportedApplyDataTypeEntry):
         named = entry.type.named
         return FindingRecord(
-            subject=_ident(entry.address),
+            subject=_w(_ident(entry.address)),
             kind="apply_data_type",
             confidence="inferred",
-            observation=["data type applied"],
-            inference=_ident(named.value) if named is not None else None,
+            observation=[_w("data type applied")],
+            inference=_w(_ident(named.value)) if named is not None else None,
         )
     if isinstance(entry, ExportedDefineStructEntry):
         return FindingRecord(
-            subject=_ident(entry.name.value),
+            subject=_w(_ident(entry.name.value)),
             kind="define_struct",
             confidence="inferred",
-            observation=[f"struct, {len(entry.fields)} field(s)", f"packed={entry.packed}"],
+            observation=[_w(f"struct, {len(entry.fields)} field(s)"), _w(f"packed={entry.packed}")],
             inference=None,
         )
     if isinstance(entry, ExportedDefineUnionEntry):
         return FindingRecord(
-            subject=_ident(entry.name.value),
+            subject=_w(_ident(entry.name.value)),
             kind="define_union",
             confidence="inferred",
-            observation=[f"union, {len(entry.fields)} field(s)"],
+            observation=[_w(f"union, {len(entry.fields)} field(s)")],
             inference=None,
         )
     if isinstance(entry, ExportedDefineTypesEntry):
         # A batch summarizes as one finding over its composites (each name projected).
         names = ", ".join(_ident(c.name.value) for c in entry.types[:16])
         return FindingRecord(
-            subject=f"define_types[{len(entry.types)}]",
+            subject=_w(f"define_types[{len(entry.types)}]"),
             kind="define_types",
             confidence="inferred",
-            observation=[f"composite batch, {len(entry.types)} type(s)"],
-            inference=names or None,
+            observation=[_w(f"composite batch, {len(entry.types)} type(s)")],
+            inference=_w(names) if names else None,
         )
     return None
