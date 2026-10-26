@@ -8,6 +8,12 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Security
 
+- **Threat-model §2 boundary registry — backfill TB9 + TB10 rows.** The §2 "Trust boundaries"
+  table stopped at TB8 while TB9 (dashboard interactive backend, §21) and TB10 (generated target
+  documentation, §22) lived only as prose sections; added both as table rows and a note clarifying
+  that the core data-flow diagram draws only the four fixed boundaries (TB1–TB4) while TB5–TB10 are
+  later-increment surfaces registered in the table with their own STRIDE sections. Registry now
+  matches the prose (reviewer follow-up F-5, PR #347). Docs-only.
 - **Threat model TB10 + ADR-078 (generated target documentation) — modeled before implementation.**
   A new output-edge trust boundary — **hostile-origin artifact → persisted/rendered document** — for
   the standing goal of auto-generating navigable documentation of an *analyzed target* (an
