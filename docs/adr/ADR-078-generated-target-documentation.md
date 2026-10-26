@@ -11,6 +11,12 @@
   mis-classified as inert (F1); Tier 0 retention is bound to the ephemeral session store (F2);
   scope alternatives (on-demand per-subtree, `.archify` reuse, raster, client-side-only) are
   weighed (F3/F5).
+  **Tier 0 implemented 2026-10-26** (`session_generate_report`, catalog 78→79;
+  `src/vivarium/report/`). Retention is **realized in-memory, per-session, discarded on evict**
+  (mirrors ADR-040 streaming jobs) — not an on-disk file: production runs `store_root=None` (the only
+  on-disk store is the worker's in-container tmpfs, off-limits to the output edge), so the ADR-002
+  "ephemeral session store / wipe-on-evict" guarantee is met in memory. Composed free-text (comments)
+  is additionally secret-redacted on detection (abuse #4). Tiers 1 and 2 remain unbuilt/gated.
 - **Date:** 2026-10-25
 - **Deciders:** Human operator (ratification + scoping pending). Any live/HTML/LLM tier, and any
   write of a report outside the ephemeral session store, is a **gated action**
@@ -104,10 +110,13 @@ CSP-wrapped, allow-list-projected HTML report**, not raw Markdown.
    explicit selection, **composed, never a whole-program materialization** — plus **finding records**
    (observation → inference → evidence) over the enveloped tool outputs and
    `session_export_annotations`. Findings tagged **observed vs inferred**; provenance manifest
-   (program SHA-256, session id, tool + revision). **Written to the ADR-002 ephemeral session store
-   by default** (inherits kill / verified-wipe-on-evict — F2); any persist outside the session store
-   is an explicit operator path with documented retention and is a **gated** action
-   (`workflow-data-lifecycle`, master §5).
+   (program SHA-256, session id, tool + revision). **Retained in the ADR-002 ephemeral session store
+   by default** (inherits kill / verified-wipe-on-evict — F2) — realized **in-memory, per-session,
+   discarded on evict** (mirrors ADR-040; prod has no on-disk server store, `store_root=None`), not an
+   on-disk file; any persist outside the session is an explicit operator path with documented
+   retention and is a **gated** action (`workflow-data-lifecycle`, master §5). Composed free-text
+   (comments) is secret-redacted on detection before projection, so a key an analyst pasted cannot
+   travel off-box verbatim (abuse #4; `secret_scan`/ADR-072, master §5).
 2. **Tier 1 — whole-program navigable atlas (gated).** "Every edge / all surfaces," interactive,
    larger caps, more diagram types — the capability the original request named. Same A+B+C controls;
    diagrams via (B) `textContent` labels or (D) rasterization, **never live SVG**. Gated on the TB10

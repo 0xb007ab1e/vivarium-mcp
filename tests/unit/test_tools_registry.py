@@ -475,7 +475,7 @@ def ctx() -> reg.ToolContext:
     )
 
 
-def test_catalog_is_exactly_67_unique_tools() -> None:
+def test_catalog_is_exactly_79_unique_tools() -> None:
     # 22 Tier-1 + 5 v1.1 semantic-naming (ADR-007) + 8 v1.1 Tier-2 metrics (ADR-008; READ-ONLY)
     # + 1 Function ID library-match (ADR-042 Phase 1: identify_functions; READ-ONLY)
     # + 6 v1.1 mutation/write (ADR-012) + 2 v1.1 structural mutation (ADR-013 Phase A) + 2 v1.1
@@ -498,11 +498,13 @@ def test_catalog_is_exactly_67_unique_tools() -> None:
     # 1 whole-program fingerprint (ADR-073 D1: program_fingerprint; read-only) + 1 crypto detection
     # by API/import/symbol (ADR-075: crypto_detect; read-only) + 1 capability detection + ATT&CK
     # tagging (ADR-074: capability_scan; read-only) + 1 offline family match by fingerprint
-    # (ADR-073 D2: family_match; read-only) —
+    # (ADR-073 D2: family_match; read-only) + 1 ADR-078 Tier-0 generated target documentation
+    # (session_generate_report; READ-ONLY, output-edge — composes export doc into finding records
+    # + a CSP-wrapped HTML report, held in-memory per-session, discarded on evict) —
     # the 15 mutation tools GATED by per-session write-consent (the structural 9 additionally by
     # allow_structural); import is GATED identically (+ allow_struct for structural entries).
-    assert len(reg.TIER1_TOOL_NAMES) == 78
-    assert len(set(reg.TIER1_TOOL_NAMES)) == 78
+    assert len(reg.TIER1_TOOL_NAMES) == 79
+    assert len(set(reg.TIER1_TOOL_NAMES)) == 79
 
 
 def test_handler_table_matches_frozen_allow_list() -> None:

@@ -43,6 +43,19 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Generated target documentation — ADR-078 Tier-0 `session_generate_report` (TB10).** A new
+  read-only, output-edge tool (catalog 78 → 79) composes the session's exported annotations into
+  ADR-shaped **finding records** (observation → inference → evidence, observed/inferred-tagged) plus a
+  self-contained, **CSP-wrapped HTML report**, retained **in-memory per-session and discarded on
+  evict** (ADR-002 ephemeral/wipe realized in memory — prod has no on-disk server store). Tier-
+  invariant **A+B+C** rendering safety: (C) allow-list projection of every binary-derived leaf (the
+  control that holds in a renderer we don't own — raw Markdown / an LLM), (B) structured data + an
+  auto-escaping renderer (no `innerHTML`), (A) strict CSP starting `default-src 'none'` + no scripts.
+  Composed free-text is **secret-redacted on detection** (a pasted key never leaves verbatim — master
+  §5 / ADR-072). Never runs in the worker (ADR-001), never a write primitive, owner-scoped (ADR-017),
+  bounded (CWE-400). New `src/vivarium/report/` package; TB10 abuse cases #1–#5/#9 land as merge gates
+  (`tests/security/test_abuse_cases.py`). Tiers 1 (whole-program atlas) and 2 (LLM narrative) remain
+  unbuilt + gated.
 - **JieLi pi32 processor support — disassemble JieLi AC6xxx firmware (fixes #338).** The worker
   image now bundles the third-party `kagaimiq/ghidra-jieli` SLEIGH module (Apache-2.0, pinned by
   commit SHA + SLEIGH-compiled at build, fail-closed), adding three JieLi custom-core LanguageIDs —

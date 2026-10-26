@@ -31,6 +31,7 @@ from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from vivarium.ghidra.port import GhidraPort
 from vivarium.jobs.streaming import StreamingJobManager
 from vivarium.logging import get_logger
+from vivarium.report.store import ReportStore
 from vivarium.server.auth import Authenticator, Principal, build_authenticator
 from vivarium.server.http_middleware import (
     SCOPE_PRINCIPAL_KEY,
@@ -291,7 +292,18 @@ def build_app(config: Config, *, session_manager: SessionManager, port: GhidraPo
     # — stream_jobs needs session_manager.authorize, and session_manager needs
     # stream_jobs.discard_session — so one hook is wired after both exist. `set_evict_callback` is
     # the documented, call-once composition seam for that (no private-attr poke).
-    session_manager.set_evict_callback(stream_jobs.discard_session)
+    # Generated-report retention (ADR-078 Tier-0 / TB10): an in-memory, per-session store for
+    # output-edge reports. Like the streaming jobs, its lifetime is bound to the session — a session
+    # evict discards its reports (no binary-derived document outlives the session — ADR-002). Since
+    # `set_evict_callback` is call-once, the single evict hook fans out to BOTH discard sinks.
+    report_store = ReportStore()
+
+    def _discard_session_artifacts(session_id: str) -> None:
+        """Evict hook: discard a session's streaming jobs AND generated reports (call-once seam)."""
+        stream_jobs.discard_session(session_id)
+        report_store.discard_session(session_id)
+
+    session_manager.set_evict_callback(_discard_session_artifacts)
     # HTTP is multi-principal: resolve the owner/caller per request from the authenticated scope
     # principal (ADR-017). stdio is single-principal (the implicit local operator) — no resolver.
     resolve_principal = _http_principal_resolver(app) if config.transport == "http" else None
@@ -300,6 +312,7 @@ def build_app(config: Config, *, session_manager: SessionManager, port: GhidraPo
         sessions=session_manager,
         port=port,
         resolve_principal=resolve_principal,
+        report_store=report_store,
     )
     register_tools(app, ctx, wrap=_with_error_boundary)
     _register_docs_resources(app)

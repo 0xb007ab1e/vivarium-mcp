@@ -71,7 +71,7 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 
 ### Output surfaces & interactive UI (new trust boundaries)
 - **ADR-076** — Dashboard interactive command backend (Phase 2; browser → server write/command — TB9) — **Proposed** (default-off, fail-closed, auth-required; live wiring gated).
-- **ADR-078** — Generated target documentation (analysis report + finding records; artifact → persisted document — TB10) — **Proposed** (tier-invariant A+B+C rendering safety; Tier 0 = bounded on-demand CSP-wrapped, allow-list-projected HTML report + finding records to the ephemeral session store; whole-program atlas + LLM-narrative tiers gated. No raw-Markdown artifact — amended 2026-10-26, red-team F1).
+- **ADR-078** — Generated target documentation (analysis report + finding records; artifact → persisted document — TB10) — **Tier 0 implemented** 2026-10-26 (`session_generate_report`); tier-invariant A+B+C rendering safety; Tier 0 = bounded on-demand CSP-wrapped, allow-list-projected HTML report + finding records held in-memory per-session (ephemeral/wipe-on-evict); whole-program atlas + LLM-narrative tiers remain **Proposed**/gated. No raw-Markdown artifact (amended 2026-10-26, red-team F1 + reviewer F2/F3).
 
 ### Read/analysis tools
 - **ADR-007** — Semantic-naming support tools (call graph, leaf-first ordering, function context).

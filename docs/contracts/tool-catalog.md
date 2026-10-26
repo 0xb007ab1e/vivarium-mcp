@@ -2,15 +2,15 @@
 
 > Pydantic source of truth: [`src/vivarium/tools/schemas.py`](../../src/vivarium/tools/schemas.py).
 > Allow-list registry: [`src/vivarium/tools/registry.py`](../../src/vivarium/tools/registry.py).
-> **Read-by-default.** 62 of the 78 tools are read-only; the **16 mutation/write tools** below are
+> **Read-by-default.** 63 of the 79 tools are read-only; the **16 mutation/write tools** below are
 > **default-deny**, gated by per-session write-consent (`session_enable_writes`) — structural writes
 > additionally by `allow_structural`. **`runScript`/arbitrary script execution is permanently out of
 > scope** (PLAN §2), and the tool surface is a **fixed allow-list** (no dynamic registration).
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **78** tools (asserted in tests by
-  `len(TIER1_TOOL_NAMES) == 78`). The breakdown:
+- **Allow-list only:** the catalog is fixed; there are exactly **79** tools (asserted in tests by
+  `len(TIER1_TOOL_NAMES) == 79`). The breakdown:
   22 Tier-1 read-only (v1) + **1 p-code emulation tool (ADR-049: `emulate`; read-effect-only)** +
   **1 p-code listing tool (ADR-052: `get_pcode`; read-only)** +
   **1 high (SSA) p-code tool (ADR-053: `get_high_pcode`; read-only)** +
@@ -41,7 +41,10 @@
   `deobfuscate_strings`; read-only)** — plus **1 crypto-detection tool (ADR-075: `crypto_detect`;
   read-only, complements `crypto_constant_scan`)** — plus **1 capability-detection tool (ADR-074:
   `capability_scan`; read-only, ATT&CK-mapped)** — plus **1 offline family-match tool (ADR-073 D2:
-  `family_match`; read-only)**. That is **62 read-only + 16 mutation/write**
+  `family_match`; read-only)** — plus **1 generated target-documentation tool (ADR-078 Tier-0:
+  `session_generate_report`; read-only, output-edge — composes the export doc into finding records +
+  a CSP-wrapped HTML report, held in-memory per-session, discarded on evict)**. That is **63 read-only
+  + 16 mutation/write**
   (the 16 = the 6
   ADR-012 write tools + the 9 structural-write tools + the gated `session_import_annotations`; it
   matches the `WRITE_TOOLS` frozenset in `registry.py`).

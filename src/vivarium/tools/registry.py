@@ -42,6 +42,10 @@ from vivarium.core.errors import ErrorEnvelope, ErrorType, GhidraMcpError
 from vivarium.ghidra.port import GhidraPort, OnProgress
 from vivarium.jobs import streaming as st
 from vivarium.logging import get_logger
+from vivarium.report.findings import compose_findings
+from vivarium.report.projection import project_string
+from vivarium.report.render import render_report_html
+from vivarium.report.store import ReportStore
 from vivarium.server.auth import CAP_READ, CAP_WRITE, Principal
 from vivarium.sessions.manager import SessionManager
 from vivarium.tools import schemas as s
@@ -148,6 +152,8 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     # write-consent + allow_structural for structural entries)
     "session_export_annotations",
     "session_import_annotations",
+    # --- Generated target documentation (ADR-078 Tier-0, TB10; output-edge, read-only) ---
+    "session_generate_report",
     # streaming extraction (v1.x — ADR-040; READ-ONLY, output-only; pull-based job + cursor)
     "start_decompile_stream",
     "fetch_job_results",
@@ -202,6 +208,9 @@ class ToolContext:
     port: GhidraPort
     principal: Principal = _LOCAL_PRINCIPAL
     resolve_principal: Callable[[], Principal] | None = None
+    report_store: ReportStore | None = None
+    """The in-memory per-session generated-report store (ADR-078 Tier-0); wired at the composition
+    root. ``None`` when the report feature is not wired (handler fails closed)."""
 
     @property
     def caller_id(self) -> str:
@@ -1496,6 +1505,87 @@ def _handle_session_export_annotations(
     return s.SessionExportAnnotationsOut(document=document)
 
 
+#: ADR-078 Tier-0 report-format revision — bump when the composition or render changes (provenance).
+_REPORT_TOOL_REVISION = "tier0.1"
+
+
+def _handle_session_generate_report(
+    ctx: ToolContext, args: s.SessionGenerateReportIn
+) -> s.SessionGenerateReportOut:
+    """Generate a bounded, (A+B+C)-safe target report for the caller's session (ADR-078 Tier-0).
+
+    Read-only, owner-scoped, and output-edge: it never runs in the worker (ADR-001) and is never a
+    write primitive. Its single source is ``session_export_annotations`` (no new worker capability);
+    it composes ADR-shaped finding records over the (C)-allow-list-projected leaves, optionally
+    renders a self-contained, CSP-wrapped HTML artifact (A+B), and retains the result in the
+    in-memory per-session store (discarded on evict — ADR-002 / TB10).
+    """
+    # Owner-scope first (BOLA chokepoint); a foreign/unknown id is SESSION_INVALID, no oracle (017).
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    if ctx.report_store is None:  # pragma: no cover - always wired at the composition root
+        raise GhidraMcpError(
+            ErrorEnvelope(
+                type=ErrorType.INTERNAL,
+                title="Report store not configured",
+                detail="The generated-report store is not wired on this server.",
+                status=500,
+                retryable=False,
+            )
+        )
+
+    # Reuse the export tool as the sole read-only source (ADR-078: no new analysis path/worker).
+    export = _handle_session_export_annotations(
+        ctx, s.SessionExportAnnotationsIn(session_id=args.session_id)
+    )
+    findings, truncated = compose_findings(
+        export.document, scope=list(args.scope), max_findings=s._MAX_REPORT_FINDINGS
+    )
+    manifest = s.ReportManifest(
+        program_sha256=export.document.binary.sha256,
+        session_id=args.session_id,
+        tool_revision=_REPORT_TOOL_REVISION,
+        generated_from=["session_export_annotations"],
+        finding_count=len(findings),
+        truncated=truncated,
+    )
+    html: str | None = None
+    if args.include_html:
+        # The client-supplied title is projected (C) before it enters the rendered document.
+        title = project_string(args.title).preview if args.title else "Vivarium target report"
+        html = render_report_html(title=title, manifest=manifest, findings=findings)
+    stored = ctx.report_store.put(args.session_id, manifest=manifest, findings=findings, html=html)
+    _log.info(
+        "tool.session_generate_report",
+        extra={
+            "tool": "session_generate_report",
+            "session": args.session_id,
+            "principal_id": ctx.caller_id,
+            "report_id": stored.report_id,
+            "finding_count": len(findings),
+            "truncated": truncated,
+            "html": html is not None,
+        },
+    )
+    # The HTML is synthesized over hostile-origin (projected) content — return it Untrusted
+    # (ADR-005): a client-owned artifact to save/open in a sandbox, never instructions.
+    wrapped = (
+        wrap(
+            html,
+            origin=DataOrigin.GHIDRA,
+            encoding="html",
+            notes=["allow-list-projected; CSP-wrapped; open only in a sandbox"],
+        )
+        if html is not None
+        else None
+    )
+    return s.SessionGenerateReportOut(
+        report_id=stored.report_id,
+        manifest=manifest,
+        findings=findings,
+        html=wrapped,
+    )
+
+
 def _import_outcome_reason(exc: GhidraMcpError) -> str:
     """Map a per-entry replay error to a short, safe outcome reason (never echoes a value).
 
@@ -1947,6 +2037,11 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "session_import_annotations": (
         _handle_session_import_annotations,
         s.SessionImportAnnotationsIn,
+    ),
+    # generated target documentation (ADR-078 Tier-0, TB10; READ-ONLY, output-edge)
+    "session_generate_report": (
+        _handle_session_generate_report,
+        s.SessionGenerateReportIn,
     ),
     # streaming extraction (v1.x — ADR-040; READ-ONLY, output-only; pull-based job + cursor)
     "start_decompile_stream": (_handle_start_decompile_stream, s.StartDecompileStreamIn),

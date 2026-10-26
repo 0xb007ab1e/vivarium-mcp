@@ -1859,3 +1859,144 @@ def test_batch_requires_structural_consent(structural_granted: bool) -> None:
             _require_write_consent(structural=True)
         assert ei.value.envelope.type is ErrorType.VALIDATION
         assert "structural" in ei.value.envelope.detail
+
+
+# ==============================================================================================
+# TB10 (ADR-078 §22) — Generated target documentation abuse cases. The Tier-0 merge gates are
+# #1-#5 and #9. HERMETIC: exercised through the output-edge modules (projection + findings
+# composition + HTML render) with synthetic hostile export documents — no worker, no I/O.
+# ==============================================================================================
+from vivarium.report.findings import compose_findings  # noqa: E402 — grouped with the TB10 block
+from vivarium.report.projection import (  # noqa: E402
+    project_identifier,
+    project_string,
+)
+from vivarium.report.render import REPORT_CSP, render_report_html  # noqa: E402
+from vivarium.tools import schemas as s  # noqa: E402
+
+# Bytes that must never appear literally (active markup in HTML, Markdown/GFM, or to an LLM).
+_TB10_MARKUP = set("<>&\"'[]():!*_~|\\`#{}")
+
+
+def _tb10_doc(entries: list[s.ExportedEntry]) -> s.ExportedAnnotationDocument:
+    return s.ExportedAnnotationDocument(
+        schema_version=1, binary=s.ExportedBinaryRef(sha256="d" * 64), entries=entries
+    )
+
+
+def _tb10_report_html(entries: list[s.ExportedEntry]) -> str:
+    findings, _ = compose_findings(_tb10_doc(entries), max_findings=1000)
+    manifest = s.ReportManifest(
+        program_sha256="d" * 64,
+        session_id="sess",
+        tool_revision="tier0.1",
+        finding_count=len(findings),
+    )
+    return render_report_html(title="t", manifest=manifest, findings=findings)
+
+
+@pytest.mark.critical
+def test_tb10_case1_html_injection_in_name_is_inert() -> None:
+    """#1: a function named ``<img src=x onerror=alert(1)>`` is projected to an inert literal."""
+    entry = s.ExportedRenameFunctionEntry(
+        kind="rename_function",
+        function="0x401000",
+        new_name=wrap("<img src=x onerror=alert(1)>", origin=DataOrigin.BINARY),
+    )
+    html = _tb10_report_html([entry])
+    # No active tag / markup byte survives — ``<``/``>`` escaped, so no ``<img`` tag and no
+    # ``onerror=`` attribute context (the letters may remain as inert text; harmless).
+    assert "<img" not in html.lower()
+    assert "x3c" in project_identifier("<")  # sanity on the primitive (``<`` -> ``\xNN``)
+
+
+@pytest.mark.critical
+def test_tb10_case2_markdown_link_injection_is_inert_in_any_consumer() -> None:
+    """#2: ``](javascript:evil)`` in a comment carries no active link in any consumer."""
+    entry = s.ExportedSetCommentEntry(
+        kind="set_comment",
+        address="0x401000",
+        comment_type="EOL",
+        text=wrap("](javascript:evil)", origin=DataOrigin.BINARY),
+    )
+    findings, _ = compose_findings(_tb10_doc([entry]), max_findings=10)
+    (f,) = findings
+    assert f.inference is not None
+    inf = f.inference.value
+    for ch in "]():":
+        assert ch not in inf
+    assert "javascript:" not in inf
+
+
+@pytest.mark.critical
+def test_tb10_case3_embedded_svg_script_is_neutralized() -> None:
+    """#3: an embedded ``<script>``/SVG in a string is projected/encoded; no live markup."""
+    entry = s.ExportedSetCommentEntry(
+        kind="set_comment",
+        address="0x401000",
+        comment_type="EOL",
+        text=wrap("<svg/onload=alert(1)><script>x</script>", origin=DataOrigin.BINARY),
+    )
+    html = _tb10_report_html([entry])
+    # No active tag survives — ``<``/``>`` escaped, so neither ``<svg`` nor ``<script`` can form
+    # (tag-name letters may remain as inert text, which cannot execute without the bracket).
+    assert "<svg" not in html.lower()
+    assert "<script" not in html.lower()
+    assert "x3csvg" in html.lower() or "x3cscript" in html.lower()  # escaped form present
+
+
+@pytest.mark.critical
+def test_tb10_case5_report_cannot_beacon_default_src_none() -> None:
+    """#5: the report's CSP starts ``default-src 'none'`` (object/font/CSS loads fail closed, not
+    just ``connect-src``) and the document carries no script."""
+    html = _tb10_report_html(
+        [
+            s.ExportedRenameFunctionEntry(
+                kind="rename_function",
+                function="0x401000",
+                new_name=wrap("x", origin=DataOrigin.BINARY),
+            )
+        ]
+    )
+    assert REPORT_CSP.startswith("default-src 'none'")
+    assert f'content="{REPORT_CSP}"' in html
+    assert "<script" not in html.lower()
+    # connect-src alone would not cover object/font/css url() loads — default-src 'none' does (F2).
+    assert "object-src" not in REPORT_CSP or "default-src 'none'" in REPORT_CSP
+
+
+@pytest.mark.critical
+def test_tb10_case9_projection_holds_in_a_renderer_we_do_not_control() -> None:
+    """#9: for a renderer we do not own (raw Markdown / an LLM), (C) projection ensures no field is
+    active markup — safety does not depend on (A)."""
+    for payload in (
+        "<img src=x onerror=alert(1)>",
+        "](javascript:evil)",
+        "![b](http://evil/x.png)",
+        "`$(id)`",
+    ):
+        preview = project_string(payload).preview
+        leaked = set(preview) & (_TB10_MARKUP - {"\\"})
+        assert not leaked, f"markup leaked for {payload!r}: {preview!r}"
+
+
+@pytest.mark.critical
+def test_tb10_case4_secret_in_comment_is_redacted_not_verbatim() -> None:
+    """#4: a secret pasted into a comment is redacted in the report, never emitted verbatim."""
+    # Synthetic PEM fixture (not a real key) — named to avoid a false "hardcoded password" flag.
+    planted = "-----BEGIN RSA PRIVATE KEY-----\nMIIEvQIBADANBgkqh\n-----END RSA PRIVATE KEY-----"
+    entry = s.ExportedSetCommentEntry(
+        kind="set_comment",
+        address="0x401000",
+        comment_type="EOL",
+        text=wrap(planted, origin=DataOrigin.BINARY),
+    )
+    findings, _ = compose_findings(_tb10_doc([entry]), max_findings=10)
+    (f,) = findings
+    assert f.inference is not None
+    inf = f.inference.value
+    assert "PRIVATE KEY" not in inf
+    assert "MIIEvQ" not in inf
+    assert inf.startswith("redacted-secret ")
+    # the marker itself carries no markup-active byte (inert in any consumer)
+    assert not (set(inf) & (_TB10_MARKUP - {"\\"}))
