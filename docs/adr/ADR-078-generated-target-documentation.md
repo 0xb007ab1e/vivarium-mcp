@@ -125,14 +125,18 @@ CSP-wrapped, allow-list-projected HTML report**, not raw Markdown.
    all surfaces" — the capability the original request named. Shipped as a **default-OFF `atlas`
    flag** on `session_generate_report`: a **bounded, static, scriptless** whole-program atlas composed
    by **reusing the existing read-only tools** (`program_summary` + `call_graph(root=None)` +
-   `list_functions`; no new worker capability / no new analysis path — ADR-001). Content = a program
-   cover page + a call-graph **adjacency table** (nodes/edges) + a function index + the Tier-0
-   findings, with an in-document table-of-contents (anchors only). Same A+B+C controls; diagrams via
+   `list_functions` + `xrefs_to`; no new worker capability / no new analysis path — ADR-001). Content
+   = a program cover page + a call-graph **adjacency table** (nodes/edges) + a function index + a
+   **cross-reference drill-down** (references *into* the top-fan-in functions) + the Tier-0 findings,
+   with an in-document table-of-contents (anchors only). Same A+B+C controls; diagrams via
    (B) `textContent`/table labels, **never live SVG** and **no scripts** (CSP `script-src 'none'`), so
    the atlas is static-navigable, not interactive. Modest hard caps (`_MAX_ATLAS_NODES/EDGES/
-   FUNCTIONS` = 2k/8k/2k) with `truncated` honesty (abuse #8). **Still deferred:** interactive
-   search/filter (needs scripts — conflicts with the CSP), rasterized (D) diagrams, xref edges, and
-   larger caps. Gated on the TB10 abuse suite green (atlas #8 + injection cases added) + the merge
+   FUNCTIONS` = 2k/8k/2k) with `truncated` honesty (abuse #8); the xref drill-down is itself bounded
+   (`_MAX_ATLAS_XREF_TARGETS` most-referenced functions × `_MAX_ATLAS_XREFS_PER_TARGET` per target,
+   `_MAX_ATLAS_XREFS` total) so it cannot blow up the whole-program report. All xref fields
+   (`from_address`/`to_address`/`ref_type`) are server-safe scalars — no projection needed. **Still
+   deferred:** interactive search/filter (needs scripts — conflicts with the CSP), rasterized (D)
+   diagrams, and larger caps. Gated on the TB10 abuse suite green (atlas #8 + injection cases added) + the merge
    review; any persist-outside-session remains gated.
 3. **Tier 2 — LLM narrative (gated, default-OFF; not originally requested).** The request asked for a
    deterministic atlas, not generated prose (red-team F5) — Tier 2 is recorded for completeness with

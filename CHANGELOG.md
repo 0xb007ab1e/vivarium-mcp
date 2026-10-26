@@ -43,6 +43,16 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **ADR-078 Tier-1 atlas — cross-reference drill-down (TB10).** The `atlas` flag now also composes a
+  bounded **cross-reference table** (references *into* the most-referenced functions) by reusing the
+  read-only `xrefs_to` tool: the handler pulls `xrefs_to` only for the top `_MAX_ATLAS_XREF_TARGETS`
+  (16) functions ranked by fan-in (`call_graph_metrics.top_fan_in`), bounded per-target
+  (`_MAX_ATLAS_XREFS_PER_TARGET` = 64) and in total (`_MAX_ATLAS_XREFS` = 1000), with `truncated`
+  honesty. All xref fields (`from_address`/`to_address`/`ref_type`) are server-safe scalars — no
+  projection needed; rendered as a new scriptless "Cross-references" section under the same **A+B+C**
+  controls. New `AtlasXref` schema; `xrefs_to` added to the atlas `generated_from` provenance; TB10
+  abuse **#8** extended to the xref flood. No new worker capability / no new analysis path (ADR-001);
+  no catalog change (additive to the existing flag).
 - **ADR-078 Tier-1 whole-program atlas — `session_generate_report` `atlas` flag (TB10).** A
   **default-OFF** `atlas` flag extends the Tier-0 report with a bounded, **static, scriptless**
   whole-program atlas: a program cover page + a call-graph **adjacency table** (nodes/edges) + a
@@ -54,7 +64,7 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   'none'` — no JS, so static-navigable not interactive); modest hard caps (`_MAX_ATLAS_NODES/EDGES/
   FUNCTIONS` = 2k/8k/2k) with `truncated` honesty. New `src/vivarium/report/atlas.py`; TB10 abuse
   cases **#8 (DoS-bound)** + call-graph-node-name injection added. Interactive atlas, rasterized
-  diagrams, xref edges, and Tier 2 (LLM narrative) remain unbuilt + gated. No catalog change
+  diagrams, and Tier 2 (LLM narrative) remain unbuilt + gated. No catalog change
   (additive flag on the existing tool).
 - **Generated target documentation — ADR-078 Tier-0 `session_generate_report` (TB10).** A new
   read-only, output-edge tool (catalog 78 → 79) composes the session's exported annotations into

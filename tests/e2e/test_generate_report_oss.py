@@ -37,6 +37,7 @@ _EXPECTED_SOURCES = {
     "program_summary",
     "call_graph",
     "list_functions",
+    "xrefs_to",  # Tier-1 xref drill-down into the top-fan-in functions (ADR-078)
 }
 
 
@@ -99,6 +100,12 @@ async def _drive_generate_report() -> None:
         assert edge["from_address"] and edge["to_address"]
         # Node/function name leaves are Untrusted-wrapped + (C)-projected (inert).
         assert _unwrap(atlas["nodes"][0]["name"]) is not None
+
+        # Tier-1 xref drill-down: the top-fan-in (most-referenced) functions have referrers in a
+        # rich call graph, so the bounded xrefs_to pull populates server-safe scalar edges.
+        assert atlas["xrefs"], "expected xref edges into the top-fan-in functions"
+        xref = atlas["xrefs"][0]
+        assert xref["from_address"] and xref["to_address"] and xref["ref_type"]
 
         # The self-contained HTML artifact (Untrusted-wrapped → unwrap .value).
         html = _unwrap(out["html"])

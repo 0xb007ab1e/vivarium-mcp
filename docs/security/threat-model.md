@@ -1531,9 +1531,12 @@ execution path (503), so TB9 adds no live attack surface.
   (wipe-on-evict) — realized **in-memory, per-session, discarded on evict** (mirrors ADR-040; prod has
   no on-disk server store, `store_root=None`), not an on-disk file. **Tier 1 first slice IMPLEMENTED
   2026-10-26** — a default-OFF `atlas` flag composes a bounded, static, scriptless whole-program atlas
-  (program summary + call-graph adjacency table + function index) by reusing the read-only tools
-  (`program_summary`/`call_graph`/`list_functions`; no new worker capability), hard-capped with
-  `truncated` honesty; interactive atlas / rasterized diagrams remain gated. Tier 2 (gated,
+  (program summary + call-graph adjacency table + function index + **cross-reference drill-down into
+  the top-fan-in functions**) by reusing the read-only tools
+  (`program_summary`/`call_graph`/`list_functions`/`xrefs_to`; no new worker capability), hard-capped
+  (`xrefs_to` pulled only for the top `_MAX_ATLAS_XREF_TARGETS` most-referenced functions, bounded
+  per-target and in total) with `truncated` honesty; interactive atlas / rasterized diagrams remain
+  gated. Tier 2 (gated,
   default-OFF): LLM narrative (not originally requested).
 - **One input only: the envelope.** Generation consumes `Untrusted[...]` tool outputs + the existing
   export; it adds no analysis path and runs at the **output edge** (server- or client-side), never
@@ -1569,7 +1572,7 @@ where the envelope's "never render" rule is deliberately relaxed, so neutralizat
 5. Opened HTML document attempts a network beacon — via fetch/XHR **or** an `object`/`font`/CSS `url()` load → blocked by CSP starting `default-src 'none'` (not `connect-src` alone — F2) + sandbox.
 6. Prompt-injection text in a string, narrative ON (Tier 2) → does not steer output; rendered inert.
 7. Report request for a foreign session id → `SESSION_INVALID`, no oracle (ADR-017).
-8. Whole-program atlas on a 50k-function binary → bounded by the atlas caps (`_MAX_ATLAS_NODES/EDGES/FUNCTIONS`); overflow dropped + `truncated` flagged; no OOM / cost blowout (now a real Tier-1 test).
+8. Whole-program atlas on a 50k-function binary → bounded by the atlas caps (`_MAX_ATLAS_NODES/EDGES/FUNCTIONS`, plus `_MAX_ATLAS_XREF_TARGETS`/`_MAX_ATLAS_XREFS_PER_TARGET`/`_MAX_ATLAS_XREFS` for the xref drill-down); overflow dropped + `truncated` flagged; no OOM / cost blowout (now a real Tier-1 test).
 9. Artifact opened in a **renderer we do not control** (raw `.md` on GitHub, mkdocs, an LLM) → (C) projection ensures no field is active markup; confirms safety does not depend on (A).
 
 **Residual risk & status.** Tier 0 **IMPLEMENTED 2026-10-26** (`session_generate_report`,

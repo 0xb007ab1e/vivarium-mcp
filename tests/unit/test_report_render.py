@@ -88,6 +88,9 @@ def _atlas() -> s.AtlasData:
         nodes=[s.AtlasNode(address="0x401000", name=_u("decrypt"))],
         edges=[s.AtlasEdge(from_address="0x401000", to_address="0x401100")],
         functions=[s.AtlasFunction(address="0x401000", name=_u("decrypt"), size=16)],
+        xrefs=[
+            s.AtlasXref(from_address="0x401200", to_address="0x401000", ref_type="CALL"),
+        ],
     )
 
 
@@ -97,11 +100,20 @@ def test_atlas_sections_rendered_scriptless() -> None:
     )
     assert "<script" not in html.lower()
     assert f'content="{REPORT_CSP}"' in html
-    for heading in (">Program<", ">Call graph<", ">Functions<"):
+    for heading in (">Program<", ">Call graph<", ">Functions<", ">Cross-references<"):
         assert heading in html
     assert "0x401000" in html and "0x401100" in html
+    assert "0x401200" in html and "CALL" in html
     assert "decrypt" in html
     assert '<nav aria-label="Contents">' in html
+    assert 'href="#atlas-xrefs"' in html
+
+
+def test_atlas_no_xrefs_shows_empty_message() -> None:
+    atlas = _atlas().model_copy(update={"xrefs": []})
+    html = render_report_html(title="t", manifest=_manifest(), findings=[], atlas=atlas)
+    assert ">Cross-references<" in html
+    assert "No cross-references in scope." in html
 
 
 def test_atlas_hostile_node_name_is_escaped() -> None:
