@@ -409,8 +409,9 @@ enforced — closing the BOLA gap that ADR-011 §6 deferred (TB6-I).
 > (`github.event.pull_request.head.repo.full_name == github.repository`), leaving fork PRs to the
 > explicit maintainer-`label` path (the label apply *is* the human gate) — restoring the human step
 > for fork code while keeping the auto-convenience for trusted branches (defense in depth, master §2).
-> **Complementary platform control (operator action):** set Actions → "Require approval for all
-> outside collaborators" as a backstop. Same-repo PRs gain **no new exposure** (same trust as a
+> **Complementary platform control (APPLIED):** Actions → "Require approval for all outside
+> collaborators" is **enforced** (`fork-pr-contributor-approval = all_external_contributors`, verified
+> 2026-10-26; #163) as a backstop. Same-repo PRs gain **no new exposure** (same trust as a
 > maintainer-labeled run).
 
 > **§4 delta — auto-repin GitHub App (round-6 #259; a new CI credential, no new product TB).** The

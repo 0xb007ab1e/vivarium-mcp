@@ -8,6 +8,12 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Security
 
+- **Fork-PR approval backstop recorded as applied; close #163 + #171.** Threat-model §4 marked the
+  Actions "require approval for all outside collaborators" backstop **enforced** (live API:
+  `fork-pr-contributor-approval = all_external_contributors`) rather than a pending operator action
+  (**#163**). The pin-bump-PR App-token fix (**#171**) was already implemented in
+  `worker-image.yml propose-pin-bump` (`create-github-app-token` + `REPIN_APP_ID`/
+  `REPIN_APP_PRIVATE_KEY`) and documented in §4 (round-6 #259); both issues closed as done. Docs-only.
 - **Threat-model §2 boundary registry — backfill TB9 + TB10 rows.** The §2 "Trust boundaries"
   table stopped at TB8 while TB9 (dashboard interactive backend, §21) and TB10 (generated target
   documentation, §22) lived only as prose sections; added both as table rows and a note clarifying
