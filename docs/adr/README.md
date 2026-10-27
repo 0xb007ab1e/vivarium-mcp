@@ -1,6 +1,6 @@
 # Architecture Decision Records (ADR) index
 
-This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-078).
+This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-079).
 Each ADR captures one significant decision: its context, the decision, alternatives, and consequences.
 Records are **point-in-time** — a `Status:` of *Proposed* reflects the record when it was written; what
 actually shipped in each release is tracked in [`../../CHANGELOG.md`](../../CHANGELOG.md) and the
@@ -72,6 +72,9 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 ### Output surfaces & interactive UI (new trust boundaries)
 - **ADR-076** — Dashboard interactive command backend (Phase 2; browser → server write/command — TB9) — **Proposed** (default-off, fail-closed, auth-required; live wiring gated).
 - **ADR-078** — Generated target documentation (analysis report + finding records; artifact → persisted document — TB10) — **Tier 0 + Tier-1 first slice implemented** 2026-10-26 (`session_generate_report`); tier-invariant A+B+C rendering safety; Tier 0 = bounded on-demand CSP-wrapped, allow-list-projected HTML report + finding records held in-memory per-session (ephemeral/wipe-on-evict); **Tier 1 first slice = a default-OFF `atlas` flag composing a bounded static whole-program atlas (program summary + call-graph adjacency + function index) by reusing the read-only tools**; interactive atlas / rasterized diagrams / LLM-narrative tier remain gated. No raw-Markdown artifact (amended 2026-10-26, red-team F1 + reviewer F2/F3).
+
+### Knowledge-graph export (new external integration)
+- **ADR-079** — Export RE sessions to the `memory-graph` knowledge graph (TB11; client-side mapper + driver, per-binary project, gated outward write) — **Proposed**.
 
 ### Read/analysis tools
 - **ADR-007** — Semantic-naming support tools (call graph, leaf-first ordering, function context).

@@ -43,6 +43,12 @@ specimen. Here the specimen is an untrusted binary.
 - **Make changes, only with consent.** Renaming functions and symbols, setting comments, applying or
   defining data types, and similar edits are off by default. A session must explicitly enable writes
   before any change is allowed, and edits can be exported and re-imported as a portable annotation file.
+- **Persist a session to a knowledge graph.** A client-side exporter (`vivarium-graph-export`, ADR-079)
+  projects a whole analysis — functions, calls, cross-references, imports/exports, strings, IOC/crypto/
+  secret/capability findings, and your own renames, comments, and types — into a per-binary project in a
+  `memory-graph` knowledge graph, so reverse-engineering findings outlive the
+  session and accumulate into a queryable corpus. The server never calls out (it stays a read-only
+  source); binary-derived content is stored as inert, provenance-tagged data and secrets stay redacted.
 
 There are 74 tools in total. The full list, with the inputs and outputs for each, is in
 [`docs/contracts/tool-catalog.md`](./docs/contracts/tool-catalog.md).

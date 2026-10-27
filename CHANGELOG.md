@@ -6,6 +6,21 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Export RE sessions to the `memory-graph` knowledge graph (ADR-079).** A new client-side package
+  `src/vivarium/graph_export/` projects a Vivarium session onto the `memory-graph` MCP server:
+  functions, calls, xrefs, imports/exports, strings, IOC/crypto/secret/capability findings, and the
+  analyst's own renames/comments/types become provenance-tagged nodes and edges in a per-binary
+  project (`vivarium-<sha256[:12]>`, idempotent upsert). The Vivarium server never calls out
+  (ADR-001) — the exporter is a separate MCP client (pure mapper + driver over `ToolCaller` /
+  `GraphSink` ports; live `McpToolCaller` / `McpGraphSink` adapters). Use the library
+  `export_session(caller, sink, session_id)` or the self-contained `vivarium-graph-export <ref>`
+  CLI. All binary-derived content crosses as inert data tagged with hostile provenance (ADR-005);
+  secret findings stay redacted (ADR-072); the outward write is gated (`workflow-gated-actions`).
+  Cross-binary `SAME_AS`/family links and auto-export at `session_close` are deferred fast-follows.
+  Threat model: TB11.
+
 ### Fixed
 
 - **Loading a binary is no longer a silent trap (#359).** Two unrelated mistakes used to both surface
