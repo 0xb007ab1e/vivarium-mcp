@@ -115,13 +115,48 @@ class _Page(_SessionScopedIn):
 # Session lifecycle
 # =====================================================================================
 class SessionCreateIn(_In):
-    """Arguments for ``session_create`` — open a session (does NOT import a binary yet).
+    """Arguments for ``session_create`` — open an EMPTY session (does NOT import or analyze).
+
+    ``session_create`` only opens a bare session; it loads nothing and spawns no worker. The order
+    is **create → import → analyze**: call ``session_import(source_ref=…)`` (a path under
+    ``VIVARIUM_IMPORT_ROOT``) to load the binary and spawn the worker, then ``session_analyze``.
+
+    ``binary_path`` and ``analyze`` are accepted ONLY so the common mistake of
+    ``session_create(binary_path=…, analyze=true)`` — which used to be a SILENT no-op (the args were
+    dropped, the binary never loaded) — now fails loudly with a message pointing at
+    ``session_import`` (issue #359). Passing either is always rejected; omit both.
 
     Attributes:
         label: Optional client-supplied label for audit/correlation (not trusted; not a path).
+        binary_path: REJECTED. ``session_create`` does not load binaries — use
+            ``session_import(source_ref=…)``. Present only to turn the silent no-op into a clear
+            error (#359).
+        analyze: REJECTED. ``session_create`` does not analyze — run ``session_analyze`` after
+            ``session_import``. Present only to turn the silent no-op into a clear error (#359).
     """
 
     label: str | None = Field(default=None, max_length=128)
+    binary_path: str | None = Field(default=None, max_length=4096)
+    analyze: bool | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def _reject_load_hints(self) -> SessionCreateIn:
+        """Fail closed when a caller tries to load/analyze via ``session_create`` (#359).
+
+        Returns:
+            ``self`` when neither load hint is supplied.
+
+        Raises:
+            ValueError: If ``binary_path`` or ``analyze`` is set — mapped to a ``validation-error``
+                envelope by the shell, with guidance to use ``session_import``/``session_analyze``.
+        """
+        if self.binary_path is not None or self.analyze is not None:
+            raise ValueError(
+                "session_create does not load or analyze a binary; it only opens an empty session. "
+                "Call session_import(source_ref=…) (a path under VIVARIUM_IMPORT_ROOT) to load the "
+                "binary and spawn the worker, then session_analyze. Order: create, import, analyze."
+            )
+        return self
 
 
 class SessionInfo(_Out):

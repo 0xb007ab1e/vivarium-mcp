@@ -165,6 +165,9 @@ class _FakeSessions:
         """Initialize with an empty authorize log."""
         self.authorized: list[str] = []
 
+    def require_worker_started(self, session_id: str, *, caller: str = "local") -> None:
+        """Pre-import guard stub (#359): no-op — the fixture's session is treated as imported."""
+
     def begin_call(self, session_id: str, *, caller: str | None = None) -> None:
         """No-op in-flight begin mark (test stub)."""
 

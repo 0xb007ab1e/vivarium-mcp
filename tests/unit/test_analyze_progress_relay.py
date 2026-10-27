@@ -50,6 +50,9 @@ class _FakeSessions:
     def set_evict_callback(self, on_evict: object) -> None:
         """Composition seam (ADR-040) — build_app binds the streaming discard hook here; no-op."""
 
+    def require_worker_started(self, session_id: str, *, caller: str = "local") -> None:
+        """Pre-import guard stub (#359): no-op — the fixture's session is treated as imported."""
+
     def begin_call(self, session_id: str, *, caller: str | None = None) -> None:
         self.events.append(f"begin:{session_id}")
 

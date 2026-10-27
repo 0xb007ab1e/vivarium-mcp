@@ -6,6 +6,26 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Loading a binary is no longer a silent trap (#359).** Two unrelated mistakes used to both surface
+  as the same opaque, `retryable:true` `worker-unavailable` 503 ("no worker for session"), pointing at
+  nothing:
+  - **Calling a worker tool before `session_import`** now returns the new, additive
+    `failed-precondition` error (**409, not retryable**) whose detail names the fix and the order
+    (`session_create` → `session_import` → `session_analyze`) — distinct from a genuinely transient
+    worker loss, which stays `worker-unavailable`. Enforced at the dispatch chokepoint via
+    `SessionManager.require_worker_started` (owner-scoped, BOLA-safe); the small set of manager-only
+    lifecycle tools (`NO_WORKER_REQUIRED_TOOLS`) is exempt, and every other session-scoped tool is
+    guarded automatically (no drift).
+  - **`session_create(binary_path=…, analyze=…)`** — which used to be a silent no-op (the args were
+    dropped at the MCP boundary and the binary never loaded) — now fails loudly with a
+    `validation-error` pointing at `session_import`. `session_create` only opens an empty session.
+  - **Out-of-root / missing `source_ref`** import errors now read more actionably ("…under the
+    server's import root (configured by VIVARIUM_IMPORT_ROOT); stage the binary there first") — still
+    path-free per the error-envelope disclosure rules; the actual order + import-root requirement are
+    documented in the `session_create`/`session_import` tool descriptions.
+
 ### Security
 
 - **Worker-image pin bumped to the 3.15/Trivy-clean build.** `.github/worker-image.pin` →

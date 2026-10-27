@@ -74,6 +74,9 @@ class FakeSessionManager:
                 )
             )
 
+    def require_worker_started(self, session_id: str, *, caller: str = "local") -> None:
+        """Pre-import guard stub (#359): no-op — the fixture's session is treated as imported."""
+
     def begin_call(self, session_id: str, *, caller: str | None = None) -> None:
         """In-flight marker (ADR-025 / F4) — no-op for these dispatch tests."""
 

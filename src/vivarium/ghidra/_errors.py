@@ -42,6 +42,7 @@ _STATUS: dict[ErrorType, int] = {
     ErrorType.LIMIT_EXCEEDED: 413,
     ErrorType.TIMEOUT: 504,
     ErrorType.WORKER_UNAVAILABLE: 503,
+    ErrorType.FAILED_PRECONDITION: 409,
     ErrorType.RESOURCE_EXHAUSTED: 503,
     ErrorType.ANALYSIS_FAILED: 422,
     ErrorType.INTERNAL: 500,
@@ -55,6 +56,7 @@ _TITLE: dict[ErrorType, str] = {
     ErrorType.LIMIT_EXCEEDED: "Limit exceeded",
     ErrorType.TIMEOUT: "Operation timed out",
     ErrorType.WORKER_UNAVAILABLE: "Worker unavailable",
+    ErrorType.FAILED_PRECONDITION: "Precondition failed",
     ErrorType.RESOURCE_EXHAUSTED: "Worker out of resources",
     ErrorType.ANALYSIS_FAILED: "Analysis failed",
     ErrorType.INTERNAL: "Internal error",
@@ -184,6 +186,30 @@ def session_invalid(correlation_id: str | None = None) -> GhidraMcpError:
     return make_error(
         ErrorType.SESSION_INVALID,
         "session is unknown, expired, or no longer available",
+        correlation_id=correlation_id,
+    )
+
+
+def no_binary_imported(correlation_id: str | None = None) -> GhidraMcpError:
+    """Build the ``failed-precondition`` error for a worker tool called before any import (#359).
+
+    Raised when a session is live but has never imported a binary, so no worker/program exists to
+    act on. It is deliberately DISTINCT from ``worker-unavailable`` (a transient, retryable worker
+    loss): this is a permanent caller-sequence error, so ``retryable`` is ``False`` and the detail
+    names the fix — ``session_import`` — rather than inviting an infinite retry loop. The detail is
+    a fixed, safe string (no host paths, env values, or binary-derived content — error-envelope.md
+    disclosure rules).
+
+    Args:
+        correlation_id: Optional id tying the error to redacted server-side logs.
+
+    Returns:
+        A ``FAILED_PRECONDITION`` :class:`GhidraMcpError`.
+    """
+    return make_error(
+        ErrorType.FAILED_PRECONDITION,
+        "no binary has been imported into this session yet — call session_import(source_ref=…) "
+        "(then session_analyze) before this tool; the order is create → import → analyze",
         correlation_id=correlation_id,
     )
 

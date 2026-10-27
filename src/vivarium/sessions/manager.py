@@ -678,6 +678,42 @@ class SessionManager:
         finally:
             self._flush_evicted()
 
+    def require_worker_started(self, session_id: str, *, caller: str = _LOCAL_PRINCIPAL_ID) -> None:
+        """Fail closed when a worker-requiring tool targets a session that never imported (#359).
+
+        The disambiguation chokepoint: a tool that needs the worker/program (anything but the small
+        set of manager-only lifecycle tools) calls this at dispatch, right after the in-flight mark.
+        It uses the session's authoritative ``worker_started`` flag — the leak-free source of truth
+        the manager already owns and clears on eviction — so:
+
+        - **never imported** (``worker_started`` is ``False``) → ``FAILED_PRECONDITION`` with an
+          actionable "call session_import first" detail, **not retryable**. Previously this surfaced
+          as the opaque, ``retryable:true`` ``worker-unavailable`` 503, indistinguishable from a
+          genuinely dead worker and inviting an infinite retry (issue #359).
+        - **imported, worker since died/evicted mid-call** (``worker_started`` is ``True`` but the
+          adapter has no live worker) → left to the adapter, which still raises the retryable
+          ``worker-unavailable`` — the one truly transient case.
+
+        Owner-scoped via the shared ``_get_live_locked`` chokepoint (ADR-017, complete mediation):
+        an unknown/expired/evicted/foreign id yields the BOLA-safe ``SESSION_INVALID`` exactly as
+        :meth:`authorize` does, so this guard reveals nothing a normal authorize would not.
+
+        Args:
+            session_id: The opaque id of a live, caller-owned session.
+            caller: The authenticated, server-derived calling-principal id (ADR-017).
+
+        Raises:
+            GhidraMcpError: ``SESSION_INVALID`` (unknown/expired/evicted/foreign, BOLA-safe) or
+                ``FAILED_PRECONDITION`` (live + owned but no binary imported yet).
+        """
+        try:
+            with self._lock:
+                sess = self._get_live_locked(session_id, caller=caller)
+                if not sess.worker_started:
+                    raise _errors.no_binary_imported()
+        finally:
+            self._flush_evicted()
+
     def record_binary_hash(
         self,
         session_id: str,

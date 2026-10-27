@@ -25,6 +25,34 @@ def test_session_scoped_inputs_forbid_extra_fields() -> None:
 
 
 @pytest.mark.critical
+def test_session_create_is_empty_by_default() -> None:
+    """A bare session_create (no load hints) validates — the normal path (#359)."""
+    model = s.SessionCreateIn()
+    assert model.binary_path is None and model.analyze is None
+
+
+@pytest.mark.critical
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"binary_path": "/srv/imports/x.bin"},
+        {"analyze": True},
+        {"binary_path": "/srv/imports/x.bin", "analyze": True},
+    ],
+)
+def test_session_create_rejects_load_hints(kwargs: dict[str, object]) -> None:
+    """session_create(binary_path=…/analyze=…) fails loudly instead of silently no-op'ing (#359).
+
+    The args are declared ONLY to catch this mistake: previously they were dropped at the MCP
+    boundary and the caller wrongly believed the binary loaded. Now they raise with guidance toward
+    session_import.
+    """
+    with pytest.raises(ValidationError) as ei:
+        s.SessionCreateIn(**kwargs)  # type: ignore[arg-type]
+    assert "session_import" in str(ei.value)  # error names the correct loader
+
+
+@pytest.mark.critical
 def test_inputs_are_frozen() -> None:
     a = s.ReadBytesIn(session_id="abc", address="0x1000", length=16)
     with pytest.raises(ValidationError):

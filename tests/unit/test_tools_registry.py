@@ -94,6 +94,21 @@ class FakeSessionManager:
         """Record an idempotent worker-spawn request (the import handler calls this)."""
         self.ensured.append(session_id)
 
+    def require_worker_started(self, session_id: str, *, caller: str = "local") -> None:
+        """Pre-import guard (#359): BOLA-safe for an invalid id; no-op for the valid session.
+
+        Mirrors :meth:`authorize` validity so the dispatch guard behaves like the real manager; the
+        valid session is treated as already-imported (worker started), so worker-tool dispatch
+        proceeds. Records the event so tests can assert the guard ran before the handler.
+        """
+        if session_id != _VALID_SID:
+            raise GhidraMcpError(
+                ErrorEnvelope(
+                    type=ErrorType.SESSION_INVALID, title="x", detail="unknown", status=404
+                )
+            )
+        self.events.append(f"require_worker:{session_id}")
+
     def create(self, *, owner: str = "local", label: str | None = None) -> s.SessionInfo:
         """Create a session, returning a fixed valid id (records the owner principal — ADR-017)."""
         self.created += 1
@@ -877,6 +892,26 @@ def test_session_scoped_call_is_wrapped_in_begin_and_end_call(ctx: reg.ToolConte
     assert events[0] == f"begin:{_VALID_SID}"  # marked in-flight first
     assert events[-1] == f"end:{_VALID_SID}"  # cleared last (the finally)
     assert f"authorize:{_VALID_SID}" in events  # the handler's auth ran between
+
+
+def test_worker_tool_dispatch_runs_the_preimport_guard(ctx: reg.ToolContext) -> None:
+    """A worker-requiring tool invokes require_worker_started before the handler (#359)."""
+    handlers = reg.build_handlers(ctx)
+    handlers["decompile_function"](session_id=_VALID_SID, function="main")
+    events = ctx.sessions.events  # type: ignore[attr-defined]
+    assert f"require_worker:{_VALID_SID}" in events  # guard ran
+    assert events.index(f"require_worker:{_VALID_SID}") < events.index(f"authorize:{_VALID_SID}")
+
+
+def test_exempt_session_tools_skip_the_preimport_guard(ctx: reg.ToolContext) -> None:
+    """Manager-only lifecycle tools are exempt — they must usable before any import (#359)."""
+    handlers = reg.build_handlers(ctx)
+    handlers["session_status"](session_id=_VALID_SID)
+    events = ctx.sessions.events  # type: ignore[attr-defined]
+    assert f"require_worker:{_VALID_SID}" not in events  # exempt: no pre-import guard
+    # Every exemption is a manager-only tool (never touches the worker) — guard it and a legitimate
+    # pre-import call would wrongly fail.
+    assert reg.NO_WORKER_REQUIRED_TOOLS.issubset(reg.TIER1_TOOL_NAMES)
 
 
 def test_session_create_is_not_wrapped(ctx: reg.ToolContext) -> None:
