@@ -42,14 +42,16 @@ Before applying a non-empty overlay, **validate every preset option name exists*
 analysis options and **fail closed** if any do not:
 
 ```python
-overlay = _analyzer_options_for_profile(profile)   # PURE, unit-tested (empty for default)
+overlay = _analyzer_options_for_profile(profile)  # PURE, unit-tested (empty for default)
 if overlay:
     options = self._program.getOptions(self._program.ANALYSIS_PROPERTIES)
-    available = set(options.getOptionNames())                 # JVM edge
-    missing = _missing_profile_options(overlay, available)    # PURE, unit-tested
+    available = set(options.getOptionNames())  # JVM edge
+    missing = _missing_profile_options(overlay, available)  # PURE, unit-tested
     if missing:
-        raise WorkerError(CODE_INTERNAL, "analyzer profile references option(s) not "
-                          "available in this Ghidra build")   # internal-error, redacted
+        raise WorkerError(
+            CODE_INTERNAL,
+            "analyzer profile references option(s) not available in this Ghidra build",
+        )  # internal-error, redacted
     for option_name, enabled in overlay.items():
         options.setBoolean(option_name, enabled)
 ```

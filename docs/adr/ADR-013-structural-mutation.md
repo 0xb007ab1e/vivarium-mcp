@@ -260,12 +260,12 @@ txn = program.startTransaction(tool_name)
 try:
     write()
 except Exception as exc:
-    program.endTransaction(txn, False)                    # roll back on write failure
+    program.endTransaction(txn, False)  # roll back on write failure
     raise WorkerError(CODE_ANALYSIS_FAILED, "write failed and was rolled back") from exc
-program.endTransaction(txn, True)                          # <-- commit OUTSIDE try: if THIS raises,
-                                                           #     the txn is left dangling, the program
-                                                           #     is in an indeterminate state, and a
-                                                           #     raw exception escapes (not typed)
+program.endTransaction(txn, True)  # <-- commit OUTSIDE try: if THIS raises,
+#     the txn is left dangling, the program
+#     is in an indeterminate state, and a
+#     raw exception escapes (not typed)
 ```
 
 `program.endTransaction(txn, True)` (the commit) can itself fail — Ghidra may run end-of-transaction
@@ -282,15 +282,15 @@ txn = program.startTransaction(tool_name)
 committed = False
 try:
     write()
-    program.endTransaction(txn, True)                      # commit INSIDE try
+    program.endTransaction(txn, True)  # commit INSIDE try
     committed = True
 except Exception as exc:
     if not committed:
         # The write OR the commit failed; end the (still-open) transaction WITHOUT committing.
-        with contextlib.suppress(Exception):               # best-effort rollback; never mask the
-            program.endTransaction(txn, False)             # original cause (topic-resource-management)
+        with contextlib.suppress(Exception):  # best-effort rollback; never mask the
+            program.endTransaction(txn, False)  # original cause (topic-resource-management)
         raise WorkerError(CODE_ANALYSIS_FAILED, "write failed and was rolled back") from exc
-    raise                                                   # unreachable in practice; explicit
+    raise  # unreachable in practice; explicit
 ```
 
 Notes on the corrected flow: the `committed` flag distinguishes "commit succeeded" from "commit
@@ -352,23 +352,31 @@ class RenameLocalVariableIn(_SessionScopedIn):
     Gated by `session_enable_writes{allow_structural: true}` + require_write_consent(structural=True).
     Name-only: no data-type change in this increment (the worker passes a null DataType — §1).
     """
-    function: str = Field(min_length=1, max_length=_MAX_NAME)   # existing function (addr|name)
-    variable: str = Field(min_length=1, max_length=_MAX_NAME)   # the target local (stable id — §a)
-    new_name: str = Field(min_length=1, max_length=_MAX_NAME)   # validate_write_name (existing)
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)  # existing function (addr|name)
+    variable: str = Field(min_length=1, max_length=_MAX_NAME)  # the target local (stable id — §a)
+    new_name: str = Field(min_length=1, max_length=_MAX_NAME)  # validate_write_name (existing)
+
 
 class RenameParameterIn(_SessionScopedIn):
     """Arguments for `rename_parameter` — set a function parameter's name (structural)."""
+
     function: str = Field(min_length=1, max_length=_MAX_NAME)
-    parameter: str = Field(min_length=1, max_length=_MAX_NAME)  # the target param (name or index — §a)
+    parameter: str = Field(
+        min_length=1, max_length=_MAX_NAME
+    )  # the target param (name or index — §a)
     new_name: str = Field(min_length=1, max_length=_MAX_NAME)
+
 
 class StructuralRenameResult(_Out):
     """Result of a structural local/parameter rename (ADR-013 §6)."""
-    address: str                 # the function's entry address — server-normalized, safe
-    function: Untrusted[str]     # the function's current name — binary-derived → untrusted (ADR-005)
-    old_name: Untrusted[str]     # the PRIOR decompiler name — binary-derived → untrusted (ADR-005)
-    new_name: str                # the server-validated name we set — SAFE (we validated it)
-    applied: bool                # server/worker-controlled — safe
+
+    address: str  # the function's entry address — server-normalized, safe
+    function: Untrusted[str]  # the function's current name — binary-derived → untrusted (ADR-005)
+    old_name: Untrusted[str]  # the PRIOR decompiler name — binary-derived → untrusted (ADR-005)
+    new_name: str  # the server-validated name we set — SAFE (we validated it)
+    applied: bool  # server/worker-controlled — safe
+
 
 # --- Phase B (DEFERRED — NOT added to the catalog now; shape recorded so §2(a)/KEY DECISION (b)
 #     is on the record). Structured signature input — NO free-form C string parsed (§2a). ---

@@ -13,7 +13,7 @@
 | 3 | Type-check | `quality` · mypy `--strict` | any error |
 | 4 | Unit + coverage | `quality` · pytest | <90% line+branch baseline |
 | 4b | **Critical-path coverage 100%** | `quality` · scoped pytest | <100% on critical modules |
-| 4c | Forward-compat matrix | `quality-py314` · build/lint/type/test on Python 3.14 | any error on 3.14 |
+| 4c | Server-runtime parity | `quality-py315` · build/lint/type/test on Python 3.15 | any error on 3.15 |
 | 5 | SAST | `sast` · bandit + semgrep | new high/critical |
 | 6 | SCA | `sca` · pip-audit | known high/critical CVE w/o waiver |
 | 6b | FID-DB license allow-list | `fid-license-gate` · `vivarium.fid_licenses` | disallowed/copyleft/missing SPDX in `deploy/fid/sources.toml` |
@@ -93,7 +93,7 @@ When the GitHub remote is set up, protect `main` with:
 
 - **Require a pull request** before merging; **≥1 approving review**; security-relevant changes get
   a security-focused review (`workflow-code-review`). Dismiss stale approvals on new commits.
-- **Require status checks to pass:** the **required** contexts are `quality`, `quality-py314`,
+- **Require status checks to pass:** the **required** contexts are `quality`, `quality-py315`,
   `sast`, `sca`, `secret-scan`, `container-iac-scan`, `fid-license-gate`, `fid-elf-match-gate`,
   `image-scan-gate`, `mtls-auth-gate`, and `actionlint` (eleven total); require branches up to date.
   (`image-scan-gate` and `mtls-auth-gate` are always-run gates that internally verify their diff-gated
@@ -130,7 +130,7 @@ above is not the same as *proving* it. Two checks close that gap:
   | `fid-elf-match-gate` | ✅ 2026-06-24 | ADR-043 "Required-check VERIFIED end-to-end" |
   | `image-scan-gate` | ✅ 2026-07-03 | PR #274 (closed unmerged): a deliberate build-break in `Containerfile.worker` failed the `image-scan (worker,…)` matrix leg → `image-scan-gate` (requires **all** image-scan legs to complete+succeed) reported **FAILURE** and the PR went **`mergeStateStatus=BLOCKED`**, while `image-scan (server)` + all other required checks stayed green — proving the required gate red-blocks a merge on a failed scan leg. (A first attempt dropped a pinned-vulnerable pip lockfile, but Trivy's image scan didn't register the loose `requirements.txt`; the leg-fail proof is the gate's own requirement. Trivy's HIGH/CRITICAL `exit-code:1` behavior is configured in `infra/trivy.yaml` and upstream-tested.) |
   | `mtls-auth-gate` | ✅ 2026-07-03 | PR #272 (closed unmerged): flipped the mTLS cert-principal assertion to a wrong value → `mtls-auth-gate` reported **FAILURE** and the PR went **`mergeStateStatus=BLOCKED`** while every other required check stayed green (the integration-only break failed that gate alone) — proving the required gate red-blocks a merge |
-  | others (`quality`, `sast`, `sca`, `secret-scan`, `container-iac-scan`, `fid-license-gate`, `quality-py314`) | observed implicitly | routinely go red on real failures in normal development |
+  | others (`quality`, `sast`, `sca`, `secret-scan`, `container-iac-scan`, `fid-license-gate`, `quality-py315`) | observed implicitly | routinely go red on real failures in normal development |
 
   > **All required gates are now empirically observed to red-block** (2026-07-03). Each proof used a
   > throwaway deliberately-failing PR, observed the gate report red + the PR go `BLOCKED`, then closed

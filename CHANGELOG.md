@@ -8,6 +8,21 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Security
 
+- **Python 3.14 → 3.15 base migration — remediates CVE-2026-111943 (HIGH).** The server's Chainguard
+  distroless base carried **CVE-2026-111943** (HIGH, `ca-certificates-bundle`, crypto/x509 MITM),
+  fixed only on the 3.15 base (the pinned 3.14 digest has no fix; the distroless runtime has no apk to
+  patch in place). Bumped both server base digests to **Python 3.15.1** (builder + runtime) and the
+  worker's `wolfi-base` digest (worker stays Python 3.12 via apk) for the same ca-certs fix.
+  Regenerated the hash-pinned `requirements.lock` + `requirements-dev.lock` on 3.15 (still
+  cp312-compatible for the worker; dev lock now `--allow-unsafe` since pip-audit 2.10.1 pulls in
+  `pip`), bumping cryptography 50.0.0→50.0.2, pydantic 2.13→2.14, starlette 1.3→1.10, uvicorn
+  0.49→0.54, ruff 0.15→0.17 (the newer ruff reformats embedded code blocks in 5 ADRs + adds RUF036).
+  A fresh **unwaived** Trivy HIGH/CRITICAL scan of the rebuilt 3.15 server image = **0 findings**, so
+  the two urllib3 waivers (CVE-2026-97687/97689) are **retired** — `.trivyignore.yaml` now has no
+  active waivers. Renamed the server-runtime parity gate `quality-py314` → **`quality-py315`** (CI +
+  branch-protection required-check list + tripwire + docs updated in lock-step). pip-audit on both
+  locks: no known vulnerabilities. (Bump initiated by the worker-image pin refresh, which surfaced
+  the CVE.)
 - **Fork-PR approval backstop recorded as applied (close #163).** Threat-model §4 marked the
   Actions "require approval for all outside collaborators" backstop **enforced** (live API:
   `fork-pr-contributor-approval = all_external_contributors`) rather than a pending operator action

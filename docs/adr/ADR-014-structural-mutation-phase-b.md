@@ -291,10 +291,27 @@ _MAX_ARRAY_LEN = 65_536
 
 # closed base-type vocabulary mapped to Ghidra built-ins in the worker (not client-extensible)
 BaseType = Literal[
-    "void", "bool", "char", "uchar", "wchar_t",
-    "int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64",
-    "int", "uint", "long", "ulong", "float", "double",
+    "void",
+    "bool",
+    "char",
+    "uchar",
+    "wchar_t",
+    "int8",
+    "uint8",
+    "int16",
+    "uint16",
+    "int32",
+    "uint32",
+    "int64",
+    "uint64",
+    "int",
+    "uint",
+    "long",
+    "ulong",
+    "float",
+    "double",
 ]
+
 
 class TypeRef(_In):
     """A structured reference to a data type — resolved against the program's DataTypeManager.
@@ -302,47 +319,61 @@ class TypeRef(_In):
     Exactly one of `base`/`named` identifies the leaf type; modifiers are bounded. NO C string is
     parsed — the worker assembles a DataType from already-resolved handles (ADR-014 §2.1).
     """
-    base:  BaseType | None = None
-    named: str | None = Field(default=None, min_length=1, max_length=_MAX_NAME)  # must already exist
+
+    base: BaseType | None = None
+    named: str | None = Field(
+        default=None, min_length=1, max_length=_MAX_NAME
+    )  # must already exist
     pointer_levels: int = Field(default=0, ge=0, le=_MAX_POINTER_DEPTH)
     array_len: int | None = Field(default=None, ge=1, le=_MAX_ARRAY_LEN)
     # model_validator: exactly one of base/named set (boundary VALIDATION otherwise)
 
+
 class ParamSpec(_In):
     """One parameter of a structured signature (ADR-014 §2.2)."""
-    name: str = Field(min_length=1, max_length=_MAX_NAME)   # validate_write_name (persisted)
+
+    name: str = Field(min_length=1, max_length=_MAX_NAME)  # validate_write_name (persisted)
     type: TypeRef
+
 
 class SetFunctionSignatureIn(_SessionScopedIn):
     """Arguments for `set_function_signature` — structured signature (NO C string — ADR-014 §2).
 
     Gated by session_enable_writes{allow_structural: true} + require_write_consent(structural=True).
     """
+
     function: str = Field(min_length=1, max_length=_MAX_NAME)
     return_type: TypeRef
     parameters: list[ParamSpec] = Field(default_factory=list, max_length=_MAX_PARAMS)
     calling_convention: str | None = Field(default=None, max_length=_MAX_NAME)  # closed allow-list
 
+
 class SetFunctionSignatureResult(_Out):
     """Result of `set_function_signature` (ADR-014 §5)."""
-    address: str                       # function entry — server-normalized, safe
-    function: Untrusted[str]           # current name — binary-derived → untrusted (ADR-005)
-    old_signature: Untrusted[str]      # PRIOR prototype — binary-derived → untrusted
-    new_signature: Untrusted[str]      # re-rendered applied prototype — binary-derived → untrusted
-    applied: bool                      # server/worker-controlled — safe
+
+    address: str  # function entry — server-normalized, safe
+    function: Untrusted[str]  # current name — binary-derived → untrusted (ADR-005)
+    old_signature: Untrusted[str]  # PRIOR prototype — binary-derived → untrusted
+    new_signature: Untrusted[str]  # re-rendered applied prototype — binary-derived → untrusted
+    applied: bool  # server/worker-controlled — safe
+
 
 class ApplyDataTypeIn(_SessionScopedIn):
     """Arguments for `apply_data_type` — lay a RESOLVABLE type at an address (ADR-014 §2.4)."""
+
     address: str = Field(min_length=1, max_length=_MAX_NAME)
     type: TypeRef
     clear_existing: bool = Field(default=False)
 
+
 class ApplyDataTypeResult(_Out):
     """Result of `apply_data_type` (ADR-014 §5)."""
-    address: str                       # server-normalized — safe
-    type_name: Untrusted[str]          # resolved type's name — binary-derived → untrusted
-    size: int                          # applied size in bytes — worker-computed scalar, safe
-    applied: bool                      # safe
+
+    address: str  # server-normalized — safe
+    type_name: Untrusted[str]  # resolved type's name — binary-derived → untrusted
+    size: int  # applied size in bytes — worker-computed scalar, safe
+    applied: bool  # safe
+
 
 # --- Phase C (DEFERRED — NOT added now; shape recorded for KEY DECISION (a)):
 # class FieldSpec(_In): name: str; type: TypeRef; offset: int | None
