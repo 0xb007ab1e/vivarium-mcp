@@ -178,6 +178,13 @@ Contract changes route through the PM (batch-atomicity mandate).
       `sdlc-reviewer`) + admin-bypass on so the maintainer isn't locked out. The (gated) dependency
       lockfile, when generated, must carry cp314 wheels for `mcp`/`pydantic` (the placeholder build
       installed `--no-deps`, so the 3.14 dep closure is first proven by the `quality-py314` CI leg).
+      - **UPDATE (2026-10-27): server migrated 3.14 → 3.15.** Chainguard's free `:latest` moved to
+        **Python 3.15**, and CVE-2026-111943 (HIGH, `ca-certificates-bundle`, crypto/x509 MITM) is
+        fixed **only** on the 3.15 base (the pinned 3.14 digest has no fix). Bumped both server base
+        digests to 3.15.1, regenerated the hash-pinned locks on 3.15 (still cp312-compatible for the
+        worker), and renamed the parity job `quality-py314` → **`quality-py315`** (branch-protection
+        required-check list updated in lock-step). The worker remains Python 3.12 (apk); its wolfi-base
+        digest was bumped for the same ca-certs fix.
   - **Worker — DONE/validated on `infra/worker-distroless` (2026-06-10).** Base: a single
     **`cgr.dev/chainguard/wolfi-base`** (digest-pinned) + `apk add python-3.12 openjdk-21`
     (replaces `python:3.12-slim` + the copied eclipse-temurin JDK). Worker stays on **Python 3.12**

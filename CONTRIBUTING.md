@@ -51,7 +51,7 @@ Your PR must pass the required checks (branch protection enforces them — see
 [docs/ci-cd.md](docs/ci-cd.md) for the authoritative list and details):
 
 `quality` (build + ruff + mypy + unit/coverage: ≥90% line+branch, **100% on the designated critical
-modules**) · `quality-py314` (forward-compat) · `sast` (bandit + semgrep) · `sca` (pip-audit) ·
+modules**) · `quality-py315` (server-runtime parity) · `sast` (bandit + semgrep) · `sca` (pip-audit) ·
 `secret-scan` (gitleaks) · `container-iac-scan` (Trivy) · `fid-license-gate` · `fid-elf-match-gate` ·
 `image-scan-gate` · `mtls-auth-gate` · `actionlint`.
 

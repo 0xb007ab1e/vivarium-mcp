@@ -60,7 +60,7 @@ _REQUIRED_MARKERS = ("critical", "abuse", "integration")
 #: loudly here rather than leaving an operator to under-protect ``main`` by following a stale list.
 _REQUIRED_STATUS_CHECKS = (
     "quality",
-    "quality-py314",
+    "quality-py315",
     "sast",
     "sca",
     "secret-scan",

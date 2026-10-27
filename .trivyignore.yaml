@@ -15,23 +15,9 @@
 # ever genuinely needed; never a permanent ignore.
 #
 # Owner: 0xb007ab1e.
-vulnerabilities:
-  # py3-pip-wheel (bundled urllib3) in the SERVER distroless base's system layer. CVE-2026-97687
-  # (HTTPS-proxy TLS interception) + CVE-2026-97689 (urllib3 unbounded-memory DoS), fixed upstream in
-  # py3-pip-wheel 26.2.1-r2. VEX = NOT AFFECTED (reachability): the server runtime is Chainguard
-  # distroless and NEVER executes system pip — the builder uninstalls pip/setuptools/wheel from the
-  # venv, and the app imports only its OWN hash-pinned urllib3 (requirements.lock, current/clean), not
-  # pip's vendored copy. The vulnerable code is dead weight, unreachable at runtime.
-  # Compensating controls: no-network-by-default runtime, read-only rootfs, non-root; the app's own
-  # HTTP stack is SCA-gated separately (pip-audit on requirements.lock).
-  # Upgrade is NOT currently available: the fix ships only on Chainguard `python:latest` (now
-  # Python 3.15), but the server is pinned to Python 3.14 (hash-locked wheels; 3.15 needs a separate
-  # lock regen + cffi/libffi build migration). The free tier exposes no `python:3.14` tag with the
-  # fix. Tracked for removal on the 3.15 migration (or a fixed 3.14 base). TIME-BOXED — re-blocks CI
-  # on expiry.
-  - id: CVE-2026-97687
-    statement: "Not affected: server distroless runtime never runs system pip; app uses its own hash-pinned urllib3 (requirements.lock). Upgrade unavailable on the pinned Python 3.14 base; revisit on 3.15 migration."
-    expired_at: 2027-01-19
-  - id: CVE-2026-97689
-    statement: "Not affected: server distroless runtime never runs system pip; app uses its own hash-pinned urllib3 (requirements.lock). Upgrade unavailable on the pinned Python 3.14 base; revisit on 3.15 migration."
-    expired_at: 2027-01-19
+# NO ACTIVE WAIVERS (2026-10-27). The two urllib3 CVEs (CVE-2026-97687 / CVE-2026-97689) in the
+# SERVER distroless base's py3-pip-wheel, plus the ca-certificates-bundle CVE-2026-111943 (HIGH), were
+# all RETIRED by the Python 3.14 → 3.15 base migration: the fixes ship on Chainguard `python:latest`
+# (now 3.15), which the server base is now pinned to. A fresh unwaived Trivy HIGH,CRITICAL scan of the
+# rebuilt 3.15 server image = 0 findings — nothing left to waive.
+vulnerabilities: []

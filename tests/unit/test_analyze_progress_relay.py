@@ -84,7 +84,7 @@ class _FakePort:
 
     def __init__(self, frames: list[tuple[int | None, str]] | None = None) -> None:
         self.frames = frames or []
-        self.on_progress_seen: OnProgress | None | object = "unset"
+        self.on_progress_seen: OnProgress | object | None = "unset"
 
     def attach_stream_jobs(self, manager: object) -> None:
         """No-op streaming-job injection (ADR-040 composition-root wiring seam)."""

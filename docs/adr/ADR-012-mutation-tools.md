@@ -265,60 +265,82 @@ every existing tool (schemas.py:38-58).
 # reject control/separator chars (already in validate_name), and (NEW) restrict to an identifier
 # charset so it cannot smuggle markup/path/zero-width payloads into the program DB.
 
+
 class RenameFunctionIn(_SessionScopedIn):
     """Arguments for `rename_function` — set a function's name (write; gated by session consent)."""
-    function: str = Field(min_length=1, max_length=_MAX_NAME)   # existing function (addr|name)
-    new_name: str = Field(min_length=1, max_length=_MAX_NAME)   # validate_name + identifier allow-list
+
+    function: str = Field(min_length=1, max_length=_MAX_NAME)  # existing function (addr|name)
+    new_name: str = Field(
+        min_length=1, max_length=_MAX_NAME
+    )  # validate_name + identifier allow-list
+
 
 class RenameResult(_Out):
     """Result of a rename write."""
-    address: str                 # server-normalized — safe
-    old_name: Untrusted[str]     # the PRIOR Ghidra name — binary-derived → untrusted (ADR-005)
-    new_name: str                # the server-validated name we set — SAFE (we validated it)
-    applied: bool                # server/worker-controlled — safe
+
+    address: str  # server-normalized — safe
+    old_name: Untrusted[str]  # the PRIOR Ghidra name — binary-derived → untrusted (ADR-005)
+    new_name: str  # the server-validated name we set — SAFE (we validated it)
+    applied: bool  # server/worker-controlled — safe
+
 
 class RenameSymbolIn(_SessionScopedIn):
     """Arguments for `rename_symbol` — set a data/label/global symbol's name (write)."""
+
     identifier: str = Field(min_length=1, max_length=_MAX_NAME)  # existing symbol (addr|name)
     new_name: str = Field(min_length=1, max_length=_MAX_NAME)
 
+
 class RenameSymbolResult(RenameResult):
     """Result of `rename_symbol` (adds the symbol kind)."""
-    kind: str                    # FUNCTION/LABEL/… — closed-vocabulary, safe
+
+    kind: str  # FUNCTION/LABEL/… — closed-vocabulary, safe
+
 
 class SetCommentIn(_SessionScopedIn):
     """Arguments for `set_comment` — set/clear one comment at an address (write)."""
+
     address: str = Field(min_length=1, max_length=_MAX_NAME)
-    comment_type: Literal["EOL", "PRE", "POST", "PLATE", "REPEATABLE"]   # closed allow-list
-    text: str | None = Field(default=None, max_length=_MAX_COMMENT)      # None clears; bounded length
+    comment_type: Literal["EOL", "PRE", "POST", "PLATE", "REPEATABLE"]  # closed allow-list
+    text: str | None = Field(default=None, max_length=_MAX_COMMENT)  # None clears; bounded length
+
 
 class SetCommentResult(_Out):
     """Result of `set_comment`."""
+
     address: str
     comment_type: str
     applied: bool
 
+
 # --- server-side write-lifecycle (no worker RPC), mirroring SessionCloseIn/Out ---
 class SessionEnableWritesIn(_SessionScopedIn):
     """Grant this session WRITE CONSENT (the human-in-the-loop gate for mutation — LLM08)."""
-    allow_structural: bool = Field(default=False)   # forward hook: gate the deferred structural set
+
+    allow_structural: bool = Field(default=False)  # forward hook: gate the deferred structural set
+
 
 class SessionWriteStateOut(_Out):
     """Reports a session's write-consent state."""
+
     session_id: str
     writes_enabled: bool
     allow_structural: bool
 
+
 class SessionDisableWritesIn(_SessionScopedIn):
     """Revoke write consent for this session (return to read-only)."""
+
 
 class SessionUndoIn(_SessionScopedIn):
     """Undo the last committed mutation transaction in this session (optional convenience)."""
 
+
 class SessionUndoOut(_Out):
     """Result of session_undo."""
+
     session_id: str
-    undone: bool          # whether a transaction was undone (false if nothing to undo)
+    undone: bool  # whether a transaction was undone (false if nothing to undo)
 ```
 
 **Bounds / allow-list / validation (per tool):**

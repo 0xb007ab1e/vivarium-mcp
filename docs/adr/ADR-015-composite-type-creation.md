@@ -356,8 +356,9 @@ worker write tools; no new lifecycle tool). The count tests update (`test_tools_
 # Reuses the merged Phase-B TypeRef (schemas.py:1443) — a FieldSpec.type is a flat TypeRef (NO
 # nested define — ADR-015 §1). NO free-form C: the worker assembles StructureDataType/UnionDataType
 # from already-resolved DataType handles via the existing _gh_resolve_type_ref (_jvm_bridge.py:1603).
-_MAX_FIELDS = 256              # a composite with >256 members is pathological (CWE-400)
+_MAX_FIELDS = 256  # a composite with >256 members is pathological (CWE-400)
 _MAX_COMPOSITE_SIZE = 1_048_576  # 1 MiB cap on the assembled composite's total computed size
+
 
 class FieldSpec(_In):
     """One member of a new composite type (ADR-015 §2.1).
@@ -366,9 +367,13 @@ class FieldSpec(_In):
     `validate_write_name` allow-list (stored-injection defense). `type` is the EXISTING Phase-B
     `TypeRef` (resolved, never parsed). `offset` is struct-only (a union overlays all members at 0).
     """
-    name: str = Field(min_length=1, max_length=_MAX_NAME)   # validate_write_name (persisted)
+
+    name: str = Field(min_length=1, max_length=_MAX_NAME)  # validate_write_name (persisted)
     type: TypeRef
-    offset: int | None = Field(default=None, ge=0, lt=_MAX_COMPOSITE_SIZE)  # struct only; None = append
+    offset: int | None = Field(
+        default=None, ge=0, lt=_MAX_COMPOSITE_SIZE
+    )  # struct only; None = append
+
 
 class DefineStructIn(_SessionScopedIn):
     """Arguments for `define_struct` — create a NEW struct from a field list (ADR-015 §2.2).
@@ -376,30 +381,37 @@ class DefineStructIn(_SessionScopedIn):
     Gated by session_enable_writes{allow_structural: true} + require_write_consent(structural=True).
     Name collision → fail-closed REJECT (ADR-015 §6). All field types resolved BEFORE the txn.
     """
-    name: str = Field(min_length=1, max_length=_MAX_NAME)       # validate_write_name (persisted)
+
+    name: str = Field(min_length=1, max_length=_MAX_NAME)  # validate_write_name (persisted)
     fields: list[FieldSpec] = Field(min_length=1, max_length=_MAX_FIELDS)  # non-empty, bounded
     packed: bool = Field(default=False)
     # model_validator: no duplicate field names; no self-embed (named==name & no pointer/array)
 
+
 class DefineStructResult(_Out):
     """Result of `define_struct` (ADR-015 §7). All fields server/worker-controlled → SAFE (no
     binary-derived echo — ADR-015 §7)."""
-    name: str           # the name WE set + server-validated — SAFE
-    kind: str           # "struct" — SAFE
-    size: int           # assembled total size in bytes — worker scalar, SAFE
-    field_count: int    # SAFE
-    applied: bool       # SAFE
+
+    name: str  # the name WE set + server-validated — SAFE
+    kind: str  # "struct" — SAFE
+    size: int  # assembled total size in bytes — worker scalar, SAFE
+    field_count: int  # SAFE
+    applied: bool  # SAFE
+
 
 class DefineUnionIn(_SessionScopedIn):
     """Arguments for `define_union` — create a NEW union (ADR-015 §2.2; offset/packed N/A)."""
+
     name: str = Field(min_length=1, max_length=_MAX_NAME)
     fields: list[FieldSpec] = Field(min_length=1, max_length=_MAX_FIELDS)
     # model_validator: no duplicate field names; no self-embed; each FieldSpec.offset MUST be None
 
+
 class DefineUnionResult(_Out):
     """Result of `define_union` (ADR-015 §7) — all SAFE (no binary-derived echo)."""
+
     name: str
-    kind: str           # "union"
+    kind: str  # "union"
     size: int
     field_count: int
     applied: bool
