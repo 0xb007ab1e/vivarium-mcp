@@ -20,7 +20,7 @@
 # no-upstream-fix Debian-base CVEs (perl-base + ncurses) that `.trivyignore.yaml` waived — Wolfi
 # ships no perl and its packages are CVE-tracked/patched (the sibling server image scans Trivy-0).
 # The worker stays on **Python 3.12** (matches the PyGhidra/JPype bundled in Ghidra 12.1.2; the
-# project's `requires-python = ">=3.12"` covers both this and the 3.14 server). Glibc base, so the
+# project's `requires-python = ">=3.12"` covers both this and the 3.15 server). Glibc base, so the
 # hash-pinned manylinux wheels (pydantic-core etc.) install unchanged.
 #
 # Design notes (vs. the shell-free server image):

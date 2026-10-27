@@ -39,7 +39,7 @@ env:
   # 3.13 (NOT the 3.12 worker runtime): requirements-mutation.lock is compiled under 3.13, where
   # mutmut's parser dep libcst pulls pyyaml-ft==8.0.0 (Requires-Python >=3.13). The lock's Python
   # MUST match the job's Python — on 3.12 that pin has no installable distribution. Mutation testing
-  # measures test quality (version-insensitive); the suite passes on 3.12/3.13/3.14. Regenerate the
+  # measures test quality (version-insensitive); the suite passes on 3.12/3.13/3.15. Regenerate the
   # lock under whatever version this job uses.
   PYTHON_VERSION: "3.13"
   # Regression floor (gap round-3 P7): a run scoring below this FAILS. Set to 65 — conservatively
