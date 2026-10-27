@@ -8,6 +8,10 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Security
 
+- **Worker-image pin bumped to the 3.15/Trivy-clean build.** `.github/worker-image.pin` →
+  `sha256:a6e3f679…` — the cosign-signed worker image from the first `worker-image.yml` build after
+  the Python 3.15 base migration (Trivy HIGH/CRITICAL = 0, no waivers). Advances what live-regression
+  cosign-verifies + pulls to the remediated image.
 - **Python 3.14 → 3.15 base migration — remediates CVE-2026-111943 (HIGH).** The server's Chainguard
   distroless base carried **CVE-2026-111943** (HIGH, `ca-certificates-bundle`, crypto/x509 MITM),
   fixed only on the 3.15 base (the pinned 3.14 digest has no fix; the distroless runtime has no apk to
