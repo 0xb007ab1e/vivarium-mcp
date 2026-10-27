@@ -66,6 +66,12 @@ _IMPORTING_DOC = """\
 
 `session_create` → `session_import` → `session_analyze` → query/decompile/rename/export.
 
+`session_create` only opens an EMPTY session (no binary, no worker). The worker spawns on
+`session_import`. Calling a worker tool (`session_analyze`, `program_metadata`, `list_functions`, …)
+before importing returns `failed-precondition` ("call session_import first") — a permanent error,
+not a transient one, so don't retry it: import first. `session_create` takes no
+`binary_path`/`analyze` shortcut.
+
 ## `source_ref` — where the input must live
 `session_import` does NOT accept raw bytes. `source_ref` is a path to a file **under the server's
 import root**, the `VIVARIUM_IMPORT_ROOT` directory. Anything outside it is refused.

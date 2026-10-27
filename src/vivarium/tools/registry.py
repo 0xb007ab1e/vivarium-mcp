@@ -276,6 +276,33 @@ def required_capability(tool_name: str) -> str:
     return CAP_WRITE if tool_name in WRITE_TOOLS else CAP_READ
 
 
+# =====================================================================================
+# Session-scoped tools that do NOT require an imported binary / live worker (#359). Every OTHER
+# session-scoped tool is guarded at the dispatch chokepoint: called before ``session_import`` it
+# fails closed with the actionable ``failed-precondition`` instead of the opaque, retryable
+# ``worker-unavailable`` 503 that previously made a never-imported session look like a dying worker.
+#
+# This is an EXEMPT-list (guard-on-by-default) deliberately: a new worker tool is auto-protected
+# with no drift, while the exemptions are the few, enumerated manager-only lifecycle tools, each
+# verified to touch only ``ctx.sessions`` (never ``ctx.port``) — so guarding them would wrongly
+# break a legitimate pre-import call:
+#   - session_import          — IS the importer (spawns the worker); guarding it is circular.
+#   - session_status/close    — pure manager state (look-up / eviction).
+#   - session_enable/disable_writes — consent flags (manager state only).
+#   - session_generate_report — builds its report from server-side session state, not the worker.
+# (session_create carries no session_id, so the dispatch guard never runs for it anyway.)
+NO_WORKER_REQUIRED_TOOLS: frozenset[str] = frozenset(
+    {
+        "session_import",
+        "session_status",
+        "session_close",
+        "session_enable_writes",
+        "session_disable_writes",
+        "session_generate_report",
+    }
+)
+
+
 def _authorize_capability(ctx: ToolContext, tool_name: str) -> None:
     """Deny the call fail-closed if the principal lacks the tool's required capability (ADR-033).
 
@@ -324,7 +351,21 @@ def _authorize_capability(ctx: ToolContext, tool_name: str) -> None:
 # Session lifecycle handlers (server-side; not worker RPC)
 # =====================================================================================
 def _handle_session_create(ctx: ToolContext, args: s.SessionCreateIn) -> s.SessionInfo:
-    """Open a new session (no binary, no worker yet).
+    """Open a new, EMPTY session — no binary, no worker, no analysis.
+
+    This is step 1 of 3. ``session_create`` loads nothing; it only mints a session id. To actually
+    analyze a binary follow the full order:
+
+        1. ``session_create()`` → an empty session (returns ``binary_sha256: null``).
+        2. ``session_import(session_id, source_ref=…)`` → load the binary (a path under
+           ``VIVARIUM_IMPORT_ROOT``) and spawn the session's hardened worker. The worker exists only
+           after THIS step (#359).
+        3. ``session_analyze(session_id)`` → run Ghidra auto-analysis.
+
+    Calling a worker tool (``session_analyze``, ``program_metadata``, ``list_functions``, …) before
+    step 2 returns ``failed-precondition`` ("call session_import first") — not a transient error.
+    ``session_create`` does NOT accept a ``binary_path``/``analyze`` shortcut (those are rejected
+    with guidance toward ``session_import``).
 
     Args:
         ctx: Injected collaborators.
@@ -2213,6 +2254,10 @@ def _bind_analyze(ctx: ToolContext) -> Callable[..., Any]:
         # always carries a session_id (required field), so this path always applies.
         ctx.sessions.begin_call(model.session_id, caller=ctx.caller_id)
         try:
+            # Pre-import guard (#359): analyze needs the imported program, so a session that never
+            # imported fails closed with the actionable ``failed-precondition`` rather than the
+            # opaque, retryable ``worker-unavailable`` the adapter would otherwise raise.
+            ctx.sessions.require_worker_started(model.session_id, caller=ctx.caller_id)
             if token is None or context is None:
                 # No client progress requested → byte-for-byte the pre-Phase-2 path (sync on loop;
                 # the worker still emits log-only frames iff args.progress was set — Phase 1).
@@ -2291,6 +2336,12 @@ def _bind(
             return handler(ctx, model)
         ctx.sessions.begin_call(session_id, caller=ctx.caller_id)
         try:
+            # Pre-import guard (#359): a worker-requiring tool on a session that never imported
+            # fails closed with the actionable ``failed-precondition`` (not the opaque, retryable
+            # ``worker-unavailable``). Owner-scoped + BOLA-safe inside. The small manager-only set
+            # is exempt (and ``session_import`` itself, which spawns the worker).
+            if tool_name not in NO_WORKER_REQUIRED_TOOLS:
+                ctx.sessions.require_worker_started(session_id, caller=ctx.caller_id)
             return handler(ctx, model)
         finally:
             ctx.sessions.end_call(session_id, caller=ctx.caller_id)

@@ -220,6 +220,51 @@ def test_ensure_worker_started_worker_is_killed_on_eviction(tmp_path: Path) -> N
     assert port.killed == [info.session_id]
 
 
+# --- require_worker_started (pre-import guard, #359) -------------------------------------------
+@pytest.mark.critical
+def test_require_worker_started_before_import_is_failed_precondition() -> None:
+    """A live session that never imported → FAILED_PRECONDITION, not retryable (#359)."""
+    port = _FakePort()
+    mgr, _ = _mgr(port=port)
+    info = mgr.create()  # created, never imported → no worker
+    with pytest.raises(GhidraMcpError) as ei:
+        mgr.require_worker_started(info.session_id)
+    assert ei.value.envelope.type is ErrorType.FAILED_PRECONDITION
+    assert ei.value.envelope.retryable is False  # permanent caller error — do NOT retry
+    assert "session_import" in ei.value.envelope.detail  # actionable: names the fix
+
+
+@pytest.mark.critical
+def test_require_worker_started_after_import_passes() -> None:
+    """Once ensure_worker ran (first import), the guard is a no-op."""
+    port = _FakePort()
+    mgr, _ = _mgr(port=port)
+    info = mgr.create()
+    mgr.ensure_worker(info.session_id)
+    mgr.require_worker_started(info.session_id)  # must not raise
+
+
+@pytest.mark.critical
+def test_require_worker_started_unknown_session_is_session_invalid() -> None:
+    """Unknown/expired/evicted id → BOLA-safe SESSION_INVALID (same as authorize)."""
+    port = _FakePort()
+    mgr, _ = _mgr(port=port)
+    with pytest.raises(GhidraMcpError) as ei:
+        mgr.require_worker_started("nonexistent-session-id")
+    assert ei.value.envelope.type is ErrorType.SESSION_INVALID
+
+
+@pytest.mark.critical
+def test_require_worker_started_foreign_caller_is_session_invalid() -> None:
+    """A foreign caller gets BOLA-safe SESSION_INVALID, never a precondition oracle (ADR-017)."""
+    port = _FakePort()
+    mgr, _ = _mgr(port=port)
+    info = mgr.create(owner="owner-a")
+    with pytest.raises(GhidraMcpError) as ei:
+        mgr.require_worker_started(info.session_id, caller="attacker-b")
+    assert ei.value.envelope.type is ErrorType.SESSION_INVALID
+
+
 # --- eviction: kill + verified wipe -----------------------------------------------------------
 @pytest.mark.critical
 def test_evict_kills_worker_then_wipes_store(tmp_path: Path) -> None:

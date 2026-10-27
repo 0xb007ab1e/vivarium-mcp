@@ -94,8 +94,18 @@ def _handlers(ctx: reg.ToolContext) -> dict[str, Callable[..., Any]]:
 
 
 def _new_session(sessions: SessionManager, *, owner: str = _OWNER) -> str:
-    """Open a session owned by ``owner`` and return its id."""
-    return sessions.create(owner=owner).session_id
+    """Open a session owned by ``owner``, simulate its import, and return its id.
+
+    Streaming ops require an imported session (a live worker). ``ensure_worker`` here stands in for
+    the ``session_import`` step the pre-import guard (#359) now enforces at dispatch; without it a
+    worker tool fails closed with ``failed-precondition``.
+    """
+    sid = sessions.create(owner=owner).session_id
+    # These hermetic tests wire the port into the ToolContext, not the manager, so ensure_worker is
+    # a no-op here; set worker_started directly to simulate the completed import the pre-import
+    # guard (#359) requires before any worker/streaming tool.
+    sessions._sessions[sid].worker_started = True
+    return sid
 
 
 # --- registration / allow-list -----------------------------------------------------------------

@@ -105,8 +105,8 @@ def _capturing_adapter() -> object:
 @pytest.mark.parametrize(
     ("reason", "expected_substring"),
     [
-        ("escapes-root", "under the import root"),
-        ("not-found", "not found under the import root"),
+        ("escapes-root", "under the server's import root"),
+        ("not-found", "not found under the server's import root"),
         ("malformed", "not a valid path"),
     ],
 )
@@ -140,4 +140,4 @@ def test_import_plain_filenotfound_maps_to_not_found() -> None:
     args = s.SessionImportIn(session_id="s", source_ref="whatever")
     with pytest.raises(GhidraMcpError) as ei:
         adapter.import_binary("s", args)  # type: ignore[attr-defined]
-    assert "not found under the import root" in (ei.value.envelope.detail or "")
+    assert "not found under the server's import root" in (ei.value.envelope.detail or "")

@@ -29,6 +29,7 @@
 | `limit-exceeded` | size/count/time bound hit (DoS control) | 413 / 429 | maybe |
 | `timeout` | per-tool/analysis deadline elapsed; worker may be killed | 408 / 504 | maybe |
 | `worker-unavailable` | worker unreachable/crashed/evicted mid-call | 503 | yes |
+| `failed-precondition` | session live but no binary imported yet — call `session_import` first (#359) | 409 | no |
 | `resource-exhausted` | worker OOM-killed / exited from resource pressure (ADR-023) | 503 | no |
 | `analysis-failed` | Ghidra couldn't analyze the input (not a server bug) | 422 | no |
 | `internal-error` | unexpected server fault; detail is generic | 500 | no |
@@ -41,6 +42,16 @@
 > `session-invalid` (404) so a 403 cannot become an existence oracle (BOLA — `std-owasp-api` API1).
 > So `forbidden` only ever fires *after* the owner check has passed. `detail` is a fixed, value-free
 > string (never the token, scope contents, or which capability). Not retryable.
+>
+> **`failed-precondition` (#359):** an ADDITIVE slug — no existing slug is repurposed. Returned when a
+> worker-requiring tool targets a live, owned session that has **never imported a binary** (no worker
+> / program to act on). The correct sequence is `session_create` → `session_import` → `session_analyze`.
+> **Distinct from `worker-unavailable`:** that is a transient, *retryable* worker loss; this is a
+> permanent caller-sequence error, so it is **409, not retryable** — retrying without importing fails
+> identically (previously this surfaced as the opaque, `retryable:true` `worker-unavailable` 503, which
+> read like a dying worker and invited an infinite retry). An unknown/expired/evicted/foreign id stays
+> `session-invalid` (BOLA-safe), so this slug reveals nothing a normal authorize would not. `detail` is
+> a fixed string naming the fix (`session_import`) — no host path, env value, or binary content.
 >
 > **`resource-exhausted` (v1.3 — ADR-023 / F1):** an ADDITIVE slug — no existing slug is repurposed.
 > Distinct from `worker-unavailable` so a client can surface a precise "increase worker memory or

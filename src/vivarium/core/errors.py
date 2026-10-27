@@ -53,6 +53,14 @@ class ErrorType(StrEnum):
     WORKER_UNAVAILABLE = "worker-unavailable"
     """The Ghidra worker could not be reached, crashed, or was evicted mid-call."""
 
+    FAILED_PRECONDITION = "failed-precondition"
+    """The session is live but not in the state this operation requires — specifically, no binary
+    has been imported yet, so there is no worker/program to act on. A permanent CALLER error (the
+    correct sequence is ``session_create`` → ``session_import`` → ``session_analyze``), NOT the
+    transient infra condition ``worker-unavailable`` is — so it is **not retryable**: retrying the
+    same call without first importing will fail identically. Distinguishing the two is the whole
+    point (issue #359): a never-imported session must not read as a dying worker."""
+
     RESOURCE_EXHAUSTED = "resource-exhausted"
     """The worker exceeded its memory cap (OOM-killed) or exited unexpectedly from resource
     pressure (ADR-023 / F1). Distinct from ``worker-unavailable`` so a client can surface a precise

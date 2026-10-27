@@ -137,8 +137,14 @@ class SourceRefError(OSError):
 #: documented env-var name (safe operator guidance), NEVER the resolved root path or the client's
 #: ``source_ref`` value (master §5 redaction). An unknown reason falls back to the generic detail.
 _SOURCE_REF_DETAILS: dict[str, str] = {
-    "escapes-root": "source_ref must be a path under the import root (VIVARIUM_IMPORT_ROOT)",
-    "not-found": "source_ref was not found under the import root (VIVARIUM_IMPORT_ROOT)",
+    "escapes-root": (
+        "source_ref must be an absolute path under the server's import root "
+        "(configured by VIVARIUM_IMPORT_ROOT); stage the binary there first"
+    ),
+    "not-found": (
+        "source_ref was not found under the server's import root "
+        "(configured by VIVARIUM_IMPORT_ROOT); stage the binary there first"
+    ),
     "malformed": "source_ref is not a valid path",
 }
 #: Fallback when the resolver signalled a reject without a recognized reason (e.g. the default
