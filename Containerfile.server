@@ -54,7 +54,7 @@
 # which ship to the runtime stage). hadolint DL3007: `:latest` is intentional + digest-pinned
 # (Chainguard free tier is :latest-only); the digest is the real pin.
 # hadolint ignore=DL3007
-FROM cgr.dev/chainguard/python:latest-dev@sha256:6536806d7b6022574cad942f1e514e2ec3db6194ce5f0a81b586991bf3fe1b94 AS builder
+FROM cgr.dev/chainguard/python:latest-dev@sha256:59cefd7684789503c50b92e1c40512910063bc9526fe323708b7a1099d14cc23 AS builder
 
 # `-dev` defaults to the non-root user; switch to root to own /venv + /run during the build.
 # Builder stage only — throwaway; the runtime stage ends as USER 65532:65532, which is what ships.
@@ -106,7 +106,7 @@ RUN set -eux; \
 # =============================================================================
 # GATED ITEM S2: pin this base by digest. Shell-free, non-root (uid/gid 65532), no package manager.
 # hadolint ignore=DL3007
-FROM cgr.dev/chainguard/python:latest@sha256:012106301931c182063868dee31dc36a0d278267ec837176ba1774a320fa1bbb AS runtime
+FROM cgr.dev/chainguard/python:latest@sha256:bf06e09413bec94d6489f0be783b8f9349339907b89e0f759d190d0b95ab2d8f AS runtime
 
 LABEL org.opencontainers.image.title="vivarium-server" \
       org.opencontainers.image.description="Secure MCP control-plane server for headless Ghidra (stdio, v1)." \

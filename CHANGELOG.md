@@ -43,6 +43,19 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Security
 
+- **Remediate CVE-2026-114613 (HIGH, `py3-pip-wheel`) in both images.** A fresh Trivy DB flagged
+  `py3-pip-wheel 26.2.2-r0` (fixed in `-r1`) in the shared Wolfi base — surfacing on the first
+  image-path PR since the 3.15 migration (the scan gate is skipped on PRs that touch no image path).
+  - **Server** (distroless, no apk): bumped both `cgr.dev/chainguard/python` digests — builder
+    (`latest-dev` → `59cefd76…`) and runtime (`latest` → `bf06e094…`) — which now bake
+    `py3-pip-wheel 26.2.2-r2`.
+  - **Worker** (Wolfi + apk): raised the existing forced floor `py3-pip-wheel>=26.1.2-r1` →
+    `>=26.2.2-r1` (the old floor was satisfied by the vulnerable `-r0`); resolves to `-r2`.
+    Upgrade-first, not a waiver (`workflow-cve-management`); pip-wheel is build-bootstrap only, not
+    executed at runtime.
+  - Verified locally: a rebuilt server image and the worker base-pkg set both scan **0 HIGH/CRITICAL**.
+    `.trivyignore.yaml` stays empty (no waivers). A worker-image rebuild + pin bump ships the fixed
+    base to the deployed worker (next `worker-image.yml` build).
 - **Worker-image pin bumped to the 3.15/Trivy-clean build.** `.github/worker-image.pin` →
   `sha256:a6e3f679…` — the cosign-signed worker image from the first `worker-image.yml` build after
   the Python 3.15 base migration (Trivy HIGH/CRITICAL = 0, no waivers). Advances what live-regression

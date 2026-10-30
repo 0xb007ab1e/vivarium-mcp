@@ -274,10 +274,12 @@ LABEL org.opencontainers.image.title="vivarium-worker" \
 # ownership by that numeric uid/gid. Ghidra's writable home is forced to the tmpfs via HOME +
 # -Duser.home below, so no created home dir is required.
 RUN set -eux; \
-    # CVE-2026-44432: floor py3-pip-wheel to the patched >=26.1.2-r1 (python-3.12 pulls it as a
-    # transitive dep; the explicit constraint also busts the build-layer cache so a fresh resolve
-    # gets the fix in CI, not a stale -r0 cached layer). py3-pip-wheel is build-bootstrap only — not
-    # executed in the runtime — but we upgrade rather than waive (upgrade-first; ADR-003 spirit).
+    # CVE-2026-44432 + CVE-2026-114613: floor py3-pip-wheel to the patched >=26.2.2-r1 (python-3.12
+    # pulls it as a transitive dep; the explicit constraint also busts the build-layer cache so a
+    # fresh resolve gets the fix in CI, not a stale -r0 cached layer). The older >=26.1.2-r1 floor
+    # was satisfied by the now-vulnerable 26.2.2-r0 the base bakes, so CVE-2026-114613 (HIGH) needed
+    # the floor raised to 26.2.2-r1 (wolfi ships 26.2.2-r2+). py3-pip-wheel is build-bootstrap only —
+    # not executed in the runtime — but we upgrade rather than waive (upgrade-first; ADR-003 spirit).
     # Force fixed base packages the pinned wolfi-base bakes vulnerable (upgrade-first, not a waiver
     # — workflow-cve-management; the explicit constraints also bust the layer cache so a fresh CI
     # resolve pulls the fixes):
@@ -286,7 +288,7 @@ RUN set -eux; \
     #   * CVE-2026-38753 + CVE-2026-38754 (HIGH, busybox) — baked 1.37.0-r60; pin the 1.38.0 fix.
     #   * CVE-2026-3644/4224/7210/82049 (HIGH, cpython) — wolfi's python-3.12 shipped vulnerable at
     #     3.12.14-r6; pin the fixed floor 3.12.15-r0 (the tarfile/XML/expat fixes; latest r3 satisfies).
-    apk add --no-cache "python-3.12>=3.12.15-r0" openjdk-21 "py3-pip-wheel>=26.1.2-r1" \
+    apk add --no-cache "python-3.12>=3.12.15-r0" openjdk-21 "py3-pip-wheel>=26.2.2-r1" \
         "libcrypto3>=3.6.3-r5" "libssl3>=3.6.3-r5" "busybox>=1.38.0-r0"; \
     ln -sf /usr/bin/python3.12 /usr/bin/python; \
     ln -sf /usr/bin/python3.12 /usr/bin/python3
