@@ -56,6 +56,17 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   - Verified locally: a rebuilt server image and the worker base-pkg set both scan **0 HIGH/CRITICAL**.
     `.trivyignore.yaml` stays empty (no waivers). A worker-image rebuild + pin bump ships the fixed
     base to the deployed worker (next `worker-image.yml` build).
+- **Remediate CVE-2026-102554 (HIGH, Google Guava) bundled in Ghidra.** Ghidra 12.1.2 ships
+  `guava 32.1.3-jre` in `Ghidra/Framework/Generic/lib/`, carrying CVE-2026-102554 (CWE-770 DoS via
+  unbounded allocation when Java-deserializing guava `CompactHashMap`/`CompactHashSet`/
+  `MapMakerInternalMap`; fixed in 33.7.2). **Upgrade-first (not a waiver):** the `ghidra-fetch` build
+  stage now downloads `guava-33.7.2-jre.jar` from Maven Central, **SHA-256-verified** (fail-closed on
+  mismatch — `std-supplychain`), and replaces the 32.1.3 jar — mirroring the existing BouncyCastle
+  1.84→1.85 upgrade. Validated end-to-end locally on the rebuilt worker: `pyghidra` starts and a real
+  headless analysis recovers **575 functions** (312 decompiled + `function_context` + `call_graph`,
+  all OK), so the guava 32→33 bump is API-safe for Ghidra; Trivy HIGH/CRITICAL on the rebuilt worker
+  image = **0**. (CI live-regression runs the *pinned* image, so the swap was proven locally; the
+  deployed worker gets it on the next worker-image rebuild + pin bump.)
 - **Worker-image pin bumped to the 3.15/Trivy-clean build.** `.github/worker-image.pin` →
   `sha256:a6e3f679…` — the cosign-signed worker image from the first `worker-image.yml` build after
   the Python 3.15 base migration (Trivy HIGH/CRITICAL = 0, no waivers). Advances what live-regression

@@ -173,6 +173,27 @@ RUN set -eux; \
     for a in bcprov bcpkix bcutil; do test -s "${lib}/${a}-jdk18on-${BC_VERSION}.jar"; done; \
     test -z "$(find "${lib}" -name 'bc*-jdk18on-1.84.jar')"
 
+# GATED ITEM W-GUAVA: upgrade Ghidra's bundled Google Guava from 32.1.3-jre to the fixed 33.7.2-jre
+# (CVE-2026-102554 HIGH — CWE-770 DoS via unbounded allocation when Java-deserializing guava
+# CompactHashMap/CompactHashSet/MapMakerInternalMap; fixed in 33.7.2). The jar is downloaded from
+# Maven Central and SHA-256-VERIFIED before it replaces the 32.1.3 jar (a mismatch fails the build —
+# std-supplychain). Ghidra's module lib/ is loaded by directory scan, so the 33.7.2 jar is picked up
+# (smoke-verified by `import pyghidra` in the runtime stage, and end-to-end by live-regression —
+# guava keeps strong backward compatibility across majors, so the 32→33 bump is API-safe for Ghidra).
+RUN set -eux; \
+    lib=/opt/ghidra/Ghidra/Framework/Generic/lib; \
+    jar="guava-33.7.2-jre.jar"; \
+    sha="b530942257fb935f8b2cfaa5f8eb5bd59c555fd8e8d01b8ce98912e077ea606c"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 60 --proto '=https' --tlsv1.2 \
+        -o "/tmp/${jar}" "https://repo1.maven.org/maven2/com/google/guava/guava/33.7.2-jre/${jar}"; \
+    printf '%s  %s\n' "${sha}" "/tmp/${jar}" > "/tmp/${jar}.sum"; \
+    sha256sum -c "/tmp/${jar}.sum"; \
+    rm -f "/tmp/${jar}.sum" "${lib}/guava-"*.jar; \
+    mv "/tmp/${jar}" "${lib}/${jar}"; \
+    # Fail closed: the 33.7.2 jar is present and no 32.x guava jar remains.
+    test -s "${lib}/${jar}"; \
+    test -z "$(find "${lib}" -name 'guava-32*.jar')"
+
 # =============================================================================
 # Stage 2: pybuilder — build the vivarium wheel (PEP 517) so the runtime install is OFFLINE.
 # =============================================================================
