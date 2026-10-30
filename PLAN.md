@@ -49,6 +49,13 @@ is the central security control.
   (`apply_type_archive` ADR-051). **Catalog 56 → 69 tools.** Every tool proven live against a real
   hardened worker (gated live-regression tests). **DYLD shared-cache support scoped + DEFERRED**
   (ADR-063 — fixture-blocked, capability ready). Detail: [`docs/roadmap-v1.8-findings.md`](docs/roadmap-v1.8-findings.md).
+- **Knowledge-graph export (ADR-079):** 🚧 **in progress** (`feat/graph-export-memory-graph`) — a
+  **client-side** exporter (`src/vivarium/graph_export/`, `vivarium-graph-export` CLI) that projects a
+  whole session into a per-binary project in the `memory-graph` MCP knowledge graph (functions/calls/
+  xrefs/imports/exports/strings + IOC/crypto/secret/capability findings + USER annotations). The server
+  never calls out (ADR-001); pure mapper + driver over `ToolCaller`/`GraphSink` ports, 100% core
+  coverage; binary-derived content stored inert + provenance-tagged (ADR-005), secrets redacted
+  (ADR-072); the outward write is **gated** (TB11). Cross-binary links + auto-export deferred.
 - **Transport:** design **configurable (stdio + HTTP)**; **build/harden stdio in v1**. ✅ **HTTP
   DONE** — shipped as a gated, separately threat-modeled (TB6) v1.1 increment (ADR-011, slices 1–6,
   merged 2026-06-12; stdio remains the default).

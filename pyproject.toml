@@ -128,6 +128,8 @@ Issues = "https://github.com/OWNER/vivarium-mcp/issues"
 [project.scripts]
 # stdio entrypoint (the only transport in v1). Implementation stub lives in src/vivarium/__main__.py.
 vivarium = "vivarium.__main__:main"
+# Self-contained RE-session → memory-graph exporter (ADR-079; client-side, gated outward write).
+vivarium-graph-export = "vivarium.graph_export.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vivarium"]
