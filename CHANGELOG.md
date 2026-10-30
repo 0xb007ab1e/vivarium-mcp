@@ -43,6 +43,12 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Security
 
+- **Worker-image pin bumped to the CVE-remediated build (ships CVE-2026-114613 + CVE-2026-102554
+  fixes to the deployed worker).** `.github/worker-image.pin` → `sha256:ba14eab4…` — the
+  cosign-signed `worker-image.yml` build off `main` carrying the `py3-pip-wheel 26.2.2-r2` base and
+  the Ghidra guava 32.1.3→33.7.2 jar swap. Until this bump the Containerfile fixes were on `main`
+  but the deployed/live-regression worker still ran the previous pinned digest (`a6e3f679…`); this
+  advances what live-regression cosign-verifies + pulls to the remediated image.
 - **Remediate CVE-2026-114613 (HIGH, `py3-pip-wheel`) in both images.** A fresh Trivy DB flagged
   `py3-pip-wheel 26.2.2-r0` (fixed in `-r1`) in the shared Wolfi base — surfacing on the first
   image-path PR since the 3.15 migration (the scan gate is skipped on PRs that touch no image path).
