@@ -31,7 +31,7 @@
 
 ## Build-time / CI credential — the repin GitHub App key (`REPIN_APP_PRIVATE_KEY`)
 - **What / where:** a GitHub App private key (repo perms Contents + Pull requests: write) stored as
-  the repo secret `REPIN_APP_PRIVATE_KEY` (with the non-secret `REPIN_APP_ID`). It lets
+  the repo secret `REPIN_APP_PRIVATE_KEY` (with the non-secret `REPIN_APP_CLIENT_ID`). It lets
   `worker-image.yml` open the **signed, mergeable** worker-image trust-pin bump PR on each release
   tag (round-6 #259). **CI-only** — not a runtime/product credential (threat-model §4 delta).
 - **Rotate (regenerate-then-replace — GitHub App keys are single-valued, no dual-valid window):**
@@ -40,7 +40,7 @@
      (revocation — an App may hold several keys during the swap, so add-new-then-remove-old is
      possible if you want zero-gap).
   2. Update the repo secret `REPIN_APP_PRIVATE_KEY` with the full new `.pem` contents (never commit
-     it). `REPIN_APP_ID` is unchanged unless the App itself is replaced.
+     it). `REPIN_APP_CLIENT_ID` is unchanged unless the App itself is replaced.
   3. Verify on the next release tag (or a dispatch) that `propose-pin-bump` mints a token and opens
      the PR; if the key is missing/partial the job **fail-safe-skips** (V3) — bump the pin manually
      with a signed commit meanwhile.

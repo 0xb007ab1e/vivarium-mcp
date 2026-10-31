@@ -222,11 +222,15 @@ section becomes "Renovate opens bump PRs; a human reviews + merges."
 
 ## Repin GitHub App (one-time — enables the auto-repin PR to actually merge)
 
-> **Status: PROVISIONED 2026-07-03.** The App (`vivarium-repin-0xb007ab1e`, App ID 4208211) is
-> installed on this repo and both secrets (`REPIN_APP_ID`, `REPIN_APP_PRIVATE_KEY`) are set, so
-> `propose-pin-bump` now **runs** on each release tag (no longer fail-safe-skips). The steps below
-> are retained as the setup/re-provision procedure (and apply after a key rotation —
-> `secret-rotation.md`). End-to-end verification still pending its first real release tag.
+> **Status: NEEDS RE-INSTALL (2026-10-31).** The **v0.14.0** release tag exercised this path for the
+> first time and `propose-pin-bump` **failed at "Mint the repin GitHub App token"** —
+> `create-github-app-token` got **404** on `GET /repos/{o}/{r}/installation`: the App
+> (`vivarium-repin-0xb007ab1e`, App ID 4208211) authenticates but is **not installed on
+> `0xb007ab1e/vivarium-mcp`** (most likely dropped in the `ghidra-mcp` → `vivarium-mcp` rename).
+> The workflow wiring is correct (it reached the mint step and fail-safe-aborted — no bot PR); the
+> gap is purely the missing installation. **Re-install per the steps below**, then re-verify on the
+> next release tag (issue #171). Note the input migrated to the App's **Client ID**
+> (`REPIN_APP_CLIENT_ID`) — `create-github-app-token` deprecated the numeric `app-id`.
 
 `worker-image.yml`'s `propose-pin-bump` job opens the PR that advances the worker-image trust pin
 (`.github/worker-image.pin`) on each release tag. It uses a **GitHub App token**, not the built-in
@@ -242,9 +246,10 @@ gated decision).
 1. **Create a GitHub App** (Settings → Developer settings → GitHub Apps → New): repository permissions
    **Contents: Read and write** + **Pull requests: Read and write** (nothing else). No webhook needed.
 2. **Install it** on `0xb007ab1e/vivarium-mcp` (this repo only — least privilege).
-3. Generate a **private key** (.pem) for the App and note its **App ID**.
+3. Generate a **private key** (.pem) for the App and note its **Client ID** (App settings → "Client
+   ID", an `Iv…`-style string — NOT the numeric App ID; `create-github-app-token` deprecated `app-id`).
 4. Add two repo secrets (Settings → Secrets and variables → Actions):
-   - `REPIN_APP_ID` = the App's numeric ID.
+   - `REPIN_APP_CLIENT_ID` = the App's Client ID.
    - `REPIN_APP_PRIVATE_KEY` = the full contents of the .pem.
 5. **Until these secrets exist** the job SKIPS with a warning — bump `.github/worker-image.pin`
    manually with a **signed** commit (a plain bot/unsigned commit cannot merge under branch

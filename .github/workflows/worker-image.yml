@@ -231,8 +231,10 @@ jobs:
   #
   # SETUP (one-time, maintainer): create a GitHub App with repo permissions Contents: write +
   # Pull requests: write, install it on this repo, and store its credentials as repo secrets
-  # REPIN_APP_ID + REPIN_APP_PRIVATE_KEY. Until those secrets exist this job SKIPS with a warning
-  # (bump .github/worker-image.pin manually with a SIGNED commit). Setup: docs/runbooks/supply-chain-pinning.md.
+  # REPIN_APP_CLIENT_ID (the App's Client ID — `create-github-app-token` deprecated the numeric
+  # `app-id` in favour of `client-id`) + REPIN_APP_PRIVATE_KEY. Until those secrets exist this job
+  # SKIPS with a warning (bump .github/worker-image.pin manually with a SIGNED commit). Setup:
+  # docs/runbooks/supply-chain-pinning.md.
   # ---------------------------------------------------------------------------
   propose-pin-bump:
     needs: build-scan-sign
@@ -246,17 +248,17 @@ jobs:
       - name: Repin App configured?
         id: cfg
         env:
-          APP_ID: ${{ secrets.REPIN_APP_ID }}
+          APP_CLIENT_ID: ${{ secrets.REPIN_APP_CLIENT_ID }}
           APP_PRIVATE_KEY: ${{ secrets.REPIN_APP_PRIVATE_KEY }}
         run: |
-          # V3: require BOTH secrets to enable the auto-repin. Guarding on APP_ID alone let an
-          # APP_ID-set-but-key-missing (or empty/malformed key) config bypass this clean skip and
+          # V3: require BOTH secrets to enable the auto-repin. Guarding on the client id alone let a
+          # client-id-set-but-key-missing (or empty/malformed key) config bypass this clean skip and
           # HARD-FAIL the downstream `create-github-app-token` step — defeating the intended
           # graceful degradation. Gate on both so a partial config skips (with the warning) instead.
-          if [ -n "${APP_ID}" ] && [ -n "${APP_PRIVATE_KEY}" ]; then
+          if [ -n "${APP_CLIENT_ID}" ] && [ -n "${APP_PRIVATE_KEY}" ]; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::REPIN_APP_ID / REPIN_APP_PRIVATE_KEY not both set — skipping the" \
+            echo "::warning::REPIN_APP_CLIENT_ID / REPIN_APP_PRIVATE_KEY not both set — skipping the" \
                  "auto-repin PR. Bump .github/worker-image.pin manually with a SIGNED commit, or" \
                  "provision the repin GitHub App (see this job's header comment)."
             echo "ok=false" >> "$GITHUB_OUTPUT"
@@ -315,7 +317,7 @@ jobs:
         if: steps.cfg.outputs.ok == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # actions/create-github-app-token@v3.2.0
         with:
-          app-id: ${{ secrets.REPIN_APP_ID }}
+          client-id: ${{ secrets.REPIN_APP_CLIENT_ID }}
           private-key: ${{ secrets.REPIN_APP_PRIVATE_KEY }}
       - name: Open a SIGNED trust-pin bump PR (Contents API commit + App-token PR)
         if: steps.cfg.outputs.ok == 'true'

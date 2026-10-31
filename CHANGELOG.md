@@ -6,6 +6,18 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Repin GitHub App: migrate `create-github-app-token` off the deprecated `app-id` to `client-id`.**
+  `worker-image.yml`'s `propose-pin-bump` now authenticates the repin App via its **Client ID**
+  (`REPIN_APP_CLIENT_ID` secret) + `REPIN_APP_PRIVATE_KEY`, silencing the action's `app-id`
+  deprecation warning. Gate, job header, threat-model §4, and the supply-chain-pinning /
+  secret-rotation runbooks updated to match. The v0.14.0 release tag also revealed the repin App is
+  **not installed** on `vivarium-mcp` (`create-github-app-token` 404 on get-repo-installation —
+  likely dropped in the `ghidra-mcp`→`vivarium-mcp` rename); re-install + set the new secret per
+  `docs/runbooks/supply-chain-pinning.md` (tracked in #171). Maintainer action required; no runtime
+  impact (the pin advances only via a human-merged, cosign-verified PR regardless).
+
 ## [0.14.0] - 2026-10-31
 
 ### Added
