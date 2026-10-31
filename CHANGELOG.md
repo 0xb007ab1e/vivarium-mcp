@@ -6,6 +6,8 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-31
+
 ### Added
 
 - **Export RE sessions to the `memory-graph` knowledge graph (ADR-079).** A new client-side package
@@ -482,8 +484,6 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   category correct 4/4) with a cross-case scorecard, dashboard, and a remediation analysis, plus
   Proposed ADR-073/074/075. ADR-073 (`program_fingerprint`) and ADR-075 (`crypto_detect`) are now
   **Accepted** and implemented (above); ADR-074 (`capability_scan`) remains Proposed.
-
-## [0.14.0] — 2026-08-25
 
 The **v1.8 capability batch** (ADR-045 … ADR-063) broadens Ghidra loader coverage and adds a set of
 read-only analysis + cross-binary tools; the **v1.9 batch** (ADR-064 … ADR-072) adds data-flow
@@ -1733,7 +1733,8 @@ analyzer is the central security control.
   off-by-default and fail-closed. See `docs/security/threat-model.md` and `SECURITY.md` for the
   reporting channel.
 
-[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/0xb007ab1e/vivarium-mcp/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/0xb007ab1e/vivarium-mcp/compare/v0.13.0...v0.14.0
 [0.7.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.4.0...v0.5.0
