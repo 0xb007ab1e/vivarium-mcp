@@ -20,6 +20,15 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [0.14.0] - 2026-10-31
 
+The **v1.8 capability batch** (ADR-045 … ADR-063) broadens Ghidra loader coverage and adds a set of
+read-only analysis + cross-binary tools; the **v1.9 batch** (ADR-064 … ADR-072) adds data-flow
+slicing plus eight capability-gap tools. Together they grow the Tier-1 catalog from **56 to 74**
+tools (58 read-only / 16 write). Every new tool is read-only (or, for `apply_type_archive`, a
+consent-gated structural write) and enforces the standard confinement + size caps before the worker
+(ADR-001); each was proven live against a real hardened worker. This release also folds in the
+**round-11 and round-12 security-hardening / gap-remediation** work below. (Note: `v1.8` / `v1.9`
+are internal feature-milestone labels, not package versions — the package is `0.14.0`.)
+
 ### Added
 
 - **Export RE sessions to the `memory-graph` knowledge graph (ADR-079).** A new client-side package
@@ -35,111 +44,6 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   Cross-binary `SAME_AS`/family links and auto-export at `session_close` are deferred fast-follows.
   Threat model: TB11.
 
-### Fixed
-
-- **Loading a binary is no longer a silent trap (#359).** Two unrelated mistakes used to both surface
-  as the same opaque, `retryable:true` `worker-unavailable` 503 ("no worker for session"), pointing at
-  nothing:
-  - **Calling a worker tool before `session_import`** now returns the new, additive
-    `failed-precondition` error (**409, not retryable**) whose detail names the fix and the order
-    (`session_create` → `session_import` → `session_analyze`) — distinct from a genuinely transient
-    worker loss, which stays `worker-unavailable`. Enforced at the dispatch chokepoint via
-    `SessionManager.require_worker_started` (owner-scoped, BOLA-safe); the small set of manager-only
-    lifecycle tools (`NO_WORKER_REQUIRED_TOOLS`) is exempt, and every other session-scoped tool is
-    guarded automatically (no drift).
-  - **`session_create(binary_path=…, analyze=…)`** — which used to be a silent no-op (the args were
-    dropped at the MCP boundary and the binary never loaded) — now fails loudly with a
-    `validation-error` pointing at `session_import`. `session_create` only opens an empty session.
-  - **Out-of-root / missing `source_ref`** import errors now read more actionably ("…under the
-    server's import root (configured by VIVARIUM_IMPORT_ROOT); stage the binary there first") — still
-    path-free per the error-envelope disclosure rules; the actual order + import-root requirement are
-    documented in the `session_create`/`session_import` tool descriptions.
-
-### Security
-
-- **Worker-image pin bumped to the CVE-remediated build (ships CVE-2026-114613 + CVE-2026-102554
-  fixes to the deployed worker).** `.github/worker-image.pin` → `sha256:ba14eab4…` — the
-  cosign-signed `worker-image.yml` build off `main` carrying the `py3-pip-wheel 26.2.2-r2` base and
-  the Ghidra guava 32.1.3→33.7.2 jar swap. Until this bump the Containerfile fixes were on `main`
-  but the deployed/live-regression worker still ran the previous pinned digest (`a6e3f679…`); this
-  advances what live-regression cosign-verifies + pulls to the remediated image.
-- **Remediate CVE-2026-114613 (HIGH, `py3-pip-wheel`) in both images.** A fresh Trivy DB flagged
-  `py3-pip-wheel 26.2.2-r0` (fixed in `-r1`) in the shared Wolfi base — surfacing on the first
-  image-path PR since the 3.15 migration (the scan gate is skipped on PRs that touch no image path).
-  - **Server** (distroless, no apk): bumped both `cgr.dev/chainguard/python` digests — builder
-    (`latest-dev` → `59cefd76…`) and runtime (`latest` → `bf06e094…`) — which now bake
-    `py3-pip-wheel 26.2.2-r2`.
-  - **Worker** (Wolfi + apk): raised the existing forced floor `py3-pip-wheel>=26.1.2-r1` →
-    `>=26.2.2-r1` (the old floor was satisfied by the vulnerable `-r0`); resolves to `-r2`.
-    Upgrade-first, not a waiver (`workflow-cve-management`); pip-wheel is build-bootstrap only, not
-    executed at runtime.
-  - Verified locally: a rebuilt server image and the worker base-pkg set both scan **0 HIGH/CRITICAL**.
-    `.trivyignore.yaml` stays empty (no waivers). A worker-image rebuild + pin bump ships the fixed
-    base to the deployed worker (next `worker-image.yml` build).
-- **Remediate CVE-2026-102554 (HIGH, Google Guava) bundled in Ghidra.** Ghidra 12.1.2 ships
-  `guava 32.1.3-jre` in `Ghidra/Framework/Generic/lib/`, carrying CVE-2026-102554 (CWE-770 DoS via
-  unbounded allocation when Java-deserializing guava `CompactHashMap`/`CompactHashSet`/
-  `MapMakerInternalMap`; fixed in 33.7.2). **Upgrade-first (not a waiver):** the `ghidra-fetch` build
-  stage now downloads `guava-33.7.2-jre.jar` from Maven Central, **SHA-256-verified** (fail-closed on
-  mismatch — `std-supplychain`), and replaces the 32.1.3 jar — mirroring the existing BouncyCastle
-  1.84→1.85 upgrade. Validated end-to-end locally on the rebuilt worker: `pyghidra` starts and a real
-  headless analysis recovers **575 functions** (312 decompiled + `function_context` + `call_graph`,
-  all OK), so the guava 32→33 bump is API-safe for Ghidra; Trivy HIGH/CRITICAL on the rebuilt worker
-  image = **0**. (CI live-regression runs the *pinned* image, so the swap was proven locally; the
-  deployed worker gets it on the next worker-image rebuild + pin bump.)
-- **Worker-image pin bumped to the 3.15/Trivy-clean build.** `.github/worker-image.pin` →
-  `sha256:a6e3f679…` — the cosign-signed worker image from the first `worker-image.yml` build after
-  the Python 3.15 base migration (Trivy HIGH/CRITICAL = 0, no waivers). Advances what live-regression
-  cosign-verifies + pulls to the remediated image.
-- **Python 3.14 → 3.15 base migration — remediates CVE-2026-111943 (HIGH).** The server's Chainguard
-  distroless base carried **CVE-2026-111943** (HIGH, `ca-certificates-bundle`, crypto/x509 MITM),
-  fixed only on the 3.15 base (the pinned 3.14 digest has no fix; the distroless runtime has no apk to
-  patch in place). Bumped both server base digests to **Python 3.15.1** (builder + runtime) and the
-  worker's `wolfi-base` digest (worker stays Python 3.12 via apk) for the same ca-certs fix.
-  Regenerated the hash-pinned `requirements.lock` + `requirements-dev.lock` on 3.15 (still
-  cp312-compatible for the worker; dev lock now `--allow-unsafe` since pip-audit 2.10.1 pulls in
-  `pip`), bumping cryptography 50.0.0→50.0.2, pydantic 2.13→2.14, starlette 1.3→1.10, uvicorn
-  0.49→0.54, ruff 0.15→0.17 (the newer ruff reformats embedded code blocks in 5 ADRs + adds RUF036).
-  A fresh **unwaived** Trivy HIGH/CRITICAL scan of the rebuilt 3.15 server image = **0 findings**, so
-  the two urllib3 waivers (CVE-2026-97687/97689) are **retired** — `.trivyignore.yaml` now has no
-  active waivers. Renamed the server-runtime parity gate `quality-py314` → **`quality-py315`** (CI +
-  branch-protection required-check list + tripwire + docs updated in lock-step). pip-audit on both
-  locks: no known vulnerabilities. (Bump initiated by the worker-image pin refresh, which surfaced
-  the CVE.)
-- **Fork-PR approval backstop recorded as applied (close #163).** Threat-model §4 marked the
-  Actions "require approval for all outside collaborators" backstop **enforced** (live API:
-  `fork-pr-contributor-approval = all_external_contributors`) rather than a pending operator action
-  (**#163**, closed). The related pin-bump-PR App-token fix (**#171**) is already implemented in
-  `worker-image.yml propose-pin-bump` (`create-github-app-token` + `REPIN_APP_ID`/
-  `REPIN_APP_PRIVATE_KEY`) and documented in §4 (round-6 #259); its mechanism is in place, but its
-  own acceptance requires **end-to-end proof on a real release's pin-bump PR** (none has occurred
-  since the fix landed — recent pins are manual), so **#171 stays open** pending that live
-  verification on the next release. Docs-only.
-- **Threat-model §2 boundary registry — backfill TB9 + TB10 rows.** The §2 "Trust boundaries"
-  table stopped at TB8 while TB9 (dashboard interactive backend, §21) and TB10 (generated target
-  documentation, §22) lived only as prose sections; added both as table rows and a note clarifying
-  that the core data-flow diagram draws only the four fixed boundaries (TB1–TB4) while TB5–TB10 are
-  later-increment surfaces registered in the table with their own STRIDE sections. Registry now
-  matches the prose (reviewer follow-up F-5, PR #347). Docs-only.
-- **Threat model TB10 + ADR-078 (generated target documentation) — modeled before implementation.**
-  A new output-edge trust boundary — **hostile-origin artifact → persisted/rendered document** — for
-  the standing goal of auto-generating navigable documentation of an *analyzed target* (an
-  archify-style atlas + ADR-shaped finding records). STRIDE-modeled (`docs/security/threat-model.md`
-  §22, **TB10**) and specified (**ADR-078**) *before* any code (`workflow-threat-model`), because a
-  generated document is a new persisted copy of **CONFIDENTIAL, HOSTILE-ORIGIN** artifacts (symbol
-  names, strings, decompiled text) that may travel off-box or reach an LLM — distinct from TB9, which
-  renders results *inert in a live browser*. Rendering safety is **tier-invariant A+B+C**: (A)
-  self-contained HTML + strict CSP (`default-src 'none'` …) + `<iframe sandbox>`; (B) data/template
-  separation (`textContent`, no `innerHTML`); (C) allow-list projection of binary-derived values
-  (the only control that holds in a renderer we don't own — no raw-Markdown artifact ships). No code
-  yet; every tier is a separate **gated** increment. Amended 2026-10-26 after `sdlc-red-team` (F1/F2/F3)
-  + `sdlc-reviewer` (CSP `default-src`, string-escape projection) review (PR #347).
-- **Dependency CVE bump — certifi.** Regenerated `requirements.lock` to clear the SCA gate's fresh advisory: `certifi` 2026.10.18 → 2026.10.19 (**PYSEC-2026-4320**). The 2026.10.18 bundle carried the `emSign ECC Root CA - G3` root; eight eMudhra intermediates chaining to it have compromised private keys (revoked by the CA), so an on-path attacker holding one could forge valid-looking certs for any host and intercept TLS from clients trusting the bundle (`requests`/`urllib3`/`pip`). 2026.10.19 restores only the unaffected emSign roots. `pip-audit --strict` over `requirements.lock` is clean; certifi-only diff (version + hashes).
-- **Clear container image-scan CVEs (worker + server).** The Trivy image-scan gate flagged HIGH/CRITICAL
-  CVEs in both images; cleared by upgrade (no waivers added — `.trivyignore.yaml` stays empty). **Worker — BouncyCastle 1.84 → 1.85:** Ghidra 12.1.2 bundles `bcprov`/`bcpkix`/`bcutil-jdk18on` at 1.84, carrying **CVE-2026-8763** (CRITICAL) + **CVE-2026-13506** (HIGH) in bcprov; the build now replaces the whole family with 1.85 from Maven Central, each SHA-256-verified before swap (fail-closed). Smoke-verified Ghidra still boots + disassembles under 1.85. **Worker — `python-3.12` pinned ≥ 3.12.15-r0:** Wolfi shipped 3.12.14-r6 with cpython **CVE-2026-3644/4224/7210/82049** (HIGH); the pin forces the fixed build and busts the layer cache. **Server — time-boxed VEX waiver for `py3-pip-wheel`** (**CVE-2026-97687/97689**, bundled urllib3 HIGH, in the distroless base's system layer): **not affected** — the server runtime never executes system pip (the venv's pip is uninstalled; the app uses its own hash-pinned `urllib3`), so the vulnerable code is unreachable. The upstream fix ships only on Chainguard `python:latest` (now Python **3.15**), but the server is pinned to Python **3.14** (hash-locked wheels; 3.15 needs a separate lock regen + cffi/libffi build migration) and the free tier exposes no fixed `python:3.14` tag — so an upgrade isn't currently available. Waiver auto-expires 2027-01-19 (re-blocks CI), tracked for removal on the 3.15 migration. Verified locally: `trivy image` (HIGH/CRITICAL) exits clean on the rebuilt worker image.
-- **Dependency CVE bump — anyio / PyJWT / mcp.** Regenerated `requirements.lock` (+ `requirements-dev.lock`) to clear fresh advisories the SCA gate flagged: `anyio` 4.13.0 → 4.14.2 (PYSEC-2026-4024 process-pool stderr-pipe deadlock, PYSEC-2026-4025 IDNA-2003 TLS hostname confusion), `pyjwt` 2.13.0 → 2.15.1 (the PYSEC-2026-41xx cluster), `mcp` 1.28.1 → 1.30.0 (CVE-2026-59951 — stateful Streamable-HTTP sessions never reclaimed → unbounded memory DoS). `pip-audit --strict` over `requirements.lock` is clean; full unit suite green on mcp 1.30.0. `mcp` is capped `<2` (2.x is a major FastMCP API migration, out of scope); the pyproject floors stay low so the `sast` extra (semgrep hard-pins old mcp/pyjwt) still resolves — the lockfile is the source of truth. Dev-only `urllib3`/`msgpack` advisories in `requirements-dev.lock` are pre-existing, not shipped, and tracked separately (scheduled-rescan, not a merge gate).
-
-### Added
 
 - **ADR-076 / TB9 — live dashboard interactive backend e2e (`McpToolCaller`).** A gated real-worker
   e2e (`tests/e2e/test_dashboard_interactive_oss.py`) closes the `pragma: no cover` gap on the live
@@ -214,48 +118,6 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   never binds `0.0.0.0`. Run one instance per interface, sharing one state file
   (`topic-tailnet-dev-access`).
 
-### Changed
-
-- **Repin the trusted worker image to the current signed build** (`.github/worker-image.pin`
-  → `sha256:a55be6dd…`). The previous pin predated the ADR-073/075 worker verbs
-  (`program_fingerprint`, `crypto_instructions`) and PR #331's honest `method-not-found` /
-  `invalid-request` dispatch slugs; the new cosign-signed digest (built from `main`) bakes them in,
-  so the "test what you ship" live-regression path exercises the current worker.
-
-### Fixed
-
-- **`default_factory` tool-arg defaults were dropped from the MCP input schema (two tools).** The
-  tool-signature builder (`_signature_from_model`) used `FieldInfo.get_default()`, which returns
-  `PydanticUndefined` for a `Field(default_factory=...)` field — so FastMCP marked such a field
-  **required**, and a real MCP client omitting it got **"Field required"**. This silently broke two
-  already-shipped tools: **`session_generate_report`** (omitting `scope`) and
-  **`set_function_signature`** (omitting `parameters` to set a zero-argument signature). Fixed with
-  `get_default(call_default_factory=True)` so the factory default (`[]`) is carried into the
-  signature (a no-op for plain-default / required fields; no gate changed). Caught by the new
-  ADR-078 real-worker docs-pipeline e2e; regression-tested for both tools.
-- **JieLi pi32 languages were unreadable by the worker — import rejected them as "not-found"
-  (fixes #338 regression).** The `jieli-sleigh` stage SLEIGH-compiled `pi32.sla`/`pi32v2.sla`/
-  `q32s.sla` under the build's `027` umask, so the COPYed module shipped the compiled grammars as
-  `0640 root:root`. The runtime worker runs as `USER 65532`, which **cannot read** those files, so
-  Ghidra **silently skipped** all three JieLi LanguageIDs and `session_import(loader="binary",
-  processor="pi32:LE:32:default", …)` failed with a worker **`not-found`** — the bundled module
-  from #338 was present but never usable. The stage now `chmod -R a+rX` the module before the COPY
-  (dirs `0755` / files `0644`); the worker reads the grammars and a JieLi AC632N `app.bin` imports +
-  disassembles (validated end-to-end: import populates `binary_sha256`; with the correct core —
-  `q32s:LE:32:default`, `base_addr=0x1E00000` — analysis recovers **401 functions** and a clean
-  C-runtime reset handler, vs. **0** before the fix when the language was skipped). No other stage is
-  affected; the module stays world-readable only (no write).
-- **Honest error when the worker lacks a verb (fixes #329, #330).** A tool whose verb the running
-  worker image does not implement (e.g. an image predating the tool — `program_fingerprint`,
-  `crypto_detect`/`crypto_instructions`, `family_match`) returned an opaque **500 internal-error**:
-  the worker emits JSON-RPC `-32601` (method-not-found), which older workers carry with no matching
-  slug, so the slug-only server mapping fell through to `internal-error`. The adapter now keys off
-  the numeric JSON-RPC **code** (preserved by every worker), surfacing an actionable **404**
-  ("operation not supported by the running worker — the worker image may predate this tool; rebuild
-  or re-pin"), and `-32600` → 400. The worker also emits proper `method-not-found` / `invalid-request`
-  slugs now (defense in depth). Detail stays leak-free; the worker's own message remains log-only.
-
-### Added
 
 - **Collapsible explorer sessions/groups and viewer panels (save viewport space).** Every explorer
   group (Sessions / Workflows / Build), each individual session block, and every viewer panel (a
@@ -373,21 +235,6 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   content stays inert even while navigable (ADR-005). Frontend + producer + schema; data contract
   additive.
 
-### Changed
-
-- **Dashboard redesigned as a VSCode-style workbench.** The dashboard UI moved from stacked
-  cards to a familiar three-region shell: a **titlebar**, an **Explorer sidebar** (sessions →
-  Overview / Imports / Exports / Strings / Call graph / each decompiled output / Verdict / Timeline,
-  plus Build), a **central artifact viewer** that renders each artifact type appropriately
-  (colorized C **code blocks** with a line-number gutter for decompiled output; sortable-width
-  tables for imports/exports/strings; a key/value grid for binary format; an adjacency list for the
-  call graph), and a **status bar**. Syntax colorization is a small self-contained tokenizer in
-  `app.js` — **no external libraries** (strict inline-free CSP) and **every token is emitted via
-  `textContent`**, so binary-derived (untrusted) content stays inert even while highlighted
-  (ADR-005). Theme-aware (light/dark) and keyboard-navigable (WCAG 2.2 AA target). Frontend-only —
-  the data contract, API, and providers are unchanged.
-
-### Added
 
 - **Dashboard analysis panels (streamed).** The dashboard SSE stream now carries the full analysis
   picture as structured panel events — `metadata` (binary format/arch/bits/endian/entry/size +
@@ -420,31 +267,6 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   same-profile query; `import_digest` is profile-stable. The human-gated D3 curation loop stays the
   way to add entries.
 
-### Security
-
-- **Worker image base bumped to fix a glibc drift (supply chain).** `Containerfile.worker` pinned
-  `cgr.dev/chainguard/wolfi-base@sha256:0b5fd36c…` across all 7 build stages, but the wolfi apk repo
-  advanced: `apk add python-3.12` now installs a build linked against **glibc 2.44**, which the older
-  pinned base's `libm.so.6` does not provide — the worker image build failed at the wheel stage
-  (`ImportError: … version GLIBC_2.44 not found`). Repinned all stages to
-  `wolfi-base@sha256:103eb3f4…` (ships glibc-2.44-r4, matching the current apk python), keeping the
-  auto-CVE-patch `apk add` design and digest-pinned bases. Unblocks the worker-image rebuild + trust
-  repin (which lights up the `program_fingerprint` / `crypto_instructions` worker code).
-
-### Changed
-
-- **`crypto_detect` gains the `instruction` source (ADR-075 fast-follow).** In addition to the
-  `import` and `api_name` sources, `crypto_detect` now flags **hardware crypto opcodes** — AES-NI
-  (`aesenc`/`aesdec`/`aeskeygenassist`/…), SHA extensions (`sha256rnds2`/…), and carry-less multiply
-  (`pclmulqdq`) — via a new read-only worker verb `crypto_instructions` (one linear pass over the
-  program's instructions, bounded by a hit cap). Catches HW-accelerated crypto that leaves no
-  importable symbol or algorithm constant. `source`∈{import,api_name,instruction}; instruction
-  confidence 0.9. No tool-count or schema change (the indicator shape already carried `source`). The
-  `code_pattern` (cipher-shaped loops) source remains the last tracked fast-follow. **Note:** the
-  worker opcode scan only runs once the pinned worker image is rebuilt to include it (unit-gated +
-  gated integration test now; image repin is the deploy step).
-
-### Added
 
 - **`family_match` — offline malware-family match by fingerprint (ADR-073 D2).** A read-only Tier-2
   tool that computes this program's `program_fingerprint` digests (D1; no new worker verb) and ranks
@@ -489,51 +311,6 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   RPC boundary. VT-`imphash`/`tlsh`/PE `rich_hash`/`authentihash` and the `family_match` corpus
   (ADR-073 D2) are a tracked fast-follow. Tier-1 catalog **74 → 75**.
 
-### Internal
-
-- **Blind-triage validation benchmark + remediation ADRs.** Added `validation/` (4-case blind static
-  triage of the read-only battery — Kelihos / Wirenet / LuckyCat / BumbleBee; verdict/severity/
-  category correct 4/4) with a cross-case scorecard, dashboard, and a remediation analysis, plus
-  Proposed ADR-073/074/075. ADR-073 (`program_fingerprint`) and ADR-075 (`crypto_detect`) are now
-  **Accepted** and implemented (above); ADR-074 (`capability_scan`) remains Proposed.
-
-The **v1.8 capability batch** (ADR-045 … ADR-063) broadens Ghidra loader coverage and adds a set of
-read-only analysis + cross-binary tools; the **v1.9 batch** (ADR-064 … ADR-072) adds data-flow
-slicing plus eight capability-gap tools. Together they grow the Tier-1 catalog from **56 to 74**
-tools (58 read-only / 16 write). Every new tool is read-only (or, for `apply_type_archive`, a
-consent-gated structural write) and enforces the standard confinement + size caps before the worker
-(ADR-001); each was proven live against a real hardened worker. This release also folds in the
-**round-11 and round-12 security-hardening / gap-remediation** work below. (Note: `v1.8` / `v1.9`
-are internal feature-milestone labels, not package versions — the package is `0.14.0`.)
-
-### Security
-
-- **Threat-model STRIDE pass for the v1.5–v1.9 parser/emulation/scanner surface (AA3, round-11).**
-  `docs/security/threat-model.md` had no delta past §19 (ADR-034, v1.4) for the extended import
-  loaders (raw/hex/self-describing/fat-slice/multi-region/container/DWARF), the p-code emulator
-  (call/args/stubs, xor_decode decode-loop emulation), and the read-only analysis primitives +
-  heuristic scanners (ADR-045…072) — new crossings of the hostile TB3 (binary→analyzer) / TB4
-  (untrusted output) boundaries left unanalysed. Adds **§20** modeling them as one STRIDE pass; AA1
-  (below) is the concrete T/E cell it surfaced.
-- **`.gnu_debuglink` path-traversal write fixed (AA1, CWE-22; round-11 gap sweep).** When applying
-  detached DWARF (`debug_format="dwarf"`, ADR-071), the companion filename came from the **hostile
-  binary's** `.gnu_debuglink` section and was used as the staging copy destination via
-  `os.path.join(stage_dir, name)` — an absolute or `..`-bearing name escaped the staging dir (a
-  worker-contained hostile-input-controlled write). Now fixed in depth: the pure
-  `core.debuglink.parse_gnu_debuglink` rejects any non-basename name (a debuglink value is a bare
-  filename by spec) and the worker staging step re-confines to a bare basename, both failing closed.
-  Regression + fuzz-invariant tests added (`tests/unit/test_debuglink.py`).
-- **Base-image HIGH CVEs — upgraded, not waived.** The image Trivy gate caught new HIGHs from base
-  drift; all fixed by upgrade (`workflow-cve-management`), base digests still pinned:
-  - **CVE-2026-14456** (openssl) — `libcrypto3`/`libssl3` fixed in `3.6.3-r5`. **Server** base bumped
-    to the current Chainguard `python` digests (`:latest` + `:latest-dev`, which ship `r5`).
-    **Worker** pins BOTH `libcrypto3>=3.6.3-r5` and `libssl3>=3.6.3-r5` in its runtime `apk add`
-    (its `wolfi-base` baked `r1`; the two are separate apk packages — one constraint does not drag
-    the other).
-  - **CVE-2026-38753 + CVE-2026-38754** (busybox, worker) — `wolfi-base` baked `1.37.0-r60`; the
-    worker pins `busybox>=1.38.0-r0`.
-
-### Added
 
 - **Data-flow slicing (`data_flow_slice`, ADR-064) — v1.9.** A read-only, bounded intra-function
   **def-use slice** over the decompiler's SSA `HighFunction`: `backward` returns the defs feeding a
@@ -640,15 +417,91 @@ are internal feature-milestone labels, not package versions — the package is `
 - **Bundled type-archive application (`apply_type_archive`, ADR-051).** A consent-gated structural
   write that applies a bundled Ghidra `.gdt` (e.g. `generic_clib_64`) to set library prototypes.
 
-Continued **security-hardening / gap-remediation** (round-6 → round-9 findings, #258–#284): **these
-hardening rounds add no tools and make no contract changes** (observable behavior unchanged; the
-catalog growth above is the v1.8 batch, not the hardening work). A streaming cancel-availability fix
-and a concurrency guard, hostile-worker output/flood clamps, a daemon restart-race fix, the
-worker-image auto-repin trust-anchor flow made signed + CI-triggering + verified with the cosign
-trust identity tightened to tag builds, plus CI-drift tripwires, workflow linting promoted to a
-required gate, and CI/docs/threat-model currency.
+### Changed
+
+- **Repin the trusted worker image to the current signed build** (`.github/worker-image.pin`
+  → `sha256:a55be6dd…`). The previous pin predated the ADR-073/075 worker verbs
+  (`program_fingerprint`, `crypto_instructions`) and PR #331's honest `method-not-found` /
+  `invalid-request` dispatch slugs; the new cosign-signed digest (built from `main`) bakes them in,
+  so the "test what you ship" live-regression path exercises the current worker.
+
+
+- **Dashboard redesigned as a VSCode-style workbench.** The dashboard UI moved from stacked
+  cards to a familiar three-region shell: a **titlebar**, an **Explorer sidebar** (sessions →
+  Overview / Imports / Exports / Strings / Call graph / each decompiled output / Verdict / Timeline,
+  plus Build), a **central artifact viewer** that renders each artifact type appropriately
+  (colorized C **code blocks** with a line-number gutter for decompiled output; sortable-width
+  tables for imports/exports/strings; a key/value grid for binary format; an adjacency list for the
+  call graph), and a **status bar**. Syntax colorization is a small self-contained tokenizer in
+  `app.js` — **no external libraries** (strict inline-free CSP) and **every token is emitted via
+  `textContent`**, so binary-derived (untrusted) content stays inert even while highlighted
+  (ADR-005). Theme-aware (light/dark) and keyboard-navigable (WCAG 2.2 AA target). Frontend-only —
+  the data contract, API, and providers are unchanged.
+
+
+- **`crypto_detect` gains the `instruction` source (ADR-075 fast-follow).** In addition to the
+  `import` and `api_name` sources, `crypto_detect` now flags **hardware crypto opcodes** — AES-NI
+  (`aesenc`/`aesdec`/`aeskeygenassist`/…), SHA extensions (`sha256rnds2`/…), and carry-less multiply
+  (`pclmulqdq`) — via a new read-only worker verb `crypto_instructions` (one linear pass over the
+  program's instructions, bounded by a hit cap). Catches HW-accelerated crypto that leaves no
+  importable symbol or algorithm constant. `source`∈{import,api_name,instruction}; instruction
+  confidence 0.9. No tool-count or schema change (the indicator shape already carried `source`). The
+  `code_pattern` (cipher-shaped loops) source remains the last tracked fast-follow. **Note:** the
+  worker opcode scan only runs once the pinned worker image is rebuilt to include it (unit-gated +
+  gated integration test now; image repin is the deploy step).
 
 ### Fixed
+
+- **Loading a binary is no longer a silent trap (#359).** Two unrelated mistakes used to both surface
+  as the same opaque, `retryable:true` `worker-unavailable` 503 ("no worker for session"), pointing at
+  nothing:
+  - **Calling a worker tool before `session_import`** now returns the new, additive
+    `failed-precondition` error (**409, not retryable**) whose detail names the fix and the order
+    (`session_create` → `session_import` → `session_analyze`) — distinct from a genuinely transient
+    worker loss, which stays `worker-unavailable`. Enforced at the dispatch chokepoint via
+    `SessionManager.require_worker_started` (owner-scoped, BOLA-safe); the small set of manager-only
+    lifecycle tools (`NO_WORKER_REQUIRED_TOOLS`) is exempt, and every other session-scoped tool is
+    guarded automatically (no drift).
+  - **`session_create(binary_path=…, analyze=…)`** — which used to be a silent no-op (the args were
+    dropped at the MCP boundary and the binary never loaded) — now fails loudly with a
+    `validation-error` pointing at `session_import`. `session_create` only opens an empty session.
+  - **Out-of-root / missing `source_ref`** import errors now read more actionably ("…under the
+    server's import root (configured by VIVARIUM_IMPORT_ROOT); stage the binary there first") — still
+    path-free per the error-envelope disclosure rules; the actual order + import-root requirement are
+    documented in the `session_create`/`session_import` tool descriptions.
+
+
+- **`default_factory` tool-arg defaults were dropped from the MCP input schema (two tools).** The
+  tool-signature builder (`_signature_from_model`) used `FieldInfo.get_default()`, which returns
+  `PydanticUndefined` for a `Field(default_factory=...)` field — so FastMCP marked such a field
+  **required**, and a real MCP client omitting it got **"Field required"**. This silently broke two
+  already-shipped tools: **`session_generate_report`** (omitting `scope`) and
+  **`set_function_signature`** (omitting `parameters` to set a zero-argument signature). Fixed with
+  `get_default(call_default_factory=True)` so the factory default (`[]`) is carried into the
+  signature (a no-op for plain-default / required fields; no gate changed). Caught by the new
+  ADR-078 real-worker docs-pipeline e2e; regression-tested for both tools.
+- **JieLi pi32 languages were unreadable by the worker — import rejected them as "not-found"
+  (fixes #338 regression).** The `jieli-sleigh` stage SLEIGH-compiled `pi32.sla`/`pi32v2.sla`/
+  `q32s.sla` under the build's `027` umask, so the COPYed module shipped the compiled grammars as
+  `0640 root:root`. The runtime worker runs as `USER 65532`, which **cannot read** those files, so
+  Ghidra **silently skipped** all three JieLi LanguageIDs and `session_import(loader="binary",
+  processor="pi32:LE:32:default", …)` failed with a worker **`not-found`** — the bundled module
+  from #338 was present but never usable. The stage now `chmod -R a+rX` the module before the COPY
+  (dirs `0755` / files `0644`); the worker reads the grammars and a JieLi AC632N `app.bin` imports +
+  disassembles (validated end-to-end: import populates `binary_sha256`; with the correct core —
+  `q32s:LE:32:default`, `base_addr=0x1E00000` — analysis recovers **401 functions** and a clean
+  C-runtime reset handler, vs. **0** before the fix when the language was skipped). No other stage is
+  affected; the module stays world-readable only (no write).
+- **Honest error when the worker lacks a verb (fixes #329, #330).** A tool whose verb the running
+  worker image does not implement (e.g. an image predating the tool — `program_fingerprint`,
+  `crypto_detect`/`crypto_instructions`, `family_match`) returned an opaque **500 internal-error**:
+  the worker emits JSON-RPC `-32601` (method-not-found), which older workers carry with no matching
+  slug, so the slug-only server mapping fell through to `internal-error`. The adapter now keys off
+  the numeric JSON-RPC **code** (preserved by every worker), surfacing an actionable **404**
+  ("operation not supported by the running worker — the worker image may predate this tool; rebuild
+  or re-pin"), and `-32600` → 400. The worker also emits proper `method-not-found` / `invalid-request`
+  slugs now (defense in depth). Detail stays leak-free; the worker's own message remains log-only.
+
 - **Round-12 Lows — AA7 accuracy + debugmap promotion (AB8/AB9/AB10).** No behavior change on the
   shipped-default path (server + config + test only):
   - **AB8** the multi-region aggregate byte budget now runs through the same OOM `_preflight_check`
@@ -755,6 +608,125 @@ required gate, and CI/docs/threat-model currency.
   metrics-logger.
 
 ### Security
+
+- **Worker-image pin bumped to the CVE-remediated build (ships CVE-2026-114613 + CVE-2026-102554
+  fixes to the deployed worker).** `.github/worker-image.pin` → `sha256:ba14eab4…` — the
+  cosign-signed `worker-image.yml` build off `main` carrying the `py3-pip-wheel 26.2.2-r2` base and
+  the Ghidra guava 32.1.3→33.7.2 jar swap. Until this bump the Containerfile fixes were on `main`
+  but the deployed/live-regression worker still ran the previous pinned digest (`a6e3f679…`); this
+  advances what live-regression cosign-verifies + pulls to the remediated image.
+- **Remediate CVE-2026-114613 (HIGH, `py3-pip-wheel`) in both images.** A fresh Trivy DB flagged
+  `py3-pip-wheel 26.2.2-r0` (fixed in `-r1`) in the shared Wolfi base — surfacing on the first
+  image-path PR since the 3.15 migration (the scan gate is skipped on PRs that touch no image path).
+  - **Server** (distroless, no apk): bumped both `cgr.dev/chainguard/python` digests — builder
+    (`latest-dev` → `59cefd76…`) and runtime (`latest` → `bf06e094…`) — which now bake
+    `py3-pip-wheel 26.2.2-r2`.
+  - **Worker** (Wolfi + apk): raised the existing forced floor `py3-pip-wheel>=26.1.2-r1` →
+    `>=26.2.2-r1` (the old floor was satisfied by the vulnerable `-r0`); resolves to `-r2`.
+    Upgrade-first, not a waiver (`workflow-cve-management`); pip-wheel is build-bootstrap only, not
+    executed at runtime.
+  - Verified locally: a rebuilt server image and the worker base-pkg set both scan **0 HIGH/CRITICAL**.
+    `.trivyignore.yaml` stays empty (no waivers). A worker-image rebuild + pin bump ships the fixed
+    base to the deployed worker (next `worker-image.yml` build).
+- **Remediate CVE-2026-102554 (HIGH, Google Guava) bundled in Ghidra.** Ghidra 12.1.2 ships
+  `guava 32.1.3-jre` in `Ghidra/Framework/Generic/lib/`, carrying CVE-2026-102554 (CWE-770 DoS via
+  unbounded allocation when Java-deserializing guava `CompactHashMap`/`CompactHashSet`/
+  `MapMakerInternalMap`; fixed in 33.7.2). **Upgrade-first (not a waiver):** the `ghidra-fetch` build
+  stage now downloads `guava-33.7.2-jre.jar` from Maven Central, **SHA-256-verified** (fail-closed on
+  mismatch — `std-supplychain`), and replaces the 32.1.3 jar — mirroring the existing BouncyCastle
+  1.84→1.85 upgrade. Validated end-to-end locally on the rebuilt worker: `pyghidra` starts and a real
+  headless analysis recovers **575 functions** (312 decompiled + `function_context` + `call_graph`,
+  all OK), so the guava 32→33 bump is API-safe for Ghidra; Trivy HIGH/CRITICAL on the rebuilt worker
+  image = **0**. (CI live-regression runs the *pinned* image, so the swap was proven locally; the
+  deployed worker gets it on the next worker-image rebuild + pin bump.)
+- **Worker-image pin bumped to the 3.15/Trivy-clean build.** `.github/worker-image.pin` →
+  `sha256:a6e3f679…` — the cosign-signed worker image from the first `worker-image.yml` build after
+  the Python 3.15 base migration (Trivy HIGH/CRITICAL = 0, no waivers). Advances what live-regression
+  cosign-verifies + pulls to the remediated image.
+- **Python 3.14 → 3.15 base migration — remediates CVE-2026-111943 (HIGH).** The server's Chainguard
+  distroless base carried **CVE-2026-111943** (HIGH, `ca-certificates-bundle`, crypto/x509 MITM),
+  fixed only on the 3.15 base (the pinned 3.14 digest has no fix; the distroless runtime has no apk to
+  patch in place). Bumped both server base digests to **Python 3.15.1** (builder + runtime) and the
+  worker's `wolfi-base` digest (worker stays Python 3.12 via apk) for the same ca-certs fix.
+  Regenerated the hash-pinned `requirements.lock` + `requirements-dev.lock` on 3.15 (still
+  cp312-compatible for the worker; dev lock now `--allow-unsafe` since pip-audit 2.10.1 pulls in
+  `pip`), bumping cryptography 50.0.0→50.0.2, pydantic 2.13→2.14, starlette 1.3→1.10, uvicorn
+  0.49→0.54, ruff 0.15→0.17 (the newer ruff reformats embedded code blocks in 5 ADRs + adds RUF036).
+  A fresh **unwaived** Trivy HIGH/CRITICAL scan of the rebuilt 3.15 server image = **0 findings**, so
+  the two urllib3 waivers (CVE-2026-97687/97689) are **retired** — `.trivyignore.yaml` now has no
+  active waivers. Renamed the server-runtime parity gate `quality-py314` → **`quality-py315`** (CI +
+  branch-protection required-check list + tripwire + docs updated in lock-step). pip-audit on both
+  locks: no known vulnerabilities. (Bump initiated by the worker-image pin refresh, which surfaced
+  the CVE.)
+- **Fork-PR approval backstop recorded as applied (close #163).** Threat-model §4 marked the
+  Actions "require approval for all outside collaborators" backstop **enforced** (live API:
+  `fork-pr-contributor-approval = all_external_contributors`) rather than a pending operator action
+  (**#163**, closed). The related pin-bump-PR App-token fix (**#171**) is already implemented in
+  `worker-image.yml propose-pin-bump` (`create-github-app-token` + `REPIN_APP_ID`/
+  `REPIN_APP_PRIVATE_KEY`) and documented in §4 (round-6 #259); its mechanism is in place, but its
+  own acceptance requires **end-to-end proof on a real release's pin-bump PR** (none has occurred
+  since the fix landed — recent pins are manual), so **#171 stays open** pending that live
+  verification on the next release. Docs-only.
+- **Threat-model §2 boundary registry — backfill TB9 + TB10 rows.** The §2 "Trust boundaries"
+  table stopped at TB8 while TB9 (dashboard interactive backend, §21) and TB10 (generated target
+  documentation, §22) lived only as prose sections; added both as table rows and a note clarifying
+  that the core data-flow diagram draws only the four fixed boundaries (TB1–TB4) while TB5–TB10 are
+  later-increment surfaces registered in the table with their own STRIDE sections. Registry now
+  matches the prose (reviewer follow-up F-5, PR #347). Docs-only.
+- **Threat model TB10 + ADR-078 (generated target documentation) — modeled before implementation.**
+  A new output-edge trust boundary — **hostile-origin artifact → persisted/rendered document** — for
+  the standing goal of auto-generating navigable documentation of an *analyzed target* (an
+  archify-style atlas + ADR-shaped finding records). STRIDE-modeled (`docs/security/threat-model.md`
+  §22, **TB10**) and specified (**ADR-078**) *before* any code (`workflow-threat-model`), because a
+  generated document is a new persisted copy of **CONFIDENTIAL, HOSTILE-ORIGIN** artifacts (symbol
+  names, strings, decompiled text) that may travel off-box or reach an LLM — distinct from TB9, which
+  renders results *inert in a live browser*. Rendering safety is **tier-invariant A+B+C**: (A)
+  self-contained HTML + strict CSP (`default-src 'none'` …) + `<iframe sandbox>`; (B) data/template
+  separation (`textContent`, no `innerHTML`); (C) allow-list projection of binary-derived values
+  (the only control that holds in a renderer we don't own — no raw-Markdown artifact ships). No code
+  yet; every tier is a separate **gated** increment. Amended 2026-10-26 after `sdlc-red-team` (F1/F2/F3)
+  + `sdlc-reviewer` (CSP `default-src`, string-escape projection) review (PR #347).
+- **Dependency CVE bump — certifi.** Regenerated `requirements.lock` to clear the SCA gate's fresh advisory: `certifi` 2026.10.18 → 2026.10.19 (**PYSEC-2026-4320**). The 2026.10.18 bundle carried the `emSign ECC Root CA - G3` root; eight eMudhra intermediates chaining to it have compromised private keys (revoked by the CA), so an on-path attacker holding one could forge valid-looking certs for any host and intercept TLS from clients trusting the bundle (`requests`/`urllib3`/`pip`). 2026.10.19 restores only the unaffected emSign roots. `pip-audit --strict` over `requirements.lock` is clean; certifi-only diff (version + hashes).
+- **Clear container image-scan CVEs (worker + server).** The Trivy image-scan gate flagged HIGH/CRITICAL
+  CVEs in both images; cleared by upgrade (no waivers added — `.trivyignore.yaml` stays empty). **Worker — BouncyCastle 1.84 → 1.85:** Ghidra 12.1.2 bundles `bcprov`/`bcpkix`/`bcutil-jdk18on` at 1.84, carrying **CVE-2026-8763** (CRITICAL) + **CVE-2026-13506** (HIGH) in bcprov; the build now replaces the whole family with 1.85 from Maven Central, each SHA-256-verified before swap (fail-closed). Smoke-verified Ghidra still boots + disassembles under 1.85. **Worker — `python-3.12` pinned ≥ 3.12.15-r0:** Wolfi shipped 3.12.14-r6 with cpython **CVE-2026-3644/4224/7210/82049** (HIGH); the pin forces the fixed build and busts the layer cache. **Server — time-boxed VEX waiver for `py3-pip-wheel`** (**CVE-2026-97687/97689**, bundled urllib3 HIGH, in the distroless base's system layer): **not affected** — the server runtime never executes system pip (the venv's pip is uninstalled; the app uses its own hash-pinned `urllib3`), so the vulnerable code is unreachable. The upstream fix ships only on Chainguard `python:latest` (now Python **3.15**), but the server is pinned to Python **3.14** (hash-locked wheels; 3.15 needs a separate lock regen + cffi/libffi build migration) and the free tier exposes no fixed `python:3.14` tag — so an upgrade isn't currently available. Waiver auto-expires 2027-01-19 (re-blocks CI), tracked for removal on the 3.15 migration. Verified locally: `trivy image` (HIGH/CRITICAL) exits clean on the rebuilt worker image.
+- **Dependency CVE bump — anyio / PyJWT / mcp.** Regenerated `requirements.lock` (+ `requirements-dev.lock`) to clear fresh advisories the SCA gate flagged: `anyio` 4.13.0 → 4.14.2 (PYSEC-2026-4024 process-pool stderr-pipe deadlock, PYSEC-2026-4025 IDNA-2003 TLS hostname confusion), `pyjwt` 2.13.0 → 2.15.1 (the PYSEC-2026-41xx cluster), `mcp` 1.28.1 → 1.30.0 (CVE-2026-59951 — stateful Streamable-HTTP sessions never reclaimed → unbounded memory DoS). `pip-audit --strict` over `requirements.lock` is clean; full unit suite green on mcp 1.30.0. `mcp` is capped `<2` (2.x is a major FastMCP API migration, out of scope); the pyproject floors stay low so the `sast` extra (semgrep hard-pins old mcp/pyjwt) still resolves — the lockfile is the source of truth. Dev-only `urllib3`/`msgpack` advisories in `requirements-dev.lock` are pre-existing, not shipped, and tracked separately (scheduled-rescan, not a merge gate).
+
+
+- **Worker image base bumped to fix a glibc drift (supply chain).** `Containerfile.worker` pinned
+  `cgr.dev/chainguard/wolfi-base@sha256:0b5fd36c…` across all 7 build stages, but the wolfi apk repo
+  advanced: `apk add python-3.12` now installs a build linked against **glibc 2.44**, which the older
+  pinned base's `libm.so.6` does not provide — the worker image build failed at the wheel stage
+  (`ImportError: … version GLIBC_2.44 not found`). Repinned all stages to
+  `wolfi-base@sha256:103eb3f4…` (ships glibc-2.44-r4, matching the current apk python), keeping the
+  auto-CVE-patch `apk add` design and digest-pinned bases. Unblocks the worker-image rebuild + trust
+  repin (which lights up the `program_fingerprint` / `crypto_instructions` worker code).
+
+
+- **Threat-model STRIDE pass for the v1.5–v1.9 parser/emulation/scanner surface (AA3, round-11).**
+  `docs/security/threat-model.md` had no delta past §19 (ADR-034, v1.4) for the extended import
+  loaders (raw/hex/self-describing/fat-slice/multi-region/container/DWARF), the p-code emulator
+  (call/args/stubs, xor_decode decode-loop emulation), and the read-only analysis primitives +
+  heuristic scanners (ADR-045…072) — new crossings of the hostile TB3 (binary→analyzer) / TB4
+  (untrusted output) boundaries left unanalysed. Adds **§20** modeling them as one STRIDE pass; AA1
+  (below) is the concrete T/E cell it surfaced.
+- **`.gnu_debuglink` path-traversal write fixed (AA1, CWE-22; round-11 gap sweep).** When applying
+  detached DWARF (`debug_format="dwarf"`, ADR-071), the companion filename came from the **hostile
+  binary's** `.gnu_debuglink` section and was used as the staging copy destination via
+  `os.path.join(stage_dir, name)` — an absolute or `..`-bearing name escaped the staging dir (a
+  worker-contained hostile-input-controlled write). Now fixed in depth: the pure
+  `core.debuglink.parse_gnu_debuglink` rejects any non-basename name (a debuglink value is a bare
+  filename by spec) and the worker staging step re-confines to a bare basename, both failing closed.
+  Regression + fuzz-invariant tests added (`tests/unit/test_debuglink.py`).
+- **Base-image HIGH CVEs — upgraded, not waived.** The image Trivy gate caught new HIGHs from base
+  drift; all fixed by upgrade (`workflow-cve-management`), base digests still pinned:
+  - **CVE-2026-14456** (openssl) — `libcrypto3`/`libssl3` fixed in `3.6.3-r5`. **Server** base bumped
+    to the current Chainguard `python` digests (`:latest` + `:latest-dev`, which ship `r5`).
+    **Worker** pins BOTH `libcrypto3>=3.6.3-r5` and `libssl3>=3.6.3-r5` in its runtime `apk add`
+    (its `wolfi-base` baked `r1`; the two are separate apk packages — one constraint does not drag
+    the other).
+  - **CVE-2026-38753 + CVE-2026-38754** (busybox, worker) — `wolfi-base` baked `1.37.0-r60`; the
+    worker pins `busybox>=1.38.0-r0`.
+
 - **Untrusted worker-reported stream `total` is clamped (#268, gap V9).** The terminal `total`
   (which feeds only the server-side ETA) is bounded to `[produced, max-stream-chunks]` with a
   safe fallback on a non-numeric value — defense-in-depth against a hostile worker (LLM02).
@@ -768,6 +740,21 @@ required gate, and CI/docs/threat-model currency.
   (fail-closed kill+evict; LLM02 / CWE-400).
 
 ### Internal / CI / supply-chain / docs
+
+Continued **security-hardening / gap-remediation** (round-6 → round-9 findings, #258–#284): **these
+hardening rounds add no tools and make no contract changes** (observable behavior unchanged; the
+catalog growth above is the v1.8 batch, not the hardening work). A streaming cancel-availability fix
+and a concurrency guard, hostile-worker output/flood clamps, a daemon restart-race fix, the
+worker-image auto-repin trust-anchor flow made signed + CI-triggering + verified with the cosign
+trust identity tightened to tag builds, plus CI-drift tripwires, workflow linting promoted to a
+required gate, and CI/docs/threat-model currency.
+
+- **Blind-triage validation benchmark + remediation ADRs.** Added `validation/` (4-case blind static
+  triage of the read-only battery — Kelihos / Wirenet / LuckyCat / BumbleBee; verdict/severity/
+  category correct 4/4) with a cross-case scorecard, dashboard, and a remediation analysis, plus
+  Proposed ADR-073/074/075. ADR-073 (`program_fingerprint`) and ADR-075 (`crypto_detect`) are now
+  **Accepted** and implemented (above); ADR-074 (`capability_scan`) remains Proposed.
+
 - **All hash-pinned lockfiles now get a scheduled pip-audit (gap Z1, round-10).** `scheduled-rescan.yml`
   extends its advisory sweep to `requirements-{mutation,groundtruth,docs}.lock` (previously only
   runtime/dev/sast were pip-audited; the rest relied solely on Renovate OSV alerts) — belt-and-suspenders
@@ -820,6 +807,7 @@ required gate, and CI/docs/threat-model currency.
   fails a unit test instead.
 
 ### Documentation
+
 - **Published a rendered documentation site (MkDocs + Material → GitHub Pages).** `docs/` now renders
   to a browsable, searchable site at `https://0xb007ab1e.github.io/vivarium-mcp/` via a new
   `docs-pages.yml` workflow (SHA-pinned actions; docs deps from a hash-pinned `requirements-docs.lock`).
