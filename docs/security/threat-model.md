@@ -429,7 +429,7 @@ enforced — closing the BOLA gap that ADR-011 §6 deferred (TB6-I).
 > admin, no secrets, no Actions write); the job's own token is `contents:read`+`actions:read` and all
 > writes go through the App token (a dropped `GH_TOKEN` fails, never silently falls back to a
 > writable token). **(D) Availability:** the job **fail-safe-skips** when the key is absent or partial
-> (V3 — both `REPIN_APP_ID` and `REPIN_APP_PRIVATE_KEY` required), degrading to a manual signed bump.
+> (V3 — both `REPIN_APP_CLIENT_ID` and `REPIN_APP_PRIVATE_KEY` required), degrading to a manual signed bump.
 > **Rotation:** regenerate the App key + replace the secret per `runbooks/secret-rotation.md`
 > (build-time credentials); a leaked key is an incident (`runbooks/incident-response.md`). Setup:
 > `runbooks/supply-chain-pinning.md` (§ Repin GitHub App).
