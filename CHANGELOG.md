@@ -6,6 +6,8 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-31
+
 ### Added
 
 - **Export RE sessions to the `memory-graph` knowledge graph (ADR-079).** A new client-side package
@@ -1733,7 +1735,8 @@ analyzer is the central security control.
   off-by-default and fail-closed. See `docs/security/threat-model.md` and `SECURITY.md` for the
   reporting channel.
 
-[Unreleased]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/0xb007ab1e/vivarium-mcp/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/0xb007ab1e/vivarium-mcp/compare/v0.13.0...v0.14.0
 [0.7.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/0xb007ab1e/ghidra-mcp/compare/v0.4.0...v0.5.0
