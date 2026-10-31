@@ -485,8 +485,6 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   Proposed ADR-073/074/075. ADR-073 (`program_fingerprint`) and ADR-075 (`crypto_detect`) are now
   **Accepted** and implemented (above); ADR-074 (`capability_scan`) remains Proposed.
 
-## [0.14.0] — 2026-08-25
-
 The **v1.8 capability batch** (ADR-045 … ADR-063) broadens Ghidra loader coverage and adds a set of
 read-only analysis + cross-binary tools; the **v1.9 batch** (ADR-064 … ADR-072) adds data-flow
 slicing plus eight capability-gap tools. Together they grow the Tier-1 catalog from **56 to 74**
