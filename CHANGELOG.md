@@ -6,6 +6,19 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`read_bytes` (and every address-taking tool) now resolve space-qualified / overlay addresses.**
+  `_parse_address` hardcoded the **default** address space, so an address that lives in an overlay
+  space — e.g. an F1 raw-import overlay mapped into `:local` — was silently read from the
+  default-space offset instead, returning a different (often uninitialized) block's bytes or an
+  all-zero / truncated read. `memory_map` and `list_data` already **emit** the qualified form
+  (`OverlayName::00001000`), so an address copied from a listing failed to round-trip. The parser
+  now uses `AddressFactory.getAddress`, which honours a bare hex offset (default space, unchanged)
+  **and** a space-qualified address, so overlay bytes resolve to the block that actually holds them
+  (ADR-005: never return silently-wrong data). Read stays size-clamped and block-confined; no new
+  surface. (#372) — JVM-edge behaviour verified via the live-worker recipe, not the unit suite.
+
 ### Changed
 
 - **Repin GitHub App: migrate `create-github-app-token` off the deprecated `app-id` to `client-id`.**
