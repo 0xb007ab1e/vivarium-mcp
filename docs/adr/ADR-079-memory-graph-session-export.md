@@ -172,10 +172,13 @@ Node/edge batches to memory-graph are chunked.
 - **Shared single memory-graph project for all binaries:** rejected for v1 — address-key collision
   (§2.3). Deferred until memory-graph exposes program-scoped identity or content-hash function keys.
 - **Cross-binary `SAME_AS` / family clustering edges:** deferred (needs the above). `function_hash`
-  and `family_match` are stored *within* a project as the future join key.
+  and `family_match` are stored *within* a project as the future join key. **→ designed in ADR-080**
+  (a dedicated `vivarium-corpus` index project of content-hash-keyed occurrence nodes with
+  within-project `SAME_AS`/`EQUIV` + family edges — memory-graph now exposes `content-hash` identity).
 - **Auto-export at `session_close` (ADR-002 interaction):** deferred to a phase-2 opt-in hook. v1 is
   explicit/manual (CLI or library call) so the eviction/wipe interaction is designed before it fires
-  automatically.
+  automatically. **→ designed in ADR-080** (a *client-side* export-before-close guarantee — **not** a
+  server hook, which would violate ADR-001 — bounded, fail-closed, gated).
 
 ## 8. Consequences
 
