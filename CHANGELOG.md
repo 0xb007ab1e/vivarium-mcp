@@ -44,6 +44,11 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Changed
 
+
+- **Bump the worker-image pin to the androidboot build + gate its live test.** Advance the trusted
+  worker digest to `sha256:12b657e7…` (the CI-signed build that bakes the #380 androidboot kernel
+  loader) and add `test_import_androidboot.py` to the live-regression hard-gate list, so the kernel
+  unwrap+load is verified against the shipped worker. (#380)
 - **Correct ADR-070: `androidboot` was listed but never implemented.** ADR-070's loader table
   described `androidboot` as shipped ("the kernel region surfaced for import; ramdisk out of MVP
   scope"). It is **not** implemented — the container allow-list is `gzip`/`xz`/`lzma`/`uimage` and
