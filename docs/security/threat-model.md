@@ -74,7 +74,7 @@ flowchart LR
 | **TB6** | network client → server (HTTP) | **first network attack surface** (v1.1; ADR-011/ADR-017) | secure-by-default: stdio default, else loopback; network bind needs TLS+auth (fail closed); **multi-token bearer** auth → distinct principals (mTLS/OAuth-pluggable); rate-limit + size caps + strict CORS; per-request authZ; **BOLA closed by an enforced per-principal owner check** (session owned by its creating principal; foreign id → same `SESSION_INVALID`, no oracle — ADR-017) on top of the CSPRNG session-id capability; operator-configurable per-owner session cap (noisy-neighbor; default off, global cap backstops); same read-only catalog |
 | **TB7** | client write-request → program mutation | **first write/agency boundary** — an LLM-exposed tool now *mutates* the per-session analysis (rename/comment) (v1.1 PROPOSED; ADR-012, §10) | **default-deny write consent** per session (human-in-the-loop gate — LLM08); annotation-only minimal set (rename function/symbol, set comment); allow-list write-name validation + comment normalization on the way IN (stored-injection defense); **one Ghidra transaction per write → rollback on failure**; per-write audit (intent+outcome); **session-scoped + ephemeral** (no persistence — wiped on evict, ADR-002); server NEVER mutates (ADR-001 — write executes only in the worker) |
 | **TB8** | annotation-import document → server | **NEW write boundary (v1.2; ADR-018)** — a client-supplied, offline-tamperable annotation document is replayed as writes | treat the document as **fully untrusted**: schema-validate + bound (count/size); **binary-hash binding** (reject a doc minted for a different program); **consent-gated** (+ `allow_structural` for structural entries); **every entry re-validated through the live validators + replayed via the existing gated write path** (no new write primitive) in per-entry transactions w/ rollback; owner-scoped (ADR-017); per-entry audited; **server persists nothing** (stateless — ADR-002 preserved); export carries the binary's confidential artifacts off-server to the client (master §5) |
-| **TB9** | browser (dashboard) → server command/write | **interactive dashboard backend (ADR-076, §21, PROPOSED)** — a browser drives the server's tools/writes | **default-OFF + auth-required + fail-closed**; commands allow-listed against the served catalog, typed/bounded, owner-checked per principal (BOLA — ADR-017); read-only ops under auth+limits, **gated ops (import/analyze/close, all writes, `ai_annotate`) default-deny → applied only via the TB7 write-consent human gate**; AI annotation propose-first; results cross TB4 as `Untrusted[...]`, rendered inert (`textContent`). Full STRIDE in §21 |
+| **TB9** | browser (dashboard) → server command/write | **interactive dashboard backend (ADR-076, §21, PARTIAL — read-only path live-enablable)** — a browser drives the server's tools/writes | **default-OFF + fail-closed + token-required**; commands allow-listed against the served catalog, typed/bounded (`commands.py`); **writes default-deny → TB7 write-consent human gate, refused by every executor** (AI annotation propose-first), **compute (import/analyze) may run on a gated worker executor under auth**, read-only ops under auth+limits; MVP gate is a **single shared bearer, tailnet-bound** (per-principal TB6 auth, an app-layer **rate limiter**, and **per-command audit** are pre-exposure follow-ups — S/R/I/D gaps); results cross TB4 as `Untrusted[...]`, rendered inert (`textContent`). Full STRIDE in §21 |
 | **TB10** | analysis artifact → persisted/rendered document | **generated target documentation (ADR-078, §22, PROPOSED)** — hostile-origin artifacts rendered/persisted into a document that **outlives the session and travels off-box** (vs TB9's live-inert render) | **tier-invariant A+B+C**: (C) allow-list projection (holds in any consumer, incl. raw Markdown / LLM), (B) data/template separation (`textContent`, no `innerHTML`), (A) self-contained HTML + strict CSP starting `default-src 'none'` + `<iframe sandbox>`; no raw-Markdown artifact; **output-edge only (never the worker), never a write primitive**; Tier 0 → ephemeral session store (wipe-on-evict, ADR-002); persist-outside + whole-program/LLM tiers **gated**. Full STRIDE in §22 |
 
 > **Registry vs. core DFD.** The data-flow diagram above draws the **four fixed boundaries** (TB1–TB4,
@@ -1456,46 +1456,77 @@ concrete escape this analysis surfaced, now fixed + regression-tested (#299). Fo
 the round-11 register (AA5/AA6/AA7 cap overshoots, AA15 emulation CPU) are self-inflicted +
 deadline/SSA-bounded, not containment breaks.
 
-## 21. TB9 — Dashboard interactive backend (Phase 2 — ADR-076, PROPOSED)
+## 21. TB9 — Dashboard interactive backend (Phase 2 — ADR-076, PARTIAL: read-only path live-enablable)
 
 > **New trust boundary.** Phase 1 of the status dashboard (`vivarium.dashboard`) is read-only,
 > GET-only, and decoupled from the server (it visualizes a file/demo provider). Phase 2 adds an
 > **interactive command channel** so an operator can drive RE workflows from the browser
 > (open/analyze, list parents/children, recurse, scans, and gated **apply transform / AI
-> annotation**). This is a **browser → server write/command boundary** — modeled here BEFORE
-> implementation (`workflow-threat-model`). It reuses, and never weakens, the existing controls:
-> the ADR-011/017/019 authenticated HTTP surface (TB6), the ADR-012/013 gated write path (TB7), and
-> ADR-001/002/004 worker isolation. The dashboard **never** gains its own JVM or write primitive.
+> annotation**). This is a **browser → server write/command boundary**, modeled before implementation
+> (`workflow-threat-model`).
+>
+> **Implementation status (reconciled to code 2026-11-03).** The pure gating **policy**
+> (`commands.py` — allow / needs-approval / deny) and a **read-only executor** (`ReadOnlyExecutor` +
+> `StateFileToolCaller`, answering read-only ops from the dashboard state file) are **implemented and
+> enablable by config** (`VIVARIUM_DASHBOARD_INTERACTIVE` + `VIVARIUM_DASHBOARD_STATE` +
+> `VIVARIUM_DASHBOARD_TOKEN`); a worker-backed `WorkerExecutor` (live compute via `McpToolCaller`)
+> exists but is wired only through the operator's **separately gated** server-spawn step. So TB9 is
+> **no longer "503 with no live path"** — when the operator enables it, a **read-only** command path
+> is live, behind a **tailnet bind + a single shared bearer token** (the deliberately-reduced MVP
+> surface). The controls this boundary reuses — the ADR-011/017/019 authenticated HTTP surface (TB6,
+> per-principal auth + rate-limit + size caps + CORS), the ADR-012/013 gated write path (TB7), and
+> ADR-001/002/004 worker isolation — are the target of the **production wiring**, and are the
+> `vivarium.dashboard` README's tracked **"Follow-ups (before any wider exposure)"**: the interim
+> single-shared-token gate is replaced by routing through TB6 before production. The dashboard
+> **never** gains its own JVM or write primitive.
 
 **Posture (secure-by-default, fail closed):**
-- **Default OFF.** Interactive is disabled unless explicitly enabled by config AND an executor is
-  wired; with neither, every command endpoint returns *disabled* (503) — Phase-1 behavior is
-  byte-for-byte preserved. No executor ⇒ no execution path exists.
-- **Auth required when on.** Enabling interactive REQUIRES authentication (bearer/mTLS/OAuth via
-  TB6, per-principal — ADR-017/019); an interactive bind with no auth fails closed at startup.
-- **Reuse the server, don't reinvent.** Commands execute only through the existing MCP tool
-  registry + session manager (owner-checked per principal, BOLA-closed — ADR-017) and the gated
-  write path (write-consent — ADR-012). The dashboard is a thin command *forwarder*, not an
-  executor of privileged logic.
+- **Default OFF, fail closed.** With no executor wired *or* interactive not enabled, every command
+  returns *disabled* (503) and Phase-1 behavior is byte-for-byte preserved. Enabling interactive is
+  **fail-closed**: `VIVARIUM_DASHBOARD_INTERACTIVE` also REQUIRES `VIVARIUM_DASHBOARD_STATE` **and**
+  `VIVARIUM_DASHBOARD_TOKEN`, else interactive stays disabled. When enabled, the wired executor is
+  the **read-only** `StateFileToolCaller` (serves read-only ops from the state file; **no worker, no
+  fresh analysis**); the compute-capable `WorkerExecutor` is wired only via the separately-gated
+  live-server step.
+- **Auth required when on (interim gate).** A command (`POST /api/command`, the only non-safe route)
+  requires the **shared bearer token**, constant-time compared by `BearerAuthMiddleware`; read-only
+  GET viewing stays tailnet/loopback-gated so the page can load. This shared-token gate is a
+  **single-principal interim** control; **per-principal auth (bearer/mTLS/OAuth via TB6 — ADR-017/019)
+  is the tracked pre-production follow-up** (README "Follow-ups"), not yet the enforced control.
+- **Reuse the server, don't reinvent.** No execution happens outside the wired executor: the
+  read-only path answers from the already-exported state file; the (gated) worker path forwards to a
+  live vivarium MCP server via `McpToolCaller`, inheriting that server's own auth / owner-checks /
+  ADR-002 isolation. The dashboard is a thin command *forwarder* that **refuses writes** and
+  re-evaluates the gating policy per command (defense in depth) — never a privileged executor.
 
 | STRIDE | Threat | Mitigation (control) |
 |---|---|---|
-| **S** | Unauthenticated/forged browser drives the server | Interactive requires TB6 auth (per-principal); no-auth interactive refused at startup (fail closed); commands bound to the authenticated principal |
-| **T** | Malicious/oversized command payload; parameter injection | Commands **allow-listed against the served catalog** (`commands.py`), typed + bounded params, validated server-side before dispatch (CWE-20); unknown op / bad params → reject, no dispatch |
-| **R** | Operator denies issuing a destructive command | Every command audited (principal, op, params-digest, decision, outcome) — `topic-logging-observability`; write ops additionally audited by TB7 |
-| **I** | Cross-session / cross-principal read or write (BOLA) | Session ownership enforced per principal (ADR-017) — a command for a foreign session id gets the same `SESSION_INVALID`, no oracle; results still cross TB4 as `Untrusted` |
-| **D** | Command flood / expensive-op abuse (analyze/AI storms; cost-DoS) | Per-principal rate limits + concurrency caps (TB6); bounded op params; **gated compute** (analyze/AI) requires approval so it can't be spammed; worker caps + kill-on-timeout unchanged (ADR-002) |
-| **E** | Browser escalates to run gated/write ops without approval (LLM08 excessive agency) | **Two-tier op policy:** read-only ops may run under auth+limits; **gated ops (import/analyze/close, all writes, `ai_annotate`) are default-deny** and return *needs-approval* — applied only via the TB7 write-consent human-in-the-loop, never auto from the browser. **AI annotation is propose-first:** the agent produces rename/comment proposals, a diff is shown, and application is a separate approved write (reversible via `session_undo`). |
+| **S** | Unauthenticated/forged browser drives the server | **MVP (enforced):** the command route requires the shared bearer token (constant-time, `BearerAuthMiddleware`); no token configured ⇒ interactive returns 403; interactive bind without `TOKEN` fails closed. **Pre-production (tracked follow-up):** replace the shared token with per-principal TB6 auth (ADR-017/019) so commands bind to a *distinct* principal — not yet enforced |
+| **T** | Malicious/oversized command payload; parameter injection | Commands **allow-listed against the served catalog** (`commands.py`), typed + bounded params, `_MAX_PARAMS` cap, validated server-side before dispatch (CWE-20); unknown op / bad params → `deny`, no dispatch. The read-only executor **re-evaluates** the policy per command (defense in depth) |
+| **R** | Operator denies issuing a command | **Gap (pre-enablement requirement):** the command path currently emits **no per-command audit** — `dispatch`/`command_route` log neither principal, op, decision, nor outcome. Per-command audit (principal/op/params-digest/decision/outcome, redacted — `topic-logging-observability`) is **required before wider exposure**; today only *write* ops, once routed through the (gated) TB7 path, get TB7's per-write audit. Interim non-repudiation rests on the single-operator, tailnet-scoped MVP |
+| **I** | Cross-session / cross-principal read or write (BOLA) | **MVP:** a single shared token ⇒ **one principal**, so there is no cross-*principal* access to isolate; the read-only path answers from the operator's own state file (no foreign-session oracle — it only holds that operator's artifacts). **Pre-production:** when the worker path routes through a per-principal TB6 server (follow-up), ADR-017's enforced per-principal owner check (foreign session id → `SESSION_INVALID`, no oracle) closes BOLA. Results always cross TB4 as `Untrusted` |
+| **D** | Command flood / expensive-op abuse (analyze storms; cost-DoS) | **Enforced:** bounded op params; the MVP executor is **read-only** (no fresh analysis); worker caps + kill-on-timeout unchanged (ADR-002) on any worker path. **Gap (pre-enablement requirement):** the dashboard app has **no app-layer rate limiter** (only `SecurityHeaders` + `BearerAuth` middleware) — command-rate DoS is bounded only by the tailnet + the read-only reduction. Per-principal rate limits + concurrency caps arrive with the **TB6 production wiring** (TB6 §19); a worker (compute) executor otherwise inherits only the underlying server's controls. Rate-limiting the command route is **required before enabling a compute executor or wider exposure** |
+| **E** | Browser escalates to run gated/write ops without approval (LLM08 excessive agency) | **Writes are hard-gated:** every write op (rename/comment/type/consent/undo/`ai_annotate`) is `op_class == "write"` → **default-deny**, returned `needs-approval` (202) and **refused by every executor** — applied only via the TB7 write-consent human-in-the-loop, **never auto from the browser**; AI annotation is **propose-first** (agent proposes → diff → separate approved write, reversible via `session_undo`). **Compute ops (import/analyze/close) are a middle tier:** `needs-approval` (202) by default, but a worker-backed executor with `supports_compute=True` MAY run them **under auth + the executor's own gating**, *without* a per-command human 202 (ADR-076 §3) — so "never auto from the browser" holds for **writes**, while compute is gated to a worker executor the operator wired (itself a gated step) and otherwise bounded by D. Read-only ops run under auth + limits |
 
 **Data classification / rendering.** Command *results* are the same confidential, hostile-origin
 artifacts as everywhere else — they cross TB4 as `Untrusted[...]` and the dashboard renders them
 inert (`textContent`, ADR-005), exactly as in Phase 1.
 
-**Residual risk & status.** PROPOSED (ADR-076). The interactive backend ships **default-off +
-fail-closed + auth-required**, with the command-validation + gating **policy** (`commands.py`)
-implemented and tested first; **live wiring to the session manager and any production enablement are
-gated actions** requiring human approval (`workflow-gated-actions`). Until then the browser has no
-execution path (503), so TB9 adds no live attack surface.
+**Residual risk & status.** PARTIAL (ADR-076). The gating **policy** (`commands.py`) and a
+**read-only** executor (`StateFileToolCaller`) are implemented, tested, and **enablable by config**
+(default-off + fail-closed + token-required). So, reconciled to code, TB9 is **not "no live path" any
+more**: when the operator enables it, a **read-only, single-shared-token, tailnet-bound** command
+path is live — a deliberately reduced surface. The compute-capable `WorkerExecutor` and any
+production enablement remain **separate gated actions** (`workflow-gated-actions`).
+
+**Pre-exposure requirements (must land before wider/production exposure — the README's "Follow-ups
+(before any wider exposure)"):** (1) **per-principal auth** via TB6 (ADR-017/019) replacing the
+interim shared token — closes the S/I per-principal gaps; (2) an **app-layer rate limiter** on the
+command route (or routing commands through the TB6-rate-limited server) — closes the D gap, and is a
+hard prerequisite before enabling a **compute** executor; (3) **per-command audit logging** (redacted
+principal/op/decision/outcome) — closes the R gap. Until (1)–(3) land, interactive stays scoped to
+the read-only, tailnet-only, single-operator MVP. These are tracked in `src/vivarium/dashboard/`
+README and `BearerAuthMiddleware` / `app.py` doc-comments, not re-filed here.
 
 ## 22. TB10 — Analysis artifact → generated document (ADR-078, PROPOSED)
 
