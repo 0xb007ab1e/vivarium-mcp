@@ -189,9 +189,9 @@ def test_read_bytes_round_trips_a_memory_map_address(worker_image: str) -> None:
         f"{[(r['start'], r.get('read', {}).get('data')) for r in reads]!r}"
     )
     # The crux of #372/#385: the round-tripped block start is **space-qualified** (a non-default
-    # space on this multi-space processor — e.g. ``CODE:0100``). A bare offset would NOT exercise the
-    # fix (the old default-space-only parse handles bare offsets fine); only a qualified address did
-    # the original Pocket-T19 zero-read. ``:`` distinguishes a qualified start from a bare hex offset.
+    # space on this multi-space processor — e.g. ``CODE:0100``). A bare offset would NOT exercise
+    # the fix (the old default-space-only parse handles bare offsets fine); only a qualified address
+    # caused the original Pocket-T19 zero-read. ``:`` distinguishes qualified from a bare offset.
     start = matched[0]["start"]
     assert ":" in start, (
         f"expected the round-tripped block start to be SPACE-QUALIFIED (exercising the #372 "
