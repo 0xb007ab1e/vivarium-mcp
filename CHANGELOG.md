@@ -28,8 +28,11 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   secret-rotation runbooks updated to match. The v0.14.0 release tag also revealed the repin App is
   **not installed** on `vivarium-mcp` (`create-github-app-token` 404 on get-repo-installation —
   likely dropped in the `ghidra-mcp`→`vivarium-mcp` rename); re-install + set the new secret per
-  `docs/runbooks/supply-chain-pinning.md` (tracked in #171). Maintainer action required; no runtime
+  `docs/runbooks/supply-chain-pinning.md` (tracked in #366). Maintainer action required; no runtime
   impact (the pin advances only via a human-merged, cosign-verified PR regardless).
+  **Resolved 2026-11-03:** the `vivarium-repin-0xb007ab1e` App was re-installed on `vivarium-mcp`
+  and `REPIN_APP_CLIENT_ID` added (the dead numeric `REPIN_APP_ID` secret removed); final green-path
+  verification runs on the next release tag (#366).
 
 ### Fixed
 

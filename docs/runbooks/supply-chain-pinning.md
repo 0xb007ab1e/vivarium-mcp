@@ -222,15 +222,18 @@ section becomes "Renovate opens bump PRs; a human reviews + merges."
 
 ## Repin GitHub App (one-time — enables the auto-repin PR to actually merge)
 
-> **Status: NEEDS RE-INSTALL (2026-10-31).** The **v0.14.0** release tag exercised this path for the
-> first time and `propose-pin-bump` **failed at "Mint the repin GitHub App token"** —
-> `create-github-app-token` got **404** on `GET /repos/{o}/{r}/installation`: the App
-> (`vivarium-repin-0xb007ab1e`, App ID 4208211) authenticates but is **not installed on
-> `0xb007ab1e/vivarium-mcp`** (most likely dropped in the `ghidra-mcp` → `vivarium-mcp` rename).
-> The workflow wiring is correct (it reached the mint step and fail-safe-aborted — no bot PR); the
-> gap is purely the missing installation. **Re-install per the steps below**, then re-verify on the
-> next release tag (issue #171). Note the input migrated to the App's **Client ID**
-> (`REPIN_APP_CLIENT_ID`) — `create-github-app-token` deprecated the numeric `app-id`.
+> **Status: RESOLVED (2026-11-03, #366) — pending next-tag green-path verification.** The **v0.14.0**
+> release tag first exposed this: `propose-pin-bump` **failed at "Mint the repin GitHub App token"** —
+> `create-github-app-token` got **404** on `GET /repos/{o}/{r}/installation` because the App
+> (`vivarium-repin-0xb007ab1e`, App ID 4208211) authenticates but was **not installed on
+> `0xb007ab1e/vivarium-mcp`** (dropped in the `ghidra-mcp` → `vivarium-mcp` rename). The workflow
+> wiring was correct (it reached the mint step and fail-safe-aborted — no bot PR); the gap was purely
+> the missing installation. **Fixed 2026-11-03:** the App was re-installed on `vivarium-mcp` (this
+> repo only) and the **`REPIN_APP_CLIENT_ID`** secret added (the deprecated numeric `REPIN_APP_ID`
+> secret was removed); `REPIN_APP_PRIVATE_KEY` was already present. The input migrated to the App's
+> **Client ID** — `create-github-app-token` deprecated the numeric `app-id`. **Authoritative
+> verification is the next release tag**: confirm the auto-opened `ci: bump worker-image trust pin …`
+> PR has a verified commit and runs the full required-check set (issue #366).
 
 `worker-image.yml`'s `propose-pin-bump` job opens the PR that advances the worker-image trust pin
 (`.github/worker-image.pin`) on each release tag. It uses a **GitHub App token**, not the built-in
