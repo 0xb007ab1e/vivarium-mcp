@@ -76,6 +76,14 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Fixed
 
+- **Worker image build: replace the dead musl-1.2.5 fallback mirror.** A dispatched `worker-image`
+  build failed in the `musl-build` stage — the fallback `ftp.barfooze.de/pub/sabotage` 404s for
+  musl-1.2.5 and the primary `musl.libc.org` was flaky, leaving the FID-gen fetch one source deep
+  (any primary blip reds the worker build and the required live-regression gate). Swapped the
+  fallback for the OpenWrt distfiles mirror (`sources.openwrt.org/musl-1.2.5.tar.gz`) — CDN-backed,
+  verified serving the identical tarball (sha256 pin `a9a118bb…` unchanged, still the integrity
+  guard). (#386)
+
 - **`read_bytes` (and every address-taking tool) now resolve space-qualified / overlay addresses.**
   `_parse_address` hardcoded the **default** address space, so an address that lives in an overlay
   space — e.g. an F1 raw-import overlay mapped into `:local` — was silently read from the
