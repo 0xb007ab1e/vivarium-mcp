@@ -47,6 +47,9 @@ class SessionSources:
     function_details: dict[str, s.FunctionDetail] = field(default_factory=dict)
     complexities: dict[str, int] = field(default_factory=dict)
     function_hashes: dict[str, str] = field(default_factory=dict)
+    #: Address(hex) → exact-bytes function hash (``exact_bytes``), for the corpus ``EQUIV`` link
+    #: (ADR-080). Populated only under enrichment; the per-binary mapper does not use it.
+    function_byte_hashes: dict[str, str] = field(default_factory=dict)
     call_nodes: list[s.CallGraphNode] = field(default_factory=list)
     call_edges: list[s.CallEdge] = field(default_factory=list)
     xrefs: list[s.Xref] = field(default_factory=list)

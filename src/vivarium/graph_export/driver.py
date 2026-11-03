@@ -288,8 +288,10 @@ def _enrich_functions(
             src.complexities[fn.address] = cx.complexity
         fh = _safe(caller, "function_hash", args, s.FunctionHashOut, failed)
         if fh is not None:
-            # Operand-masked hash = the cross-binary clone / SAME_AS key (ADR-079 §7, deferred).
+            # Operand-masked hash = the cross-binary clone / SAME_AS key (ADR-080); exact-bytes hash
+            # = the byte-identical EQUIV key.
             src.function_hashes[fn.address] = fh.exact_instructions
+            src.function_byte_hashes[fn.address] = fh.exact_bytes
 
 
 def _gather_annotations(
@@ -339,25 +341,16 @@ def _apply_annotation_entry(entry: dict[str, Any], src: SessionSources) -> None:
 # --- push (map + resolve + upsert) --------------------------------------------------------------
 
 
-def push_batch(
-    sink: GraphSink,
-    batch: GraphBatch,
-    *,
-    program_sha256: str,
-    binary_label: str,
+def _push_into(
+    sink: GraphSink, project_id: str, project_name: str, batch: GraphBatch
 ) -> ExportStats:
-    """Upsert a mapped batch into the per-binary memory-graph project (idempotent).
+    """Upsert a batch into an already-resolved project (idempotent); return the outcome stats.
 
     Nodes are upserted first (chunked); their returned keys build a local-id index and an address
     index, against which edge endpoints are resolved (``ADDR_REF`` endpoints via the address index).
     Edges whose endpoints do not both resolve are skipped and counted — never fabricated.
     """
-    name = f"vivarium-{program_sha256[:12]}"
-    project_id = sink.ensure_project(
-        name, f"Vivarium RE export of {binary_label} ({program_sha256})"
-    )
-    stats = ExportStats(project_id=project_id, project_name=name)
-
+    stats = ExportStats(project_id=project_id, project_name=project_name)
     id_index, addr_index = _upsert_nodes(sink, project_id, batch, stats)
     edge_payloads = _resolve_edges(batch, id_index, addr_index, stats)
     for chunk in _chunks(edge_payloads, _CHUNK):
@@ -368,13 +361,68 @@ def push_batch(
     _log.info(
         "graph_export.push",
         extra={
-            "project": name,
+            "project": project_name,
             "nodes": stats.nodes_total,
             "edges": stats.edges_total,
             "skipped": stats.edges_skipped,
         },
     )
     return stats
+
+
+def push_batch(
+    sink: GraphSink,
+    batch: GraphBatch,
+    *,
+    program_sha256: str,
+    binary_label: str,
+) -> ExportStats:
+    """Upsert a mapped batch into the per-binary memory-graph project (idempotent)."""
+    name = f"vivarium-{program_sha256[:12]}"
+    project_id = sink.ensure_project(
+        name, f"Vivarium RE export of {binary_label} ({program_sha256})"
+    )
+    return _push_into(sink, project_id, name, batch)
+
+
+def _family_tuples(
+    family: s.FamilyMatchOut | None,
+) -> list[tuple[str, float, list[str], str]]:
+    """Flatten ``family_match`` to ``(label, confidence, basis, corpus_version)`` leads."""
+    if family is None:
+        return []
+    return [
+        (c.family, c.confidence, list(c.basis), family.corpus_version) for c in family.candidates
+    ]
+
+
+def push_corpus(sink: GraphSink, src: SessionSources) -> ExportStats:
+    """Project this session's content-hashed functions + family leads into the corpus project.
+
+    ADR-080 Part A: clone clusters across binaries form **by upsert idempotency** on the shared
+    hash-class node names in the ``vivarium-corpus`` project — no cross-binary query, no fan-out.
+    The function hashes come from per-function enrichment, so a corpus push is meaningful only when
+    the export ran with ``enrich_functions=True``; without hashes it upserts just the program anchor
+    (honest, empty of clone links). Reuses the same idempotent upsert machinery as ``push_batch``.
+    """
+    from vivarium.graph_export.corpus import CORPUS_PROJECT, build_corpus_specs
+
+    batch = build_corpus_specs(
+        sha256=src.metadata.sha256,
+        fmt=src.metadata.format,
+        masked_hashes=src.function_hashes,
+        byte_hashes=src.function_byte_hashes,
+        function_names={
+            fn.address: name for fn in src.functions if (name := _unwrap(fn.name)) is not None
+        },
+        families=_family_tuples(src.family),
+    )
+    project_id = sink.ensure_project(
+        CORPUS_PROJECT,
+        "Vivarium cross-binary corpus index (ADR-080): content-hash clone clusters "
+        "(SAME_AS / EQUIV) + family-match leads across exported binaries.",
+    )
+    return _push_into(sink, project_id, CORPUS_PROJECT, batch)
 
 
 def export_session(
@@ -384,8 +432,16 @@ def export_session(
     *,
     binary_label: str = "",
     opts: ExportOptions | None = None,
+    link_corpus: bool = False,
 ) -> ExportStats:
-    """Gather, map, and push one Vivarium session to its memory-graph project (ADR-079)."""
+    """Gather, map, and push one Vivarium session to its memory-graph project (ADR-079).
+
+    When ``link_corpus`` is set (ADR-080 Part A), the session's content-hashed functions + family
+    leads are *also* projected into the shared ``vivarium-corpus`` index so clones cluster across
+    binaries. Corpus linking is only useful with ``enrich_functions=True`` (that is where the
+    function hashes come from); otherwise the corpus gets just the program anchor. The returned
+    stats describe the per-binary push.
+    """
     options = opts or ExportOptions()
     src, failed = gather_sources(caller, session_id, options)
     batch = build_graph(src)
@@ -395,8 +451,47 @@ def export_session(
         program_sha256=src.metadata.sha256,
         binary_label=binary_label or src.metadata.format,
     )
+    if link_corpus:
+        push_corpus(sink, src)
     stats.failed_tools = failed
     return stats
+
+
+def export_session_and_close(
+    caller: ToolCaller,
+    sink: GraphSink,
+    session_id: str,
+    *,
+    binary_label: str = "",
+    opts: ExportOptions | None = None,
+    link_corpus: bool = False,
+) -> ExportStats:
+    """Export THIS session, then close it — guaranteeing the close runs even if export fails.
+
+    ADR-080 Part B, client-side **export-before-close**: this is NOT a server hook (a server that
+    exported on close would call out, violating ADR-001). Fail-closed: a failed or partial export
+    never defers the ``session_close`` (ADR-002's wipe is unconditional). A session already evicted
+    server-side raises inside the export; it is logged and reported as an honest empty export, not
+    propagated — the holder asked to close, and the session is gone regardless.
+
+    Returns the per-binary :class:`ExportStats` on success, or a zeroed sentinel (``project_id=""``,
+    ``failed_tools=["export-aborted"]``) when the export could not complete.
+    """
+    try:
+        return export_session(
+            caller, sink, session_id, binary_label=binary_label, opts=opts, link_corpus=link_corpus
+        )
+    except Exception as exc:
+        _log.warning(
+            "graph_export.export_failed_before_close",
+            extra={"session": session_id, "error": type(exc).__name__},
+        )
+        return ExportStats(project_id="", project_name="", failed_tools=["export-aborted"])
+    finally:
+        try:
+            caller.call("session_close", {"session_id": session_id})
+        except Exception:
+            _log.warning("graph_export.close_failed", extra={"session": session_id})
 
 
 def _upsert_nodes(

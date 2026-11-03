@@ -8,6 +8,18 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+- **Cross-binary corpus links + export-on-close for the memory-graph exporter (ADR-080, completes
+  ADR-079 §7).** `graph_export` can now project a session's content-hashed functions + family-match
+  leads into a shared `vivarium-corpus` index project (`export_session(link_corpus=True)` /
+  `push_corpus` / CLI `--corpus`): each per-binary **occurrence** node links `SAME_AS` a **shared
+  hash-class node named by the operand-masked `function_hash`** (and `EQUIV` a `bytes:<exact_bytes>`
+  node for byte-identical clones), so clone clusters across binaries form **by upsert idempotency —
+  no cross-binary query, no pairwise fan-out**. Clone/family links are INFERRED leads (ADR-073); the
+  names are safe digests, hostile names stay inert attrs, no secret enters the corpus (ADR-005/072).
+  Also `export_session_and_close` / CLI `--export-on-close` (ADR-080 Part B): a **client-side**
+  export-before-close guarantee (never a server hook — ADR-001), fail-closed so a failed or evicted
+  export never defers the ADR-002 wipe. Pure-core projection is 100%-covered with a property + abuse
+  pass. (#367)
 - **`secret_scan` byte-magic sub-pass — detect binary-only container/bootloader magic (ADR-072
   follow-up).** The string pass only saw format magic that survives as a printable `list_strings`
   token; binary-only signatures — uImage `0x27051956`, DTB/FDT `0xd00dfeed`, cramfs, XZ, LZ4 — were

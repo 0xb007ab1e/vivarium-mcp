@@ -15,7 +15,11 @@ import logging
 import os
 import sys
 
-from vivarium.graph_export.driver import ExportOptions, export_session
+from vivarium.graph_export.driver import (
+    ExportOptions,
+    export_session,
+    export_session_and_close,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:  # pragma: no cover - CLI wiring
@@ -51,6 +55,18 @@ def _build_parser() -> argparse.ArgumentParser:  # pragma: no cover - CLI wiring
         action="store_true",
         help="Per-function deep enrichment (signature/complexity/hash) — N calls per function.",
     )
+    parser.add_argument(
+        "--corpus",
+        action="store_true",
+        help="Also link into the shared vivarium-corpus cross-binary clone index (ADR-080); "
+        "implies --enrich (the clone links need per-function hashes).",
+    )
+    parser.add_argument(
+        "--export-on-close",
+        action="store_true",
+        help="Guarantee the export runs before the session is closed, even on error (ADR-080 "
+        "Part B); a failed export never defers the close.",
+    )
     parser.add_argument("--expected-sha256", default=None, help="Integrity guard for the import.")
     return parser
 
@@ -72,21 +88,39 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live trans
 
     info = caller.call("session_create", {"label": args.label} if args.label else {})
     session_id = info["session_id"]
+    closed = False
     try:
         import_args: dict[str, object] = {"session_id": session_id, "source_ref": args.source_ref}
         if args.expected_sha256:
             import_args["expected_sha256"] = args.expected_sha256
         caller.call("session_import", import_args)
         caller.call("session_analyze", {"session_id": session_id, "profile": args.profile})
-        stats = export_session(
-            caller,
-            sink,
-            session_id,
-            binary_label=args.source_ref,
-            opts=ExportOptions(enrich_functions=args.enrich),
-        )
+        # Corpus clone links need per-function hashes → enrichment; --corpus implies --enrich.
+        opts = ExportOptions(enrich_functions=args.enrich or args.corpus)
+        if args.export_on_close:
+            # export_session_and_close owns the close (runs it in a finally, fail-closed).
+            stats = export_session_and_close(
+                caller,
+                sink,
+                session_id,
+                binary_label=args.source_ref,
+                opts=opts,
+                link_corpus=args.corpus,
+            )
+            closed = True
+        else:
+            stats = export_session(
+                caller,
+                sink,
+                session_id,
+                binary_label=args.source_ref,
+                opts=opts,
+                link_corpus=args.corpus,
+            )
+            closed = False
     finally:
-        caller.call("session_close", {"session_id": session_id})
+        if not closed:
+            caller.call("session_close", {"session_id": session_id})
 
     print(
         f"exported {stats.nodes_total} nodes / {stats.edges_total} edges "
