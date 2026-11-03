@@ -33,6 +33,17 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Changed
 
+- **Reconcile the TB9 threat model (`docs/security/threat-model.md` §21) to the shipped dashboard
+  code.** §21 had drifted ahead of the implementation — it still read "no live execution path (503)"
+  and modelled compute ops (import/analyze) as per-command human-gated. The gap-review against the
+  code corrected §21's status (a **read-only** `StateFileToolCaller` executor is implemented and
+  config-enablable behind a tailnet bind + single shared token) and its S/R/I/D/E rows: writes stay
+  hard-gated and refused by every executor, but **compute may run on a gated worker executor under
+  auth** (ADR-076 §3); and the **per-principal auth, an app-layer rate limiter, and per-command
+  audit** are named as explicit **pre-exposure requirements** (the dashboard README's existing
+  "Follow-ups (before any wider exposure)" — S/R/D gaps), not re-filed. Docs only; no code or control
+  change. (#368)
+
 - **Repin GitHub App: migrate `create-github-app-token` off the deprecated `app-id` to `client-id`.**
   `worker-image.yml`'s `propose-pin-bump` now authenticates the repin App via its **Client ID**
   (`REPIN_APP_CLIENT_ID` secret) + `REPIN_APP_PRIVATE_KEY`, silencing the action's `app-id`
