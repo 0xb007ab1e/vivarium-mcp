@@ -75,7 +75,7 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 
 ### Knowledge-graph export (new external integration)
 - **ADR-079** — Export RE sessions to the `memory-graph` knowledge graph (TB11; client-side mapper + driver, per-binary project, gated outward write) — **Proposed**.
-- **ADR-080** — Cross-binary corpus links (`SAME_AS`/`EQUIV` clone + family clustering in a dedicated `vivarium-corpus` index project) + client-side export-on-close — completes the ADR-079 §7 deferrals — **Proposed**.
+- **ADR-080** — Cross-binary corpus links (`SAME_AS`/`EQUIV` clone + family clustering in a dedicated `vivarium-corpus` index project) + client-side export-on-close — completes the ADR-079 §7 deferrals — **Accepted / Implemented** 2026-11-03 (#367): realized via shared hash-class nodes (cluster forms by upsert idempotency, no cross-binary query / no fan-out) + `export_session_and_close`.
 
 ### Read/analysis tools
 - **ADR-007** — Semantic-naming support tools (call graph, leaf-first ordering, function context).

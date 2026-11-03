@@ -9,7 +9,13 @@ boundary as inert data tagged with hostile provenance
 (ADR-005); secret findings stay redacted (ADR-072).
 """
 
-from vivarium.graph_export.driver import ExportOptions, ExportStats, export_session
+from vivarium.graph_export.driver import (
+    ExportOptions,
+    ExportStats,
+    export_session,
+    export_session_and_close,
+    push_corpus,
+)
 from vivarium.graph_export.ports import EdgeSpec, GraphSink, NodeSpec, ToolCaller
 
 __all__ = [
@@ -20,4 +26,6 @@ __all__ = [
     "NodeSpec",
     "ToolCaller",
     "export_session",
+    "export_session_and_close",
+    "push_corpus",
 ]

@@ -1,8 +1,10 @@
 # ADR-080: Cross-binary corpus links + export-on-close for the memory-graph exporter
 
-- **Status:** **Proposed** (2026-11-02; drafted by the assistant). Design of record authored BEFORE
-  any implementation (`workflow-threat-model`). Completes the two items ADR-079 §7 explicitly
-  deferred: cross-binary `SAME_AS` / family-clustering links, and auto-export at session close.
+- **Status:** **Accepted — Implemented** (proposed 2026-11-02; implemented 2026-11-03, #367). Design
+  of record authored BEFORE any implementation (`workflow-threat-model`). Completes the two items
+  ADR-079 §7 explicitly deferred: cross-binary `SAME_AS` / family-clustering links, and auto-export
+  at session close. See **§9 Implementation note** for the one realized refinement (shared hash-class
+  nodes instead of pairwise edges — strictly bounds the clustering).
 - **Date:** 2026-11-02
 - **Deciders:** Human operator (ratification pending). Both features **write to / orchestrate an
   external store** (the `memory-graph` MCP server) — a `workflow-gated-actions` outward/persistence
@@ -194,3 +196,36 @@ remains a single-project operation unless corpus linking is requested.
 - Cost: one extra standing memory-graph project (`vivarium-corpus`) and a bounded second write pass
   per export when corpus linking is on; both opt-in and gated. The per-binary export path and the
   core server are unchanged.
+
+## 9. Implementation note (2026-11-03, #367)
+
+Implemented in `src/vivarium/graph_export/` — a pure `corpus.py` (`build_corpus_specs`), driver
+`push_corpus` + `export_session(link_corpus=…)` + `export_session_and_close` (Part B), and
+`--corpus` / `--export-on-close` CLI flags. One **refinement** to Part A, strictly better than the
+drafted shape:
+
+- **Shared hash-class nodes, not pairwise `SAME_AS` edges.** Rather than query the corpus for
+  same-hash occurrences and add O(n²) pairwise edges under a `MAX_CLONE_FANOUT` cap (§Part A / §4),
+  the exporter upserts a **shared clone-class node named by the hash** (`CONSTANT` = the operand-masked
+  `exact_instructions`; a second `CONSTANT` named `bytes:<exact_bytes>` for `EQUIV`) and links each
+  per-binary **occurrence** (`FUNCTION`, named `<sha256[:12]>:<addr>`, back-ref attrs `{sha256,
+  address, masked_hash, exact_bytes, ghidra_name}`) to it with one `SAME_AS` (and one `EQUIV`). Two
+  binaries' occurrences of the same hash reach the **same** class node by name in the one
+  `vivarium-corpus` project, so the clone cluster forms **by upsert idempotency with no cross-binary
+  query and no fan-out** — the §4 cap and the deferred `query_nodes` port are unnecessary. "All clones
+  of H" is the neighbour set of the class node; the cluster is a star, not a clique. Family leads are
+  `OTHER` `family:<label>` nodes the anchor `REFERENCES` (INFERRED), as drafted.
+
+- This keeps every §5 security property: class/anchor names are server-computed digests (safe),
+  hostile names stay inert `attrs`, clone/family links are `inferred`, no `SECRET` enters the corpus,
+  and the write stays gated. Corpus linking is opt-in (default OFF) and only meaningful with
+  `enrich_functions=True` (the hash source); `--corpus` implies `--enrich`.
+
+- **Part B** is exactly as designed: `export_session_and_close` runs the export in a `try` and the
+  `session_close` in a `finally` (client-side, never a server hook — ADR-001), fail-closed — a raising
+  or evicted export is logged and returns an honest empty sentinel while the close still runs
+  (ADR-002 wipe never deferred).
+
+Tests: `tests/unit/test_graph_export_corpus.py` — pure projection (100%), a Hypothesis property +
+abuse pass (arbitrary/hostile input → only schema-valid, inert nodes/edges; never raises), and driver
+wiring incl. idempotent cross-binary clustering and export-before-close on success/raise/failing-close.

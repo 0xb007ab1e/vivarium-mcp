@@ -32,6 +32,7 @@ NODE_KINDS: frozenset[str] = frozenset(
         "COMMENT",
         "STRUCT",
         "UNION",
+        "OTHER",
     }
 )
 
@@ -45,6 +46,8 @@ EDGE_TYPES: frozenset[str] = frozenset(
         "IMPORTS",
         "EXPORTS",
         "ANNOTATES",
+        "SAME_AS",
+        "EQUIV",
     }
 )
 
