@@ -5925,10 +5925,25 @@ class PyGhidraBackend:
         return self._program
 
     def _parse_address(self, value: str) -> Any:  # pragma: no cover - JVM edge
-        """Parse a hex address string into a Ghidra ``Address`` (default address space).
+        """Parse an address string into a Ghidra ``Address``.
+
+        Accepts a **bare hex offset** (optional ``0x`` prefix, resolved in the default address
+        space) *and* a **space-qualified** Ghidra address such as an overlay's
+        ``OverlayName::00001000``. A bare offset is always resolved in the default space, so a byte
+        range that lives in a non-default/overlay space — e.g. an F1 raw-import overlay mapped into
+        ``:local`` (#372) — must be addressed by its qualified form to reach the block that actually
+        holds it; resolving it in the default space would read a different (often uninitialized)
+        block and return silently-wrong / all-zero bytes, exactly the trap ADR-005 forbids. The
+        qualified form is precisely what ``memory_map`` / ``list_data`` emit (``str(addr)``), so an
+        address copied from a listing round-trips to the right space.
+
+        The parse still never leaves the program's own ``AddressFactory`` (every space is one the
+        loaded program already defines), and ``read_bytes`` remains size-clamped and block-confined
+        downstream — no new surface, only correct space resolution.
 
         Args:
-            value: An address string (hex, optional ``0x`` prefix).
+            value: An address string — bare hex (``[0x]1A2B``) or space-qualified
+                (``space::offset``).
 
         Returns:
             A Ghidra ``Address``.
@@ -5939,9 +5954,13 @@ class PyGhidraBackend:
         from worker.dispatch import CODE_INVALID_PARAMS, WorkerError
 
         program = self._require_program()
+        # Strip only a leading ``0x`` on the bare-offset form; a space-qualified address
+        # (``name::offset``) carries no ``0x`` prefix and is passed through untouched.
         text = value[2:] if value[:2].lower() == "0x" else value
         try:
-            addr = program.getAddressFactory().getDefaultAddressSpace().getAddress(int(text, 16))
+            # ``AddressFactory.getAddress`` parses a bare hex offset in the default space AND a
+            # space-qualified address (honouring overlay namespaces) — one call, both forms.
+            addr = program.getAddressFactory().getAddress(text)
         except Exception as exc:
             raise WorkerError(CODE_INVALID_PARAMS, "could not parse address") from exc
         if addr is None:
