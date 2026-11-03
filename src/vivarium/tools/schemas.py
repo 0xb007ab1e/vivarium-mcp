@@ -311,7 +311,7 @@ class SessionImportIn(_SessionScopedIn):
     regions: list[RegionSpec] | None = Field(default=None, max_length=_MAX_IMPORT_REGIONS)
     debug_ref: str | None = Field(default=None, min_length=1, max_length=512)
     debug_format: Literal["map", "dwarf"] | None = None
-    container: Literal["gzip", "xz", "lzma", "uimage"] | None = None
+    container: Literal["gzip", "xz", "lzma", "uimage", "androidboot"] | None = None
 
     @model_validator(mode="after")
     def _validate_loader_hints(self) -> SessionImportIn:  # noqa: C901 — one branch per loader kind
@@ -364,7 +364,9 @@ class SessionImportIn(_SessionScopedIn):
         # byte-for-byte the pre-ADR-070 path. `gzip`/`xz`/`lzma` are decompressed first (streamed,
         # with zip-bomb output + ratio caps); `uimage` strips the 64-byte U-Boot legacy header and
         # unwraps its payload per the header's own compression (none/gzip/lzma), under the same
-        # caps. The payload is then handed to the loader hints below. Mutually exclusive with
+        # caps; `androidboot` parses the `ANDROID!` header and surfaces the page-aligned **kernel**
+        # region (the loadable image; the ramdisk is a cpio filesystem — a separate follow-on). The
+        # payload is then handed to the loader hints below. Mutually exclusive with
         # `regions` (a scatter-load of ALREADY-mapped raw blocks, not a single stream); everything
         # else (auto/binary loaders, processor/base) still applies to the unwrapped payload.
         if self.container is not None and self.regions is not None:

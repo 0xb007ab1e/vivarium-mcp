@@ -8,6 +8,17 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Added
 
+
+- **`androidboot` container loader — surface the Android boot-image kernel (ADR-070 / #380).** 
+  `session_import` now accepts `container="androidboot"`: the worker parses the `ANDROID!`
+  `boot_img_hdr` and slices the page-aligned **kernel** region (the loadable image) under the same
+  zip-bomb output + ratio caps as the other containers, then hands it to the loader. Header parsing
+  is a pure, hermetically-fuzzed `core.androidboot.parse_android_boot_header` (hostile bytes →
+  validated header or `ValueError`; page-size power-of-two + per-region size caps guard CWE-20/400/
+  190/369). The **ramdisk** stays deferred — it is a cpio filesystem, not loadable code, needing a
+  separate filesystem-extract capability (the parser already computes its window). Corrects the
+  ADR-070 overstatement that androidboot was shipped; a live-regression integration test proves the
+  end-to-end unwrap + load. (#380)
 - **Cross-binary corpus links + export-on-close for the memory-graph exporter (ADR-080, completes
   ADR-079 §7).** `graph_export` can now project a session's content-hashed functions + family-match
   leads into a shared `vivarium-corpus` index project (`export_session(link_corpus=True)` /

@@ -564,12 +564,15 @@ def test_container_valid_with_auto_and_binary() -> None:
     # ADR-070 follow-up: the U-Boot uImage envelope is now an accepted container.
     m3 = s.SessionImportIn(session_id="s", source_ref="fw.uimg", container="uimage")
     assert m3.container == "uimage"
+    # #380: the Android boot image (`ANDROID!`) is now an accepted container (kernel surfaced).
+    m4 = s.SessionImportIn(session_id="s", source_ref="fw.img", container="androidboot")
+    assert m4.container == "androidboot"
 
 
 def test_container_unknown_rejected() -> None:
-    """A container outside the closed set (e.g. the deferred 'androidboot') fails closed."""
+    """A container outside the closed set (e.g. an unsupported 'squashfs') fails closed."""
     with pytest.raises(ValidationError):
-        s.SessionImportIn(session_id="s", source_ref="fw", container="androidboot")  # type: ignore[arg-type]
+        s.SessionImportIn(session_id="s", source_ref="fw", container="squashfs")  # type: ignore[arg-type]
 
 
 def test_regions_aggregate_byte_budget_enforced_before_worker() -> None:
