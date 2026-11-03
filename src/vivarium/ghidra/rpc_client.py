@@ -166,6 +166,12 @@ _IOC_STRING_BUDGET = 10_000
 #: Max strings pulled for the ``secret_scan`` pass (ADR-072); bounds the scanned set + feeds
 #: ``truncated`` when the program has more strings than the budget.
 _SECRET_STRING_BUDGET = 10_000
+#: Max memory blocks read for the ``secret_scan`` byte-magic sub-pass (ADR-072 byte follow-up);
+#: bounds the number of worker ``read_bytes`` hops and feeds ``truncated`` when there are more.
+_SECRET_MAGIC_MAX_BLOCKS = 64
+#: Bytes read from the head of each block for the byte-magic sub-pass (<= ``MAX_READ_BYTES``;
+#: container/bootloader headers live at a block/image start). Bounded per ADR-072 / CWE-400.
+_SECRET_MAGIC_WINDOW = 8192
 #: Max ``search_bytes`` matches requested per crypto signature (each search is already bounded; this
 #: caps the per-signature contribution to the aggregate and feeds ``truncated``).
 _CRYPTO_MATCH_BUDGET = 1_000
@@ -1954,9 +1960,11 @@ class RpcGhidraAdapter:
         hits = secretscan.scan_secrets(
             rows, categories=categories, entropy_threshold=a.entropy_threshold
         )
+        byte_hits, byte_truncated = self._secret_byte_magic(sid, categories)
+        hits = hits + byte_hits
         total = len(hits)
         page = hits[a.offset : a.offset + a.limit]
-        truncated = strings.truncated or (a.offset + a.limit < total)
+        truncated = strings.truncated or byte_truncated or (a.offset + a.limit < total)
         return s.SecretScanOut(
             findings=[
                 s.SecretFinding(
@@ -1972,6 +1980,52 @@ class RpcGhidraAdapter:
             total=total,
             truncated=truncated,
         )
+
+    def _secret_byte_magic(
+        self, sid: str, categories: tuple[str, ...] | None
+    ) -> tuple[list[Any], bool]:
+        """Byte-magic sub-pass of ``secret_scan`` — bounded block-head reads over existing RPCs.
+
+        Reads the head of each *initialized* memory block (``memory_map`` then ``read_bytes`` — both
+        already-proven worker hops, no new surface) and runs the pure
+        :func:`core.secretscan.scan_byte_magic` for binary-only container/bootloader magic (uImage,
+        DTB, cramfs, XZ, LZ4) that the printable-string pass cannot see (ADR-072 byte follow-up).
+        Bounded by :data:`_SECRET_MAGIC_MAX_BLOCKS` blocks x :data:`_SECRET_MAGIC_WINDOW` bytes
+        (CWE-400); more blocks than the cap set ``truncated``. Overlay-block bytes resolve correctly
+        once the ``_parse_address`` overlay fix (#372) is in the worker; non-overlay blocks are
+        unaffected. The returned findings are the pure core ``SecretFinding`` (redacted); the caller
+        wraps the masked preview BINARY like the string hits.
+
+        Returns:
+            ``(findings, truncated)`` — redacted byte-magic findings and whether the block set or a
+            read was truncated.
+        """
+        from vivarium.core import secretscan
+
+        if categories is not None and "format_magic" not in categories:
+            return [], False
+        blocks = self._tool_call(sid, "memory_map", {}).get("blocks", [])
+        findings: list[Any] = []
+        truncated = False
+        scanned = 0
+        for block in blocks:
+            start = block.get("start")
+            if start is None or not block.get("initialized", False):
+                continue
+            if scanned >= _SECRET_MAGIC_MAX_BLOCKS:
+                truncated = True
+                break
+            size = int(block.get("size", 0))
+            if size <= 0:
+                continue
+            result = self._tool_call(
+                sid, "read_bytes", {"address": start, "length": min(size, _SECRET_MAGIC_WINDOW)}
+            )
+            data = bytes.fromhex(str(result.get("data", "")))
+            findings.extend(secretscan.scan_byte_magic([(str(start), data)], categories=categories))
+            truncated = truncated or bool(result.get("truncated", False))
+            scanned += 1
+        return findings, truncated
 
     def call_graph_metrics(self, sid: str, a: s.CallGraphMetricsIn) -> s.CallGraphMetricsOut:
         """Structural call-graph metrics (PURE ``core.metrics`` over the ``call_graph`` RPC).
