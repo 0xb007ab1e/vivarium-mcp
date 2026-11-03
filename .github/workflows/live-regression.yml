@@ -406,6 +406,7 @@ jobs:
             tests/integration/test_identify_functions_fid.py \
             tests/integration/test_identify_functions_selfmatch.py \
             tests/integration/test_import_raw_binary.py \
+            tests/integration/test_read_bytes_roundtrip_multispace.py \
             tests/integration/test_import_synthetic_elf.py \
             tests/integration/test_import_hex.py \
             tests/integration/test_import_selfdescribing.py \
