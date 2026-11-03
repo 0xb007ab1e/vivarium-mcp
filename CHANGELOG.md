@@ -33,6 +33,15 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Changed
 
+- **Reconcile ADR-076 status to the shipped read-only interactive path.** ADR-076 still read
+  "Proposed … no live server wiring … browser has no live execution path (503)". Updated to
+  **Partial**: the gating policy (`commands.py`) and a **read-only** executor (`StateFileToolCaller`,
+  answering read-only ops from the dashboard state file) are implemented and config-enablable
+  (default-off, fail-closed, token-required, tailnet-bound); the compute/write live path and
+  production enablement remain gated (#368). A dated "Status update" section + the ADR index entry
+  record what shipped and point at the §21 pre-exposure requirements (per-principal auth, rate
+  limiter, per-command audit). Docs only; companion to the §21 reconciliation. (#368)
+
 - **Reconcile the TB9 threat model (`docs/security/threat-model.md` §21) to the shipped dashboard
   code.** §21 had drifted ahead of the implementation — it still read "no live execution path (503)"
   and modelled compute ops (import/analyze) as per-command human-gated. The gap-review against the

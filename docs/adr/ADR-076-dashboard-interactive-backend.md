@@ -1,9 +1,12 @@
 # ADR-076: Dashboard interactive backend (Phase 2)
 
-- **Status:** **Proposed** (2026-09-04; drafted by the assistant). Phase 1 (author + visualize) is
-  implemented (dashboard MVP → live bridge → panels → VSCode UI → RE browser → interactive call
-  graph → workflows catalog/Runs/builder, PRs #317–#322). This ADR proposes Phase 2 — an
-  **interactive command backend** — and is the design of record for threat-model **TB9** (§21).
+- **Status:** **Partial — read-only path shipped + config-enablable** (proposed 2026-09-04; updated
+  2026-11-03, see "Status update" below). Phase 1 (author + visualize) is implemented (dashboard MVP
+  → live bridge → panels → VSCode UI → RE browser → interactive call graph → workflows catalog/Runs/
+  builder, PRs #317–#322). This ADR is the design of record for Phase 2 — the **interactive command
+  backend** — and for threat-model **TB9** (§21). The gating policy (`commands.py`) and a **read-only**
+  executor (`StateFileToolCaller`) are now implemented and config-enablable; the compute/write live
+  path and production enablement remain **gated** (#368).
 - **Date:** 2026-09-04
 - **Deciders:** Human operator (ratification + enablement pending); the interactive write path is a
   **gated action** (`workflow-gated-actions`).
@@ -62,10 +65,12 @@ gated actions** requiring human approval.
 
 - **Positive:** the interactive foundation exists, threat-modeled and fail-closed; the goal's
   interactive/apply-transform capabilities have a safe contract to build on; Phase 1 is unaffected.
-- **Negative / residual:** until the executor is wired + enabled (gated), the browser has no live
-  execution path (503) — interactive is not yet usable end-to-end by design. Wiring touches
-  security-critical server surface (auth, write path, session isolation) and must be reviewed +
-  human-approved before enablement.
+- **Negative / residual:** a **read-only** execution path now exists when the operator enables it
+  (see "Status update"), behind a tailnet bind + a single shared token — the deliberately-reduced MVP
+  surface. The **compute/write** live path and any production enablement remain gated and touch
+  security-critical server surface (auth, write path, session isolation); they must be reviewed +
+  human-approved, and the §21 pre-exposure requirements (per-principal auth, an app-layer rate
+  limiter, per-command audit) must land before wider exposure.
 
 ## Alternatives considered
 
@@ -73,3 +78,28 @@ gated actions** requiring human approval.
   write path, widens attack surface, violates "reuse the server" + ADR-001.
 - **Keep author-only (Phase 1) permanently** — rejected: does not meet the goal's interactive/apply
   capabilities; TB9 is the sanctioned path to add them safely.
+
+## Status update (2026-11-03)
+
+Reconciled to the shipped code (the same gap-review that corrected threat-model §21). Beyond the
+"groundwork" increment above, the dashboard now also ships a **read-only executor**:
+
+- **`commands.py`** gating policy (allow / needs-approval / deny) — implemented + tested.
+- **`ReadOnlyExecutor` + `StateFileToolCaller`** — a wired, **read-only** executor that answers
+  read-only ops (metadata / listings / call graph / per-function callers-callees-decompile) **from
+  the dashboard state file** (no worker, no fresh analysis; writes are refused; the policy is
+  re-evaluated per command — defense in depth).
+- **Config-enablable, fail-closed:** `VIVARIUM_DASHBOARD_INTERACTIVE` also REQUIRES
+  `VIVARIUM_DASHBOARD_STATE` **and** `VIVARIUM_DASHBOARD_TOKEN`, else interactive stays disabled
+  (503). `POST /api/command` returns 503 with no executor and 403 with no token.
+
+So the original "no live server wiring / browser has no live execution path (503)" is **superseded**:
+when enabled, a **read-only, tailnet-bound, single-shared-token** command path is live — a
+deliberately reduced surface. Still **gated** (separate human approval): the compute-capable
+`WorkerExecutor` (live `McpToolCaller` → a spawned MCP server) and any production enablement.
+
+**Before wider/production exposure** (threat-model §21 pre-exposure requirements + the
+`vivarium.dashboard` README "Follow-ups"): replace the interim shared token with **per-principal TB6
+auth** (ADR-017/019), add an **app-layer rate limiter** on the command route (hard prerequisite
+before enabling a compute executor), and add **per-command audit logging**. Tracked under #368; this
+ADR and §21 are the design of record.
