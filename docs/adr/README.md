@@ -1,6 +1,6 @@
 # Architecture Decision Records (ADR) index
 
-This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-079).
+This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-080).
 Each ADR captures one significant decision: its context, the decision, alternatives, and consequences.
 Records are **point-in-time** — a `Status:` of *Proposed* reflects the record when it was written; what
 actually shipped in each release is tracked in [`../../CHANGELOG.md`](../../CHANGELOG.md) and the
@@ -75,6 +75,7 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 
 ### Knowledge-graph export (new external integration)
 - **ADR-079** — Export RE sessions to the `memory-graph` knowledge graph (TB11; client-side mapper + driver, per-binary project, gated outward write) — **Proposed**.
+- **ADR-080** — Cross-binary corpus links (`SAME_AS`/`EQUIV` clone + family clustering in a dedicated `vivarium-corpus` index project) + client-side export-on-close — completes the ADR-079 §7 deferrals — **Proposed**.
 
 ### Read/analysis tools
 - **ADR-007** — Semantic-naming support tools (call graph, leaf-first ordering, function context).
