@@ -284,3 +284,89 @@ MALFORMED_ELF = malformed_elf()
 
 TRUNCATED_PE = truncated_pe()
 """A deliberately malformed PE blob (MZ magic, out-of-range e_lfanew)."""
+
+
+# --- Android boot image (ADR-070 `androidboot` container; fixture for #380) ----------------------
+
+#: Android boot image magic (`boot_img_hdr`).
+ANDROID_BOOT_MAGIC = b"ANDROID!"
+
+#: Default page size used to lay out a synthetic boot image (a common real value).
+_ANDROID_DEFAULT_PAGE = 2048
+
+
+def _page_round_up(size: int, page: int) -> int:
+    """Round ``size`` up to the next multiple of ``page`` (the boot-image region alignment)."""
+    return ((size + page - 1) // page) * page
+
+
+def synthetic_android_boot_image(
+    *,
+    page_size: int = _ANDROID_DEFAULT_PAGE,
+    kernel: bytes | None = None,
+    ramdisk: bytes | None = None,
+    second: bytes = b"",
+) -> bytes:
+    """Build a deterministic, benign Android boot image (`boot_img_hdr` v0).
+
+    Byte-for-byte reproducible (fixed constants, no randomness/clock/I/O). Lays out a standard
+    `ANDROID!` header (page 0) followed by the **page-aligned kernel, ramdisk, and optional second**
+    regions — exactly the structure the deferred `androidboot` loader must parse to surface
+    the kernel and (the #380 gap) the **ramdisk** region. Not a real program: the kernel/ramdisk
+    payloads are small marker blobs (the default ramdisk is a real gzip stream, since Android
+    ramdisks are a compressed cpio — so the ramdisk-decompress follow-on is exercisable too).
+
+    Header layout (LE): ``magic[8]``, ten ``u32`` (kernel_size, kernel_addr, ramdisk_size,
+    ramdisk_addr, second_size, second_addr, tags_addr, page_size, header_version, os_version),
+    ``name[16]``, ``cmdline[512]``, ``id[32]`` (zeroed — a fixture needs no real SHA1), and
+    ``extra_cmdline[1024]`` = 1632 bytes, then zero-padded to ``page_size``.
+
+    Args:
+        page_size: Region alignment (must be > 0); regions start on page boundaries.
+        kernel: Kernel region bytes (default: a benign marker blob).
+        ramdisk: Ramdisk region bytes (default: a gzip-compressed benign marker, ``mtime=0`` for
+            reproducibility).
+        second: Optional second-stage region bytes (default: none).
+
+    Returns:
+        The complete boot-image bytes.
+    """
+    import gzip
+
+    if page_size <= 0:
+        msg = "page_size must be positive"
+        raise ValueError(msg)
+    if kernel is None:
+        kernel = b"KERNEL--synthetic-benign-payload\n"
+    if ramdisk is None:
+        ramdisk = gzip.compress(b"RAMDISK--synthetic-benign-cpio\n", mtime=0)
+
+    header = struct.pack(
+        "<8sIIIIIIIIII16s512s32s1024s",
+        ANDROID_BOOT_MAGIC,
+        len(kernel),
+        0x10008000,  # kernel_addr (conventional; inert in a fixture)
+        len(ramdisk),
+        0x11000000,  # ramdisk_addr
+        len(second),
+        0x10F00000,  # second_addr
+        0x10000100,  # tags_addr
+        page_size,
+        0,  # header_version (v0)
+        0,  # os_version
+        b"vivarium-fixture",  # name[16] (exactly 16 bytes)
+        b"console=ttyS0",  # cmdline (zero-padded to 512 by struct)
+        b"",  # id[32] (zeroed — no real SHA1 needed)
+        b"",  # extra_cmdline (zero-padded to 1024)
+    )
+
+    def _region(payload: bytes) -> bytes:
+        return payload + b"\x00" * (_page_round_up(len(payload), page_size) - len(payload))
+
+    blob = bytearray()
+    blob += _region(header)  # header occupies page 0 (1632 B rounded up to page_size)
+    blob += _region(kernel)
+    blob += _region(ramdisk)
+    if second:
+        blob += _region(second)
+    return bytes(blob)
