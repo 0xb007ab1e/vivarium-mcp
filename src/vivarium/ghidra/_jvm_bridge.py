@@ -981,6 +981,8 @@ class PyGhidraBackend:
         try:
             if container == "uimage":
                 self._unwrap_uimage(source_ref, limit, _open_comp, _stream_to_payload)
+            elif container == "androidboot":
+                self._unwrap_androidboot(source_ref, limit, _stream_to_payload)
             else:
                 with _open_comp(source_ref, container) as src:
                     _stream_to_payload(src)
@@ -1043,6 +1045,61 @@ class PyGhidraBackend:
             return
         # Nested-compressed payload: stream-decompress the extracted window under the same cap.
         with open_comp(envelope_path, meta.comp) as src:
+            stream_to_payload(src)
+
+    def _unwrap_androidboot(
+        self,
+        source_ref: str,
+        limit: int,
+        stream_to_payload: Callable[[Any], None],
+    ) -> None:  # pragma: no cover - worker filesystem edge
+        """Surface the **kernel** region of an Android boot image as the loadable payload (#380).
+
+        Parses the ``ANDROID!`` header with the PURE
+        :func:`vivarium.core.androidboot.parse_android_boot_header` (hostile bytes, hermetically
+        fuzzed), slices the page-aligned kernel window (clamped to the real file size — a header
+        claiming more than exists never over-reads), and writes it out under the shared output cap.
+        The kernel is loaded as-is (a raw/zImage kernel is analysable directly); no nested
+        decompression is attempted here. The **ramdisk** (a cpio filesystem, not loadable code) is a
+        separate follow-on — its window is parsed but not surfaced by this container loader.
+
+        Args:
+            source_ref: The confined Android-boot-image path.
+            limit: The already-computed absolute output cap (min of the abs cap + the ratio cap).
+            stream_to_payload: The bounded chunk-copier into the payload file.
+
+        Raises:
+            ValueError: If the header is invalid or the kernel window is empty / past EOF.
+        """
+        from vivarium.core.androidboot import _HEADER_PREFIX_SIZE, parse_android_boot_header
+
+        with open(source_ref, "rb") as handle:  # noqa: PTH123 — confined path from the server
+            meta = parse_android_boot_header(
+                handle.read(_HEADER_PREFIX_SIZE), max_region_size=limit
+            )
+        file_size = os.path.getsize(source_ref)  # noqa: PTH202
+        start = min(meta.kernel_offset, file_size)
+        payload_len = max(0, min(meta.kernel_offset + meta.kernel_size, file_size) - start)
+        if payload_len <= 0:
+            raise ValueError("Android boot image kernel window is empty or past EOF")
+
+        project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
+        # Slice the exact kernel window to a temp (bounded by payload_len, already <= limit), then
+        # stream it out under the cap (identity — the kernel is loaded as-is).
+        kernel_path = os.path.join(project_dir, "androidboot_kernel.bin")  # noqa: PTH118
+        with (
+            open(source_ref, "rb") as src,  # noqa: PTH123 — confined path
+            open(kernel_path, "wb") as dst,  # noqa: PTH123
+        ):
+            src.seek(start)
+            remaining = payload_len
+            while remaining > 0:
+                chunk = src.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                dst.write(chunk)
+                remaining -= len(chunk)
+        with open(kernel_path, "rb") as src:  # noqa: PTH123
             stream_to_payload(src)
 
     def _gh_import(
