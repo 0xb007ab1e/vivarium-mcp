@@ -70,7 +70,7 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 - **ADR-077** — JieLi `pi32` processor (SLEIGH) module for AC6xxx firmware — **Accepted**.
 
 ### Output surfaces & interactive UI (new trust boundaries)
-- **ADR-076** — Dashboard interactive command backend (Phase 2; browser → server write/command — TB9) — **Proposed** (default-off, fail-closed, auth-required; live wiring gated).
+- **ADR-076** — Dashboard interactive command backend (Phase 2; browser → server write/command — TB9) — **Partial** 2026-11-03: policy (`commands.py`) + a **read-only** executor (`StateFileToolCaller`) shipped + config-enablable (default-off, fail-closed, token-required, tailnet-bound); compute/write live path + production enablement gated (#368). Per-principal auth + rate-limit + audit are §21 pre-exposure requirements.
 - **ADR-078** — Generated target documentation (analysis report + finding records; artifact → persisted document — TB10) — **Tier 0 + Tier-1 first slice implemented** 2026-10-26 (`session_generate_report`); tier-invariant A+B+C rendering safety; Tier 0 = bounded on-demand CSP-wrapped, allow-list-projected HTML report + finding records held in-memory per-session (ephemeral/wipe-on-evict); **Tier 1 first slice = a default-OFF `atlas` flag composing a bounded static whole-program atlas (program summary + call-graph adjacency + function index) by reusing the read-only tools**; interactive atlas / rasterized diagrams / LLM-narrative tier remain gated. No raw-Markdown artifact (amended 2026-10-26, red-team F1 + reviewer F2/F3).
 
 ### Knowledge-graph export (new external integration)
