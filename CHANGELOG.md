@@ -6,18 +6,18 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- **`read_bytes` (and every address-taking tool) now resolve space-qualified / overlay addresses.**
-  `_parse_address` hardcoded the **default** address space, so an address that lives in an overlay
-  space — e.g. an F1 raw-import overlay mapped into `:local` — was silently read from the
-  default-space offset instead, returning a different (often uninitialized) block's bytes or an
-  all-zero / truncated read. `memory_map` and `list_data` already **emit** the qualified form
-  (`OverlayName::00001000`), so an address copied from a listing failed to round-trip. The parser
-  now uses `AddressFactory.getAddress`, which honours a bare hex offset (default space, unchanged)
-  **and** a space-qualified address, so overlay bytes resolve to the block that actually holds them
-  (ADR-005: never return silently-wrong data). Read stays size-clamped and block-confined; no new
-  surface. (#372) — JVM-edge behaviour verified via the live-worker recipe, not the unit suite.
+- **`secret_scan` byte-magic sub-pass — detect binary-only container/bootloader magic (ADR-072
+  follow-up).** The string pass only saw format magic that survives as a printable `list_strings`
+  token; binary-only signatures — uImage `0x27051956`, DTB/FDT `0xd00dfeed`, cramfs, XZ, LZ4 — were
+  missed. `secret_scan` now also runs a pure, bounded byte-magic pass (`core.secretscan`
+  `scan_byte_magic`) over the head of each *initialized* memory block (reusing the existing
+  `memory_map` + `read_bytes` hops — no new worker surface), capped at 64 blocks × 8 KiB (CWE-400).
+  Findings land in the existing `format_magic` category with a `byte:*` `pattern_id`, so the tool
+  contract is unchanged (purely additive); the same redaction contract holds (only a masked hex
+  preview + correlation hash leave the module). Overlay-block bytes resolve once the `_parse_address`
+  overlay fix is in the worker; non-overlay blocks are unaffected. (#371)
 
 ### Changed
 
@@ -30,6 +30,19 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
   likely dropped in the `ghidra-mcp`→`vivarium-mcp` rename); re-install + set the new secret per
   `docs/runbooks/supply-chain-pinning.md` (tracked in #171). Maintainer action required; no runtime
   impact (the pin advances only via a human-merged, cosign-verified PR regardless).
+
+### Fixed
+
+- **`read_bytes` (and every address-taking tool) now resolve space-qualified / overlay addresses.**
+  `_parse_address` hardcoded the **default** address space, so an address that lives in an overlay
+  space — e.g. an F1 raw-import overlay mapped into `:local` — was silently read from the
+  default-space offset instead, returning a different (often uninitialized) block's bytes or an
+  all-zero / truncated read. `memory_map` and `list_data` already **emit** the qualified form
+  (`OverlayName::00001000`), so an address copied from a listing failed to round-trip. The parser
+  now uses `AddressFactory.getAddress`, which honours a bare hex offset (default space, unchanged)
+  **and** a space-qualified address, so overlay bytes resolve to the block that actually holds them
+  (ADR-005: never return silently-wrong data). Read stays size-clamped and block-confined; no new
+  surface. (#372) — JVM-edge behaviour verified via the live-worker recipe, not the unit suite.
 
 ## [0.14.0] - 2026-10-31
 

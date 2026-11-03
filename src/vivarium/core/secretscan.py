@@ -70,8 +70,8 @@ _KEY_MATERIAL_MARKERS: tuple[tuple[str, str], ...] = (
 )
 
 # Firmware/bootloader/container format magic that appears as printable ASCII in a strings dump —
-# provenance context (ADR-072 D1 `format_magic`), not a secret. Binary-only magic (uImage's
-# 0x27051956) is out of a string-based MVP scan and is deferred to the byte-scan follow-up.
+# provenance context (ADR-072 D1 `format_magic`), not a secret. Binary-only magic that never shows
+# up as a clean strings token (e.g. uImage's 0x27051956) is handled by :func:`scan_byte_magic`.
 _FORMAT_MAGIC: tuple[tuple[str, str], ...] = (
     ("android_boot", "ANDROID!"),
     ("uboot_legacy", "U-Boot"),
@@ -93,6 +93,25 @@ _PROPERTY_SECRET_NAME = re.compile(
 
 # A run of base64/hex characters long enough to be key material (used with the entropy gate).
 _BLOB = re.compile(r"[A-Za-z0-9+/=_\-]{20,}")
+
+#: Binary-only container/bootloader format magic — byte signatures that do NOT survive as a clean
+#: printable token in a ``list_strings`` dump, so :func:`scan_secrets` (string-only) misses them
+#: (ADR-072 — the byte-scan follow-up). Byte-exact compare only (no regex → ReDoS-N/A). Each entry
+#: is a distinctive (>= 4-byte) signature with at least one non-printable byte, so false positives
+#: over arbitrary bytes stay low; still a *lead*, not proof (ADR-072 D4). Printable magics (ELF,
+#: ``ANDROID!``, ``UBI#``, squashfs ``hsqs``) stay in :data:`_FORMAT_MAGIC` to avoid duplicate hits.
+_BYTE_MAGIC: tuple[tuple[str, bytes], ...] = (
+    ("uimage", b"\x27\x05\x19\x56"),  # U-Boot legacy uImage header (0x27051956, big-endian)
+    ("device_tree", b"\xd0\x0d\xfe\xed"),  # Flattened Device Tree / DTB (0xd00dfeed, big-endian)
+    ("cramfs", b"\x45\x3d\xcd\x28"),  # cramfs superblock (0x28cd3d45, little-endian on disk)
+    ("xz", b"\xfd7zXZ\x00"),  # XZ container stream header
+    ("lz4", b"\x04\x22\x4d\x18"),  # LZ4 frame magic (0x184d2204, little-endian)
+)
+
+#: Hard cap on the bytes scanned per region for byte magic (CWE-400; the caller also caps the number
+#: of regions). A header-bearing block head well under this suffices; a larger region is scanned
+#: truncated-with-flag, never unboundedly.
+MAX_MAGIC_SCAN_LEN = 65536
 
 #: Default Shannon-entropy floor (bits/byte) for a high-entropy blob to count as a credential.
 DEFAULT_ENTROPY_THRESHOLD = 4.0
@@ -235,4 +254,71 @@ def scan_secrets(  # noqa: C901 - one linear pass, one independent branch per cl
                                 ent,
                             )
                         )
+    return findings
+
+
+def _offset_address(base: str | None, delta: int) -> str | None:
+    """Return ``base`` advanced by ``delta`` bytes, preserving any space/overlay qualifier.
+
+    A memory block start is emitted as ``str(Address)`` — a bare hex offset (``00001000``) or an
+    overlay-qualified address (``OverlayName::00001000``). The byte magic sits ``delta`` bytes into
+    the scanned region, so the finding's address is ``base + delta`` in the *same* space. The
+    space prefix (if any) is kept so the address round-trips back to the right block (cf. the
+    ``_parse_address`` overlay fix, #372). A non-hex base is returned unchanged (honest fallback).
+    """
+    if base is None:
+        return None
+    prefix, sep, offset_text = base.rpartition("::")
+    try:
+        value = int(offset_text, 16) + delta
+    except ValueError:
+        return base
+    # Preserve the zero-padded width Ghidra uses (``str(Address)``) so the address round-trips; a
+    # value needing more digits than the original simply widens past it (rjust never truncates).
+    hex_offset = format(value, "x").rjust(len(offset_text), "0")
+    return f"{prefix}{sep}{hex_offset}" if sep else hex_offset
+
+
+def scan_byte_magic(
+    regions: Iterable[tuple[str | None, bytes]],
+    *,
+    categories: tuple[str, ...] | None = None,
+) -> list[SecretFinding]:
+    """Scan raw byte ``regions`` for binary-only format magic the string scan cannot see.
+
+    Complements :func:`scan_secrets` (printable strings only): uImage's ``0x27051956``, DTB/FDT,
+    cramfs, XZ and LZ4 are byte signatures that never appear as a clean ``list_strings`` token
+    (ADR-072 — the deferred byte-scan follow-up). Deterministic, side-effect-free, **byte-compare
+    only** (no regex → ReDoS-N/A). Each region is scanned up to :data:`MAX_MAGIC_SCAN_LEN` bytes; at
+    most one finding per (region, signature) — the first occurrence — keeps the result bounded. The
+    magic is inert provenance, not a secret; it still flows through the redaction helper so no field
+    ever carries anything but a masked hex preview + correlation hash (ADR-072 D3).
+
+    Args:
+        regions: ``(base_address_hex_or_None, raw_bytes)`` pairs — bounded block-head reads. The
+            base preserves any overlay/space qualifier so the finding address round-trips.
+        categories: Restrict to these categories (subset of :data:`CATEGORIES`); this scan only
+            produces ``format_magic``, so a non-``None`` set without it yields nothing.
+
+    Returns:
+        Redacted :class:`SecretFinding` list (category ``format_magic``, ``pattern_id`` ``byte:*``);
+        NEVER carries a raw value (ADR-072 D3).
+    """
+    if categories is not None and "format_magic" not in categories:
+        return []
+    findings: list[SecretFinding] = []
+    for base, data in regions:
+        window = data[:MAX_MAGIC_SCAN_LEN]
+        for pattern_id, magic in _BYTE_MAGIC:
+            index = window.find(magic)
+            if index >= 0:
+                findings.append(
+                    _finding(
+                        _offset_address(base, index),
+                        "format_magic",
+                        f"byte:{pattern_id}",
+                        magic.hex(),
+                        None,
+                    )
+                )
     return findings
