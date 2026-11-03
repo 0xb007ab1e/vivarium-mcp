@@ -6,6 +6,19 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **`secret_scan` byte-magic sub-pass — detect binary-only container/bootloader magic (ADR-072
+  follow-up).** The string pass only saw format magic that survives as a printable `list_strings`
+  token; binary-only signatures — uImage `0x27051956`, DTB/FDT `0xd00dfeed`, cramfs, XZ, LZ4 — were
+  missed. `secret_scan` now also runs a pure, bounded byte-magic pass (`core.secretscan`
+  `scan_byte_magic`) over the head of each *initialized* memory block (reusing the existing
+  `memory_map` + `read_bytes` hops — no new worker surface), capped at 64 blocks × 8 KiB (CWE-400).
+  Findings land in the existing `format_magic` category with a `byte:*` `pattern_id`, so the tool
+  contract is unchanged (purely additive); the same redaction contract holds (only a masked hex
+  preview + correlation hash leave the module). Overlay-block bytes resolve once the `_parse_address`
+  overlay fix is in the worker; non-overlay blocks are unaffected. (#371)
+
 ### Changed
 
 - **Repin GitHub App: migrate `create-github-app-token` off the deprecated `app-id` to `client-id`.**

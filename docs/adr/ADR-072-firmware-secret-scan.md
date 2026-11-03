@@ -144,3 +144,17 @@ tool).
 Additive + read-only → no migration. Worker-side change → needs a worker rebuild + `.github/
 worker-image.pin` bump (per the worker-change-validation-recipe) before the live gate exercises it.
 Contract delta lands atomically (WS0). Merge stays gated.
+
+## Follow-up — byte-magic sub-pass (shipped, #371)
+
+The MVP `format_magic` category matched only magic that survives as a printable `list_strings`
+token. **Binary-only** container/bootloader magic — uImage `0x27051956`, DTB/FDT `0xd00dfeed`,
+cramfs, XZ, LZ4 — never appears as a clean string token, so the string pass missed it. `secret_scan`
+now also runs a **pure, bounded byte-magic sub-pass** (`core.secretscan.scan_byte_magic`): the
+adapter reads the head of each *initialized* memory block (existing `memory_map` + `read_bytes`
+hops — no new worker surface), capped at `_SECRET_MAGIC_MAX_BLOCKS` blocks × `_SECRET_MAGIC_WINDOW`
+bytes (CWE-400). Findings land in the existing `format_magic` category with a `byte:*` `pattern_id`,
+so the tool contract is unchanged (purely additive). Same redaction contract (D3) — only a masked
+hex preview + correlation hash leave the module. Printable magics (ELF, `ANDROID!`, `UBI#`, squashfs
+`hsqs`) stay in the string list to avoid duplicate hits. Overlay-block bytes resolve correctly once
+the `_parse_address` overlay fix (#372) is in the worker; non-overlay blocks are unaffected.
