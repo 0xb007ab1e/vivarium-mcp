@@ -33,6 +33,14 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Changed
 
+- **Correct ADR-070: `androidboot` was listed but never implemented.** ADR-070's loader table
+  described `androidboot` as shipped ("the kernel region surfaced for import; ramdisk out of MVP
+  scope"). It is **not** implemented — the container allow-list is `gzip`/`xz`/`lzma`/`uimage` and
+  `container="androidboot"` fails closed. Corrected the table + MVP line + ADR index, and added a
+  dated correction note; implementing androidboot (kernel **and** ramdisk) is tracked in the rescoped
+  #380, with the synthetic boot-image fixture (#383) as the prerequisite. Docs only; surfaced during
+  the #380 fixture work (same doc-drift class as the §21 / ADR-076 reconciliations).
+
 - **Reconcile ADR-076 status to the shipped read-only interactive path.** ADR-076 still read
   "Proposed … no live server wiring … browser has no live execution path (503)". Updated to
   **Partial**: the gating policy (`commands.py`) and a **read-only** executor (`StateFileToolCaller`,

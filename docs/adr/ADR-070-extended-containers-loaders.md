@@ -58,7 +58,7 @@ header spec:
 | Token | Format | Payload |
 |---|---|---|
 | `uimage` | U-Boot legacy `uImage` (magic `0x27051956`, 64-byte header, CRC + declared length) | the wrapped kernel/blob, optionally compressed (D3). |
-| `androidboot` | Android boot image (`ANDROID!` magic, page-aligned kernel/ramdisk regions) | the kernel region (surfaced for import; ramdisk out of MVP scope). |
+| `androidboot` **(DEFERRED — not shipped; see correction below)** | Android boot image (`ANDROID!` magic, page-aligned kernel/ramdisk regions) | *designed:* the kernel region; ramdisk was a later increment. **Not in the shipped allow-list.** |
 | `gzip` / `xz` / `lzma` | bare compressed stream (a packed section) | the decompressed image (D3). |
 
 Vendor OTA wrappers (e.g. `AOTA`) and exotic per-vendor container formats are **explicitly deferred** —
@@ -179,6 +179,20 @@ edits land atomically with the schema change as one reviewed unit, not ad hoc. N
 Additive + default-off → no migration; absence of `container` = today's behavior. Worker-side change
 (and any pure-Python parser shipped in the worker) → needs a worker rebuild + `.github/
 worker-image.pin` bump (per the worker-change-validation-recipe) before the live gate exercises it.
-MVP = `uimage` + `gzip`/`xz`/`lzma` (+ `androidboot`); vendor-OTA and heterogeneous/nested unwrap are
-follow-on increments behind the same allow-list + caps. Document in `getting-started.md`. Merge stays
-**gated**.
+MVP as shipped = `uimage` + `gzip`/`xz`/`lzma`; `androidboot`, vendor-OTA, and heterogeneous/nested
+unwrap are follow-on increments behind the same allow-list + caps. Document in `getting-started.md`.
+Merge stays **gated**.
+
+## Correction (2026-11-03)
+
+The loader table above originally listed **`androidboot`** as if shipped ("the kernel region surfaced
+for import; ramdisk out of MVP scope"). That **overstated** it: `androidboot` was **never
+implemented**. The shipped container allow-list is `Literal["gzip", "xz", "lzma", "uimage"]`
+(`SessionImportIn.container`), and `test_container_unknown_rejected` asserts `container="androidboot"`
+**fails closed** as an out-of-set value. So the as-built `androidboot` support is **kernel + ramdisk
+both deferred**, not "kernel done, ramdisk deferred".
+
+Implementing `androidboot` (kernel **and** ramdisk) is tracked in #380 (rescoped), with a
+deterministic synthetic boot-image fixture now in place
+(`tests/_fixtures/binaries.synthetic_android_boot_image`, #383) as the prerequisite. Surfaced during
+the #380 fixture work; same doc-drift class as the ADR-076/§21 reconciliations.

@@ -57,7 +57,7 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 - **ADR-067** — Function-granularity binary-diff report (patch-diffing) — **Accepted**.
 - **ADR-068** — String / constant deobfuscation (stack-strings, XOR-decoded) — **Accepted**.
 - **ADR-069** — Automatic struct/type recovery from access patterns (proposes; existing write applies) — **Accepted**.
-- **ADR-070** — Extended firmware container unwrap + loaders (OTA/uImage/decompress, fuzz-gated) — **Accepted**.
+- **ADR-070** — Extended firmware container unwrap + loaders (fuzz-gated) — **Accepted**; shipped set = `uimage` + `gzip`/`xz`/`lzma` (`androidboot` was listed but **never implemented** — deferred, kernel + ramdisk, tracked #380; corrected 2026-11-03).
 - **ADR-071** — Debug-info import beyond PDB (DWARF / `.map` / `.sym`) — **Accepted**.
 - **ADR-072** — Firmware-aware secret/credential/key-material scan (redacted) — **Accepted**.
 
