@@ -160,7 +160,10 @@ def test_emulate_explicit_abi_on_unprototyped_fn(worker_image: str) -> None:
         f"{envelope.get('traceback', '')[-2000:]}"
     )
     data = envelope["data"]
-    assert int(data.get("return_value") or 0) == 12, (
+    return_value = data.get("return_value")
+    assert return_value is not None, f"no return_value from the arg_registers call: {data!r}"
+    # emulate returns the call result as a HEX string ("c" == 0xc == 12), like test_emulate_autoarg.
+    assert int(str(return_value), 16) == 12, (
         f"expected arg_registers=['ECX','EDX'] to place 5+7 and return 12 on the unprototyped "
         f"function; got {data!r}"
     )
