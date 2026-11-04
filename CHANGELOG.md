@@ -9,6 +9,16 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Added
 
 
+- **`deobfuscate_strings` detects ADD-const decoders, filtering address/counter adds (#401).** The
+  `xor_decode` stage detection kept only constant `INT_XOR`, because a constant `INT_ADD` is
+  overwhelmingly address arithmetic (`[base + disp]`) or a loop counter (`inc`) — indiscriminately
+  collecting them would pollute the chain with bogus keys. Now a constant `INT_ADD` is accepted as a
+  decode stage **only when its output feeds a `STORE` value** (the genuine `buf[i] += k` op),
+  isolating it from address/counter adds; `INT_XOR` stays permissive (rare as a constant in ordinary
+  code). So `encoding`/`stages[].op` may now be `"add"`. The value-feeds-store filter is the pure,
+  hermetically-tested `core.multidecode.select_decode_ops`; a gated live-regression test recovers a
+  real ADD decoder and asserts the loop-counter add is filtered (a one-entry chain). Completes the
+  ADR-068 D3 / ADR-081 D4 `add`-decoder follow-up. (#401)
 - **`deobfuscate_strings` recovers multi-stage / chained local decoders (ADR-081 / #379).** The
   ADR-068 `xor_decode` MVP emulated the whole decoder but read back only `min(write_targets)`, so a
   chained decoder whose final plaintext lands in a *different* buffer (e.g. `scratch = ct ^ k1` then

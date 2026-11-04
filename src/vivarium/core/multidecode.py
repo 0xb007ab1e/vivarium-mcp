@@ -14,6 +14,8 @@ untrusted by the adapter (ADR-005); nothing here trusts or interprets the bytes.
 
 from __future__ import annotations
 
+from collections.abc import Hashable, Sequence
+
 
 def leading_printable_run(data: bytes) -> bytes:
     """Return the leading run of printable ASCII bytes, stopping at the first non-printable byte.
@@ -67,6 +69,40 @@ def best_decoded_run(
         if best is None or len(run) > len(best[1]) or (len(run) == len(best[1]) and base < best[0]):
             best = (base, run)
     return best
+
+
+def select_decode_ops[K: Hashable](
+    ops: Sequence[tuple[str, K, int]], store_value_keys: set[K]
+) -> list[tuple[str, int]]:
+    """Filter candidate constant ops down to the real decode stages (ADR-081 / #401).
+
+    Each candidate is ``(op, out_key, const)`` in instruction order, where ``op`` is ``"xor"`` or
+    ``"add"``, ``out_key`` identifies the op's **output** varnode, and ``const`` is the constant
+    operand. ``store_value_keys`` is the set of varnode identities that are the VALUE written by a
+    ``STORE`` in the function.
+
+    - ``xor`` ops are **always** kept: a constant ``INT_XOR`` is rare in ordinary code (``xor
+      reg,reg`` zeroing carries no constant), so the permissive rule from the ADR-068 MVP has a low
+      false-positive rate.
+    - ``add`` ops are kept **only** when the op's output feeds a stored value (``out_key in
+      store_value_keys``): a constant ``INT_ADD`` is overwhelmingly address arithmetic (``[base +
+      disp]``) or a loop counter (``inc``), so an unfiltered rule would pollute the chain with bogus
+      ``add`` keys. Requiring the add to produce a stored byte isolates the genuine decode op.
+
+    Deterministic + side-effect-free. Returns the kept ``(op, const)`` pairs in input order.
+
+    Args:
+        ops: Ordered ``(op, out_key, const)`` candidates from the function's p-code walk.
+        store_value_keys: Varnode identities that are a ``STORE`` value operand in the function.
+
+    Returns:
+        The ordered ``(op, const)`` decode stages (XOR kept always; ADD kept only if value-feeding).
+    """
+    result: list[tuple[str, int]] = []
+    for op, out_key, const in ops:
+        if op == "xor" or (op == "add" and out_key in store_value_keys):
+            result.append((op, const))
+    return result
 
 
 def assemble_stage_chain(
