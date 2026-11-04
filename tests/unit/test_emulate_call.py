@@ -54,6 +54,36 @@ def test_args_capped() -> None:
         s.EmulateIn(session_id="s", start="0x1000", call=True, args=over)
 
 
+def test_arg_registers_explicit_abi_accepted() -> None:
+    """#381: explicit ABI register placement for an unprototyped target is accepted."""
+    m = s.EmulateIn(
+        session_id="s", start="0x1000", call=True, args=[5, 7], arg_registers=["r0", "r1"]
+    )
+    assert m.args == [5, 7] and m.arg_registers == ["r0", "r1"]
+
+
+def test_arg_registers_requires_call_and_args() -> None:
+    """`arg_registers` is meaningless without call + the values to place → fails closed (#381)."""
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):  # no call
+        s.EmulateIn(session_id="s", start="0x1000", args=[1], arg_registers=["r0"])
+    with pytest.raises(ValidationError):  # no args
+        s.EmulateIn(session_id="s", start="0x1000", call=True, arg_registers=["r0"])
+
+
+def test_arg_registers_must_cover_every_arg() -> None:
+    """Fewer registers than args fails closed — every positional arg needs a register (#381)."""
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        s.EmulateIn(
+            session_id="s", start="0x1000", call=True, args=[1, 2, 3], arg_registers=["r0", "r1"]
+        )
+
+
 # --- result builder ------------------------------------------------------------------------------
 
 

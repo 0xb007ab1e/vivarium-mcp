@@ -576,6 +576,11 @@ class PyGhidraBackend:
             call=bool(params.get("call", False)),
             stubs=list(params.get("stubs") or []),
             args=None if params.get("args") is None else [int(a) for a in params["args"]],
+            arg_registers=(
+                None
+                if params.get("arg_registers") is None
+                else [str(r) for r in params["arg_registers"]]
+            ),
         )
 
     def demangle(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -6037,6 +6042,7 @@ class PyGhidraBackend:
         call: bool = False,
         stubs: list[dict[str, Any]] | None = None,
         args: list[int] | None = None,
+        arg_registers: list[str] | None = None,
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Run bounded Ghidra p-code emulation and return register/memory readbacks (ADR-049).
 
@@ -6061,6 +6067,9 @@ class PyGhidraBackend:
             args: ``[int, ...]`` auto arg-placement (ADR-066 follow-up; ``call`` only) — each value
                 is written to its parameter's register storage per the function's resolved calling
                 convention (register params only; a stack-passed param fails closed).
+            arg_registers: ``[str, ...]`` explicit ABI placement (#381) — the register for each
+                ``args[i]``, for an UNPROTOTYPED target (no recovered convention); overrides the
+                prototype path, register params only, unknown register name fails closed.
 
         Returns:
             ``{"steps_executed", "stop_reason", "registers", "memory", "return_value"}``.
@@ -6131,7 +6140,22 @@ class PyGhidraBackend:
                 # signature — a raw binary's convention is null, proven). Register params only; a
                 # stack-passed param fails closed (stage it via write_memory). An explicit
                 # `set_registers` value for that register wins (already applied above).
-                if args:
+                if args and arg_registers is not None:
+                    # #381: EXPLICIT ABI placement — write each arg into the caller-supplied
+                    # register, NO dependency on a recovered prototype (unprototyped target). The
+                    # schema already guarantees a register for every arg; here we only validate the
+                    # register exists for this language and honour a set_registers override.
+                    for i, value in enumerate(args):
+                        reg_name = str(arg_registers[i])
+                        if program.getLanguage().getRegister(reg_name) is None:
+                            raise WorkerError(
+                                CODE_NOT_FOUND,
+                                f"arg_registers[{i}] ({reg_name!r}) is not a register of this "
+                                "language",
+                            )
+                        if reg_name not in set_registers:
+                            emu.writeRegister(reg_name, int(value))
+                elif args:
                     func = program.getFunctionManager().getFunctionAt(self._parse_address(start))
                     if func is None:
                         raise WorkerError(

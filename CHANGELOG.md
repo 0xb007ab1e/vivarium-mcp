@@ -9,6 +9,14 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Added
 
 
+- **`emulate` explicit ABI — call functions with no recovered prototype (ADR-066 / #381).** The
+  `args` auto-placement needs a resolved calling convention, so a raw/stripped target whose
+  convention Ghidra can't recover failed closed. New `arg_registers` gives the caller's own ABI:
+  each `args[i]` is written to `arg_registers[i]` directly — no prototype needed (register-passed
+  only; stack args via `write_memory`). Schema-validated (requires `call`+`args`, covers every arg,
+  bounded); unknown register name fails closed at the worker; `set_registers` still overrides. Same
+  bounded p-code sandbox (ADR-049) — no native exec. (#381)
+
 - **`androidboot` container loader — surface the Android boot-image kernel (ADR-070 / #380).** 
   `session_import` now accepts `container="androidboot"`: the worker parses the `ANDROID!`
   `boot_img_hdr` and slices the page-aligned **kernel** region (the loadable image) under the same

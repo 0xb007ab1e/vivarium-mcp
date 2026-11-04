@@ -1568,6 +1568,7 @@ class RpcGhidraAdapter:
                     "call": a.call,
                     "stubs": [{"target": st.target, "action": st.action} for st in (a.stubs or [])],
                     "args": a.args,
+                    "arg_registers": a.arg_registers,
                 },
             )
         )
