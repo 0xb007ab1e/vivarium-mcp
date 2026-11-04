@@ -66,6 +66,11 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Changed
 
 
+- **Bump the worker-image pin to the ADR-081 build; gate the #379 multistage live test.** Advance
+  the trusted worker digest to `sha256:b97b9797…` — the CI-signed build that bakes the ADR-081
+  multi-stage `xor_decode` worker path — and add `test_deobfuscate_multistage.py` to the
+  live-regression hard-gate list, so the two-buffer chained-decoder recovery (final plaintext in a
+  non-minimum buffer → `[xor 0x41, xor 0x80]` chain) is verified against the shipped worker. (#379)
 - **Bump the worker-image pin to the `arg_registers` + CVE-drift build; gate the #381 live test.**
   Advance the trusted worker digest to `sha256:ed573ba8…` — the CI-signed build that bakes the #381
   `emulate` explicit-ABI path and the refreshed Chainguard base — and add
