@@ -142,6 +142,14 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Fixed
 
+- **`deobfuscate_strings` ADD-decoder recovery through a copy chain (#401).** The #401 ADD-const
+  filter required the `INT_ADD` output varnode to *be* a `STORE` value, but on a real worker an
+  8-bit decode op (`add al, imm8`) lands its result in a unique temp that a `COPY`/`SUBPIECE` then
+  moves into the stored sub-register — so the add output was one link upstream of the STORE value
+  and was dropped (the live gate recovered nothing). The STORE-value set is now expanded backward
+  through `COPY`/`SUBPIECE` edges (`core.multidecode.expand_value_feeders`, bounded + cycle-safe)
+  before the filter, so a copy-reached decode add qualifies while loop-counter / address adds
+  (never copied into a stored byte) stay excluded. Validated against a locally built worker. (#401)
 - **Worker image build: replace the dead musl-1.2.5 fallback mirror.** A dispatched `worker-image`
   build failed in the `musl-build` stage — the fallback `ftp.barfooze.de/pub/sabotage` 404s for
   musl-1.2.5 and the primary `musl.libc.org` was flaky, leaving the FID-gen fetch one source deep
