@@ -2454,10 +2454,12 @@ class PyGhidraBackend:
         single-pass ones. Reports the ordered decode-op chain (``xor``/``add``). Stage detection
         keeps every constant ``INT_XOR`` (rare in ordinary code) but accepts a constant ``INT_ADD``
         only when its output feeds a ``STORE`` value (#401) — otherwise an ``INT_ADD`` const is
-        address arithmetic or a loop counter, not a decode op (filtered by the pure
-        :func:`core.multidecode.select_decode_ops`). A non-decoder (or an interprocedural /
-        self-modifying decoder that produced no printable-changed run) yields nothing — fail closed,
-        never guessed.
+        address arithmetic or a loop counter, not a decode op. The STORE-value set is expanded back
+        through ``COPY``/``SUBPIECE`` edges (:func:`core.multidecode.expand_value_feeders`) so an
+        8-bit decode op whose result reaches the stored sub-register through a unique temp still
+        qualifies; the final filter is the pure :func:`core.multidecode.select_decode_ops`. A
+        non-decoder (or an interprocedural / self-modifying decoder that produced no
+        printable-changed run) yields nothing — fail closed, never guessed.
 
         Args:
             func: The candidate function.
@@ -2474,6 +2476,7 @@ class PyGhidraBackend:
         from vivarium.core.multidecode import (
             assemble_stage_chain,
             best_decoded_run,
+            expand_value_feeders,
             select_decode_ops,
         )
 
@@ -2485,23 +2488,29 @@ class PyGhidraBackend:
 
         # Ordered constant decode candidates (op, output-varnode-key, key). XOR is kept always; an
         # ADD is a real decode op only if its output feeds a STORE VALUE (#401 — otherwise it is
-        # address arithmetic / a loop counter). store_value_keys collects every STORE value operand.
+        # address arithmetic / a loop counter). store_value_keys collects every STORE value operand;
+        # link_edges (COPY/SUBPIECE) let an 8-bit decode op's result reach the stored sub-register
+        # through a unique temp (its output is one link upstream of the STORE value).
         candidates: list[tuple[str, object, int]] = []
         store_value_keys: set[object] = set()
+        link_edges: dict[object, list[object]] = {}
         has_store = False
         write_targets: set[int] = set()
         for instruction in listing.getInstructions(func.getBody(), True):
             for op in instruction.getPcode():
                 mnem = str(op.getMnemonic())
+                out = op.getOutput()
                 if mnem == "STORE":
                     has_store = True
                     if op.getNumInputs() >= 3:  # STORE space, offset, VALUE
                         store_value_keys.add(_vn_key(op.getInput(2)))
-                elif mnem in ("INT_XOR", "INT_ADD"):
-                    out = op.getOutput()
+                elif mnem in ("COPY", "SUBPIECE") and out is not None:
+                    # out is produced from input0 (SUBPIECE input1 is a constant byte offset).
+                    link_edges.setdefault(_vn_key(out), []).append(_vn_key(op.getInput(0)))
+                elif mnem in ("INT_XOR", "INT_ADD") and out is not None:
                     for k in range(op.getNumInputs()):
                         vn = op.getInput(k)
-                        if vn.isConstant() and out is not None:
+                        if vn.isConstant():
                             kind = "xor" if mnem == "INT_XOR" else "add"
                             candidates.append((kind, _vn_key(out), int(vn.getOffset()) & 0xFF))
                             break
@@ -2509,7 +2518,8 @@ class PyGhidraBackend:
                 if ref.getReferenceType().isWrite():
                     write_targets.add(int(ref.getToAddress().getOffset()))
 
-        stage_ops = select_decode_ops(candidates, store_value_keys)
+        value_feeders = expand_value_feeders(store_value_keys, link_edges)
+        stage_ops = select_decode_ops(candidates, value_feeders)
         if not stage_ops or not has_store or not write_targets:
             return None
 

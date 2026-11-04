@@ -71,6 +71,45 @@ def best_decoded_run(
     return best
 
 
+def expand_value_feeders[K: Hashable](
+    store_value_keys: set[K], link_edges: dict[K, list[K]], *, max_depth: int = 8
+) -> set[K]:
+    """Expand the STORE-value varnode set backward through COPY/SUBPIECE edges (#401).
+
+    A byte written by a ``STORE`` can be produced one or more links upstream: an 8-bit decode op
+    (``add al, k``) often lands in a unique temp that a ``COPY``/``SUBPIECE`` then moves into the
+    sub-register that is stored. So the real decode op's **output** may not be the STORE value
+    varnode itself but a source of it. ``link_edges`` maps a varnode key to the input keys of the
+    ``COPY``/``SUBPIECE`` that produced it; this walks those edges backward from every stored value,
+    bounded by ``max_depth``, returning the stored values plus all reachable sources.
+
+    Deterministic + side-effect-free. Keeping this to COPY/SUBPIECE (not arithmetic) preserves the
+    address/counter filter: a loop-counter or address ``INT_ADD`` output is never copied into a
+    stored byte, so it stays out of the expanded set.
+
+    Args:
+        store_value_keys: Varnode identities that are a ``STORE`` value operand.
+        link_edges: ``{out_key: [input_key, ...]}`` for each COPY/SUBPIECE op in the function.
+        max_depth: Bound on the backward walk (DoS / cycle guard).
+
+    Returns:
+        The stored-value keys plus every COPY/SUBPIECE source reachable within ``max_depth``.
+    """
+    result = set(store_value_keys)
+    frontier = list(store_value_keys)
+    depth = 0
+    while frontier and depth < max_depth:
+        nxt: list[K] = []
+        for key in frontier:
+            for src in link_edges.get(key, ()):
+                if src not in result:
+                    result.add(src)
+                    nxt.append(src)
+        frontier = nxt
+        depth += 1
+    return result
+
+
 def select_decode_ops[K: Hashable](
     ops: Sequence[tuple[str, K, int]], store_value_keys: set[K]
 ) -> list[tuple[str, int]]:
