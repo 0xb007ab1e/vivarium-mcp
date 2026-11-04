@@ -53,6 +53,15 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Changed
 
 
+- **CVE-drift repin: refresh the Chainguard base digests on both images (2026-11-04).** A fresh
+  Trivy DB flagged HIGH CVEs the pinned bases had already fixed upstream but the stale digests still
+  carried — server: CVE-2026-97687/CVE-2026-97689 (urllib3, `py3-pip-wheel`) + CVE-2026-111943
+  (`ca-certificates-bundle`); worker: CVE-2026-44432 (`py3-pip-wheel`) + CVE-2026-3644 (cpython).
+  Bumped `cgr.dev/chainguard/python` (builder `29ab100e…`, runtime `31dd69d8…`) and
+  `cgr.dev/chainguard/wolfi-base` (`771146c2…`, all stages) to current; the newer digests bake the
+  patched packages and the worker apk floors resolve clean (no floor change). Verified locally:
+  `trivy image` HIGH/CRITICAL = 0 on the built server image and on the worker runtime apk set.
+  Unblocks the worker-image rebuild (upgrade-first, not a waiver — `workflow-cve-management`).
 - **Bump the worker-image pin to the androidboot build + gate its live test.** Advance the trusted
   worker digest to `sha256:12b657e7…` (the CI-signed build that bakes the #380 androidboot kernel
   loader) and add `test_import_androidboot.py` to the live-regression hard-gate list, so the kernel

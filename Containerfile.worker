@@ -42,6 +42,10 @@
 # `@REPLACE_WITH_DIGEST_FOR_<image:tag>` placeholder that `infra/pin-supply-chain.sh` resolves on
 # the gated build host. Ghidra is downloaded + CHECKSUM-VERIFIED before unzip (W3 below).
 #
+# CVE-drift repin 2026-11-04: refreshed the wolfi-base digest to 771146c2… (was 0feab531…). A
+# fresh Trivy DB (2026-11-04) flagged CVE-2026-44432 (py3-pip-wheel) + CVE-2026-3644 (cpython) on
+# the stale base; the newer digest's apk index resolves both runtime floors to patched versions
+# (local trivy of the runtime apk set: 0 HIGH/CRITICAL). No floor change needed.
 #   GATED ITEM W-BASE: cgr.dev/chainguard/wolfi-base (build + runtime; pinned by digest)
 #   GATED ITEM W3: Ghidra 12.1.2 release artifact (downloaded + SHA-256-verified, not pulled as image)
 #   GATED ITEM W-JIELI: kagaimiq/ghidra-jieli processor module (pinned by commit SHA, compiled at
@@ -108,7 +112,7 @@ ARG BOOST_TARBALL_URL=https://github.com/boostorg/boost/releases/download/boost-
 # Stage 1: ghidra-fetch — fetch + verify + unpack Ghidra. Build tooling stays HERE, not in runtime.
 # =============================================================================
 # GATED ITEM W-BASE: pin this base by digest.
-FROM cgr.dev/chainguard/wolfi-base@sha256:0feab531471d2edfcca55f18883441cb7df598e724fa2dedf9985273f532eed7 AS ghidra-fetch
+FROM cgr.dev/chainguard/wolfi-base@sha256:771146c2dfc880902a185f060c3db5571473c46b267edd98c3119c83068dfb61 AS ghidra-fetch
 
 ARG GHIDRA_VERSION
 ARG GHIDRA_RELEASE_TAG
@@ -201,7 +205,7 @@ RUN set -eux; \
 # (the lock pins RUNTIME deps only). Resolving the backend is a network action — confined HERE in a
 # builder stage (network during the gated build is already accepted: Ghidra download). Same Wolfi
 # base + python-3.12 as runtime → reproducible toolchain; the wheel is pure-Python (py3-none-any).
-FROM cgr.dev/chainguard/wolfi-base@sha256:0feab531471d2edfcca55f18883441cb7df598e724fa2dedf9985273f532eed7 AS pybuilder
+FROM cgr.dev/chainguard/wolfi-base@sha256:771146c2dfc880902a185f060c3db5571473c46b267edd98c3119c83068dfb61 AS pybuilder
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=ignore
 RUN set -eux; apk add --no-cache "python-3.12>=3.12.15-r0" "py3-pip-wheel>=26.1.2-r1"  # CVE-2026-44432 + cpython CVE-2026-3644/4224/7210/82049 (build stage)
 WORKDIR /build
@@ -282,7 +286,7 @@ RUN set -eux; \
 # Stage 3: runtime — Wolfi + Python 3.12 + JDK 21 + Ghidra + PyGhidra + the worker code. No build
 # tools beyond what apk/ensurepip need for the offline install.
 # =============================================================================
-FROM cgr.dev/chainguard/wolfi-base@sha256:0feab531471d2edfcca55f18883441cb7df598e724fa2dedf9985273f532eed7 AS runtime
+FROM cgr.dev/chainguard/wolfi-base@sha256:771146c2dfc880902a185f060c3db5571473c46b267edd98c3119c83068dfb61 AS runtime
 
 ARG GHIDRA_VERSION
 LABEL org.opencontainers.image.title="vivarium-worker" \
@@ -462,7 +466,7 @@ ENTRYPOINT ["python", "-m", "worker"]
 # is a glibc base — so add the upstream wolfi OS repo (its signing key already ships in wolfi-base)
 # and install gcc/make/GLIBC-dev (NOT musl-dev; tar is busybox-provided). Throwaway: only the built
 # binary is COPY'd into the fidgen stage.
-FROM cgr.dev/chainguard/wolfi-base@sha256:0feab531471d2edfcca55f18883441cb7df598e724fa2dedf9985273f532eed7 AS zlib-build
+FROM cgr.dev/chainguard/wolfi-base@sha256:771146c2dfc880902a185f060c3db5571473c46b267edd98c3119c83068dfb61 AS zlib-build
 
 ARG ZLIB_VERSION
 ARG ZLIB_TARBALL_SHA256
@@ -584,7 +588,7 @@ USER 65532:65532
 # archive is merged into one relocatable object via `ld -r --whole-archive` — every musl object in,
 # no glibc clash, no driver. Throwaway: only the merged .o + allow-list cross the stage boundary;
 # the C toolchain never ships.
-FROM cgr.dev/chainguard/wolfi-base@sha256:0feab531471d2edfcca55f18883441cb7df598e724fa2dedf9985273f532eed7 AS musl-build
+FROM cgr.dev/chainguard/wolfi-base@sha256:771146c2dfc880902a185f060c3db5571473c46b267edd98c3119c83068dfb61 AS musl-build
 
 ARG MUSL_VERSION
 ARG MUSL_TARBALL_SHA256
@@ -707,7 +711,7 @@ USER 65532:65532
 # OpenSSL is dynamically linked) — so a PIC DB matches the dominant consumer. `make build_libs` builds
 # only libcrypto.a + libssl.a (skips the openssl app + tests/docs — a big time saver). Throwaway:
 # only the merged .o + allow-list cross the stage boundary; the C toolchain + perl never ship.
-FROM cgr.dev/chainguard/wolfi-base@sha256:0feab531471d2edfcca55f18883441cb7df598e724fa2dedf9985273f532eed7 AS openssl-build
+FROM cgr.dev/chainguard/wolfi-base@sha256:771146c2dfc880902a185f060c3db5571473c46b267edd98c3119c83068dfb61 AS openssl-build
 
 ARG OPENSSL_VERSION
 ARG OPENSSL_TARBALL_SHA256
@@ -860,7 +864,7 @@ RUN set -eux; \
 # symbol-scoped (`--include-symbols` is omitted in the fidgen step) because the merged .o is pure
 # Boost (no CRT/libc to mislabel) AND Ghidra DEMANGLES C++ names, which a mangled `nm` allow-list
 # would not match — so scoping would wrongly empty the DB. Throwaway: only the merged .o ships out.
-FROM cgr.dev/chainguard/wolfi-base@sha256:0feab531471d2edfcca55f18883441cb7df598e724fa2dedf9985273f532eed7 AS boost-build
+FROM cgr.dev/chainguard/wolfi-base@sha256:771146c2dfc880902a185f060c3db5571473c46b267edd98c3119c83068dfb61 AS boost-build
 
 ARG BOOST_VERSION
 ARG BOOST_TARBALL_SHA256
