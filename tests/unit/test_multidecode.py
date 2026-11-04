@@ -13,6 +13,7 @@ from hypothesis import strategies as st
 from vivarium.core.multidecode import (
     assemble_stage_chain,
     best_decoded_run,
+    expand_value_feeders,
     leading_printable_run,
     select_decode_ops,
 )
@@ -156,6 +157,47 @@ def test_select_preserves_order_mixed() -> None:
     """Mixed XOR + value-feeding ADD stay in instruction order (xor then add)."""
     ops = [("xor", "AL", 0x41), ("add", "RDX", 0x08), ("add", "AL", 0x80)]
     assert select_decode_ops(ops, {"AL"}) == [("xor", 0x41), ("add", 0x80)]
+
+
+# --- expand_value_feeders (COPY/SUBPIECE reach, #401 copy-chain fix) ------------------------------
+
+
+def test_expand_no_edges_is_identity() -> None:
+    """With no COPY/SUBPIECE edges the set is unchanged."""
+    assert expand_value_feeders({"AL"}, {}) == {"AL"}
+
+
+def test_expand_one_copy_level() -> None:
+    """A stored AL copied from a unique temp pulls the unique into the value-feeder set."""
+    # AL = COPY(u1); STORE ..., AL  → u1 is effectively value-feeding.
+    assert expand_value_feeders({"AL"}, {"AL": ["u1"]}) == {"AL", "u1"}
+
+
+def test_expand_multi_level_chain() -> None:
+    """A multi-link COPY/SUBPIECE chain is fully walked (bounded)."""
+    edges = {"AL": ["u1"], "u1": ["u2"]}
+    assert expand_value_feeders({"AL"}, edges) == {"AL", "u1", "u2"}
+
+
+def test_expand_add_output_becomes_selectable() -> None:
+    """The #401 copy-chain case end-to-end: add output (unique) is kept after expansion."""
+    # add al,k lands in u1; AL = COPY(u1); STORE AL. The add candidate's out is u1.
+    feeders = expand_value_feeders({"AL"}, {"AL": ["u1"]})
+    ops = [("add", "u1", 0x10), ("add", "ECX", 0x01)]  # decode add (via copy) + loop counter
+    assert select_decode_ops(ops, feeders) == [("add", 0x10)]  # counter still filtered
+
+
+def test_expand_cycle_safe() -> None:
+    """A cyclic edge set terminates (does not hang) and resolves the reachable nodes."""
+    edges = {"a": ["b"], "b": ["a"]}
+    assert expand_value_feeders({"a"}, edges) == {"a", "b"}
+
+
+def test_expand_depth_bound() -> None:
+    """The backward walk stops at max_depth (deep chains are bounded, DoS guard)."""
+    edges = {"n0": ["n1"], "n1": ["n2"], "n2": ["n3"]}
+    out = expand_value_feeders({"n0"}, edges, max_depth=2)
+    assert "n1" in out and "n2" in out and "n3" not in out
 
 
 # --- properties (fuzz) ---------------------------------------------------------------------------
