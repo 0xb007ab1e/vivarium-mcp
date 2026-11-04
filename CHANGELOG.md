@@ -76,6 +76,12 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Changed
 
 
+- **Bump the worker-image pin to the #401 ADD-decoder (copy-chain) build; gate the #401 live test.**
+  Advance the trusted worker digest to `sha256:e4e00c2e…` — the CI-signed build that bakes the #401
+  ADD-const decoder detection with the COPY/SUBPIECE value-feed expansion — and add
+  `test_deobfuscate_add.py` to the live-regression hard-gate list, so the ADD-decoder recovery
+  (`buf[i] += 0x10`, with the loop-counter add filtered to a single `[add 0x10]` chain) is verified
+  against the shipped worker. (#401)
 - **Bump the worker-image pin to the ADR-081 build; gate the #379 multistage live test.** Advance
   the trusted worker digest to `sha256:b97b9797…` — the CI-signed build that bakes the ADR-081
   multi-stage `xor_decode` worker path — and add `test_deobfuscate_multistage.py` to the
