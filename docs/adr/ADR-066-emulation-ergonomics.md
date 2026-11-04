@@ -184,3 +184,18 @@ Additive + read-effect-only → no migration; existing `emulate` behavior is unc
 optional). Worker-side change (ABI setup + stub handling) → needs a worker rebuild + `.github/
 worker-image.pin` bump (per the worker-change-validation-recipe) before the live gate exercises it.
 The tool needs no write-consent. Merge stays **gated**.
+
+## Follow-up — explicit ABI for unprototyped targets (#381, 2026-11-03)
+
+The `args` auto-placement above requires a RESOLVED calling convention (the decompiler's recovered
+prototype), so a **raw/stripped binary whose convention Ghidra cannot resolve** failed closed
+("function has no resolved parameters — set a signature first"). #381 adds an **`arg_registers`**
+field: the caller's own ABI register order. With `arg_registers` set, each `args[i]` is written to
+`arg_registers[i]` **directly — no prototype needed** (the explicit-ABI path for an unprototyped
+target; the parked T19 SK-derivation case under raw `emulate`). It is register-passed only (stage a
+stack arg via `write_memory`), schema-validated (requires `call=True` + `args`, must cover every
+arg, bounded), and the worker fails closed on a register name unknown to the language (CWE-20).
+`set_registers` still overrides a given register. No native execution / no new sandbox surface — the
+same bounded p-code interpreter (ADR-049) just gets its argument registers set explicitly instead of
+by a recovered convention. Verified: schema units + an integration test
+(`test_emulate_explicit_abi.py`) calling an unprototyped `int add(a,b)` via `arg_registers` → 12.

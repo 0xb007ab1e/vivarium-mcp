@@ -1829,9 +1829,18 @@ class EmulateIn(_SessionScopedIn):
     call: bool = False
     stubs: list[EmulateStub] | None = Field(default=None, max_length=_MAX_EMULATE_STUBS)
     args: list[int] | None = Field(default=None, max_length=_MAX_EMULATE_REGISTERS)
+    arg_registers: list[str] | None = Field(default=None, max_length=_MAX_EMULATE_REGISTERS)
+    """**Explicit ABI arg-placement (ADR-066 follow-up, #381).** The ordered register names each
+    positional ``args[i]`` is written to — the caller's OWN calling convention, used when the target
+    has **no usable recovered prototype** (a raw/stripped binary whose convention Ghidra cannot
+    resolve, so the default ``args`` path fails closed). When set, ``args[i]`` goes
+    to ``arg_registers[i]`` directly — no prototype needed. Requires ``call=True`` + ``args``, and
+    must provide a register for every arg. Register-passed only (stage a stack arg via
+    ``write_memory``); an unknown register name fails closed at the worker. ``set_registers`` still
+    overrides a given register."""
 
     @model_validator(mode="after")
-    def _bound_emulate(self) -> EmulateIn:
+    def _bound_emulate(self) -> EmulateIn:  # noqa: C901 — one bounded check per field
         """Cap list lengths + the total memory-write size (CWE-400; fail closed).
 
         Returns:
@@ -1858,6 +1867,16 @@ class EmulateIn(_SessionScopedIn):
             raise ValueError(
                 "args requires call=True (auto arg-placement targets a called function)"
             )
+        if self.arg_registers is not None:
+            # Explicit ABI placement (#381) needs a call + the values to place, and a register for
+            # each one — reject an incomplete/meaningless combination rather than silently drop it.
+            if not self.call or self.args is None:
+                raise ValueError(
+                    "arg_registers requires call=True and args (it gives the explicit ABI "
+                    "register for each positional arg)"
+                )
+            if len(self.arg_registers) < len(self.args):
+                raise ValueError("arg_registers must provide a register for every arg")
         return self
 
 
