@@ -9,6 +9,19 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Added
 
 
+- **`deobfuscate_strings` recovers multi-stage / chained local decoders (ADR-081 / #379).** The
+  ADR-068 `xor_decode` MVP emulated the whole decoder but read back only `min(write_targets)`, so a
+  chained decoder whose final plaintext lands in a *different* buffer (e.g. `scratch = ct ^ k1` then
+  `out = scratch ^ k2`) was missed (reported not-recovered). The whole-function emulation already
+  runs every local stage, so the fix widens **readback**: read every distinct write buffer (bounded
+  by a new server-clamped `max_stages` ≤ 64) and report the one that became printable, plus the
+  ordered `stages[]{op, key}` XOR chain (length 1 for single-pass, >1 for chained). No new execution
+  surface — the same single bounded ADR-049 sandbox run; `max_bytes`/`max_steps`/`max_stages` bound
+  it, output stays untrusted-wrapped. Interprocedural / self-modifying / stateful-stream decoders +
+  `add`-decoders stay deferred and **fail closed** (never a guessed plaintext). The pure
+  buffer-selection + chain-assembly is `core.multidecode` (hermetic unit + property tests); a gated
+  live-regression test proves end-to-end recovery of a two-buffer chained decoder on the real worker.
+  (#379)
 - **`emulate` explicit ABI — call functions with no recovered prototype (ADR-066 / #381).** The
   `args` auto-placement needs a resolved calling convention, so a raw/stripped target whose
   convention Ghidra can't recover failed closed. New `arg_registers` gives the caller's own ABI:

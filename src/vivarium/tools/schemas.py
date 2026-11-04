@@ -809,6 +809,10 @@ class DeobfuscateStringsIn(_SessionScopedIn):
             (bounded).
         max_steps: ``xor_decode`` only — the p-code step budget for the decode-loop emulation
             (inherits the ADR-049 clamp ``[1, 1_000_000]``); ignored by ``stack_string``.
+        max_stages: ``xor_decode`` only (ADR-081) — the hard cap on both the number of decode
+            stages reported and the number of distinct write buffers read back after the bounded
+            emulation (chained/multi-stage local decoders). Server-clamped ``[1, 64]``; ignored by
+            ``stack_string``.
     """
 
     function: str | None = Field(default=None, min_length=1, max_length=_MAX_NAME)
@@ -819,10 +823,23 @@ class DeobfuscateStringsIn(_SessionScopedIn):
     max_results: int = Field(default=256, ge=1, le=_MAX_LIMIT)
     max_bytes: int = Field(default=256, ge=1, le=_MAX_LIMIT)
     max_steps: int = Field(default=100_000, ge=1, le=1_000_000)
+    max_stages: int = Field(default=8, ge=1, le=64)
+
+
+class DecodeStage(_Out):
+    """One stage of a multi-stage ``xor_decode`` decode chain (ADR-081).
+
+    Attributes:
+        op: The decode operation — ``"xor"`` / ``"add"`` — safe (closed vocabulary).
+        key: The stage's recovered single-byte key (hex) — UNTRUSTED (binary-derived; ADR-005).
+    """
+
+    op: Literal["xor", "add"]
+    key: Untrusted[str]
 
 
 class RecoveredString(_Out):
-    """One recovered (deobfuscated) string (ADR-068).
+    """One recovered (deobfuscated) string (ADR-068, ADR-081).
 
     Attributes:
         address: Where the string is constructed — the function entry (hex) — safe.
@@ -830,10 +847,13 @@ class RecoveredString(_Out):
             vocabulary).
         text: The recovered string — UNTRUSTED (binary-derived; ADR-005).
         length: Recovered length in bytes — safe.
-        encoding: For ``xor_decode``, the decode operation — ``"xor"`` / ``"add"`` (safe, closed
-            vocabulary); ``None`` for ``stack_string``.
-        decode_key: For ``xor_decode``, the recovered single-byte key (hex) — UNTRUSTED
+        encoding: For ``xor_decode``, the FIRST stage's decode operation — ``"xor"`` / ``"add"``
+            (safe, closed vocabulary); ``None`` for ``stack_string``.
+        decode_key: For ``xor_decode``, the FIRST stage's single-byte key (hex) — UNTRUSTED
             (binary-derived); ``None`` for ``stack_string``.
+        stages: For ``xor_decode`` (ADR-081), the ordered decode-stage chain (one ``{op, key}`` per
+            detected constant decode op); length 1 for a single-pass decoder, >1 for a
+            chained/multi-stage one. ``None`` for ``stack_string``. Each ``key`` is UNTRUSTED.
     """
 
     address: str
@@ -842,6 +862,7 @@ class RecoveredString(_Out):
     length: int
     encoding: Literal["xor", "add"] | None = None
     decode_key: Untrusted[str] | None = None
+    stages: list[DecodeStage] | None = None
 
 
 class DeobfuscateStringsOut(_Out):

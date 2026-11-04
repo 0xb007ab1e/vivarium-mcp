@@ -179,7 +179,10 @@ and reassembles them via the pure core — invisible to the HighFunction because
 removes stores never read; function-scoped or a bounded program scan; recovered text untrusted;
 `xor_decode` (ADR-068 D3) detects an in-place XOR-with-const decode loop and emulates it in the
 ADR-049 sandbox, reporting a run only if it became printable, with untrusted `encoding`/`decode_key`;
-`add`/multi-stage decoders deferred),
+multi-stage (ADR-081): reads back every distinct write buffer (bounded by `max_stages`≤64) and
+reports the printable one plus the ordered untrusted `stages[]{op, key}` XOR chain, recovering
+chained/multi-buffer local decoders; interprocedural/self-modifying/stateful + `add` decoders
+fail closed / deferred),
 `stack_frame` (ADR-054 recovered stack layout — read-only; the function's locals/parameters with
 offsets, types, sizes from the Stack analyzer), `basic_blocks` (ADR-055 control-flow graph —
 read-only; each basic block's address range + intraprocedural successor edges from
