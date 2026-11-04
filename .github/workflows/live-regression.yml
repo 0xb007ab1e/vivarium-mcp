@@ -432,6 +432,7 @@ jobs:
             tests/integration/test_import_debug_map.py \
             tests/integration/test_deobfuscate_strings.py \
             tests/integration/test_deobfuscate_multistage.py \
+            tests/integration/test_deobfuscate_add.py \
             tests/integration/test_import_uimage.py \
             tests/integration/test_import_androidboot.py \
             tests/integration/test_emulate_autoarg.py \
