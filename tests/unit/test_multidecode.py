@@ -14,6 +14,7 @@ from vivarium.core.multidecode import (
     assemble_stage_chain,
     best_decoded_run,
     leading_printable_run,
+    select_decode_ops,
 )
 
 # --- leading_printable_run -----------------------------------------------------------------------
@@ -126,6 +127,35 @@ def test_stage_chain_key_masked_to_byte() -> None:
     """Keys are normalised to a single byte (0..0xff)."""
     stages, _ = assemble_stage_chain([("xor", 0x1041)], max_stages=8)
     assert stages == [{"op": "xor", "key": "0x41"}]
+
+
+# --- select_decode_ops (ADD-const filter, #401) --------------------------------------------------
+
+
+def test_select_keeps_all_xor() -> None:
+    """XOR ops are always kept regardless of whether they feed a store (permissive, low FP)."""
+    ops = [("xor", "AL", 0x41), ("xor", "AL", 0x13)]
+    assert select_decode_ops(ops, set()) == [("xor", 0x41), ("xor", 0x13)]
+
+
+def test_select_keeps_add_only_when_value_feeding() -> None:
+    """An ADD is kept only when its output varnode is a STORE value (the genuine decode op)."""
+    # ("add","AL",..) feeds a stored value (AL in store_value_keys) → kept;
+    # ("add","RDX",..) is an address displacement (not a stored value) → dropped.
+    ops = [("add", "AL", 0x10), ("add", "RDX", 0x08)]
+    assert select_decode_ops(ops, {"AL"}) == [("add", 0x10)]
+
+
+def test_select_drops_loop_counter_add() -> None:
+    """A loop-counter ADD (inc ecx: output ECX, never a stored value) is dropped."""
+    ops = [("add", "ECX", 0x01)]
+    assert select_decode_ops(ops, {"AL"}) == []
+
+
+def test_select_preserves_order_mixed() -> None:
+    """Mixed XOR + value-feeding ADD stay in instruction order (xor then add)."""
+    ops = [("xor", "AL", 0x41), ("add", "RDX", 0x08), ("add", "AL", 0x80)]
+    assert select_decode_ops(ops, {"AL"}) == [("xor", 0x41), ("add", 0x80)]
 
 
 # --- properties (fuzz) ---------------------------------------------------------------------------

@@ -2451,10 +2451,13 @@ class PyGhidraBackend:
         ``max_stages``) and pick the one whose decoded window BECAME printable (changed vs its
         original bytes) via the pure :func:`core.multidecode.best_decoded_run` — recovering
         chained/multi-stage decoders whose final plaintext lands in a non-minimum buffer, not just
-        single-pass ones. Reports the ordered XOR-key chain. A non-decoder (or an interprocedural /
+        single-pass ones. Reports the ordered decode-op chain (``xor``/``add``). Stage detection
+        keeps every constant ``INT_XOR`` (rare in ordinary code) but accepts a constant ``INT_ADD``
+        only when its output feeds a ``STORE`` value (#401) — otherwise an ``INT_ADD`` const is
+        address arithmetic or a loop counter, not a decode op (filtered by the pure
+        :func:`core.multidecode.select_decode_ops`). A non-decoder (or an interprocedural /
         self-modifying decoder that produced no printable-changed run) yields nothing — fail closed,
-        never guessed. XOR keys only (``INT_ADD`` is address-arithmetic-ambiguous — a tracked
-        follow-up).
+        never guessed.
 
         Args:
             func: The candidate function.
@@ -2468,12 +2471,23 @@ class PyGhidraBackend:
             A recovered-string dict (with an ordered ``stages`` chain), or ``None`` if not a
             recoverable local XOR decoder.
         """
-        from vivarium.core.multidecode import assemble_stage_chain, best_decoded_run
+        from vivarium.core.multidecode import (
+            assemble_stage_chain,
+            best_decoded_run,
+            select_decode_ops,
+        )
+
+        def _vn_key(vn: Any) -> tuple[str, int]:
+            return (str(vn.getAddress()), int(vn.getSize()))
 
         listing = self._require_program().getListing()
         refmgr = self._require_program().getReferenceManager()
 
-        xor_keys: list[int] = []
+        # Ordered constant decode candidates (op, output-varnode-key, key). XOR is kept always; an
+        # ADD is a real decode op only if its output feeds a STORE VALUE (#401 — otherwise it is
+        # address arithmetic / a loop counter). store_value_keys collects every STORE value operand.
+        candidates: list[tuple[str, object, int]] = []
+        store_value_keys: set[object] = set()
         has_store = False
         write_targets: set[int] = set()
         for instruction in listing.getInstructions(func.getBody(), True):
@@ -2481,17 +2495,22 @@ class PyGhidraBackend:
                 mnem = str(op.getMnemonic())
                 if mnem == "STORE":
                     has_store = True
-                elif mnem == "INT_XOR":
+                    if op.getNumInputs() >= 3:  # STORE space, offset, VALUE
+                        store_value_keys.add(_vn_key(op.getInput(2)))
+                elif mnem in ("INT_XOR", "INT_ADD"):
+                    out = op.getOutput()
                     for k in range(op.getNumInputs()):
                         vn = op.getInput(k)
-                        if vn.isConstant():
-                            xor_keys.append(int(vn.getOffset()) & 0xFF)
+                        if vn.isConstant() and out is not None:
+                            kind = "xor" if mnem == "INT_XOR" else "add"
+                            candidates.append((kind, _vn_key(out), int(vn.getOffset()) & 0xFF))
                             break
             for ref in refmgr.getReferencesFrom(instruction.getAddress()):
                 if ref.getReferenceType().isWrite():
                     write_targets.add(int(ref.getToAddress().getOffset()))
 
-        if not xor_keys or not has_store or not write_targets:
+        stage_ops = select_decode_ops(candidates, store_value_keys)
+        if not stage_ops or not has_store or not write_targets:
             return None
 
         # ADR-081 D3: read back EVERY distinct write buffer, bounded by max_stages (DoS).
@@ -2515,26 +2534,24 @@ class PyGhidraBackend:
         if not memory:
             return None
         # _gh_emulate returns read_memory windows in request order (its mems build); zip by base.
-        candidates: list[tuple[int, bytes, bytes]] = []
+        buffers: list[tuple[int, bytes, bytes]] = []
         for base, mem in zip(bases, memory, strict=False):
             after = bytes.fromhex(str(mem.get("data", "")))
             prior = bytes.fromhex(before[base]) if before[base] else b""
-            candidates.append((base, prior, after))
+            buffers.append((base, prior, after))
 
-        pick = best_decoded_run(candidates, min_length=min_length)
+        pick = best_decoded_run(buffers, min_length=min_length)
         if pick is None:
             return None
         base, run = pick
-        stages, _truncated = assemble_stage_chain(
-            [("xor", k) for k in xor_keys], max_stages=max_stages
-        )
+        stages, _truncated = assemble_stage_chain(stage_ops, max_stages=max_stages)
 
         return {
             "address": entry,
             "technique": "xor_decode",
             "text": run.decode("latin1"),
             "length": len(run),
-            "encoding": "xor",
+            "encoding": stages[0]["op"],  # first stage's op ("xor" or "add", #401)
             "decode_key": stages[0]["key"],
             "stages": stages,
         }
