@@ -53,6 +53,11 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Changed
 
 
+- **Bump the worker-image pin to the `arg_registers` + CVE-drift build; gate the #381 live test.**
+  Advance the trusted worker digest to `sha256:ed573ba8…` — the CI-signed build that bakes the #381
+  `emulate` explicit-ABI path and the refreshed Chainguard base — and add
+  `test_emulate_explicit_abi.py` to the live-regression hard-gate list, so the unprototyped-target
+  `arg_registers` call (place 5+7 → return 12) is verified against the shipped worker. (#381)
 - **CVE-drift repin: refresh the Chainguard base digests on both images (2026-11-04).** A fresh
   Trivy DB flagged HIGH CVEs the pinned bases had already fixed upstream but the stale digests still
   carried — server: CVE-2026-97687/CVE-2026-97689 (urllib3, `py3-pip-wheel`) + CVE-2026-111943
