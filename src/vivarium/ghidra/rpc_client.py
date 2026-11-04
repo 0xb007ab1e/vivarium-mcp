@@ -3074,8 +3074,17 @@ def _build_recover_struct(r: dict[str, Any]) -> s.RecoverStructOut:
 
 
 def _build_recovered_string(r: dict[str, Any]) -> s.RecoveredString:
-    """Build one :class:`RecoveredString` (ADR-068): the recovered text + key are binary-derived."""
+    """Build one :class:`RecoveredString` (ADR-068/ADR-081): text + key(s) are untrusted."""
     decode_key = r.get("decode_key")
+    raw_stages = r.get("stages")
+    stages = (
+        None
+        if raw_stages is None
+        else [
+            s.DecodeStage(op=st["op"], key=_w(str(st["key"]), DataOrigin.BINARY))
+            for st in raw_stages
+        ]
+    )
     return s.RecoveredString(
         address=str(r["address"]),
         technique=r["technique"],
@@ -3083,6 +3092,7 @@ def _build_recovered_string(r: dict[str, Any]) -> s.RecoveredString:
         length=int(r["length"]),
         encoding=r.get("encoding"),
         decode_key=None if decode_key is None else _w(str(decode_key), DataOrigin.BINARY),
+        stages=stages,
     )
 
 

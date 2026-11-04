@@ -417,6 +417,8 @@ class PyGhidraBackend:
             _clamp_count(params.get("max_results", 256)),
             _clamp_count(params.get("max_bytes", 256)),
             int(params.get("max_steps", 100_000)),
+            # ADR-081: multi-stage readback/chain cap (schema also clamps it server-side).
+            max(1, min(64, int(params.get("max_stages", 8)))),
         )
 
     def stack_frame(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2279,6 +2281,7 @@ class PyGhidraBackend:
         max_results: int,
         max_bytes: int,
         max_steps: int = 100_000,
+        max_stages: int = 8,
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Recover hidden (stack-string) strings from a function or bounded program scan (ADR-068).
 
@@ -2293,8 +2296,11 @@ class PyGhidraBackend:
         no execution (ADR-068 D2), read-only, program DB untouched. Bounded by ``max_results`` +
         ``max_bytes`` + a function-scan cap; ``truncated`` honest (ADR-005).
 
-        (``xor_decode`` — bounded emulation of a local decode loop via the ADR-049 engine — is a
-        tracked follow-up; the schema does not yet accept it.)
+        The ``xor_decode`` technique (ADR-068 D3, ADR-081) recovers plaintext by BOUNDED emulation
+        of a local decode loop via the ADR-049 engine, reading back every distinct write buffer
+        (bounded by ``max_stages``) and reporting the one that became printable plus the ordered
+        decode-stage chain — so chained/multi-stage local decoders are recovered, not just
+        single-pass ones.
 
         Args:
             function: A function (name or entry address) to scope the scan; ``None`` scans a bounded
@@ -2304,10 +2310,12 @@ class PyGhidraBackend:
             max_results: Cap on recovered strings returned (already server-clamped).
             max_bytes: Cap on the length of any single recovered string (already server-clamped).
             max_steps: ``xor_decode`` p-code step budget for the decode-loop emulation (clamped).
+            max_stages: ``xor_decode`` cap on the multi-stage readback buffers + reported chain
+                (ADR-081; server-clamped ``[1, 64]``).
 
         Returns:
-            ``{"strings": [{"address", "technique", "text", "length", "encoding"?, "decode_key"?}],
-            "truncated"}``.
+            ``{"strings": [{"address", "technique", "text", "length", "encoding"?, "decode_key"?,
+            "stages"?}], "truncated"}``.
 
         Raises:
             WorkerError: ``not-found`` if a named ``function`` does not resolve.
@@ -2411,7 +2419,9 @@ class PyGhidraBackend:
             if not want_xor or len(results) >= max_results:
                 break
             try:
-                recovered = self._gh_xor_decode_one(func, min_length, max_bytes, max_steps)
+                recovered = self._gh_xor_decode_one(
+                    func, min_length, max_bytes, max_steps, max_stages
+                )
             except (
                 Exception
             ):  # a decoder that faults/halts oddly is skipped, not fatal (fail closed)
@@ -2428,54 +2438,66 @@ class PyGhidraBackend:
         return {"strings": results, "truncated": truncated}
 
     def _gh_xor_decode_one(  # noqa: C901 - one bounded detect-then-emulate decoder recovery (JVM edge)
-        self, func: Any, min_length: int, max_bytes: int, max_steps: int
+        self, func: Any, min_length: int, max_bytes: int, max_steps: int, max_stages: int = 8
     ) -> dict[str, Any] | None:  # pragma: no cover - JVM edge
-        """Recover one single-pass XOR-const in-place decoder's plaintext (ADR-068 D3).
+        """Recover one local XOR decoder's plaintext — single-pass OR chained (ADR-068 D3, ADR-081).
 
-        Detects the decoder statically (an ``INT_XOR`` with a constant operand — the single-byte
-        key — plus at least one ``STORE``, and a WRITE data reference locating the in-place buffer),
-        then recovers the plaintext by BOUNDED p-code emulation of the function via
-        :meth:`_gh_emulate` (``call=True`` — the ADR-049 sandbox: no native execution, program DB
-        untouched) and reading the decoded buffer back. Reports only a run that BECAME printable
-        (changed vs the original bytes), so a non-decoder pre-filter match yields nothing. ``xor``
-        only in this increment (``add`` decoders are a tracked follow-up within ADR-068).
+        Detects the decoder statically (one or more ``INT_XOR`` constant operands — the single-byte
+        key(s), in instruction order — plus at least one ``STORE`` and the WRITE data references
+        locating the in-place buffer(s)), then recovers the plaintext by BOUNDED p-code emulation of
+        the function via :meth:`_gh_emulate` (``call=True`` — the ADR-049 sandbox: no native
+        execution, program DB untouched). The whole-function run already executes every *local*
+        stage, so ADR-081 only widens READBACK: read back every distinct write buffer (bounded by
+        ``max_stages``) and pick the one whose decoded window BECAME printable (changed vs its
+        original bytes) via the pure :func:`core.multidecode.best_decoded_run` — recovering
+        chained/multi-stage decoders whose final plaintext lands in a non-minimum buffer, not just
+        single-pass ones. Reports the ordered XOR-key chain. A non-decoder (or an interprocedural /
+        self-modifying decoder that produced no printable-changed run) yields nothing — fail closed,
+        never guessed. XOR keys only (``INT_ADD`` is address-arithmetic-ambiguous — a tracked
+        follow-up).
 
         Args:
             func: The candidate function.
             min_length: Minimum recovered-run length.
-            max_bytes: Cap on the decoded-buffer window read back.
+            max_bytes: Cap on each decoded-buffer window read back.
             max_steps: P-code step budget for the emulation (server-clamped).
+            max_stages: Cap on the readback buffer count AND the reported stage chain (ADR-081 D3;
+                server-clamped ``[1, 64]``).
 
         Returns:
-            A recovered-string dict, or ``None`` if not a recoverable XOR decoder.
+            A recovered-string dict (with an ordered ``stages`` chain), or ``None`` if not a
+            recoverable local XOR decoder.
         """
+        from vivarium.core.multidecode import assemble_stage_chain, best_decoded_run
+
         listing = self._require_program().getListing()
         refmgr = self._require_program().getReferenceManager()
 
-        key: int | None = None
+        xor_keys: list[int] = []
         has_store = False
-        write_targets: list[int] = []
+        write_targets: set[int] = set()
         for instruction in listing.getInstructions(func.getBody(), True):
             for op in instruction.getPcode():
                 mnem = str(op.getMnemonic())
                 if mnem == "STORE":
                     has_store = True
-                elif mnem == "INT_XOR" and key is None:
+                elif mnem == "INT_XOR":
                     for k in range(op.getNumInputs()):
                         vn = op.getInput(k)
                         if vn.isConstant():
-                            key = int(vn.getOffset()) & 0xFF
+                            xor_keys.append(int(vn.getOffset()) & 0xFF)
                             break
             for ref in refmgr.getReferencesFrom(instruction.getAddress()):
                 if ref.getReferenceType().isWrite():
-                    write_targets.append(int(ref.getToAddress().getOffset()))
+                    write_targets.add(int(ref.getToAddress().getOffset()))
 
-        if key is None or not has_store or not write_targets:
+        if not xor_keys or not has_store or not write_targets:
             return None
 
-        base = min(write_targets)
+        # ADR-081 D3: read back EVERY distinct write buffer, bounded by max_stages (DoS).
+        bases = sorted(write_targets)[:max_stages]
         entry = str(func.getEntryPoint())
-        before_hex = self._gh_read_bytes(hex(base), max_bytes).get("data", "")
+        before = {b: self._gh_read_bytes(hex(b), max_bytes).get("data", "") for b in bases}
 
         result = self._gh_emulate(
             start=entry,
@@ -2484,7 +2506,7 @@ class PyGhidraBackend:
             max_steps=max_steps,
             stop_at=None,
             read_registers=[],
-            read_memory=[{"address": hex(base), "length": max_bytes}],
+            read_memory=[{"address": hex(b), "length": max_bytes} for b in bases],
             call=True,
             stubs=[],
             args=None,
@@ -2492,28 +2514,29 @@ class PyGhidraBackend:
         memory = result.get("memory") or []
         if not memory:
             return None
-        decoded = bytes.fromhex(str(memory[0].get("data", "")))
-        before = bytes.fromhex(before_hex) if before_hex else b""
+        # _gh_emulate returns read_memory windows in request order (its mems build); zip by base.
+        candidates: list[tuple[int, bytes, bytes]] = []
+        for base, mem in zip(bases, memory, strict=False):
+            after = bytes.fromhex(str(mem.get("data", "")))
+            prior = bytes.fromhex(before[base]) if before[base] else b""
+            candidates.append((base, prior, after))
 
-        run_bytes = bytearray()
-        for byte in decoded:  # leading printable run (stops at NUL / any non-printable byte)
-            if 0x20 <= byte <= 0x7E:
-                run_bytes.append(byte)
-            else:
-                break
-        if len(run_bytes) < min_length:
+        pick = best_decoded_run(candidates, min_length=min_length)
+        if pick is None:
             return None
-        # Only report a run the decode actually PRODUCED — reject bytes that were already plaintext.
-        if bytes(run_bytes) == before[: len(run_bytes)]:
-            return None
+        base, run = pick
+        stages, _truncated = assemble_stage_chain(
+            [("xor", k) for k in xor_keys], max_stages=max_stages
+        )
 
         return {
             "address": entry,
             "technique": "xor_decode",
-            "text": run_bytes.decode("latin1"),
-            "length": len(run_bytes),
+            "text": run.decode("latin1"),
+            "length": len(run),
             "encoding": "xor",
-            "decode_key": hex(key),
+            "decode_key": stages[0]["key"],
+            "stages": stages,
         }
 
     def _gh_stack_frame(self, function: str) -> dict[str, Any]:  # pragma: no cover - JVM edge

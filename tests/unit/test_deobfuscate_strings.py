@@ -90,6 +90,17 @@ def test_caps_bounded() -> None:
         s.DeobfuscateStringsIn(session_id="s", max_bytes=0)
 
 
+def test_max_stages_bounded() -> None:
+    """ADR-081: max_stages defaults to 8 and is clamped to [1, 64]."""
+    assert s.DeobfuscateStringsIn(session_id="s").max_stages == 8
+    assert s.DeobfuscateStringsIn(session_id="s", max_stages=1).max_stages == 1
+    assert s.DeobfuscateStringsIn(session_id="s", max_stages=64).max_stages == 64
+    with pytest.raises(ValidationError):
+        s.DeobfuscateStringsIn(session_id="s", max_stages=0)
+    with pytest.raises(ValidationError):
+        s.DeobfuscateStringsIn(session_id="s", max_stages=65)
+
+
 # --- result builder ------------------------------------------------------------------------------
 
 
@@ -138,6 +149,33 @@ def test_builder_xor_decode_wraps_key_and_keeps_encoding() -> None:
     assert rec.technique == "xor_decode" and rec.encoding == "xor"
     assert isinstance(rec.text, Untrusted)
     assert isinstance(rec.decode_key, Untrusted) and rec.decode_key.value == "0x41"
+    # No stages key in the result → stages is None (backward-compatible).
+    assert rec.stages is None
+
+
+def test_builder_multistage_wraps_each_stage_key_untrusted() -> None:
+    """ADR-081: a chained xor_decode carries an ordered `stages` chain; each key is UNTRUSTED."""
+    out = _build_deobfuscate_strings(
+        {
+            "strings": [
+                {
+                    "address": "0x00401000",
+                    "technique": "xor_decode",
+                    "text": "Hello!",
+                    "length": 6,
+                    "encoding": "xor",
+                    "decode_key": "0x41",
+                    "stages": [{"op": "xor", "key": "0x41"}, {"op": "xor", "key": "0x13"}],
+                }
+            ],
+            "truncated": False,
+        }
+    )
+    rec = out.strings[0]
+    assert rec.stages is not None and len(rec.stages) == 2
+    assert [st.op for st in rec.stages] == ["xor", "xor"]
+    assert all(isinstance(st.key, Untrusted) for st in rec.stages)
+    assert [st.key.value for st in rec.stages] == ["0x41", "0x13"]
 
 
 def test_builder_tolerates_empty() -> None:
