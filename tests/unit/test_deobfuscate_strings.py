@@ -101,6 +101,23 @@ def test_max_stages_bounded() -> None:
         s.DeobfuscateStringsIn(session_id="s", max_stages=65)
 
 
+def test_interprocedural_bounds() -> None:
+    """ADR-082: max_call_depth defaults to 2 ([0,8]) and max_callees to 16 ([1,256])."""
+    m = s.DeobfuscateStringsIn(session_id="s")
+    assert m.max_call_depth == 2 and m.max_callees == 16
+    assert s.DeobfuscateStringsIn(session_id="s", max_call_depth=0).max_call_depth == 0  # entry
+    assert s.DeobfuscateStringsIn(session_id="s", max_call_depth=8).max_call_depth == 8
+    assert s.DeobfuscateStringsIn(session_id="s", max_callees=256).max_callees == 256
+    with pytest.raises(ValidationError):
+        s.DeobfuscateStringsIn(session_id="s", max_call_depth=9)
+    with pytest.raises(ValidationError):
+        s.DeobfuscateStringsIn(session_id="s", max_call_depth=-1)
+    with pytest.raises(ValidationError):
+        s.DeobfuscateStringsIn(session_id="s", max_callees=0)
+    with pytest.raises(ValidationError):
+        s.DeobfuscateStringsIn(session_id="s", max_callees=257)
+
+
 # --- result builder ------------------------------------------------------------------------------
 
 

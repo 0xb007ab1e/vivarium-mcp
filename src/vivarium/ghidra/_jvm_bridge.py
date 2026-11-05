@@ -419,6 +419,9 @@ class PyGhidraBackend:
             int(params.get("max_steps", 100_000)),
             # ADR-081: multi-stage readback/chain cap (schema also clamps it server-side).
             max(1, min(64, int(params.get("max_stages", 8)))),
+            # ADR-082: interprocedural detection bounds (schema also clamps them server-side).
+            max(0, min(8, int(params.get("max_call_depth", 2)))),
+            max(1, min(256, int(params.get("max_callees", 16)))),
         )
 
     def stack_frame(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2282,6 +2285,8 @@ class PyGhidraBackend:
         max_bytes: int,
         max_steps: int = 100_000,
         max_stages: int = 8,
+        max_call_depth: int = 2,
+        max_callees: int = 16,
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Recover hidden (stack-string) strings from a function or bounded program scan (ADR-068).
 
@@ -2312,6 +2317,10 @@ class PyGhidraBackend:
             max_steps: ``xor_decode`` p-code step budget for the decode-loop emulation (clamped).
             max_stages: ``xor_decode`` cap on the multi-stage readback buffers + reported chain
                 (ADR-081; server-clamped ``[1, 64]``).
+            max_call_depth: ``xor_decode`` depth of the interprocedural decode-op scan (ADR-082;
+                ``0`` = entry-only; server-clamped ``[0, 8]``).
+            max_callees: ``xor_decode`` cap on the number of functions scanned in the call-graph
+                walk (ADR-082; server-clamped ``[1, 256]``).
 
         Returns:
             ``{"strings": [{"address", "technique", "text", "length", "encoding"?, "decode_key"?,
@@ -2420,7 +2429,7 @@ class PyGhidraBackend:
                 break
             try:
                 recovered = self._gh_xor_decode_one(
-                    func, min_length, max_bytes, max_steps, max_stages
+                    func, min_length, max_bytes, max_steps, max_stages, max_call_depth, max_callees
                 )
             except (
                 Exception
@@ -2438,7 +2447,14 @@ class PyGhidraBackend:
         return {"strings": results, "truncated": truncated}
 
     def _gh_xor_decode_one(  # noqa: C901 - one bounded detect-then-emulate decoder recovery (JVM edge)
-        self, func: Any, min_length: int, max_bytes: int, max_steps: int, max_stages: int = 8
+        self,
+        func: Any,
+        min_length: int,
+        max_bytes: int,
+        max_steps: int,
+        max_stages: int = 8,
+        max_call_depth: int = 2,
+        max_callees: int = 16,
     ) -> dict[str, Any] | None:  # pragma: no cover - JVM edge
         """Recover one local XOR decoder's plaintext — single-pass OR chained (ADR-068 D3, ADR-081).
 
@@ -2457,9 +2473,12 @@ class PyGhidraBackend:
         address arithmetic or a loop counter, not a decode op. The STORE-value set is expanded back
         through ``COPY``/``SUBPIECE`` edges (:func:`core.multidecode.expand_value_feeders`) so an
         8-bit decode op whose result reaches the stored sub-register through a unique temp still
-        qualifies; the final filter is the pure :func:`core.multidecode.select_decode_ops`. A
-        non-decoder (or an interprocedural / self-modifying decoder that produced no
-        printable-changed run) yields nothing — fail closed, never guessed.
+        qualifies; the final filter is the pure :func:`core.multidecode.select_decode_ops`.
+        Detection spans the entry function AND its in-program callees (ADR-082, bounded by
+        ``max_call_depth``/``max_callees``) — the per-byte transform of an interprocedural decoder
+        may live in a helper; the emulation already steps into those callees. A non-decoder, or a
+        decoder that calls an EXTERNAL/unresolved helper (faults at emulation), yields nothing —
+        fail closed, never guessed.
 
         Args:
             func: The candidate function.
@@ -2468,6 +2487,11 @@ class PyGhidraBackend:
             max_steps: P-code step budget for the emulation (server-clamped).
             max_stages: Cap on the readback buffer count AND the reported stage chain (ADR-081 D3;
                 server-clamped ``[1, 64]``).
+            max_call_depth: How deep the decode-op scan follows in-program callees (ADR-082 — the
+                transform may live in a helper function). ``0`` = entry-only. Server-clamped
+                ``[0, 8]``.
+            max_callees: Hard cap on the total number of functions scanned in the call-graph walk
+                (ADR-082 DoS; server-clamped ``[1, 256]``).
 
         Returns:
             A recovered-string dict (with an ordered ``stages`` chain), or ``None`` if not a
@@ -2483,8 +2507,23 @@ class PyGhidraBackend:
         def _vn_key(vn: Any) -> tuple[str, int]:
             return (str(vn.getAddress()), int(vn.getSize()))
 
-        listing = self._require_program().getListing()
-        refmgr = self._require_program().getReferenceManager()
+        program = self._require_program()
+        listing = program.getListing()
+        refmgr = program.getReferenceManager()
+        manager = program.getFunctionManager()
+        memory = program.getMemory()
+
+        def _writable_base(value: int) -> bool:
+            # A constant that is a mapped, writable address is a candidate buffer base (ADR-082): an
+            # interprocedural decoder loads the buffer pointer in the CALLER (`mov rdi, 0x…`) while
+            # the STORE is in the callee (no static write-ref there). Small consts (keys) and
+            # non-addresses fall outside any block → excluded. The printable-changed gate filters
+            # any non-buffer that slips through.
+            try:
+                block = memory.getBlock(program.getAddressFactory().getAddress(hex(value)))
+            except Exception:
+                return False
+            return block is not None and bool(block.isWrite())
 
         # Ordered constant decode candidates (op, output-varnode-key, key). XOR is kept always; an
         # ADD is a real decode op only if its output feeds a STORE VALUE (#401 — otherwise it is
@@ -2496,27 +2535,61 @@ class PyGhidraBackend:
         link_edges: dict[object, list[object]] = {}
         has_store = False
         write_targets: set[int] = set()
-        for instruction in listing.getInstructions(func.getBody(), True):
-            for op in instruction.getPcode():
-                mnem = str(op.getMnemonic())
-                out = op.getOutput()
-                if mnem == "STORE":
-                    has_store = True
-                    if op.getNumInputs() >= 3:  # STORE space, offset, VALUE
-                        store_value_keys.add(_vn_key(op.getInput(2)))
-                elif mnem in ("COPY", "SUBPIECE") and out is not None:
-                    # out is produced from input0 (SUBPIECE input1 is a constant byte offset).
-                    link_edges.setdefault(_vn_key(out), []).append(_vn_key(op.getInput(0)))
-                elif mnem in ("INT_XOR", "INT_ADD") and out is not None:
-                    for k in range(op.getNumInputs()):
-                        vn = op.getInput(k)
-                        if vn.isConstant():
-                            kind = "xor" if mnem == "INT_XOR" else "add"
-                            candidates.append((kind, _vn_key(out), int(vn.getOffset()) & 0xFF))
-                            break
-            for ref in refmgr.getReferencesFrom(instruction.getAddress()):
-                if ref.getReferenceType().isWrite():
-                    write_targets.add(int(ref.getToAddress().getOffset()))
+
+        def _scan(f: Any) -> None:  # noqa: C901 - one flat p-code dispatch; branches read inline
+            """Accumulate the decode signals from one function's raw p-code into the shared sets."""
+            nonlocal has_store
+            for instruction in listing.getInstructions(f.getBody(), True):
+                for op in instruction.getPcode():
+                    mnem = str(op.getMnemonic())
+                    out = op.getOutput()
+                    if mnem == "STORE":
+                        has_store = True
+                        if op.getNumInputs() >= 3:  # STORE space, offset, VALUE
+                            store_value_keys.add(_vn_key(op.getInput(2)))
+                    elif mnem in ("COPY", "SUBPIECE") and out is not None:
+                        # out is produced from input0 (SUBPIECE input1 is a constant byte offset).
+                        link_edges.setdefault(_vn_key(out), []).append(_vn_key(op.getInput(0)))
+                    elif mnem in ("INT_XOR", "INT_ADD") and out is not None:
+                        for k in range(op.getNumInputs()):
+                            vn = op.getInput(k)
+                            if vn.isConstant():
+                                kind = "xor" if mnem == "INT_XOR" else "add"
+                                candidates.append((kind, _vn_key(out), int(vn.getOffset()) & 0xFF))
+                                break
+                    # ADR-082: a constant data-movement operand that is a mapped writable address is
+                    # a candidate buffer base (the interprocedural buffer pointer loaded in the
+                    # caller, e.g. `mov rdi, 0x…`). Restricted to COPY/LOAD/STORE so branch/call
+                    # targets are not mistaken for buffers; the printable-changed gate filters rest.
+                    if mnem in ("COPY", "LOAD", "STORE"):
+                        for k in range(op.getNumInputs()):
+                            cvn = op.getInput(k)
+                            if cvn.isConstant() and _writable_base(int(cvn.getOffset())):
+                                write_targets.add(int(cvn.getOffset()))
+                for ref in refmgr.getReferencesFrom(instruction.getAddress()):
+                    if ref.getReferenceType().isWrite():
+                        write_targets.add(int(ref.getToAddress().getOffset()))
+
+        # ADR-082: scan the entry function AND its in-program callees (BFS, cycle-safe), bounded by
+        # max_call_depth + max_callees — the per-byte transform of an interprocedural decoder lives
+        # in a helper. The emulation already steps into in-program callees (why stubs exist),
+        # so only DETECTION must span them; an external/unresolved call is not scanned and faults at
+        # emulation (fail closed). max_call_depth=0 reproduces the entry-only behaviour.
+        visited: set[str] = {str(func.getEntryPoint())}
+        queue: list[tuple[Any, int]] = [(func, 0)]
+        while queue and len(visited) <= max_callees:
+            current, depth = queue.pop(0)
+            _scan(current)
+            if depth >= max_call_depth:
+                continue
+            for callee in self._iter_call_sites(current, listing, refmgr, manager):
+                if callee is None:
+                    continue
+                key = str(callee.getEntryPoint())
+                if key in visited or len(visited) >= max_callees:
+                    continue
+                visited.add(key)
+                queue.append((callee, depth + 1))
 
         value_feeders = expand_value_feeders(store_value_keys, link_edges)
         stage_ops = select_decode_ops(candidates, value_feeders)
