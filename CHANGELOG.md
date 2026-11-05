@@ -148,6 +148,11 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Changed
 
 
+- **Bump the worker-image pin to the ADR-088 lz4-ramdisk build; gate the #414 live test.** Advance
+  the trusted worker digest to `sha256:94975224…` — the CI-signed build that bakes the ADR-088 lz4
+  ramdisk codecs **and the new `lz4` dependency** — and add `test_import_lz4_ramdisk.py` to the
+  live-regression hard-gate list, so a legacy- and a standard-frame lz4 ramdisk are decoded against
+  the shipped worker. (#414)
 - **Bump the worker-image pin to the ADR-087 ramdisk-cpio build; gate the #415 live test.** Advance
   the trusted worker digest to `sha256:b0cdebeb…` — the CI-signed build that bakes the ADR-087
   `ramdisk_list` cpio file-tree tool — and add `test_ramdisk_list.py` to the live-regression
