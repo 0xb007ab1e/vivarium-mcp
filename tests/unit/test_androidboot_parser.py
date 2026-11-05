@@ -44,9 +44,14 @@ def test_codec_uncompressed_cpio() -> None:
     assert detect_ramdisk_codec(b"070702000000") == "cpio"
 
 
-def test_codec_lz4_and_unknown_are_none() -> None:
-    """lz4 (stdlib can't inflate) and arbitrary/short bytes return None (worker fails closed)."""
-    assert detect_ramdisk_codec(b"\x04\x22\x4d\x18lz4..") is None  # lz4 frame magic
+def test_codec_lz4_standard_and_legacy() -> None:
+    """Both lz4 frame formats are recognised (ADR-088): standard frame + legacy frame."""
+    assert detect_ramdisk_codec(b"\x04\x22\x4d\x18lz4..") == "lz4"  # standard frame magic
+    assert detect_ramdisk_codec(b"\x02\x21\x4c\x18lz4..") == "lz4-legacy"  # legacy frame magic
+
+
+def test_codec_unknown_is_none() -> None:
+    """Arbitrary/short bytes return None (worker fails closed)."""
     assert detect_ramdisk_codec(b"\x00\x01") is None
     assert detect_ramdisk_codec(b"") is None
 
@@ -54,7 +59,7 @@ def test_codec_lz4_and_unknown_are_none() -> None:
 @given(st.binary(max_size=16))
 def test_codec_never_raises(data: bytes) -> None:
     """Arbitrary bytes never raise and return a known codec or None."""
-    assert detect_ramdisk_codec(data) in {"gzip", "xz", "cpio", None}
+    assert detect_ramdisk_codec(data) in {"gzip", "xz", "cpio", "lz4", "lz4-legacy", None}
 
 
 def test_parses_the_synthetic_fixture() -> None:

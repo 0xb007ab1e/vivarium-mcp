@@ -32,6 +32,9 @@ _MAX_READ_BYTES = 1_048_576  # 1 MiB
 # Upper bound on the flat ramdisk image bytes scanned for the cpio tree (ADR-087 ramdisk_list). A
 # real Android ramdisk is well under this; the cap bounds the worker-side read array (CWE-400).
 _RAMDISK_MAX_BYTES = 256 * 1_048_576  # 256 MiB
+# Upper bound on the number of legacy-lz4 blocks parsed (ADR-088). The streamed output bomb cap is
+# the real bound; this is a defensive ceiling on the block-record count (CWE-400).
+_LZ4_LEGACY_MAX_BLOCKS = 1_000_000
 # Defensive per-instruction ceiling on emitted p-code ops (v1.8 — ADR-052 get_pcode). A SLEIGH
 # instruction lifts to a bounded op count, but cap it so one instruction can't balloon the response.
 _MAX_PCODE_OPS_PER_INSN = 256
@@ -198,6 +201,66 @@ def _require(params: dict[str, Any], key: str) -> Any:
     if key not in params:
         raise WorkerError(CODE_INVALID_PARAMS, f"missing required parameter: {key}")
     return params[key]
+
+
+class _Lz4LegacyReader:  # pragma: no cover - worker-only decode edge (ADR-088)
+    """A file-like streaming reader for a **legacy** lz4 frame ramdisk (ADR-088, #414).
+
+    Reads the (already size-capped) legacy-lz4 file, validates its block framing with the pure
+    :func:`vivarium.core.lz4legacy.parse_legacy_frame` (hostile-byte, fail-closed), and decompresses
+    each block on demand with ``lz4.block`` (each block ≤ 8 MiB uncompressed). Exposes ``read(n)``
+    so it feeds the ADR-070 ``_stream_to_payload`` bomb cap exactly like
+    ``gzip.open``/``lz4.frame.open`` — the output is never buffered whole past the running chunk.
+    """
+
+    def __init__(self, path: str) -> None:
+        """Open + frame-validate the legacy lz4 file (no decompression yet).
+
+        Args:
+            path: The confined, size-capped legacy-lz4 ramdisk path.
+
+        Raises:
+            Lz4LegacyError: If the file is not a well-formed, bounded legacy lz4 frame.
+        """
+        import lz4.block  # worker-only vetted dep (ADR-088)
+
+        from vivarium.core.lz4legacy import MAX_BLOCK_OUTPUT, parse_legacy_frame
+
+        self._lz4_block = lz4.block
+        self._max_block_output = MAX_BLOCK_OUTPUT
+        with open(path, "rb") as handle:  # noqa: PTH123 — confined path from the server
+            self._data = handle.read()
+        self._blocks = parse_legacy_frame(self._data, max_blocks=_LZ4_LEGACY_MAX_BLOCKS)
+        self._index = 0
+        self._buffer = b""
+
+    def read(self, size: int = -1) -> bytes:
+        """Return up to ``size`` decompressed bytes (all remaining when ``size`` < 0)."""
+        while (size < 0 or len(self._buffer) < size) and self._index < len(self._blocks):
+            offset, length = self._blocks[self._index]
+            self._index += 1
+            self._buffer += self._lz4_block.decompress(
+                self._data[offset : offset + length],
+                uncompressed_size=self._max_block_output,
+            )
+        if size < 0:
+            out, self._buffer = self._buffer, b""
+            return out
+        out, self._buffer = self._buffer[:size], self._buffer[size:]
+        return out
+
+    def close(self) -> None:
+        """Release the buffered bytes (no OS handle is held)."""
+        self._data = b""
+        self._buffer = b""
+
+    def __enter__(self) -> _Lz4LegacyReader:
+        """Enter the context (the file is already read in ``__init__``)."""
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        """Release buffers on context exit."""
+        self.close()
 
 
 class PyGhidraBackend:
@@ -998,6 +1061,12 @@ class PyGhidraBackend:
                 return gzip.open(path, "rb")
             if comp == "xz":
                 return lzma.open(path, "rb", format=lzma.FORMAT_XZ)
+            if comp == "lz4":
+                import lz4.frame  # worker-only vetted dep (ADR-088); not on the server path
+
+                return lz4.frame.open(path, "rb")
+            if comp == "lz4-legacy":
+                return _Lz4LegacyReader(path)  # pure framing (core) + lz4.block per block (ADR-088)
             return lzma.open(path, "rb", format=lzma.FORMAT_AUTO)  # legacy .lzma (alone) / auto
 
         def _stream_to_payload(reader: Any) -> None:
