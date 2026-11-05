@@ -440,6 +440,7 @@ jobs:
             tests/integration/test_import_androidboot.py \
             tests/integration/test_import_androidboot_ramdisk.py \
             tests/integration/test_import_dyld.py \
+            tests/integration/test_list_cache_components.py \
             tests/integration/test_ramdisk_list.py \
             tests/integration/test_import_lz4_ramdisk.py \
             tests/integration/test_emulate_autoarg.py \
