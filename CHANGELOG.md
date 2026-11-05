@@ -9,6 +9,15 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Added
 
 
+- **`ramdisk_list` — structured cpio file-tree of an Android ramdisk (ADR-087 / #415).** New
+  read-only tool (catalog 79 → 80) completing the ADR-085 Scope-B deferral. After a
+  `container_region="ramdisk"` import (the flat decompressed cpio image), `ramdisk_list` parses the
+  cpio `newc`/`newc-crc` members via the pure, Hypothesis-fuzzed `core.cpio.parse_newc_entries`
+  (hostile-byte bounded, fail-closed `not-found` if the program is not a well-formed cpio) and
+  returns each member's `path` (UNTRUSTED — binary-derived name), `size`, `mode`, `kind`
+  (file/dir/symlink/other), and the hex program `address` of its data. **Per-file extract composes
+  with `read_bytes`** at that address+size — no separate tool. Bounded by `max_entries` (CWE-400) +
+  a 256 MiB image-scan cap; the member data is never materialized by the parser. (#415)
 - **`session_import` imports a dyld shared-cache component (ADR-086 / #369).** New
   `loader="dyld"` + `dyld_component` mount a dyld shared cache with Ghidra's
   `DyldCacheFileSystem`, extract the component dylib named by `dyld_component` (an in-cache path,

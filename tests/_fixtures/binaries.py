@@ -464,3 +464,49 @@ def synthetic_dyld_shared_cache(
     )
     out[macho_foff : macho_foff + len(macho)] = macho
     return bytes(out)
+
+
+# --- synthetic cpio newc archive (ADR-087, #415) -------------------------------------------------
+def cpio_newc_archive(entries: list[tuple[str, int, bytes]]) -> bytes:
+    """Build a deterministic cpio ``newc`` (``070701``) archive + the ``TRAILER!!!`` sentinel.
+
+    Byte-for-byte reproducible (fixed ino/mtime, no clock/randomness). Mirrors the kernel's
+    `gen_init_cpio` layout: a 110-byte ASCII header per member, the NUL-terminated name padded to a
+    4-byte boundary, then the data padded to a 4-byte boundary. Used to exercise the pure
+    :func:`vivarium.core.cpio.parse_newc_entries`.
+
+    Args:
+        entries: ``(name, mode, data)`` per member (``mode`` carries the file-type bits).
+
+    Returns:
+        The cpio ``newc`` archive bytes.
+    """
+
+    def _f(value: int) -> bytes:
+        return b"%08x" % value
+
+    def _pad4(buf: bytes) -> bytes:
+        return buf + b"\x00" * ((-len(buf)) % 4)
+
+    def _member(name: str, mode: int, data: bytes) -> bytes:
+        namez = name.encode() + b"\x00"
+        header = (
+            b"070701"
+            + _f(1)  # ino
+            + _f(mode)
+            + _f(0)  # uid
+            + _f(0)  # gid
+            + _f(1)  # nlink
+            + _f(0)  # mtime
+            + _f(len(data))  # filesize
+            + _f(0)  # devmajor
+            + _f(0)  # devminor
+            + _f(0)  # rdevmajor
+            + _f(0)  # rdevminor
+            + _f(len(namez))  # namesize
+            + _f(0)  # check
+        )
+        return _pad4(header + namez) + _pad4(data)
+
+    out = b"".join(_member(name, mode, data) for name, mode, data in entries)
+    return out + _member("TRAILER!!!", 0, b"")

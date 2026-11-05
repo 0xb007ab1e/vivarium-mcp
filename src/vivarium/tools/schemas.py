@@ -1145,6 +1145,51 @@ class StringListOut(_Out):
     truncated: bool = False
 
 
+class RamdiskListIn(_Page):
+    """Arguments for ``ramdisk_list`` — paginated, bounded (ADR-087, #415).
+
+    Lists the cpio ``newc`` member tree of a loaded Android ramdisk (imported via
+    ``container="androidboot"`` + ``container_region="ramdisk"``, Scope A → flat cpio image).
+
+    Attributes:
+        max_entries: Hard cap on cpio members parsed before failing closed (CWE-400).
+    """
+
+    max_entries: int = Field(default=4096, ge=1, le=65536)
+
+
+class RamdiskEntry(_Out):
+    """One member of a cpio ramdisk (binary-derived → the path is untrusted).
+
+    Attributes:
+        path: The member path — UNTRUSTED (binary-derived file name).
+        size: The member's data length in bytes — safe.
+        mode: The POSIX ``st_mode`` (type + permission bits) — safe.
+        kind: ``"file"`` / ``"dir"`` / ``"symlink"`` / ``"other"`` — safe (derived from mode).
+        address: Hex program address of the member's data — safe; pass to ``read_bytes`` to extract.
+    """
+
+    path: Untrusted[str]
+    size: int
+    mode: int
+    kind: str
+    address: str
+
+
+class RamdiskListOut(_Out):
+    """Result of ``ramdisk_list``.
+
+    Attributes:
+        entries: Bounded page of cpio members.
+        total: Total members in the archive — safe.
+        truncated: Whether the page was capped.
+    """
+
+    entries: list[RamdiskEntry]
+    total: int
+    truncated: bool = False
+
+
 class ListSymbolsIn(_Page):
     """Arguments for ``list_symbols`` — paginated, bounded.
 

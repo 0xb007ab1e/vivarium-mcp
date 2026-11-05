@@ -29,6 +29,9 @@ from typing import Any, ClassVar
 # Bounds the bridge enforces itself (defense-in-depth; the server also caps before calling).
 _MAX_RESULT_COUNT = 10_000
 _MAX_READ_BYTES = 1_048_576  # 1 MiB
+# Upper bound on the flat ramdisk image bytes scanned for the cpio tree (ADR-087 ramdisk_list). A
+# real Android ramdisk is well under this; the cap bounds the worker-side read array (CWE-400).
+_RAMDISK_MAX_BYTES = 256 * 1_048_576  # 256 MiB
 # Defensive per-instruction ceiling on emitted p-code ops (v1.8 — ADR-052 get_pcode). A SLEIGH
 # instruction lifts to a bounded op count, but cap it so one instruction can't balloon the response.
 _MAX_PCODE_OPS_PER_INSN = 256
@@ -548,6 +551,12 @@ class PyGhidraBackend:
         """List defined strings (paginated/bounded)."""
         offset, limit = _page(params)
         return self._gh_list_strings(offset, limit, int(params.get("min_length", 4)))
+
+    def ramdisk_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List the cpio member tree of a loaded Android ramdisk (ADR-087; paginated/bounded)."""
+        offset, limit = _page(params)
+        max_entries = max(1, min(int(params.get("max_entries", 4096)), 65536))
+        return self._gh_ramdisk_list(offset, limit, max_entries)
 
     def list_symbols(self, params: dict[str, Any]) -> dict[str, Any]:
         """List symbols (paginated/bounded)."""
@@ -3391,6 +3400,74 @@ class PyGhidraBackend:
                 }
             )
         return {"xrefs": rows, "total": total, "truncated": truncated}
+
+    def _gh_ramdisk_list(
+        self, offset: int, limit: int, max_entries: int
+    ) -> dict[str, Any]:  # pragma: no cover - JVM edge
+        """Parse the loaded Android ramdisk's cpio tree (ADR-087, #415; paginated/bounded).
+
+        Reads the flat ramdisk image (the Scope-A raw-decompressed cpio loaded as the program's one
+        memory block, bounded by ``_RAMDISK_MAX_BYTES``) and runs the pure
+        :func:`vivarium.core.cpio.parse_newc_entries` over it. Each member's data offset is mapped
+        to an absolute program address (the min address + the in-archive offset) so the caller can
+        extract one file with ``read_bytes``. Fails closed ``not-found`` if the program is not a
+        cpio ``newc`` archive or is malformed (ADR-005 category-safe; the bytes are hostile).
+
+        Args:
+            offset: Zero-based start index into the member list.
+            limit: Maximum members to return (already clamped).
+            max_entries: Hard cap on members parsed before failing closed (CWE-400).
+
+        Returns:
+            ``{"entries": [{"path","size","mode","kind","address"}], "total", "truncated"}``.
+
+        Raises:
+            WorkerError: ``not-found`` if the program has no memory or is not a well-formed cpio.
+        """
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        from vivarium.core.cpio import CpioError, is_cpio_newc, parse_newc_entries
+
+        program = self._require_program()
+        memory = program.getMemory()
+        min_addr = program.getMinAddress()
+        max_addr = program.getMaxAddress()
+        if min_addr is None or max_addr is None:
+            raise WorkerError(CODE_NOT_FOUND, "the program has no loaded memory to scan for a cpio")
+        span = int(max_addr.subtract(min_addr)) + 1
+        length = max(0, min(span, _RAMDISK_MAX_BYTES))
+        data, _read = self._get_bytes(memory, min_addr, length)
+
+        if not is_cpio_newc(data):
+            raise WorkerError(CODE_NOT_FOUND, "the loaded program is not a cpio (newc) ramdisk")
+        try:
+            all_entries = parse_newc_entries(data, max_entries=max_entries)
+        except CpioError as exc:
+            raise WorkerError(
+                CODE_NOT_FOUND, "the ramdisk is not a well-formed cpio archive"
+            ) from exc
+
+        total = len(all_entries)
+        rows: list[dict[str, Any]] = []
+        for entry in all_entries[offset : offset + limit]:
+            if entry.is_dir:
+                kind = "dir"
+            elif entry.is_symlink:
+                kind = "symlink"
+            elif (entry.mode & 0o170000) == 0o100000:
+                kind = "file"
+            else:
+                kind = "other"
+            rows.append(
+                {
+                    "path": entry.name,
+                    "size": int(entry.size),
+                    "mode": int(entry.mode),
+                    "kind": kind,
+                    "address": str(min_addr.add(entry.data_offset)),
+                }
+            )
+        return {"entries": rows, "total": total, "truncated": offset + limit < total}
 
     def _gh_list_strings(
         self, offset: int, limit: int, min_length: int

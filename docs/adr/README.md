@@ -1,6 +1,6 @@
 # Architecture Decision Records (ADR) index
 
-This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-086).
+This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-087).
 Each ADR captures one significant decision: its context, the decision, alternatives, and consequences.
 Records are **point-in-time** — a `Status:` of *Proposed* reflects the record when it was written; what
 actually shipped in each release is tracked in [`../../CHANGELOG.md`](../../CHANGELOG.md) and the
@@ -82,6 +82,7 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 - **ADR-084** — Self-modifying unpacker recovery: adds the opt-in `unpack` technique to `deobfuscate_strings`. A probe showed Ghidra's emulator RE-TRANSLATES self-modified code on execution, so the ADR-049 sandbox already runs an unpacker + the code it decodes (still p-code only, no native exec); `unpack` emulates the (function-scoped) function and extracts the printable strings that APPEARED in post-run writable memory via the pure `extract_changed_strings` (`technique="unpack"`, no key/stages). Whole-program rejected (CWE-400); non-self-contained unpackers fail closed — **Proposed** (#399).
 - **ADR-085** — Android boot-image ramdisk region: adds `container_region` (`kernel` default / `ramdisk`) to the androidboot container loader. `ramdisk` (Scope A) slices the page-aligned ramdisk window, codec-detects it (gzip/xz/uncompressed-cpio via the pure `detect_ramdisk_codec`), and surfaces the RAW-decompressed cpio bytes as a flat binary for string/byte triage (names, init.rc, configs, keys) — reusing the ADR-070 bomb-capped decompressor. lz4 ramdisks + a structured cpio file-tree/extract (Scope B) are deferred — **Proposed** (#380).
 - **ADR-086** — DYLD shared-cache component import: adds `loader="dyld"` + `dyld_component` to `session_import`. The worker mounts a dyld shared cache with Ghidra's `DyldCacheFileSystem`, extracts the named component dylib, and imports the extracted Mach-O (self-describing — no `processor`/`base_addr`/`entry`; mutually exclusive with `regions`/`container`). Omitting `dyld_component` fails closed with a bounded component listing (discovery). Supersedes ADR-063's fixture-blocked deferral — the hermetic `synthetic_dyld_shared_cache` builder unblocks a gated-testable path — **Proposed** (#369).
+- **ADR-087** — Android ramdisk cpio file-tree + per-file extract: adds the read-only `ramdisk_list` tool (catalog 79→80). Parses the Scope-A flat cpio ramdisk image (ADR-085) into structured `newc`/`newc-crc` members via the pure, fuzzed `core.cpio.parse_newc_entries` (hostile-byte bounded, fail-closed), returning each member's path (UNTRUSTED), size, mode, kind, and the program address of its data; per-file extract composes with `read_bytes`. Implements the ADR-085 Scope-B deferral — **Proposed** (#415).
 
 ### Read/analysis tools
 - **ADR-007** — Semantic-naming support tools (call graph, leaf-first ordering, function context).
