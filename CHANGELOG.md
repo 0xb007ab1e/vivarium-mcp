@@ -97,6 +97,12 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Changed
 
 
+- **Bump the worker-image pin to the ADR-083 stream-decode build; gate the #400 live test.** Advance
+  the trusted worker digest to `sha256:8011d1ea…` — the CI-signed build that bakes the ADR-083
+  opt-in `stream_decode` technique — and add `test_deobfuscate_stream.py` to the live-regression
+  hard-gate list, so a self-contained rolling-keystream decoder is recovered via `stream_decode`
+  (and `xor_decode` correctly is not, and a whole-program `stream_decode` is rejected) against the
+  shipped worker. (#400)
 - **Bump the worker-image pin to the ADR-082 interprocedural build; gate the #398 live test.**
   Advance the trusted worker digest to `sha256:2ef541af…` — the CI-signed build that bakes the
   ADR-082 cross-function decode detection — and add `test_deobfuscate_interproc.py` to the
