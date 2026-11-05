@@ -435,6 +435,7 @@ jobs:
             tests/integration/test_deobfuscate_add.py \
             tests/integration/test_deobfuscate_interproc.py \
             tests/integration/test_deobfuscate_stream.py \
+            tests/integration/test_deobfuscate_unpack.py \
             tests/integration/test_import_uimage.py \
             tests/integration/test_import_androidboot.py \
             tests/integration/test_emulate_autoarg.py \
