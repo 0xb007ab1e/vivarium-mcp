@@ -66,6 +66,12 @@ dependencies = [
   # PYSEC-2026-4025 (IDNA 2003 TLS hostname confusion in connect_tcp/TLSStream.wrap). Fixed 4.14.2.
   # No upper pin — the lock moves forward under review (SCA gate). MIT.
   "anyio>=4.14.2",
+  # lz4 ramdisk decompression (ADR-088, #414). Android/kernel ramdisks are frequently lz4 — standard
+  # frame via `lz4.frame`, legacy frame via `lz4.block` + the pure `core.lz4legacy` framing parser.
+  # Imported ONLY inside the worker (`_jvm_bridge`, container-side); the server carries it unused.
+  # Vetted (canonical python-lz4; `cot vet` = info), BSD-3-Clause, widely used; the lockfile pins the
+  # exact hashes (SBOM'd in the worker image). No upper pin — the lock moves forward under review.
+  "lz4>=4.4.0",
 ]
 
 [project.optional-dependencies]
@@ -204,7 +210,9 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 # PyGhidra/JPype exist ONLY inside the worker container (ADR-001/003) and are not installed in the
 # server/test env. The JVM bridge is the sole importer; allow missing imports at that boundary.
-module = ["pyghidra.*", "jpype.*"]
+# `lz4` (ADR-088) is a worker-only vetted dep with no type stubs; it is imported lazily inside the
+# JVM bridge's decompress path, so allow its missing stubs at the same boundary.
+module = ["pyghidra.*", "jpype.*", "lz4.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

@@ -510,3 +510,26 @@ def cpio_newc_archive(entries: list[tuple[str, int, bytes]]) -> bytes:
 
     out = b"".join(_member(name, mode, data) for name, mode, data in entries)
     return out + _member("TRAILER!!!", 0, b"")
+
+
+# --- synthetic legacy lz4 frame FRAMING (ADR-088, #414) ------------------------------------------
+def lz4_legacy_frame(blocks: list[bytes]) -> bytes:
+    """Build a legacy lz4 frame's *framing* from raw block payloads (magic + ``[u32 len][block]``).
+
+    Byte-for-byte reproducible. The block payloads are passed through verbatim — this builds the
+    FRAMING only, so the pure :func:`vivarium.core.lz4legacy.parse_legacy_frame` (which validates
+    framing, never decompresses) can be exercised without the ``lz4`` dependency. Real lz4-block
+    payloads are built in-container by the gated integration test.
+
+    Args:
+        blocks: The per-block raw byte payloads (treated opaquely).
+
+    Returns:
+        The legacy lz4 frame bytes (magic + one length-prefixed record per block).
+    """
+    import struct
+
+    out = bytearray(b"\x02\x21\x4c\x18")  # legacy lz4 magic (LE 0x184C2102)
+    for block in blocks:
+        out += struct.pack("<I", len(block)) + block
+    return bytes(out)

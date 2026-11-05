@@ -9,6 +9,15 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Added
 
 
+- **lz4-compressed Android ramdisks — standard + legacy frame (ADR-088 / #414).** The androidboot
+  container loader (ADR-085) now decompresses **lz4** ramdisks: the **standard** lz4 frame
+  (`04 22 4d 18`) via `lz4.frame`, and the **legacy** lz4 frame (`02 21 4c 18` — the common Android
+  format, which `lz4.frame` cannot decode) via a new pure, Hypothesis-fuzzed
+  `core.lz4legacy.parse_legacy_frame` (validates the block framing, never decompresses) + `lz4.block`
+  per block. Both stream under the ADR-070 zip-bomb cap (output ceiling + ratio). Adds the vetted,
+  hash-pinned `lz4` dependency (BSD-3-Clause), imported only inside the worker. `container_region=
+  "ramdisk"` + `ramdisk_list` (ADR-087) now work on lz4 ramdisks; an unusual block size/dictionary or
+  a corrupt stream fails closed. (#414)
 - **`ramdisk_list` — structured cpio file-tree of an Android ramdisk (ADR-087 / #415).** New
   read-only tool (catalog 79 → 80) completing the ADR-085 Scope-B deferral. After a
   `container_region="ramdisk"` import (the flat decompressed cpio image), `ramdisk_list` parses the

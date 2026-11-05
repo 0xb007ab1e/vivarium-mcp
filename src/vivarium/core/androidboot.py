@@ -127,18 +127,21 @@ def detect_ramdisk_codec(head: bytes) -> str | None:
     - ``"gzip"`` — magic ``1f 8b`` (the most common Android ramdisk codec);
     - ``"xz"`` — magic ``fd 37 7a 58 5a 00``;
     - ``"cpio"`` — an UNCOMPRESSED cpio ``newc``/``newc-crc`` archive (ASCII magic ``070701`` /
-      ``070702``), passed through raw.
+      ``070702``), passed through raw;
+    - ``"lz4"`` — a **standard** lz4 frame (magic ``04 22 4d 18``), inflated via ``lz4.frame``
+      (ADR-088);
+    - ``"lz4-legacy"`` — a **legacy** lz4 frame (magic ``02 21 4c 18``, the common Android ramdisk
+      format), inflated via the pure ``core.lz4legacy`` framing parser + ``lz4.block`` (ADR-088).
 
-    Any other leading bytes — notably **lz4** (``04 22 4d 18``), which stdlib cannot inflate —
-    return ``None`` so the worker fails closed with an "unsupported ramdisk compression" error (lz4
-    tracked follow-up pending a vetted dependency). Arbitrary/short input returns ``None``, never
-    raises.
+    Any other leading bytes return ``None`` so the worker fails closed with an "unsupported ramdisk
+    compression" error. Arbitrary/short input returns ``None``, never raises.
 
     Args:
         head: The first bytes of the sliced ramdisk region (at least 6 recommended).
 
     Returns:
-        ``"gzip"`` / ``"xz"`` / ``"cpio"`` for a surfaced codec, else ``None``.
+        ``"gzip"`` / ``"xz"`` / ``"cpio"`` / ``"lz4"`` / ``"lz4-legacy"`` for a surfaced codec, else
+        ``None``.
     """
     if head[:2] == b"\x1f\x8b":
         return "gzip"
@@ -146,4 +149,8 @@ def detect_ramdisk_codec(head: bytes) -> str | None:
         return "xz"
     if head[:6] in (b"070701", b"070702"):
         return "cpio"
+    if head[:4] == b"\x04\x22\x4d\x18":
+        return "lz4"
+    if head[:4] == b"\x02\x21\x4c\x18":
+        return "lz4-legacy"
     return None
