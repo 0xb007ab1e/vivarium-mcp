@@ -233,6 +233,10 @@ class GhidraPort(Protocol):
         """List the cpio member tree of a loaded Android ramdisk (ADR-087; paginated/bounded)."""
         ...
 
+    def list_cache_components(self, sid: str, a: s.CacheComponentsIn) -> s.CacheComponentsOut:
+        """List a dyld shared cache's component dylibs (ADR-089; paginated/bounded)."""
+        ...
+
     def list_symbols(self, sid: str, a: s.ListSymbolsIn) -> s.SymbolListOut:
         """List symbols (paginated/bounded)."""
         ...

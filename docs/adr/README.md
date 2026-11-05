@@ -1,6 +1,6 @@
 # Architecture Decision Records (ADR) index
 
-This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-088).
+This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-089).
 Each ADR captures one significant decision: its context, the decision, alternatives, and consequences.
 Records are **point-in-time** — a `Status:` of *Proposed* reflects the record when it was written; what
 actually shipped in each release is tracked in [`../../CHANGELOG.md`](../../CHANGELOG.md) and the
@@ -84,6 +84,7 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 - **ADR-086** — DYLD shared-cache component import: adds `loader="dyld"` + `dyld_component` to `session_import`. The worker mounts a dyld shared cache with Ghidra's `DyldCacheFileSystem`, extracts the named component dylib, and imports the extracted Mach-O (self-describing — no `processor`/`base_addr`/`entry`; mutually exclusive with `regions`/`container`). Omitting `dyld_component` fails closed with a bounded component listing (discovery). Supersedes ADR-063's fixture-blocked deferral — the hermetic `synthetic_dyld_shared_cache` builder unblocks a gated-testable path — **Proposed** (#369).
 - **ADR-087** — Android ramdisk cpio file-tree + per-file extract: adds the read-only `ramdisk_list` tool (catalog 79→80). Parses the Scope-A flat cpio ramdisk image (ADR-085) into structured `newc`/`newc-crc` members via the pure, fuzzed `core.cpio.parse_newc_entries` (hostile-byte bounded, fail-closed), returning each member's path (UNTRUSTED), size, mode, kind, and the program address of its data; per-file extract composes with `read_bytes`. Implements the ADR-085 Scope-B deferral — **Proposed** (#415).
 - **ADR-088** — lz4-compressed Android ramdisk (standard + legacy frame): adds the `lz4` / `lz4-legacy` ramdisk codecs to the androidboot container loader. Standard frame (`04 22 4d 18`) via `lz4.frame`; legacy frame (`02 21 4c 18`, the common Android format) via a new pure, fuzzed `core.lz4legacy` framing parser + `lz4.block` per block, streamed under the ADR-070 bomb cap. Adds the vetted, hash-pinned `lz4` dependency (worker-only import). Implements the ADR-085 lz4 follow-up — **Proposed** (#414).
+- **ADR-089** — `list_cache_components` discovery tool + slid-cache coverage: adds a read-only `list_cache_components` tool (catalog 80→81) that mounts a confined dyld shared cache and lists its component dylibs (so a caller picks a `dyld_component` without a failed import); plus a hermetic slid-base extraction test (#419) proving base-relative `getMacho` extraction. Multi-subcache is a documented deferral (Ghidra-machinery-covered). Implements the ADR-086 follow-ups #418/#419 — **Proposed**.
 
 ### Read/analysis tools
 - **ADR-007** — Semantic-naming support tools (call graph, leaf-first ordering, function context).

@@ -80,6 +80,23 @@ def test_component_path_and_arch_are_parameterizable() -> None:
     assert cache[path_off:path_end] == b"/usr/lib/libcustom.dylib"
 
 
+def test_slid_cache_is_base_relative() -> None:
+    """A non-default ("slid") base still resolves (ADR-089 #419): imageAddr - base == macho offset.
+
+    `getMacho` reads a component at ``imageAddress - cacheBaseAddress``, so the extraction is
+    base-relative — a cache loaded at a slid base must still land on the embedded Mach-O, proving
+    the fixture + the offset model are slide-correct (not hardcoded to the default base).
+    """
+    slid_base = 0x180000000  # a different ("slid") base than the default
+    cache = binaries.synthetic_dyld_shared_cache(base_address=slid_base)
+    h = _parse_header(cache)
+    assert h["base"] == slid_base
+    image_addr, _mod, _inode, _path_off, _pad = struct.unpack_from("<QQQII", cache, h["img_off"])
+    macho_off = image_addr - h["base"]
+    magic, _cpu, _sub, filetype = struct.unpack_from("<IiiI", cache, macho_off)
+    assert magic == _MH_MAGIC_64 and filetype == _MH_DYLIB  # the slide did not break the offset
+
+
 def test_deterministic_and_benign() -> None:
     """Byte-for-byte reproducible (fixed constants, no clock/randomness) — hermetic fixture."""
     a = binaries.synthetic_dyld_shared_cache()

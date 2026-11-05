@@ -203,6 +203,34 @@ def _require(params: dict[str, Any], key: str) -> Any:
     return params[key]
 
 
+def _dyld_walk_components(fs: Any) -> list[str]:  # pragma: no cover - JVM/filesystem edge
+    """Enumerate a mounted dyld cache's component paths, bounded by ``_DYLD_MAX_COMPONENTS``.
+
+    Shared by the ADR-086 import-discovery path (:meth:`PyGhidraBackend._open_dyld_component`)
+    and the ADR-089 ``list_cache_components`` tool. Walks the Ghidra ``GFileSystem`` listing
+    depth-first, collecting file (non-directory) paths up to the cap — never reads a member's bytes.
+
+    Args:
+        fs: The mounted ``DyldCacheFileSystem`` (a Ghidra ``GFileSystem``).
+
+    Returns:
+        The component paths (bounded by ``_DYLD_MAX_COMPONENTS``), in listing order.
+    """
+    components: list[str] = []
+
+    def _walk(directory: Any) -> None:
+        for entry in fs.getListing(directory):
+            if len(components) >= _DYLD_MAX_COMPONENTS:
+                return
+            if bool(entry.isDirectory()):
+                _walk(entry)
+            else:
+                components.append(str(entry.getPath()))
+
+    _walk(None)
+    return components
+
+
 class _Lz4LegacyReader:  # pragma: no cover - worker-only decode edge (ADR-088)
     """A file-like streaming reader for a **legacy** lz4 frame ramdisk (ADR-088, #414).
 
@@ -620,6 +648,11 @@ class PyGhidraBackend:
         offset, limit = _page(params)
         max_entries = max(1, min(int(params.get("max_entries", 4096)), 65536))
         return self._gh_ramdisk_list(offset, limit, max_entries)
+
+    def list_cache_components(self, params: dict[str, Any]) -> dict[str, Any]:
+        """List the component dylibs of a dyld shared cache (ADR-089; paginated/bounded)."""
+        offset, limit = _page(params)
+        return self._gh_list_cache_components(str(_require(params, "source_ref")), offset, limit)
 
     def list_symbols(self, params: dict[str, Any]) -> dict[str, Any]:
         """List symbols (paginated/bounded)."""
@@ -1845,18 +1878,7 @@ class PyGhidraBackend:
             raise WorkerError(CODE_NOT_FOUND, "not a recognizable dyld_shared_cache")
         try:
             fs = fsref.getFilesystem()
-            components: list[str] = []
-
-            def _walk(directory: Any) -> None:
-                for entry in fs.getListing(directory):
-                    if len(components) >= _DYLD_MAX_COMPONENTS:
-                        return
-                    if bool(entry.isDirectory()):
-                        _walk(entry)
-                    else:
-                        components.append(str(entry.getPath()))
-
-            _walk(None)
+            components = _dyld_walk_components(fs)
             dylibs = [c for c in components if c.endswith(".dylib")] or components
 
             if dyld_component is None:
@@ -1893,6 +1915,52 @@ class PyGhidraBackend:
         self._project = project_ctx  # retain (server kills+wipes on evict; process death frees it)
         self._loaded = loaded  # keep the LoadResults' consumer alive so the program is not released
         self._program = program
+
+    def _gh_list_cache_components(
+        self, source_ref: str, offset: int, limit: int
+    ) -> dict[str, Any]:  # pragma: no cover - JVM/filesystem edge
+        """List a dyld shared cache's component dylibs (ADR-089, #418; paginated/bounded).
+
+        Mounts the (server-confined, size-capped) cache with Ghidra's ``DyldCacheFileSystem`` and
+        enumerates its component paths via the shared :func:`_dyld_walk_components` (bounded by
+        ``_DYLD_MAX_COMPONENTS``) — **no program is loaded or mutated**. Fails closed
+        ``not-found`` if the input is not a recognizable dyld cache (ADR-005 category-safe; hostile
+        bytes). The
+        paths are returned for the caller to pick a ``dyld_component`` and ``session_import`` it.
+
+        Args:
+            source_ref: The server-confined dyld_shared_cache path.
+            offset: Zero-based start index into the component list.
+            limit: Maximum components to return (already clamped).
+
+        Returns:
+            ``{"components": [str, ...], "total", "truncated"}``.
+
+        Raises:
+            WorkerError: ``not-found`` if the input is not a recognizable dyld cache.
+        """
+        import pyghidra
+
+        pyghidra.start()
+        from ghidra.formats.gfilesystem import FileSystemService
+        from ghidra.util.task import TaskMonitor
+        from java.io import File
+        from worker.dispatch import CODE_NOT_FOUND, WorkerError
+
+        svc = FileSystemService.getInstance()
+        fsref = svc.probeFileForFilesystem(
+            svc.getLocalFSRL(File(source_ref)), TaskMonitor.DUMMY, None
+        )
+        if fsref is None:
+            raise WorkerError(CODE_NOT_FOUND, "not a recognizable dyld_shared_cache")
+        try:
+            components = _dyld_walk_components(fsref.getFilesystem())
+        finally:
+            fsref.close()
+
+        total = len(components)
+        page = components[offset : offset + limit]
+        return {"components": page, "total": total, "truncated": offset + limit < total}
 
     def _gh_analyze(
         self,

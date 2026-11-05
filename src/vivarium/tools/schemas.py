@@ -1190,6 +1190,34 @@ class RamdiskListOut(_Out):
     truncated: bool = False
 
 
+class CacheComponentsIn(_Page):
+    """Arguments for ``list_cache_components`` — paginated, bounded (ADR-089, #418).
+
+    Lists the component dylib paths of a dyld shared cache, so a caller can pick a
+    ``dyld_component`` and ``session_import`` it (``loader="dyld"``) — without a failed import.
+
+    Attributes:
+        source_ref: The confined dyld_shared_cache path (resolved + size-capped server-side, like
+            ``session_import``).
+    """
+
+    source_ref: str = Field(min_length=1, max_length=512)
+
+
+class CacheComponentsOut(_Out):
+    """Result of ``list_cache_components``.
+
+    Attributes:
+        components: Bounded page of component dylib paths — each UNTRUSTED (binary-derived path).
+        total: Total components in the cache — safe.
+        truncated: Whether the page was capped.
+    """
+
+    components: list[Untrusted[str]]
+    total: int
+    truncated: bool = False
+
+
 class ListSymbolsIn(_Page):
     """Arguments for ``list_symbols`` — paginated, bounded.
 

@@ -1520,6 +1520,21 @@ class RpcGhidraAdapter:
             )
         )
 
+    def list_cache_components(self, sid: str, a: s.CacheComponentsIn) -> s.CacheComponentsOut:
+        """List a dyld shared cache's component dylibs (ADR-089; paginated/bounded).
+
+        The ``source_ref`` is resolved + confined + size-capped server-side (reusing the import DoS
+        guard, ADR-089 D2) BEFORE the worker mounts the hostile cache.
+        """
+        self._resolve_and_cap(a.source_ref)
+        return _build_cache_components(
+            self._tool_call(
+                sid,
+                "list_cache_components",
+                {"source_ref": a.source_ref, "offset": a.offset, "limit": a.limit},
+            )
+        )
+
     def list_symbols(self, sid: str, a: s.ListSymbolsIn) -> s.SymbolListOut:
         """List symbols (paginated/bounded)."""
         return _build_symbol_list(
@@ -3396,6 +3411,17 @@ def _build_ramdisk_list(r: dict[str, Any]) -> s.RamdiskListOut:
     """Build :class:`RamdiskListOut` from a plain result."""
     return s.RamdiskListOut(
         entries=[_build_ramdisk_entry(x) for x in r.get("entries", [])],
+        total=int(r["total"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+def _build_cache_components(r: dict[str, Any]) -> s.CacheComponentsOut:
+    """Build :class:`CacheComponentsOut`: each component path=BINARY (extracted) → UNTRUSTED."""
+    return s.CacheComponentsOut(
+        components=[
+            _w(x, DataOrigin.BINARY, encoding="utf-8-replace") for x in r.get("components", [])
+        ],
         total=int(r["total"]),
         truncated=bool(r.get("truncated", False)),
     )
