@@ -110,6 +110,44 @@ def expand_value_feeders[K: Hashable](
     return result
 
 
+def extract_changed_strings(
+    before: bytes, after: bytes, *, min_length: int, max_results: int
+) -> list[tuple[int, str]]:
+    """Extract printable-ASCII runs in ``after`` that an unpacker PRODUCED (changed vs ``before``).
+
+    Scans ``after`` for maximal runs of printable ASCII (``0x20..0x7E``) of at least ``min_length``,
+    keeping only a run whose bytes differ from the same span of ``before`` — so only content the
+    unpacker wrote into memory is reported, not plaintext that was already there (ADR-084 D2). The
+    before/after change requirement is the honesty gate: a function that produced no new printable
+    string yields nothing. Deterministic + side-effect-free.
+
+    Args:
+        before: The original (static file) bytes of the window.
+        after: The post-emulation bytes of the same window.
+        min_length: Minimum run length to report (noise floor; already server-clamped).
+        max_results: Hard cap on the number of strings returned.
+
+    Returns:
+        ``(offset, text)`` pairs (offset within the window) for each changed printable run, in
+        ascending offset order, bounded by ``max_results``. ``text`` is binary-derived and MUST be
+        wrapped untrusted by the adapter (ADR-005).
+    """
+    results: list[tuple[int, str]] = []
+    i, n = 0, len(after)
+    while i < n and len(results) < max_results:
+        if 0x20 <= after[i] <= 0x7E:
+            j = i
+            while j < n and 0x20 <= after[j] <= 0x7E:
+                j += 1
+            run = after[i:j]
+            if len(run) >= min_length and run != before[i:j]:
+                results.append((i, run.decode("latin1")))
+            i = j
+        else:
+            i += 1
+    return results
+
+
 def select_decode_ops[K: Hashable](
     ops: Sequence[tuple[str, K, int]], store_value_keys: set[K]
 ) -> list[tuple[str, int]]:

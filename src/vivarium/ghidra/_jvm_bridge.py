@@ -36,6 +36,9 @@ _MAX_PCODE_OPS_PER_INSN = 256
 #: raw-p-code walk so an adversarial binary cannot force an unbounded scan; the per-call wall-clock
 #: kill backs it. A `function`-scoped call ignores this (one function).
 _DEOBFUSCATE_FUNCTION_SCAN_CAP = 2_000
+#: Cap on the number of writable memory blocks scanned for `unpack` output (ADR-084, #399). Bounds
+#: the post-emulation memory scan of a self-modifying unpacker's output.
+_UNPACK_MAX_BLOCKS = 4
 #: Cap on functions BSim-signed per side in a `binary_diff` bsim (content) pairing (ADR-067). Bounds
 #: the O(n*m) all-pairs vector compare on a hostile pair of binaries (CWE-400).
 _BINARY_DIFF_BSIM_MAX_SCAN = 500
@@ -2336,12 +2339,14 @@ class PyGhidraBackend:
         want_stack = "stack_string" in techniques
         want_xor = "xor_decode" in techniques
         want_stream = "stream_decode" in techniques
-        if want_stream and function is None:
-            # ADR-083: stream_decode relaxes detection to a variable key, so a whole-program scan
-            # would emulate a large fraction of functions (CWE-400) — require an explicit function.
+        want_unpack = "unpack" in techniques
+        if (want_stream or want_unpack) and function is None:
+            # ADR-083/084: stream_decode + unpack emulate the chosen function, so a whole-program
+            # scan would emulate a large fraction of functions (CWE-400) — require a function.
             from worker.dispatch import CODE_INVALID_PARAMS, WorkerError
 
-            raise WorkerError(CODE_INVALID_PARAMS, "stream_decode requires an explicit function")
+            which = "stream_decode" if want_stream else "unpack"
+            raise WorkerError(CODE_INVALID_PARAMS, f"{which} requires an explicit function")
 
         if function is not None:
             functions = [self._resolve_function(function)]
@@ -2478,6 +2483,26 @@ class PyGhidraBackend:
             results.append(recovered)
             if len(results) >= max_results:
                 truncated = True
+                break
+
+        # ADR-084: unpack — opt-in, function-scoped (enforced above). Emulate the function (which
+        # runs a self-modifying unpacker + the unpacked code — Ghidra's emulator re-translates
+        # modified code) and extract the printable strings that APPEARED in post-run memory.
+        for func in functions:
+            if not want_unpack or len(results) >= max_results:
+                break
+            try:
+                unpacked = self._gh_unpack_one(func, min_length, max_bytes, max_results, max_steps)
+            except Exception:  # an unpacker that faults/halts oddly yields nothing (fail closed)
+                unpacked = []
+            for rec in unpacked:
+                rec["text"] = rec["text"][:max_bytes]
+                rec["length"] = len(rec["text"])
+                results.append(rec)
+                if len(results) >= max_results:
+                    truncated = True
+                    break
+            if len(results) >= max_results:
                 break
 
         return {"strings": results, "truncated": truncated}
@@ -2699,6 +2724,83 @@ class PyGhidraBackend:
             "decode_key": stages[0]["key"],
             "stages": stages,
         }
+
+    def _gh_unpack_one(  # pragma: no cover - JVM edge
+        self, func: Any, min_length: int, max_bytes: int, max_results: int, max_steps: int
+    ) -> list[dict[str, Any]]:
+        """Recover strings a self-modifying unpacker produced in post-run memory (ADR-084, #399).
+
+        Runs the bounded ADR-049 whole-function emulation of ``func`` — which executes the unpacker
+        AND the unpacked code (Ghidra's emulator re-translates self-modified code; the full ADR-049
+        sandbox applies: no native execution, no syscalls, program DB untouched) — then reads back a
+        bounded window (``max_bytes``) of each writable memory block from the POST-run state and
+        extracts every printable string that APPEARED (changed vs the static file bytes) via the
+        :func:`core.multidecode.extract_changed_strings`. A function that produced no new printable
+        string (not an unpacker, or keyed on external input so the zero-initialised emulation yields
+        garbage) returns an empty list — fail closed, never guessed.
+
+        Args:
+            func: The candidate (self-modifying) function.
+            min_length: Minimum recovered-string length.
+            max_bytes: Window size read back from each writable block (and the per-string cap).
+            max_results: Hard cap on the number of strings returned.
+            max_steps: P-code step budget for the emulation (an unpacker loop may need a large one).
+
+        Returns:
+            A list of recovered-string dicts (``technique="unpack"``, no key/stages); may be empty.
+        """
+        from vivarium.core.multidecode import extract_changed_strings
+
+        program = self._require_program()
+        memory = program.getMemory()
+        entry = str(func.getEntryPoint())
+
+        windows: list[tuple[int, int]] = []
+        for block in memory.getBlocks():
+            if not bool(block.isWrite()) or len(windows) >= _UNPACK_MAX_BLOCKS:
+                continue
+            start = int(block.getStart().getOffset())
+            span = int(block.getEnd().getOffset()) - start + 1
+            windows.append((start, min(max_bytes, span)))
+        if not windows:
+            return []
+
+        before = {s: self._gh_read_bytes(hex(s), length).get("data", "") for s, length in windows}
+        result = self._gh_emulate(
+            start=entry,
+            set_registers={},
+            write_memory=[],
+            max_steps=max_steps,
+            stop_at=None,
+            read_registers=[],
+            read_memory=[{"address": hex(s), "length": length} for s, length in windows],
+            call=True,
+            stubs=[],
+            args=None,
+        )
+        mems = result.get("memory") or []
+
+        recovered: list[dict[str, Any]] = []
+        for (start, _length), mem in zip(windows, mems, strict=False):
+            after = bytes.fromhex(str(mem.get("data", "")))
+            prior = bytes.fromhex(before[start]) if before[start] else b""
+            for off, text in extract_changed_strings(
+                prior, after, min_length=min_length, max_results=max_results
+            ):
+                recovered.append(
+                    {
+                        "address": hex(start + off),
+                        "technique": "unpack",
+                        "text": text,
+                        "length": len(text),
+                        "encoding": None,
+                        "decode_key": None,
+                        "stages": None,
+                    }
+                )
+                if len(recovered) >= max_results:
+                    return recovered
+        return recovered
 
     def _gh_stack_frame(self, function: str) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Return a function's recovered stack-frame layout (ADR-054).

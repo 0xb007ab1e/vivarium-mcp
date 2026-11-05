@@ -802,9 +802,10 @@ class DeobfuscateStringsIn(_SessionScopedIn):
         function: Optional function (address or name) to scope the scan; omit for a bounded
             whole-program scan (server-clamped).
         techniques: Recovery passes to run (``"stack_string"`` and/or ``"xor_decode"``); default
-            both. ``"stream_decode"`` (ADR-083) is OPT-IN and NOT in the default — it relaxes
-            detection to a variable key (stateful/stream ciphers) and so requires an explicit
-            ``function`` (a whole-program ``stream_decode`` is rejected, CWE-400).
+            both. ``"stream_decode"`` (ADR-083) and ``"unpack"`` (ADR-084) are OPT-IN and NOT in the
+            default — each requires an explicit ``function`` (CWE-400). ``stream_decode`` relaxes
+            detection to a variable key (stateful/stream ciphers); ``unpack`` emulates the function
+            and extracts strings a self-modifying unpacker produced in post-run memory.
         min_length: Minimum recovered-string length to report (noise floor; bounded).
         max_results: Cap on recovered strings returned (bounded).
         max_bytes: Cap on the length of any single recovered string / decoded buffer window
@@ -823,8 +824,8 @@ class DeobfuscateStringsIn(_SessionScopedIn):
     """
 
     function: str | None = Field(default=None, min_length=1, max_length=_MAX_NAME)
-    techniques: list[Literal["stack_string", "xor_decode", "stream_decode"]] | None = Field(
-        default=None, max_length=6
+    techniques: list[Literal["stack_string", "xor_decode", "stream_decode", "unpack"]] | None = (
+        Field(default=None, max_length=8)
     )
     min_length: int = Field(default=4, ge=1, le=_MAX_LIMIT)
     max_results: int = Field(default=256, ge=1, le=_MAX_LIMIT)
@@ -852,8 +853,8 @@ class RecoveredString(_Out):
 
     Attributes:
         address: Where the string is constructed — the function entry (hex) — safe.
-        technique: How it was recovered — ``stack_string`` / ``xor_decode`` / ``stream_decode``
-            (safe, closed vocabulary).
+        technique: How it was recovered — ``stack_string`` / ``xor_decode`` / ``stream_decode`` /
+            ``unpack`` (safe, closed vocabulary).
         text: The recovered string — UNTRUSTED (binary-derived; ADR-005).
         length: Recovered length in bytes — safe.
         encoding: For ``xor_decode``, the FIRST stage's op — ``"xor"`` / ``"add"``; for
@@ -869,7 +870,7 @@ class RecoveredString(_Out):
     """
 
     address: str
-    technique: Literal["stack_string", "xor_decode", "stream_decode"]
+    technique: Literal["stack_string", "xor_decode", "stream_decode", "unpack"]
     text: Untrusted[str]
     length: int
     encoding: Literal["xor", "add", "stream"] | None = None

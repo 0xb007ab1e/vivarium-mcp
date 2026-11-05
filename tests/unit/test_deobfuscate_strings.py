@@ -88,6 +88,12 @@ def test_stream_decode_technique_accepted() -> None:
     assert m.techniques == ["stream_decode"]
 
 
+def test_unpack_technique_accepted() -> None:
+    """ADR-084: `unpack` is an accepted (opt-in) technique."""
+    m = s.DeobfuscateStringsIn(session_id="s", function="0x1000", techniques=["unpack"])
+    assert m.techniques == ["unpack"]
+
+
 def test_caps_bounded() -> None:
     """min_length/max_results/max_bytes are >= 1."""
     with pytest.raises(ValidationError):
@@ -196,6 +202,30 @@ def test_builder_stream_decode_no_key() -> None:
     )
     rec = out.strings[0]
     assert rec.technique == "stream_decode" and rec.encoding == "stream"
+    assert isinstance(rec.text, Untrusted)
+    assert rec.decode_key is None and rec.stages is None
+
+
+def test_builder_unpack_no_key_no_encoding() -> None:
+    """ADR-084: an `unpack` result carries technique `unpack`, no encoding/key/stages."""
+    out = _build_deobfuscate_strings(
+        {
+            "strings": [
+                {
+                    "address": "0x00001050",
+                    "technique": "unpack",
+                    "text": "Hi!",
+                    "length": 3,
+                    "encoding": None,
+                    "decode_key": None,
+                    "stages": None,
+                }
+            ],
+            "truncated": False,
+        }
+    )
+    rec = out.strings[0]
+    assert rec.technique == "unpack" and rec.encoding is None
     assert isinstance(rec.text, Untrusted)
     assert rec.decode_key is None and rec.stages is None
 

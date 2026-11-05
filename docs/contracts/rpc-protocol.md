@@ -189,7 +189,11 @@ already steps into in-program callees) so a decoder whose transform lives in a h
 external/unresolved-call + self-modifying decoders fail closed; stream/stateful (ADR-083): the
 opt-in `stream_decode` technique (not default; requires an explicit `function`, else rejected)
 relaxes detection to a variable key (a keystream) and recovers a self-contained stateful/stream
-cipher — `technique="stream_decode"`, `encoding="stream"`, no `decode_key`),
+cipher — `technique="stream_decode"`, `encoding="stream"`, no `decode_key`; self-modifying
+unpackers (ADR-084): the opt-in `unpack` technique (not default; requires an explicit `function`)
+emulates the function — Ghidra's emulator re-translates self-modified code, so the unpacker + the
+unpacked code run in the ADR-049 sandbox — and extracts the printable strings that appeared in
+post-run writable memory, `technique="unpack"`, no key/encoding/stages),
 `stack_frame` (ADR-054 recovered stack layout — read-only; the function's locals/parameters with
 offsets, types, sizes from the Stack analyzer), `basic_blocks` (ADR-055 control-flow graph —
 read-only; each basic block's address range + intraprocedural successor edges from

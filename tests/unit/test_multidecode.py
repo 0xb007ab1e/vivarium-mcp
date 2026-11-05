@@ -14,6 +14,7 @@ from vivarium.core.multidecode import (
     assemble_stage_chain,
     best_decoded_run,
     expand_value_feeders,
+    extract_changed_strings,
     leading_printable_run,
     select_decode_ops,
 )
@@ -200,7 +201,61 @@ def test_expand_depth_bound() -> None:
     assert "n1" in out and "n2" in out and "n3" not in out
 
 
+# --- extract_changed_strings (unpack output scan, ADR-084, #399) ---------------------------------
+
+
+def test_extract_finds_unpacked_string() -> None:
+    """A printable run the unpacker wrote (changed vs before) is extracted with its offset."""
+    before = bytes(8)
+    after = b"\x00\x00Hello!\x00" + b"\x00" * 0
+    # after = 00 00 'Hello!' 00  → the run "Hello!" at offset 2, changed vs the zero before.
+    out = extract_changed_strings(before + b"\x00", after, min_length=4, max_results=16)
+    assert out == [(2, "Hello!")]
+
+
+def test_extract_ignores_preexisting_plaintext() -> None:
+    """A run identical to the before-bytes (already plaintext) is NOT reported."""
+    before = b"Hello!\x00\x00"
+    after = b"Hello!\x00\x00"
+    assert extract_changed_strings(before, after, min_length=4, max_results=16) == []
+
+
+def test_extract_respects_min_length() -> None:
+    """Runs shorter than min_length are skipped."""
+    out = extract_changed_strings(bytes(8), b"\x00Hi\x00ABCDE\x00", min_length=4, max_results=16)
+    assert out == [(4, "ABCDE")]
+
+
+def test_extract_caps_results() -> None:
+    """The result list is bounded by max_results."""
+    after = b"AAAA\x00BBBB\x00CCCC\x00DDDD"
+    out = extract_changed_strings(bytes(len(after)), after, min_length=4, max_results=2)
+    assert len(out) == 2
+    assert out[0] == (0, "AAAA") and out[1] == (5, "BBBB")
+
+
+def test_extract_multiple_changed_runs() -> None:
+    """Several changed printable runs are each reported in offset order."""
+    after = b"\x00Hi there\x00\x01bye now!"
+    out = extract_changed_strings(bytes(len(after)), after, min_length=4, max_results=16)
+    assert out == [(1, "Hi there"), (11, "bye now!")]
+
+
 # --- properties (fuzz) ---------------------------------------------------------------------------
+
+
+@settings(max_examples=300)
+@given(st.binary(max_size=64), st.binary(max_size=64), st.integers(min_value=1, max_value=8))
+def test_prop_extract_changed_is_sound(before: bytes, after: bytes, min_length: int) -> None:
+    """extract_changed_strings never raises; every result is printable, long enough, and changed."""
+    out = extract_changed_strings(before, after, min_length=min_length, max_results=32)
+    assert len(out) <= 32
+    for off, text in out:
+        raw = text.encode("latin1")
+        assert len(raw) >= min_length
+        assert all(0x20 <= b <= 0x7E for b in raw)
+        assert after[off : off + len(raw)] == raw
+        assert raw != before[off : off + len(raw)]
 
 
 @settings(max_examples=300)
