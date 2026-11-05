@@ -9,6 +9,17 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Added
 
 
+- **`session_import` imports a dyld shared-cache component (ADR-086 / #369).** New
+  `loader="dyld"` + `dyld_component` mount a dyld shared cache with Ghidra's
+  `DyldCacheFileSystem`, extract the component dylib named by `dyld_component` (an in-cache path,
+  e.g. `/usr/lib/libSystem.B.dylib`), and import the extracted Mach-O — so every read tool then
+  analyzes that one iOS/macOS system dylib. Self-describing like `macho` (no
+  `processor`/`base_addr`/`entry`; mutually exclusive with `regions`/`container`). Omitting
+  `dyld_component` fails closed with a bounded, category-safe listing of the available components
+  (discovery, no separate tool needed). The component lookup is INSIDE the Ghidra GFileSystem's own
+  listing (never a host path — CWE-22); an unknown component or corrupt cache fails closed; the
+  mount/extract stay in the worker (ADR-001). Supersedes ADR-063's fixture-blocked deferral — a
+  hermetic `synthetic_dyld_shared_cache` builder makes it gated-testable. (#369)
 - **`session_import` surfaces the Android boot-image ramdisk (ADR-085 / #380).** The androidboot
   container loader (ADR-070) shipped the kernel region and deferred the ramdisk (a cpio filesystem).
   New optional `container_region` (`kernel` default / `ramdisk`) selects which region to surface.

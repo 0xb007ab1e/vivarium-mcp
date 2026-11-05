@@ -1,6 +1,6 @@
 # Architecture Decision Records (ADR) index
 
-This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-085).
+This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-086).
 Each ADR captures one significant decision: its context, the decision, alternatives, and consequences.
 Records are **point-in-time** — a `Status:` of *Proposed* reflects the record when it was written; what
 actually shipped in each release is tracked in [`../../CHANGELOG.md`](../../CHANGELOG.md) and the
@@ -81,6 +81,7 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 - **ADR-083** — Stateful / stream-cipher decode recovery: adds the opt-in `stream_decode` technique to `deobfuscate_strings` — relaxes detection to a VARIABLE key (a keystream, not a constant) so a self-contained stateful/stream cipher (RC4-like / rolling-key / LFSR) is recovered by the same bounded ADR-049 emulation + printable-changed gate (`technique="stream_decode"`, `encoding="stream"`, no key). Function-scoped only (whole-program rejected, CWE-400); external-keyed / self-modifying stay fail-closed — **Proposed** (#400).
 - **ADR-084** — Self-modifying unpacker recovery: adds the opt-in `unpack` technique to `deobfuscate_strings`. A probe showed Ghidra's emulator RE-TRANSLATES self-modified code on execution, so the ADR-049 sandbox already runs an unpacker + the code it decodes (still p-code only, no native exec); `unpack` emulates the (function-scoped) function and extracts the printable strings that APPEARED in post-run writable memory via the pure `extract_changed_strings` (`technique="unpack"`, no key/stages). Whole-program rejected (CWE-400); non-self-contained unpackers fail closed — **Proposed** (#399).
 - **ADR-085** — Android boot-image ramdisk region: adds `container_region` (`kernel` default / `ramdisk`) to the androidboot container loader. `ramdisk` (Scope A) slices the page-aligned ramdisk window, codec-detects it (gzip/xz/uncompressed-cpio via the pure `detect_ramdisk_codec`), and surfaces the RAW-decompressed cpio bytes as a flat binary for string/byte triage (names, init.rc, configs, keys) — reusing the ADR-070 bomb-capped decompressor. lz4 ramdisks + a structured cpio file-tree/extract (Scope B) are deferred — **Proposed** (#380).
+- **ADR-086** — DYLD shared-cache component import: adds `loader="dyld"` + `dyld_component` to `session_import`. The worker mounts a dyld shared cache with Ghidra's `DyldCacheFileSystem`, extracts the named component dylib, and imports the extracted Mach-O (self-describing — no `processor`/`base_addr`/`entry`; mutually exclusive with `regions`/`container`). Omitting `dyld_component` fails closed with a bounded component listing (discovery). Supersedes ADR-063's fixture-blocked deferral — the hermetic `synthetic_dyld_shared_cache` builder unblocks a gated-testable path — **Proposed** (#369).
 
 ### Read/analysis tools
 - **ADR-007** — Semantic-naming support tools (call graph, leaf-first ordering, function context).

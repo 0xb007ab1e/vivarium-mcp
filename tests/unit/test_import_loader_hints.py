@@ -649,3 +649,103 @@ def test_no_container_is_byte_for_byte_noop() -> None:
     adapter.import_binary("s", s.SessionImportIn(session_id="s", source_ref="p.elf"))  # type: ignore[attr-defined]
     assert "container" not in captured[0]
     assert "max_decompressed_bytes" not in captured[0]
+
+
+# --- 2d. dyld shared-cache component loader (ADR-086; #369) ---------------------------------------
+
+
+def test_dyld_accepts_component_path() -> None:
+    """loader='dyld' with a dyld_component is valid (extract that component from the cache)."""
+    m = s.SessionImportIn.model_validate(
+        {
+            "session_id": "s",
+            "source_ref": "dyld_shared_cache_x86_64",
+            "loader": "dyld",
+            "dyld_component": "/usr/lib/libviv.dylib",
+        }
+    )
+    assert m.loader == "dyld"
+    assert m.dyld_component == "/usr/lib/libviv.dylib"
+
+
+def test_dyld_without_component_is_valid_discovery() -> None:
+    """Omitting dyld_component is valid — the worker returns a component listing (discovery)."""
+    m = s.SessionImportIn.model_validate(
+        {"session_id": "s", "source_ref": "cache", "loader": "dyld"}
+    )
+    assert m.loader == "dyld" and m.dyld_component is None
+
+
+@pytest.mark.parametrize(
+    "hint", [{"processor": "x86:LE:64:default"}, {"base_addr": 0x1000}, {"entry": 0x1000}]
+)
+def test_dyld_is_self_describing_rejects_raw_hints(hint: dict[str, object]) -> None:
+    """dyld is self-describing (component Mach-O carries its arch/layout) → raw hints rejected."""
+    with pytest.raises(ValidationError):
+        s.SessionImportIn.model_validate(
+            {"session_id": "s", "source_ref": "cache", "loader": "dyld", **hint}
+        )
+
+
+@pytest.mark.parametrize("loader", ["auto", "binary", "macho", "dex", "apk"])
+def test_dyld_component_only_allowed_with_dyld_loader(loader: str) -> None:
+    """dyld_component with any non-dyld loader is ambiguous → rejected fail-closed."""
+    with pytest.raises(ValidationError, match="dyld_component is only allowed"):
+        s.SessionImportIn.model_validate(
+            {
+                "session_id": "s",
+                "source_ref": "x",
+                "loader": loader,
+                "dyld_component": "/usr/lib/libviv.dylib",
+            }
+        )
+
+
+def test_dyld_mutually_exclusive_with_regions_and_container() -> None:
+    """dyld extracts from a cache FILE → combining with regions/container is rejected."""
+    with pytest.raises(ValidationError, match="mutually exclusive with regions/container"):
+        s.SessionImportIn.model_validate(
+            {
+                "session_id": "s",
+                "source_ref": "cache",
+                "loader": "dyld",
+                "regions": [{"base_addr": 0x0, "length": 0x10, "offset": 0x0}],
+            }
+        )
+    with pytest.raises(ValidationError, match="mutually exclusive with regions/container"):
+        s.SessionImportIn.model_validate(
+            {"session_id": "s", "source_ref": "cache", "loader": "dyld", "container": "gzip"}
+        )
+
+
+def test_dyld_import_params_thread_loader_and_component() -> None:
+    """ADR-086: loader='dyld' with a component threads {loader, dyld_component}."""
+    adapter, captured = _adapter_capturing_call()
+    args = s.SessionImportIn.model_validate(
+        {
+            "session_id": "s",
+            "source_ref": "cache",
+            "loader": "dyld",
+            "dyld_component": "/usr/lib/libviv.dylib",
+        }
+    )
+    adapter.import_binary("s", args)  # type: ignore[attr-defined]
+    assert captured == [
+        {
+            "source_ref": "cache",
+            "expected_sha256": None,
+            "loader": "dyld",
+            "dyld_component": "/usr/lib/libviv.dylib",
+        }
+    ]
+
+
+def test_dyld_discovery_import_params_thread_only_loader() -> None:
+    """ADR-086: omitting dyld_component sends ONLY {source_ref, expected_sha256, loader}."""
+    adapter, captured = _adapter_capturing_call()
+    args = s.SessionImportIn.model_validate(
+        {"session_id": "s", "source_ref": "cache", "loader": "dyld"}
+    )
+    adapter.import_binary("s", args)  # type: ignore[attr-defined]
+    assert captured == [{"source_ref": "cache", "expected_sha256": None, "loader": "dyld"}]
+    assert "dyld_component" not in captured[0]

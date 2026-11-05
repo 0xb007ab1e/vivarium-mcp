@@ -39,6 +39,9 @@ _DEOBFUSCATE_FUNCTION_SCAN_CAP = 2_000
 #: Cap on the number of writable memory blocks scanned for `unpack` output (ADR-084, #399). Bounds
 #: the post-emulation memory scan of a self-modifying unpacker's output.
 _UNPACK_MAX_BLOCKS = 4
+#: Cap on the component dylibs enumerated from a dyld_shared_cache (ADR-086, #369). Bounds the
+#: discovery listing of a hostile/huge cache (CWE-400).
+_DYLD_MAX_COMPONENTS = 4096
 #: Cap on functions BSim-signed per side in a `binary_diff` bsim (content) pairing (ADR-067). Bounds
 #: the O(n*m) all-pairs vector compare on a hostile pair of binaries (CWE-400).
 _BINARY_DIFF_BSIM_MAX_SCAN = 500
@@ -281,6 +284,12 @@ class PyGhidraBackend:
             proc = params.get("processor")
             return self._gh_import(
                 str(source_ref), loader="macho", processor=None if proc is None else str(proc)
+            )
+        if loader == "dyld":
+            # ADR-086 (#369): extract a component dylib from a dyld cache + import as Mach-O.
+            comp = params.get("dyld_component")
+            return self._gh_import(
+                str(source_ref), loader="dyld", dyld_component=None if comp is None else str(comp)
             )
         # AUTO path — plus the optional ADR-061 companion PDB / ADR-071 companion debug map (the
         # server allows pdb_ref/debug_ref only with loader='auto', so they thread here and nowhere
@@ -1176,6 +1185,7 @@ class PyGhidraBackend:
         pdb_ref: str | None = None,
         debug_ref: str | None = None,
         debug_format: str | None = None,
+        dyld_component: str | None = None,
     ) -> dict[str, Any]:  # pragma: no cover - JVM edge
         """Import a binary file into a transient Ghidra project (PyGhidra).
 
@@ -1205,6 +1215,9 @@ class PyGhidraBackend:
                 set, its symbols are applied to the loaded program before analysis via
                 :meth:`_apply_debug`.
             debug_format: The companion debug format (``"map"``) — required with ``debug_ref``.
+            dyld_component: The dyld-cache component path to extract + import as Mach-O (required
+                when ``loader == "dyld"``, ADR-086); when ``None`` with ``loader == "dyld"`` the
+                mount fails closed with the component listing via :meth:`_open_dyld_component`.
 
         Returns:
             A plain ``SessionInfo``-shaped dict.
@@ -1244,6 +1257,10 @@ class PyGhidraBackend:
         elif loader in ("dex", "macho", "apk"):
             # Self-describing (ADR-047): force the loader, no language (the format carries it).
             self._open_named_loader(source_ref, project_dir, str(loader), None)
+        elif loader == "dyld":
+            # ADR-086 (#369): extract the named component dylib from the dyld_shared_cache (via
+            # DyldCacheFileSystem) + open the extracted Mach-O. Omitting the component lists them.
+            self._open_dyld_component(source_ref, project_dir, dyld_component)
         else:
             # AUTO path — byte-for-byte the pre-ADR-045 call (opinion/container loaders). For a
             # detached-DWARF companion (ADR-071 follow-up) the binary is opened from a staging dir
@@ -1705,6 +1722,95 @@ class PyGhidraBackend:
                 CODE_NOT_FOUND,
                 "no Mach-O slice matched the requested processor, or the file could not be loaded",
             ) from exc
+
+        self._project = project_ctx  # retain (server kills+wipes on evict; process death frees it)
+        self._loaded = loaded  # keep the LoadResults' consumer alive so the program is not released
+        self._program = program
+
+    def _open_dyld_component(
+        self, source_ref: str, project_dir: str, dyld_component: str | None
+    ) -> None:  # pragma: no cover - JVM/filesystem edge
+        """Extract a component dylib from a dyld_shared_cache + open it as Mach-O (ADR-086, #369).
+
+        Mounts the (confined, size-capped) cache with Ghidra's ``DyldCacheFileSystem``, enumerates
+        its component dylibs (bounded by ``_DYLD_MAX_COMPONENTS``), and — when ``dyld_component``
+        names one — loads that component THROUGH the cache's own ``ByteProvider`` (carrying the
+        ``dyldcachev1`` FSRL, so opinion routes to ``DyldCacheExtractLoader``, which materializes
+        the component's split segments into one program). Omitting ``dyld_component`` fails closed
+        with a category-safe list of the available component paths (discovery). The lookup is INSIDE
+        the Ghidra GFileSystem's own listing, never the host filesystem (CWE-22); an unknown
+        component fails closed. All mount/extract/parse of the hostile cache stays in the worker
+        (ADR-001/D4).
+
+        Args:
+            source_ref: The server-confined dyld_shared_cache path.
+            project_dir: The writable per-session project location (the wiped store).
+            dyld_component: The in-cache component path to extract, or ``None`` to list components.
+
+        Raises:
+            WorkerError: ``invalid-params`` (no component named — lists them); ``not-found`` (not a
+                cache, or the named component is absent / cannot load).
+        """
+        import pyghidra
+
+        pyghidra.start()
+        from ghidra.formats.gfilesystem import FileSystemService  # type: ignore[import-not-found]
+        from ghidra.util.task import TaskMonitor
+        from java.io import File  # type: ignore[import-not-found]
+        from worker.dispatch import CODE_INVALID_PARAMS, CODE_NOT_FOUND, WorkerError
+
+        svc = FileSystemService.getInstance()
+        fsref = svc.probeFileForFilesystem(
+            svc.getLocalFSRL(File(source_ref)), TaskMonitor.DUMMY, None
+        )
+        if fsref is None:
+            raise WorkerError(CODE_NOT_FOUND, "not a recognizable dyld_shared_cache")
+        try:
+            fs = fsref.getFilesystem()
+            components: list[str] = []
+
+            def _walk(directory: Any) -> None:
+                for entry in fs.getListing(directory):
+                    if len(components) >= _DYLD_MAX_COMPONENTS:
+                        return
+                    if bool(entry.isDirectory()):
+                        _walk(entry)
+                    else:
+                        components.append(str(entry.getPath()))
+
+            _walk(None)
+            dylibs = [c for c in components if c.endswith(".dylib")] or components
+
+            if dyld_component is None:
+                preview = ", ".join(dylibs[:50])
+                raise WorkerError(
+                    CODE_INVALID_PARAMS,
+                    f"loader='dyld' requires dyld_component; available components: {preview}",
+                )
+            gfile = fs.lookup(dyld_component)
+            if gfile is None or bool(gfile.isDirectory()):
+                raise WorkerError(CODE_NOT_FOUND, "dyld_component not found in the cache")
+
+            # Load the component THROUGH the cache's own ByteProvider — it carries the
+            # ``dyldcachev1`` FSRL, which routes opinion to Ghidra's ``DyldCacheExtractLoader``
+            # (the loader that materializes a cache component's split segments into one program).
+            # Extracting the raw bytes to a plain file loses that FSRL and the loader refuses
+            # (``FSRL protocol is 'file' but 'dyldcachev1' is required``). The ByteProvider stays
+            # open across ``load()`` and is closed with the filesystem in the outer ``finally``.
+            provider = fs.getByteProvider(gfile, TaskMonitor.DUMMY)
+            project_ctx = pyghidra.open_project(project_dir, "session", create=True)
+            project = project_ctx.__enter__()
+            loaded = pyghidra.program_loader().source(provider).project(project).load()
+            program = loaded.getPrimaryDomainObject()
+        except WorkerError:
+            raise
+        except Exception as exc:
+            raise WorkerError(
+                CODE_NOT_FOUND,
+                "the dyld component could not be loaded as a Mach-O program",
+            ) from exc
+        finally:
+            fsref.close()
 
         self._project = project_ctx  # retain (server kills+wipes on evict; process death frees it)
         self._loaded = loaded  # keep the LoadResults' consumer alive so the program is not released
@@ -5618,7 +5724,7 @@ class PyGhidraBackend:
         from ghidra.program.model.data import FileDataTypeManager
         from ghidra.program.model.symbol import SourceType
         from ghidra.util.task import TaskMonitor
-        from java.io import File as JFile  # type: ignore[import-not-found]
+        from java.io import File as JFile
         from java.util import ArrayList  # type: ignore[import-not-found]
         from worker.dispatch import CODE_NOT_FOUND, WorkerError
 
