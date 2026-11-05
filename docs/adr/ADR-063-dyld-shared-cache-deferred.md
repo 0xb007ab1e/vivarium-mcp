@@ -1,8 +1,13 @@
 # ADR-063: DYLD shared-cache support — DEFERRED (fixture-blocked)
 
-- **Status:** **Deferred** (2026-08-13). Scoped at the operator's request; **not built** — the
-  capability is ready but a hermetic test fixture is not feasible, and the ROI is low. This ADR
-  records the scoping so the decision is not re-litigated from scratch.
+- **Status:** **SUPERSEDED by [ADR-086](./ADR-086-dyld-component-import.md)** (2026-11-05) — the
+  fixture blocker was solved (a hermetic `synthetic_dyld_shared_cache` builder, self-consistent with
+  Ghidra's linear `SplitDyldCache.getMacho` model), so `loader="dyld"` + `dyld_component` SHIPPED
+  (#369). The "multi-day, fragile, impossible fixture / low ROI" assessment below is **overturned**;
+  it is retained as the point-in-time record of the earlier deferral. Originally **Deferred**
+  (2026-08-13): scoped at the operator's request; not built — capability ready but a hermetic test
+  fixture judged infeasible and the ROI low. This ADR records the scoping so the decision is not
+  re-litigated from scratch.
 - **Date:** 2026-08-13
 - **Deciders:** Human operator (asked to scope the DYLD fixture problem, then to record the deferral);
   assistant scoped the loader + fixture feasibility live against the pinned worker.
