@@ -439,6 +439,7 @@ jobs:
             tests/integration/test_import_uimage.py \
             tests/integration/test_import_androidboot.py \
             tests/integration/test_import_androidboot_ramdisk.py \
+            tests/integration/test_import_dyld.py \
             tests/integration/test_emulate_autoarg.py \
             tests/integration/test_emulate_explicit_abi.py \
             tests/integration/test_worker_analysis.py \
