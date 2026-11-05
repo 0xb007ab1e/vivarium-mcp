@@ -2335,6 +2335,13 @@ class PyGhidraBackend:
         listing = program.getListing()
         want_stack = "stack_string" in techniques
         want_xor = "xor_decode" in techniques
+        want_stream = "stream_decode" in techniques
+        if want_stream and function is None:
+            # ADR-083: stream_decode relaxes detection to a variable key, so a whole-program scan
+            # would emulate a large fraction of functions (CWE-400) — require an explicit function.
+            from worker.dispatch import CODE_INVALID_PARAMS, WorkerError
+
+            raise WorkerError(CODE_INVALID_PARAMS, "stream_decode requires an explicit function")
 
         if function is not None:
             functions = [self._resolve_function(function)]
@@ -2444,6 +2451,35 @@ class PyGhidraBackend:
                 truncated = True
                 break
 
+        # ADR-083: stream_decode — opt-in, function-scoped (enforced above). Relaxes detection to a
+        # VARIABLE key (a keystream) and recovers a self-contained stateful/stream cipher by the
+        # bounded emulation + printable-changed gate; a non-decryptor / external-keyed cipher yields
+        # nothing (fail closed). No per-byte key is reported (encoding="stream").
+        for func in functions:
+            if not want_stream or len(results) >= max_results:
+                break
+            try:
+                recovered = self._gh_xor_decode_one(
+                    func,
+                    min_length,
+                    max_bytes,
+                    max_steps,
+                    max_stages,
+                    max_call_depth,
+                    max_callees,
+                    mode="stream",
+                )
+            except Exception:  # a cipher that faults/halts oddly is skipped, not fatal (closed)
+                recovered = None
+            if recovered is None:
+                continue
+            recovered["text"] = recovered["text"][:max_bytes]
+            recovered["length"] = len(recovered["text"])
+            results.append(recovered)
+            if len(results) >= max_results:
+                truncated = True
+                break
+
         return {"strings": results, "truncated": truncated}
 
     def _gh_xor_decode_one(  # noqa: C901 - one bounded detect-then-emulate decoder recovery (JVM edge)
@@ -2455,6 +2491,7 @@ class PyGhidraBackend:
         max_stages: int = 8,
         max_call_depth: int = 2,
         max_callees: int = 16,
+        mode: str = "xor",
     ) -> dict[str, Any] | None:  # pragma: no cover - JVM edge
         """Recover one local XOR decoder's plaintext — single-pass OR chained (ADR-068 D3, ADR-081).
 
@@ -2492,10 +2529,13 @@ class PyGhidraBackend:
                 ``[0, 8]``.
             max_callees: Hard cap on the total number of functions scanned in the call-graph walk
                 (ADR-082 DoS; server-clamped ``[1, 256]``).
+            mode: ``"xor"`` (default) requires a CONSTANT key and reports the stage chain;
+                ``"stream"`` (ADR-083) accepts a VARIABLE key (a keystream byte feeding a store) and
+                reports ``technique="stream_decode"`` / ``encoding="stream"`` with no key/stages.
 
         Returns:
-            A recovered-string dict (with an ordered ``stages`` chain), or ``None`` if not a
-            recoverable local XOR decoder.
+            A recovered-string dict (with an ordered ``stages`` chain for ``mode="xor"``), or
+            ``None`` if not a recoverable decoder.
         """
         from vivarium.core.multidecode import (
             assemble_stage_chain,
@@ -2533,6 +2573,7 @@ class PyGhidraBackend:
         candidates: list[tuple[str, object, int]] = []
         store_value_keys: set[object] = set()
         link_edges: dict[object, list[object]] = {}
+        decode_op_outputs: list[object] = []  # ADR-083: every INT_XOR/INT_ADD output (variable-key)
         has_store = False
         write_targets: set[int] = set()
 
@@ -2551,6 +2592,7 @@ class PyGhidraBackend:
                         # out is produced from input0 (SUBPIECE input1 is a constant byte offset).
                         link_edges.setdefault(_vn_key(out), []).append(_vn_key(op.getInput(0)))
                     elif mnem in ("INT_XOR", "INT_ADD") and out is not None:
+                        decode_op_outputs.append(_vn_key(out))  # ADR-083: variable-key candidate
                         for k in range(op.getNumInputs()):
                             vn = op.getInput(k)
                             if vn.isConstant():
@@ -2592,8 +2634,17 @@ class PyGhidraBackend:
                 queue.append((callee, depth + 1))
 
         value_feeders = expand_value_feeders(store_value_keys, link_edges)
-        stage_ops = select_decode_ops(candidates, value_feeders)
-        if not stage_ops or not has_store or not write_targets:
+        stage_ops: list[tuple[str, int]] = []
+        if mode == "stream":
+            # ADR-083: a decode op with a VARIABLE key (a keystream byte) feeding a STORE — no
+            # constant required. The before/after printable-changed gate after emulation is the
+            # proof (a self-contained stream cipher decrypts under emulation; a non-decryptor or an
+            # external-keyed one yields garbage → not-recovered). No stage chain / key for a stream.
+            has_decode = any(ok in value_feeders for ok in decode_op_outputs)
+        else:
+            stage_ops = select_decode_ops(candidates, value_feeders)
+            has_decode = bool(stage_ops)
+        if not has_decode or not has_store or not write_targets:
             return None
 
         # ADR-081 D3: read back EVERY distinct write buffer, bounded by max_stages (DoS).
@@ -2627,8 +2678,18 @@ class PyGhidraBackend:
         if pick is None:
             return None
         base, run = pick
+        if mode == "stream":
+            # ADR-083: a stream cipher has no single reportable key — report the plaintext only.
+            return {
+                "address": entry,
+                "technique": "stream_decode",
+                "text": run.decode("latin1"),
+                "length": len(run),
+                "encoding": "stream",
+                "decode_key": None,
+                "stages": None,
+            }
         stages, _truncated = assemble_stage_chain(stage_ops, max_stages=max_stages)
-
         return {
             "address": entry,
             "technique": "xor_decode",

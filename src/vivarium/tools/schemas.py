@@ -802,7 +802,9 @@ class DeobfuscateStringsIn(_SessionScopedIn):
         function: Optional function (address or name) to scope the scan; omit for a bounded
             whole-program scan (server-clamped).
         techniques: Recovery passes to run (``"stack_string"`` and/or ``"xor_decode"``); default
-            all supported.
+            both. ``"stream_decode"`` (ADR-083) is OPT-IN and NOT in the default — it relaxes
+            detection to a variable key (stateful/stream ciphers) and so requires an explicit
+            ``function`` (a whole-program ``stream_decode`` is rejected, CWE-400).
         min_length: Minimum recovered-string length to report (noise floor; bounded).
         max_results: Cap on recovered strings returned (bounded).
         max_bytes: Cap on the length of any single recovered string / decoded buffer window
@@ -821,8 +823,8 @@ class DeobfuscateStringsIn(_SessionScopedIn):
     """
 
     function: str | None = Field(default=None, min_length=1, max_length=_MAX_NAME)
-    techniques: list[Literal["stack_string", "xor_decode"]] | None = Field(
-        default=None, max_length=4
+    techniques: list[Literal["stack_string", "xor_decode", "stream_decode"]] | None = Field(
+        default=None, max_length=6
     )
     min_length: int = Field(default=4, ge=1, le=_MAX_LIMIT)
     max_results: int = Field(default=256, ge=1, le=_MAX_LIMIT)
@@ -850,24 +852,27 @@ class RecoveredString(_Out):
 
     Attributes:
         address: Where the string is constructed — the function entry (hex) — safe.
-        technique: How it was recovered (``"stack_string"`` / ``"xor_decode"``) — safe (closed
-            vocabulary).
+        technique: How it was recovered — ``stack_string`` / ``xor_decode`` / ``stream_decode``
+            (safe, closed vocabulary).
         text: The recovered string — UNTRUSTED (binary-derived; ADR-005).
         length: Recovered length in bytes — safe.
-        encoding: For ``xor_decode``, the FIRST stage's decode operation — ``"xor"`` / ``"add"``
-            (safe, closed vocabulary); ``None`` for ``stack_string``.
+        encoding: For ``xor_decode``, the FIRST stage's op — ``"xor"`` / ``"add"``; for
+            ``stream_decode`` (ADR-083), ``"stream"`` (a keystream — no single key); safe, closed
+            vocabulary; ``None`` for ``stack_string``.
         decode_key: For ``xor_decode``, the FIRST stage's single-byte key (hex) — UNTRUSTED
-            (binary-derived); ``None`` for ``stack_string``.
+            (binary-derived); ``None`` for ``stack_string`` and ``stream_decode`` (a stream cipher
+            has no single reportable key).
         stages: For ``xor_decode`` (ADR-081), the ordered decode-stage chain (one ``{op, key}`` per
             detected constant decode op); length 1 for a single-pass decoder, >1 for a
-            chained/multi-stage one. ``None`` for ``stack_string``. Each ``key`` is UNTRUSTED.
+            chained/multi-stage one. ``None`` for ``stack_string`` and ``stream_decode``. Each
+            ``key`` is UNTRUSTED.
     """
 
     address: str
-    technique: Literal["stack_string", "xor_decode"]
+    technique: Literal["stack_string", "xor_decode", "stream_decode"]
     text: Untrusted[str]
     length: int
-    encoding: Literal["xor", "add"] | None = None
+    encoding: Literal["xor", "add", "stream"] | None = None
     decode_key: Untrusted[str] | None = None
     stages: list[DecodeStage] | None = None
 

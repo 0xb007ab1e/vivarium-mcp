@@ -82,6 +82,12 @@ def test_technique_enum_closed() -> None:
     assert m.techniques == ["stack_string", "xor_decode"]
 
 
+def test_stream_decode_technique_accepted() -> None:
+    """ADR-083: `stream_decode` is an accepted (opt-in) technique."""
+    m = s.DeobfuscateStringsIn(session_id="s", function="0x1000", techniques=["stream_decode"])
+    assert m.techniques == ["stream_decode"]
+
+
 def test_caps_bounded() -> None:
     """min_length/max_results/max_bytes are >= 1."""
     with pytest.raises(ValidationError):
@@ -168,6 +174,30 @@ def test_builder_xor_decode_wraps_key_and_keeps_encoding() -> None:
     assert isinstance(rec.decode_key, Untrusted) and rec.decode_key.value == "0x41"
     # No stages key in the result → stages is None (backward-compatible).
     assert rec.stages is None
+
+
+def test_builder_stream_decode_no_key() -> None:
+    """ADR-083: a `stream_decode` result carries `encoding="stream"`, no key, no stages."""
+    out = _build_deobfuscate_strings(
+        {
+            "strings": [
+                {
+                    "address": "0x00401000",
+                    "technique": "stream_decode",
+                    "text": "Hello!",
+                    "length": 6,
+                    "encoding": "stream",
+                    "decode_key": None,
+                    "stages": None,
+                }
+            ],
+            "truncated": False,
+        }
+    )
+    rec = out.strings[0]
+    assert rec.technique == "stream_decode" and rec.encoding == "stream"
+    assert isinstance(rec.text, Untrusted)
+    assert rec.decode_key is None and rec.stages is None
 
 
 def test_builder_multistage_wraps_each_stage_key_untrusted() -> None:
