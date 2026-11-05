@@ -156,6 +156,12 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Changed
 
 
+- **Bump the worker-image pin to the review-remediation build.** Advance the trusted worker digest to
+  `sha256:eb054249…` — the CI-signed build that carries the ADR-086–089 review-remediation hardening
+  (iterative/bounded dyld cache walk, category-safe `list_cache_components` fault mapping, corrected
+  lz4 ramdisk codec messaging). No new live-gate test: the hardening is behavior-equivalent on valid
+  caches (the existing dyld/ramdisk gates cover it) and the pathological paths are unit-proven
+  (`test_dyld_walk.py`). (ADR-086–089 follow-up)
 - **Bump the worker-image pin to the ADR-089 dyld-discovery build; gate the #418/#419 live test.**
   Advance the trusted worker digest to `sha256:d9878957…` — the CI-signed build that bakes the
   ADR-089 `list_cache_components` tool — and add `test_list_cache_components.py` to the
