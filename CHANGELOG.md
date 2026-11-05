@@ -9,6 +9,17 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Added
 
 
+- **`deobfuscate_strings` recovers strings from self-modifying unpackers (ADR-084 / #399).** A
+  probe established that Ghidra's p-code emulator **re-translates self-modified code on execution**
+  — so the ADR-049 sandbox already runs an unpacker *and* the code it decodes into memory (still
+  p-code only, no native exec). New **opt-in** `unpack` technique emulates the chosen function and
+  extracts the printable strings that **appeared** in post-run writable memory (changed vs the
+  static image) via the pure `core.multidecode.extract_changed_strings` — reporting
+  `technique="unpack"` with no key/encoding/stages. Like `stream_decode`, it is **not** in the
+  default and requires an explicit `function` (a whole-program `unpack` is rejected, CWE-400).
+  Self-contained only: a non-self-contained / externally-keyed unpacker produces nothing (fail
+  closed). No new execution surface — the self-modified-code re-translation is existing, sandboxed,
+  bounded (`max_steps`) emulator behavior. (#399)
 - **`deobfuscate_strings` recovers self-contained stateful / stream-cipher decoders (ADR-083 /
   #400).** A stream cipher XORs the ciphertext with an evolving **keystream** (a register value, not
   a constant), so the keyed `xor_decode` family never detected it — even though the ADR-049

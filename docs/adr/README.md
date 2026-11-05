@@ -1,6 +1,6 @@
 # Architecture Decision Records (ADR) index
 
-This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-083).
+This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-084).
 Each ADR captures one significant decision: its context, the decision, alternatives, and consequences.
 Records are **point-in-time** — a `Status:` of *Proposed* reflects the record when it was written; what
 actually shipped in each release is tracked in [`../../CHANGELOG.md`](../../CHANGELOG.md) and the
@@ -79,6 +79,7 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 - **ADR-081** — Multi-stage / chained local decode recovery: extends `deobfuscate_strings` (`xor_decode`) to read back every distinct write buffer after the bounded ADR-049 emulation (`max_stages`-capped) and report the printable one plus the ordered `stages` XOR chain — recovers chained/multi-buffer local decoders the ADR-068 D4 MVP missed; interprocedural/self-modifying/stateful + `add` decoders stay deferred (fail-closed) — **Proposed** (#379).
 - **ADR-082** — Interprocedural local decode recovery: extends `deobfuscate_strings` (`xor_decode`) detection to span the entry function + its in-program callees (bounded by `max_call_depth`/`max_callees`, BFS, cycle-safe) — recovers a decoder whose per-byte transform lives in a called helper; the ADR-049 emulation already steps into in-program callees, so only detection widens (no new execution surface). External/unresolved-call, self-modifying + stateful decoders stay fail-closed — **Proposed** (#398).
 - **ADR-083** — Stateful / stream-cipher decode recovery: adds the opt-in `stream_decode` technique to `deobfuscate_strings` — relaxes detection to a VARIABLE key (a keystream, not a constant) so a self-contained stateful/stream cipher (RC4-like / rolling-key / LFSR) is recovered by the same bounded ADR-049 emulation + printable-changed gate (`technique="stream_decode"`, `encoding="stream"`, no key). Function-scoped only (whole-program rejected, CWE-400); external-keyed / self-modifying stay fail-closed — **Proposed** (#400).
+- **ADR-084** — Self-modifying unpacker recovery: adds the opt-in `unpack` technique to `deobfuscate_strings`. A probe showed Ghidra's emulator RE-TRANSLATES self-modified code on execution, so the ADR-049 sandbox already runs an unpacker + the code it decodes (still p-code only, no native exec); `unpack` emulates the (function-scoped) function and extracts the printable strings that APPEARED in post-run writable memory via the pure `extract_changed_strings` (`technique="unpack"`, no key/stages). Whole-program rejected (CWE-400); non-self-contained unpackers fail closed — **Proposed** (#399).
 
 ### Read/analysis tools
 - **ADR-007** — Semantic-naming support tools (call graph, leaf-first ordering, function context).
