@@ -303,7 +303,14 @@ class SessionImportIn(_SessionScopedIn):
 
     source_ref: str = Field(min_length=1, max_length=512)
     expected_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
-    loader: Literal["auto", "binary", "intel-hex", "motorola-hex", "dex", "macho", "apk"] = "auto"
+    loader: Literal[
+        "auto", "binary", "intel-hex", "motorola-hex", "dex", "macho", "apk", "dyld"
+    ] = "auto"
+    #: ADR-086 (#369): with ``loader="dyld"``, the in-cache path of the component dylib to extract +
+    #: import from a ``dyld_shared_cache`` (e.g. ``/usr/lib/libSystem.B.dylib``). Omit to get a
+    #: category-safe listing of the available components (discovery). Only valid with
+    #: ``loader="dyld"``.
+    dyld_component: str | None = Field(default=None, min_length=1, max_length=512)
     processor: str | None = Field(default=None, min_length=1, max_length=128)
     base_addr: int | None = Field(default=None, ge=0)
     entry: int | None = Field(default=None, ge=0)
@@ -376,6 +383,14 @@ class SessionImportIn(_SessionScopedIn):
         if self.container is not None and self.regions is not None:
             raise ValueError("container and regions are mutually exclusive")
 
+        # ADR-086 (#369): dyld_component pairs with loader="dyld" (extract a component dylib from a
+        # dyld_shared_cache). dyld extracts a component from a cache FILE — mutually exclusive with
+        # the stream/scatter-load inputs (regions/container). dyld_component elsewhere is ambiguous.
+        if self.dyld_component is not None and self.loader != "dyld":
+            raise ValueError("dyld_component is only allowed with loader='dyld'")
+        if self.loader == "dyld" and (self.regions is not None or self.container is not None):
+            raise ValueError("loader='dyld' is mutually exclusive with regions/container")
+
         def _require_supported_processor() -> None:
             if self.processor is None or not languages.is_supported_language(self.processor):
                 raise ValueError(
@@ -424,7 +439,9 @@ class SessionImportIn(_SessionScopedIn):
         # `auto` and the self-describing container loaders (ADR-047: dex/apk — the format carries
         # its own processor + layout) take NO hints; auto lets opinion pick the loader, the named
         # ones force it. A hint here is ambiguous → rejected, not silently ignored.
-        if self.loader in ("auto", "dex", "apk"):
+        # ``dyld`` (ADR-086) is self-describing too — the component Mach-O extracted from the cache
+        # carries its own arch + layout; only ``dyld_component`` (handled above) applies.
+        if self.loader in ("auto", "dex", "apk", "dyld"):
             if self.processor is not None or self.base_addr is not None or self.entry is not None:
                 raise ValueError(
                     f"loader='{self.loader}' is self-describing; "

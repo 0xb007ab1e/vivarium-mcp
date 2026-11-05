@@ -370,3 +370,97 @@ def synthetic_android_boot_image(
     if second:
         blob += _region(second)
     return bytes(blob)
+
+
+# --- synthetic dyld_shared_cache (ADR-086, #369) -------------------------------------------------
+#: Default cache base address (the address that maps to file offset 0). Ghidra's
+#: `SplitDyldCache.getMacho` reads a component at `imageAddress - baseAddress` (a LINEAR model), so
+#: the single mapping must cover from file offset 0 at this base.
+_DYLD_DEFAULT_BASE = 0x7FFF00000000
+
+
+def _minimal_macho_dylib(install_name: bytes, *, vmaddr: int, fileoff: int, vmsize: int) -> bytes:
+    """Build a minimal x86-64 ``MH_DYLIB`` Mach-O (header + ``__TEXT`` segment + ``LC_ID_DYLIB``).
+
+    Deterministic + side-effect-free. Used only as a dyld-cache component; ``vmaddr``/``fileoff``
+    are the component's address + cache file offset so Ghidra's cache reader resolves it.
+    """
+    import struct
+
+    mh_magic_64, cpu_x86_64, cpu_sub, mh_dylib = 0xFEEDFACF, 0x01000007, 3, 0x6
+    lc_segment_64, lc_id_dylib = 0x19, 0xD
+    namez = install_name + b"\x00"
+    idcmd_size = (24 + len(namez) + 7) // 8 * 8
+    idcmd = struct.pack("<IIIIII", lc_id_dylib, idcmd_size, 24, 0, 0x10000, 0x10000) + namez
+    idcmd += b"\x00" * (idcmd_size - len(idcmd))
+    seg = struct.pack(
+        "<II16sQQQQIIII", lc_segment_64, 72, b"__TEXT", vmaddr, vmsize, fileoff, vmsize, 5, 5, 0, 0
+    )
+    cmds = seg + idcmd
+    hdr = struct.pack("<IiiIIIII", mh_magic_64, cpu_x86_64, cpu_sub, mh_dylib, 2, len(cmds), 0, 0)
+    return hdr + cmds
+
+
+def synthetic_dyld_shared_cache(
+    *,
+    arch: bytes = b"x86_64",
+    component_path: bytes = b"/usr/lib/libviv.dylib",
+    base_address: int = _DYLD_DEFAULT_BASE,
+) -> bytes:
+    """Build a deterministic, benign, hermetic ``dyld_shared_cache`` with one component dylib.
+
+    Byte-for-byte reproducible (fixed constants, no randomness/clock/I/O). Lays out a minimal, SELF-
+    CONSISTENT cache that Ghidra's ``DyldCacheFileSystem`` mounts and extracts the component from
+    (verified live against the pinned worker, ADR-086): a ``dyld_v1  <arch>`` header, one
+    ``dyld_cache_mapping_info`` covering the whole file from offset 0 at ``base_address`` (Ghidra's
+    ``SplitDyldCache.getMacho`` reads a component at ``imageAddress - baseAddress`` — a LINEAR
+    model, so the mapping fileOffset is 0 and the image address = base + the Mach-O file offset),
+    one ``dyld_cache_image_info`` → the embedded ``MH_DYLIB`` Mach-O, and the component path string.
+    Not a real system cache: one tiny synthetic dylib — it proves the loader wiring, the hermetic
+    fixture path ADR-063 was blocked on (master §5: tests build their own deterministic inputs).
+
+    Args:
+        arch: The cache architecture token in the magic (e.g. ``b"x86_64"``, ``b"arm64"``).
+        component_path: The in-cache path of the single component dylib.
+        base_address: The cache base address (maps to file offset 0).
+
+    Returns:
+        The synthetic ``dyld_shared_cache`` bytes.
+    """
+    import struct
+
+    macho_foff = 0x2000  # the embedded Mach-O's FILE offset ⇒ image address = base + macho_foff
+    magic = b"dyld_v1  " + arch
+    magic += b"\x00" * (16 - len(magic))
+    if len(magic) != 16:
+        raise ValueError("dyld arch token too long for the 16-byte magic")
+    hdr_size = 0x100
+    map_off, map_cnt = hdr_size, 1
+    img_off, img_cnt = map_off + 32, 1
+    path_off = img_off + 32
+    path = component_path + b"\x00"
+    file_size = macho_foff + 0x1000
+
+    hdr = bytearray(hdr_size)
+    hdr[0:16] = magic
+    # magic[16] | mappingOffset u32 | mappingCount u32 | imagesOffsetOld u32 | imagesCountOld u32 |
+    # dyldBaseAddress u64 — the only fields Ghidra needs for a single-image mount.
+    struct.pack_into("<IIIIQ", hdr, 16, map_off, map_cnt, img_off, img_cnt, base_address)
+    mapping = struct.pack(
+        "<QQQII", base_address, file_size, 0, 5, 5
+    )  # addr,size,fileOff=0,prot r-x
+    image_addr = base_address + macho_foff
+    image = struct.pack(
+        "<QQQII", image_addr, 0, 0, path_off, 0
+    )  # address,modTime,inode,pathOff,pad
+
+    out = bytearray(file_size)
+    out[0:hdr_size] = hdr
+    out[map_off : map_off + 32] = mapping
+    out[img_off : img_off + 32] = image
+    out[path_off : path_off + len(path)] = path
+    macho = _minimal_macho_dylib(
+        component_path, vmaddr=image_addr, fileoff=macho_foff, vmsize=0x1000
+    )
+    out[macho_foff : macho_foff + len(macho)] = macho
+    return bytes(out)

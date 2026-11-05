@@ -630,6 +630,12 @@ class RpcGhidraAdapter:
             params["loader"] = args.loader
             if args.processor is not None:
                 params["processor"] = args.processor
+        elif args.loader == "dyld":
+            # ADR-086 (#369): extract a component dylib from a dyld_shared_cache. The optional
+            # dyld_component names it (omit to get a discovery listing from the worker).
+            params["loader"] = args.loader
+            if args.dyld_component is not None:
+                params["dyld_component"] = args.dyld_component
         # ADR-061 companion PDB (opt-in; loader='auto' only, enforced by the schema): confine +
         # size-cap the PDB with the SAME resolver/cap/pre-flight as the binary (no byte reaches the
         # JVM until it passes), then thread it. Absent → no key crosses (byte-for-byte no-op).
