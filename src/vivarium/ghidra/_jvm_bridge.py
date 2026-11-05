@@ -48,6 +48,10 @@ _UNPACK_MAX_BLOCKS = 4
 #: Cap on the component dylibs enumerated from a dyld_shared_cache (ADR-086, #369). Bounds the
 #: discovery listing of a hostile/huge cache (CWE-400).
 _DYLD_MAX_COMPONENTS = 4096
+#: Cap on total filesystem nodes (dirs + files) visited while walking a dyld cache (ADR-086 review
+#: hardening). Bounds the iterative walk's work + stack on a hostile tree of many empty directories
+#: (CWE-400); generously above `_DYLD_MAX_COMPONENTS` so a real cache's directory overhead fits.
+_DYLD_MAX_WALK_NODES = 65536
 #: Cap on functions BSim-signed per side in a `binary_diff` bsim (content) pairing (ADR-067). Bounds
 #: the O(n*m) all-pairs vector compare on a hostile pair of binaries (CWE-400).
 _BINARY_DIFF_BSIM_MAX_SCAN = 500
@@ -203,31 +207,37 @@ def _require(params: dict[str, Any], key: str) -> Any:
     return params[key]
 
 
-def _dyld_walk_components(fs: Any) -> list[str]:  # pragma: no cover - JVM/filesystem edge
+def _dyld_walk_components(fs: Any) -> list[str]:
     """Enumerate a mounted dyld cache's component paths, bounded by ``_DYLD_MAX_COMPONENTS``.
 
     Shared by the ADR-086 import-discovery path (:meth:`PyGhidraBackend._open_dyld_component`)
-    and the ADR-089 ``list_cache_components`` tool. Walks the Ghidra ``GFileSystem`` listing
-    depth-first, collecting file (non-directory) paths up to the cap — never reads a member's bytes.
+    and the ADR-089 ``list_cache_components`` tool. Walks the Ghidra ``GFileSystem`` listing with an
+    **explicit stack (iterative, not recursive)** so a hostile cache that nests directories deeper
+    than Python's recursion limit cannot raise ``RecursionError`` (CWE-674); collecting file
+    (non-directory) paths up to ``_DYLD_MAX_COMPONENTS`` and bounding the total nodes visited by
+    ``_DYLD_MAX_WALK_NODES`` so a tree of many empty directories cannot grow the stack unboundedly
+    (CWE-400). Never reads a member's bytes.
 
     Args:
-        fs: The mounted ``DyldCacheFileSystem`` (a Ghidra ``GFileSystem``).
+        fs: The mounted ``DyldCacheFileSystem`` (a Ghidra ``GFileSystem``). ``fs.getListing(dir)``
+            yields entries exposing ``isDirectory()`` + ``getPath()``.
 
     Returns:
         The component paths (bounded by ``_DYLD_MAX_COMPONENTS``), in listing order.
     """
     components: list[str] = []
-
-    def _walk(directory: Any) -> None:
+    stack: list[Any] = [None]  # start at the filesystem root
+    nodes = 0
+    while stack and len(components) < _DYLD_MAX_COMPONENTS and nodes < _DYLD_MAX_WALK_NODES:
+        directory = stack.pop()
         for entry in fs.getListing(directory):
-            if len(components) >= _DYLD_MAX_COMPONENTS:
-                return
+            nodes += 1
+            if len(components) >= _DYLD_MAX_COMPONENTS or nodes >= _DYLD_MAX_WALK_NODES:
+                break
             if bool(entry.isDirectory()):
-                _walk(entry)
+                stack.append(entry)
             else:
                 components.append(str(entry.getPath()))
-
-    _walk(None)
     return components
 
 
@@ -263,7 +273,14 @@ class _Lz4LegacyReader:  # pragma: no cover - worker-only decode edge (ADR-088)
         self._buffer = b""
 
     def read(self, size: int = -1) -> bytes:
-        """Return up to ``size`` decompressed bytes (all remaining when ``size`` < 0)."""
+        """Return up to ``size`` decompressed bytes (all remaining when ``size`` < 0).
+
+        The ADR-070 zip-bomb cap is enforced by the caller (`_stream_to_payload`) on the running
+        output of **bounded** `read(size>0)` chunks, so callers MUST read in bounded chunks: a
+        ``read(-1)`` would decompress every block into one buffer and bypass the streamed cap (it
+        would still be input-size-bounded, but defeats the stream guarantee). The sole caller passes
+        a positive chunk size.
+        """
         while (size < 0 or len(self._buffer) < size) and self._index < len(self._blocks):
             offset, length = self._blocks[self._index]
             self._index += 1
@@ -1201,12 +1218,12 @@ class PyGhidraBackend:
         :func:`vivarium.core.androidboot.parse_android_boot_header` (hostile bytes, hermetically
         fuzzed). ``region="kernel"`` (default) slices the page-aligned kernel window and loads it
         as-is (a raw/zImage kernel is analysable directly). ``region="ramdisk"`` (ADR-085) slices
-        page-aligned ramdisk window, detects its codec (gzip / xz / uncompressed-cpio via the pure
-        :func:`vivarium.core.androidboot.detect_ramdisk_codec`), and surfaces the DECOMPRESSED cpio
-        bytes as a flat payload for string/byte triage (names, ``init.rc``, configs, keys). An
-        unsupported ramdisk codec (e.g. lz4 — stdlib cannot inflate) or an empty ramdisk fails
-        closed. Every slice is clamped to the real file size (no over-read) and every decompress
-        streams under the shared zip-bomb cap.
+        page-aligned ramdisk window, detects its codec (gzip / xz / uncompressed-cpio / lz4 standard
+        + legacy frame via the pure ``core.androidboot.detect_ramdisk_codec``; ADR-088), and
+        surfaces the DECOMPRESSED cpio bytes as a flat payload for string/byte triage (names,
+        ``init.rc``, configs, keys). A codec ``detect_ramdisk_codec`` rejects, or an empty ramdisk,
+        fails closed. Every slice is clamped to the real file size (no over-read); every
+        decompress streams under the shared zip-bomb cap.
 
         Args:
             source_ref: The confined Android-boot-image path.
@@ -1264,14 +1281,15 @@ class PyGhidraBackend:
                 remaining -= len(chunk)
 
         if region == "ramdisk":
-            # ADR-085: decompress the cpio ramdisk (gzip/xz) or pass an uncompressed cpio raw; an
-            # unsupported codec (lz4/other) fails closed. The decompress streams under the bomb cap.
+            # ADR-085 + ADR-088: decompress the cpio ramdisk (gzip/xz/lz4 standard+legacy frame) or
+            # pass an uncompressed cpio raw; a codec detect_ramdisk_codec does not recognise fails
+            # closed. The decompress streams under the bomb cap.
             with open(temp_path, "rb") as probe:  # noqa: PTH123
                 codec = detect_ramdisk_codec(probe.read(16))
             if codec is None:
                 raise ValueError(
                     "Android boot image ramdisk uses an unsupported compression "
-                    "(only gzip / xz / uncompressed cpio are supported; lz4 is not)"
+                    "(supported: gzip / xz / uncompressed cpio / lz4 standard + legacy frame)"
                 )
             if codec == "cpio":
                 with open(temp_path, "rb") as src:  # noqa: PTH123
@@ -1955,6 +1973,12 @@ class PyGhidraBackend:
             raise WorkerError(CODE_NOT_FOUND, "not a recognizable dyld_shared_cache")
         try:
             components = _dyld_walk_components(fsref.getFilesystem())
+        except WorkerError:
+            raise
+        except Exception as exc:
+            # Parity with _open_dyld_component: any mount/listing fault on a hostile-but-mountable
+            # cache is category-safe `not-found`, never a raw/`internal-error` leak (ADR-005).
+            raise WorkerError(CODE_NOT_FOUND, "the dyld cache could not be listed") from exc
         finally:
             fsref.close()
 

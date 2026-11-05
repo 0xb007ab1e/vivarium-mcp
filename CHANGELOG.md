@@ -269,6 +269,18 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 
 ### Fixed
 
+- **Review-remediation of the dyld/ramdisk/lz4 increments (ADR-086–089 validation pass).** A
+  security/quality review of the merged ADR-086–089 code surfaced three LOW/INFO items, now fixed:
+  (1) **docs-currency** — `_unwrap_androidboot`'s docstring/comment/error message still said lz4 was
+  unsupported after ADR-088 wired it; corrected to list gzip/xz/cpio/lz4-standard/lz4-legacy.
+  (2) **recursion + parity hardening (CWE-674/-400)** — `_dyld_walk_components` now walks the dyld
+  cache listing with an **explicit stack (iterative, not recursive)** so a pathological deeply-nested
+  cache cannot raise `RecursionError`, bounded by a new total-nodes cap (`_DYLD_MAX_WALK_NODES`); and
+  `list_cache_components` now maps a mount/listing fault to a category-safe `not-found` (parity with
+  the import-discovery path), never an `internal-error` leak. The iterative walk is now hermetically
+  unit-tested (deep-nesting-no-recurse + both caps) via a fake GFileSystem. (3) a docstring note on
+  `_Lz4LegacyReader.read` that the streamed zip-bomb cap relies on bounded (`size>0`) reads. No
+  Critical/High/Medium issues were found; the hostile-byte parsers were verified sound.
 - **`deobfuscate_strings` ADD-decoder recovery through a copy chain (#401).** The #401 ADD-const
   filter required the `INT_ADD` output varnode to *be* a `STORE` value, but on a real worker an
   8-bit decode op (`add al, imm8`) lands its result in a unique temp that a `COPY`/`SUBPIECE` then
