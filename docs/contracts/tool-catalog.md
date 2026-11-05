@@ -2,15 +2,15 @@
 
 > Pydantic source of truth: [`src/vivarium/tools/schemas.py`](../../src/vivarium/tools/schemas.py).
 > Allow-list registry: [`src/vivarium/tools/registry.py`](../../src/vivarium/tools/registry.py).
-> **Read-by-default.** 63 of the 79 tools are read-only; the **16 mutation/write tools** below are
+> **Read-by-default.** 64 of the 80 tools are read-only; the **16 mutation/write tools** below are
 > **default-deny**, gated by per-session write-consent (`session_enable_writes`) — structural writes
 > additionally by `allow_structural`. **`runScript`/arbitrary script execution is permanently out of
 > scope** (PLAN §2), and the tool surface is a **fixed allow-list** (no dynamic registration).
 
 ## Conventions (apply to every tool)
 
-- **Allow-list only:** the catalog is fixed; there are exactly **79** tools (asserted in tests by
-  `len(TIER1_TOOL_NAMES) == 79`). The breakdown:
+- **Allow-list only:** the catalog is fixed; there are exactly **80** tools (asserted in tests by
+  `len(TIER1_TOOL_NAMES) == 80`). The breakdown:
   22 Tier-1 read-only (v1) + **1 p-code emulation tool (ADR-049: `emulate`; read-effect-only)** +
   **1 p-code listing tool (ADR-052: `get_pcode`; read-only)** +
   **1 high (SSA) p-code tool (ADR-053: `get_high_pcode`; read-only)** +
@@ -45,7 +45,9 @@
   `session_generate_report`; read-only, output-edge — composes the export doc into finding records +
   a CSP-wrapped HTML report, held in-memory per-session, discarded on evict; a default-OFF `atlas`
   flag (ADR-078 Tier-1) adds a bounded static whole-program atlas by reusing `program_summary`/
-  `call_graph`/`list_functions` — additive, no new tool)**. That is **63 read-only + 16
+  `call_graph`/`list_functions` — additive, no new tool)** — plus **1 cpio ramdisk file-tree tool
+  (ADR-087, #415: `ramdisk_list`; read-only — parses a loaded Android ramdisk's cpio members via the
+  pure fuzzed `core.cpio`)**. That is **64 read-only + 16
   mutation/write**
   (the 16 = the 6
   ADR-012 write tools + the 9 structural-write tools + the gated `session_import_annotations`; it
@@ -120,6 +122,7 @@
 | Tool | Input | Output |
 |------|-------|--------|
 | `list_strings` | `ListStringsIn{offset, limit, min_length}` | `StringListOut{strings[], total, truncated}` |
+| `ramdisk_list` | `RamdiskListIn{offset, limit, max_entries}` | `RamdiskListOut{entries[{path*, size, mode, kind, address}], total, truncated}` | **ADR-087** (#415) — structured cpio file-tree of a loaded Android ramdisk (read-only). Scope A (ADR-085) surfaces a `container_region="ramdisk"` import as a flat decompressed cpio image; this parses that image's cpio `newc`/`newc-crc` members via the pure, fuzzed `core.cpio.parse_newc_entries` (hostile-byte bounded, fail-closed `not-found` if the program is not a well-formed cpio) and returns each member's `path`(`*`=UNTRUSTED binary-derived name), `size`, `mode`, `kind`∈{file,dir,symlink,other}, and the hex program `address` of its data. **Per-file extract composes with `read_bytes`** at the returned `address`+`size` (no separate tool). Bounded by `max_entries` (CWE-400) + a 256 MiB image-scan cap; the member data is never materialized by the parser |
 | `list_symbols` | `ListSymbolsIn{offset, limit, name_contains?}` | `SymbolListOut{symbols[], total, truncated}` |
 | `get_symbol` | `GetSymbolIn{identifier}` | `Symbol{address, name*, kind, namespace*?}` |
 | `list_data` | `ListDataIn{offset, limit}` | `DataListOut{data[], total, truncated}` |

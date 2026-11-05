@@ -1510,6 +1510,16 @@ class RpcGhidraAdapter:
             )
         )
 
+    def ramdisk_list(self, sid: str, a: s.RamdiskListIn) -> s.RamdiskListOut:
+        """List the cpio member tree of a loaded Android ramdisk (ADR-087; paginated/bounded)."""
+        return _build_ramdisk_list(
+            self._tool_call(
+                sid,
+                "ramdisk_list",
+                {"offset": a.offset, "limit": a.limit, "max_entries": a.max_entries},
+            )
+        )
+
     def list_symbols(self, sid: str, a: s.ListSymbolsIn) -> s.SymbolListOut:
         """List symbols (paginated/bounded)."""
         return _build_symbol_list(
@@ -3365,6 +3375,27 @@ def _build_string_list(r: dict[str, Any]) -> s.StringListOut:
     """Build :class:`StringListOut` from a plain result."""
     return s.StringListOut(
         strings=[_build_defined_string(x) for x in r.get("strings", [])],
+        total=int(r["total"]),
+        truncated=bool(r.get("truncated", False)),
+    )
+
+
+@_fail_closed
+def _build_ramdisk_entry(r: dict[str, Any]) -> s.RamdiskEntry:
+    """Build one :class:`RamdiskEntry`: path=BINARY (extracted file name); the rest is safe."""
+    return s.RamdiskEntry(
+        path=_w(r["path"], DataOrigin.BINARY, encoding="utf-8-replace"),
+        size=int(r["size"]),
+        mode=int(r["mode"]),
+        kind=str(r["kind"]),
+        address=str(r["address"]),
+    )
+
+
+def _build_ramdisk_list(r: dict[str, Any]) -> s.RamdiskListOut:
+    """Build :class:`RamdiskListOut` from a plain result."""
+    return s.RamdiskListOut(
+        entries=[_build_ramdisk_entry(x) for x in r.get("entries", [])],
         total=int(r["total"]),
         truncated=bool(r.get("truncated", False)),
     )

@@ -599,6 +599,23 @@ class FakeGhidraPort:
             truncated=False,
         )
 
+    def ramdisk_list(self, sid: str, a: s.RamdiskListIn) -> s.RamdiskListOut:
+        """Return a bounded, deterministic cpio ramdisk file tree (untrusted paths)."""
+        self._maybe_fail()
+        return s.RamdiskListOut(
+            entries=[
+                s.RamdiskEntry(
+                    path=_u("etc/init.rc"),
+                    size=11,
+                    mode=0o100644,
+                    kind="file",
+                    address="0x00000000",
+                )
+            ],
+            total=1,
+            truncated=False,
+        )
+
     def list_symbols(self, sid: str, a: s.ListSymbolsIn) -> s.SymbolListOut:
         """Return a bounded, deterministic symbol page (untrusted names)."""
         self._maybe_fail()

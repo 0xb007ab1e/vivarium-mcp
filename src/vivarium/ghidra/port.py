@@ -229,6 +229,10 @@ class GhidraPort(Protocol):
         """List defined strings (paginated/bounded)."""
         ...
 
+    def ramdisk_list(self, sid: str, a: s.RamdiskListIn) -> s.RamdiskListOut:
+        """List the cpio member tree of a loaded Android ramdisk (ADR-087; paginated/bounded)."""
+        ...
+
     def list_symbols(self, sid: str, a: s.ListSymbolsIn) -> s.SymbolListOut:
         """List symbols (paginated/bounded)."""
         ...
