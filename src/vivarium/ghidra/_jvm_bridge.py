@@ -249,6 +249,7 @@ class PyGhidraBackend:
                 str(container),
                 int(params.get("max_decompressed_bytes", 512 * 1024 * 1024)),
                 int(params.get("max_decompression_ratio", 200)),
+                str(params.get("container_region") or "kernel"),
             )
         loader = params.get("loader")
         regions = params.get("regions")
@@ -932,7 +933,12 @@ class PyGhidraBackend:
     # object leaks the boundary); addresses render via ``str(addr)`` (Ghidra's canonical hex form).
 
     def _decompress_container(  # noqa: C901 - one bounded unwrap dispatch (stream/uimage branches read clearer inline; worker edge)
-        self, source_ref: str, container: str, max_output: int, max_ratio: int
+        self,
+        source_ref: str,
+        container: str,
+        max_output: int,
+        max_ratio: int,
+        region: str = "kernel",
     ) -> str:  # pragma: no cover - worker filesystem edge
         """Unwrap a compressed container to a payload file, zip-bomb-bounded (ADR-070; JVM-free).
 
@@ -950,6 +956,7 @@ class PyGhidraBackend:
                 payload per its ``ih_comp`` field (none/gzip/lzma) under the same caps.
             max_output: Absolute cap on decompressed bytes.
             max_ratio: Cap on output ÷ input bytes.
+            region: For ``androidboot`` only (ADR-085): ``"kernel"`` (default) or ``"ramdisk"``.
 
         Returns:
             The path to the decompressed payload file (loaded by the caller's loader dispatch).
@@ -995,7 +1002,7 @@ class PyGhidraBackend:
             if container == "uimage":
                 self._unwrap_uimage(source_ref, limit, _open_comp, _stream_to_payload)
             elif container == "androidboot":
-                self._unwrap_androidboot(source_ref, limit, _stream_to_payload)
+                self._unwrap_androidboot(source_ref, limit, region, _open_comp, _stream_to_payload)
             else:
                 with _open_comp(source_ref, container) as src:
                     _stream_to_payload(src)
@@ -1064,55 +1071,98 @@ class PyGhidraBackend:
         self,
         source_ref: str,
         limit: int,
+        region: str,
+        open_comp: Callable[[str, str], Any],
         stream_to_payload: Callable[[Any], None],
     ) -> None:  # pragma: no cover - worker filesystem edge
-        """Surface the **kernel** region of an Android boot image as the loadable payload (#380).
+        """Surface the kernel OR ramdisk region of an Android boot image (#380; ADR-070 / ADR-085).
 
         Parses the ``ANDROID!`` header with the PURE
         :func:`vivarium.core.androidboot.parse_android_boot_header` (hostile bytes, hermetically
-        fuzzed), slices the page-aligned kernel window (clamped to the real file size — a header
-        claiming more than exists never over-reads), and writes it out under the shared output cap.
-        The kernel is loaded as-is (a raw/zImage kernel is analysable directly); no nested
-        decompression is attempted here. The **ramdisk** (a cpio filesystem, not loadable code) is a
-        separate follow-on — its window is parsed but not surfaced by this container loader.
+        fuzzed). ``region="kernel"`` (default) slices the page-aligned kernel window and loads it
+        as-is (a raw/zImage kernel is analysable directly). ``region="ramdisk"`` (ADR-085) slices
+        page-aligned ramdisk window, detects its codec (gzip / xz / uncompressed-cpio via the pure
+        :func:`vivarium.core.androidboot.detect_ramdisk_codec`), and surfaces the DECOMPRESSED cpio
+        bytes as a flat payload for string/byte triage (names, ``init.rc``, configs, keys). An
+        unsupported ramdisk codec (e.g. lz4 — stdlib cannot inflate) or an empty ramdisk fails
+        closed. Every slice is clamped to the real file size (no over-read) and every decompress
+        streams under the shared zip-bomb cap.
 
         Args:
             source_ref: The confined Android-boot-image path.
             limit: The already-computed absolute output cap (min of the abs cap + the ratio cap).
+            region: ``"kernel"`` (default) or ``"ramdisk"`` (ADR-085).
+            open_comp: The ADR-070 decompressor factory (``(path, "gzip"|"xz"|...) -> reader``).
             stream_to_payload: The bounded chunk-copier into the payload file.
 
         Raises:
-            ValueError: If the header is invalid or the kernel window is empty / past EOF.
+            ValueError: If the header is invalid, the window is empty / past EOF, or (ramdisk)
+                the codec is unsupported / the ramdisk is absent.
         """
-        from vivarium.core.androidboot import _HEADER_PREFIX_SIZE, parse_android_boot_header
+        from vivarium.core.androidboot import (
+            _HEADER_PREFIX_SIZE,
+            detect_ramdisk_codec,
+            parse_android_boot_header,
+        )
 
         with open(source_ref, "rb") as handle:  # noqa: PTH123 — confined path from the server
             meta = parse_android_boot_header(
                 handle.read(_HEADER_PREFIX_SIZE), max_region_size=limit
             )
         file_size = os.path.getsize(source_ref)  # noqa: PTH202
-        start = min(meta.kernel_offset, file_size)
-        payload_len = max(0, min(meta.kernel_offset + meta.kernel_size, file_size) - start)
-        if payload_len <= 0:
-            raise ValueError("Android boot image kernel window is empty or past EOF")
-
         project_dir = os.environ.get("VIVARIUM_WORKER_PROJECT_DIR", "/work/project")
-        # Slice the exact kernel window to a temp (bounded by payload_len, already <= limit), then
-        # stream it out under the cap (identity — the kernel is loaded as-is).
-        kernel_path = os.path.join(project_dir, "androidboot_kernel.bin")  # noqa: PTH118
+
+        if region == "ramdisk":
+            if meta.ramdisk_size <= 0:
+                raise ValueError("Android boot image has no ramdisk")
+            offset, size, temp_name = (
+                meta.ramdisk_offset,
+                meta.ramdisk_size,
+                "androidboot_ramdisk.bin",
+            )
+        else:
+            offset, size, temp_name = meta.kernel_offset, meta.kernel_size, "androidboot_kernel.bin"
+
+        start = min(offset, file_size)
+        window = max(0, min(offset + size, file_size) - start)
+        if window <= 0:
+            raise ValueError(f"Android boot image {region} window is empty or past EOF")
+
+        # Slice the exact window to a temp (bounded by `window`, already <= limit).
+        temp_path = os.path.join(project_dir, temp_name)  # noqa: PTH118
         with (
             open(source_ref, "rb") as src,  # noqa: PTH123 — confined path
-            open(kernel_path, "wb") as dst,  # noqa: PTH123
+            open(temp_path, "wb") as dst,  # noqa: PTH123
         ):
             src.seek(start)
-            remaining = payload_len
+            remaining = window
             while remaining > 0:
                 chunk = src.read(min(1024 * 1024, remaining))
                 if not chunk:
                     break
                 dst.write(chunk)
                 remaining -= len(chunk)
-        with open(kernel_path, "rb") as src:  # noqa: PTH123
+
+        if region == "ramdisk":
+            # ADR-085: decompress the cpio ramdisk (gzip/xz) or pass an uncompressed cpio raw; an
+            # unsupported codec (lz4/other) fails closed. The decompress streams under the bomb cap.
+            with open(temp_path, "rb") as probe:  # noqa: PTH123
+                codec = detect_ramdisk_codec(probe.read(16))
+            if codec is None:
+                raise ValueError(
+                    "Android boot image ramdisk uses an unsupported compression "
+                    "(only gzip / xz / uncompressed cpio are supported; lz4 is not)"
+                )
+            if codec == "cpio":
+                with open(temp_path, "rb") as src:  # noqa: PTH123
+                    stream_to_payload(src)
+            else:
+                with open_comp(temp_path, codec) as src:
+                    stream_to_payload(src)
+            return
+
+        # kernel: loaded as-is (identity stream).
+        with open(temp_path, "rb") as src:  # noqa: PTH123
             stream_to_payload(src)
 
     def _gh_import(

@@ -18,10 +18,43 @@ from tests._fixtures import binaries
 from vivarium.core.androidboot import (
     ANDROID_BOOT_MAGIC,
     AndroidBootHeader,
+    detect_ramdisk_codec,
     parse_android_boot_header,
 )
 
 _CAP = 1 << 30  # 1 GiB region cap for the tests
+
+
+# --- detect_ramdisk_codec (ADR-085, #380) --------------------------------------------------------
+
+
+def test_codec_gzip() -> None:
+    """A gzip ramdisk (magic 1f 8b) is detected."""
+    assert detect_ramdisk_codec(b"\x1f\x8b\x08\x00rest") == "gzip"
+
+
+def test_codec_xz() -> None:
+    """An xz ramdisk (magic fd 37 7a 58 5a 00) is detected."""
+    assert detect_ramdisk_codec(b"\xfd7zXZ\x00rest") == "xz"
+
+
+def test_codec_uncompressed_cpio() -> None:
+    """An uncompressed cpio newc / newc-crc archive is detected (passed through raw)."""
+    assert detect_ramdisk_codec(b"070701000000") == "cpio"
+    assert detect_ramdisk_codec(b"070702000000") == "cpio"
+
+
+def test_codec_lz4_and_unknown_are_none() -> None:
+    """lz4 (stdlib can't inflate) and arbitrary/short bytes return None (worker fails closed)."""
+    assert detect_ramdisk_codec(b"\x04\x22\x4d\x18lz4..") is None  # lz4 frame magic
+    assert detect_ramdisk_codec(b"\x00\x01") is None
+    assert detect_ramdisk_codec(b"") is None
+
+
+@given(st.binary(max_size=16))
+def test_codec_never_raises(data: bytes) -> None:
+    """Arbitrary bytes never raise and return a known codec or None."""
+    assert detect_ramdisk_codec(data) in {"gzip", "xz", "cpio", None}
 
 
 def test_parses_the_synthetic_fixture() -> None:

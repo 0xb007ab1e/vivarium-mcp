@@ -389,8 +389,10 @@ tokens via the stdlib decompressor; for `"uimage"` the pure `core.uimage` parser
 (`limit-exceeded` — a zip-bomb never materializes a large buffer, ADR-070 D3), then loads the payload
 with the loader hints. Parsed in the worker, never the server (ADR-001/D4); a corrupt stream/header
 fails closed `not-found`. Mutually exclusive with `regions`. Absent ⇒ byte-for-byte the pre-ADR-070
-path. Additive/opt-in, read-only, tool count unchanged. (androidboot header format is a tracked
-follow-up.)
+path. Additive/opt-in, read-only, tool count unchanged. For `container="androidboot"` the pure
+`core.androidboot` parser surfaces the region named by `container_region` — `"kernel"` (default; the
+loadable image) or `"ramdisk"` (ADR-085; the cpio filesystem, codec-detected gzip/xz/uncompressed-cpio
+and RAW-decompressed under the same caps for string/byte triage — lz4 / absent ramdisk fail closed).
 
 **`import_binary` — companion PDB (v1.8 — ADR-061; server → worker, OPTIONAL):** the params MAY
 carry `pdb_ref` (a second server-confined + size-capped path under `VIVARIUM_IMPORT_ROOT`), allowed
