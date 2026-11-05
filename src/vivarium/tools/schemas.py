@@ -312,6 +312,10 @@ class SessionImportIn(_SessionScopedIn):
     debug_ref: str | None = Field(default=None, min_length=1, max_length=512)
     debug_format: Literal["map", "dwarf"] | None = None
     container: Literal["gzip", "xz", "lzma", "uimage", "androidboot"] | None = None
+    #: ADR-085 (#380): for ``container="androidboot"``, which region to surface — ``"kernel"``
+    #: (default, the loadable image) or ``"ramdisk"`` (the decompressed cpio filesystem, loaded raw
+    #: for string/byte triage). Ignored for other containers.
+    container_region: Literal["kernel", "ramdisk"] | None = None
 
     @model_validator(mode="after")
     def _validate_loader_hints(self) -> SessionImportIn:  # noqa: C901 — one branch per loader kind

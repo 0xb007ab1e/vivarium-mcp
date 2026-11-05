@@ -651,6 +651,8 @@ class RpcGhidraAdapter:
             params["container"] = args.container
             params["max_decompressed_bytes"] = _MAX_DECOMPRESSED_BYTES
             params["max_decompression_ratio"] = _MAX_DECOMPRESSION_RATIO
+            if args.container_region is not None:  # ADR-085: androidboot kernel|ramdisk selector
+                params["container_region"] = args.container_region
         result = self._call(
             session_id,
             "import_binary",

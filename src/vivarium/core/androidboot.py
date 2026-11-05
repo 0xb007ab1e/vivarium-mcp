@@ -117,3 +117,33 @@ def parse_android_boot_header(data: bytes, *, max_region_size: int) -> AndroidBo
         ramdisk_offset=ramdisk_offset,
         ramdisk_size=ramdisk_size,
     )
+
+
+def detect_ramdisk_codec(head: bytes) -> str | None:
+    """Detect a ramdisk's compression from its leading magic bytes (ADR-085, #380).
+
+    Pure + side-effect-free. Recognises the ramdisk codecs this loader surfaces:
+
+    - ``"gzip"`` — magic ``1f 8b`` (the most common Android ramdisk codec);
+    - ``"xz"`` — magic ``fd 37 7a 58 5a 00``;
+    - ``"cpio"`` — an UNCOMPRESSED cpio ``newc``/``newc-crc`` archive (ASCII magic ``070701`` /
+      ``070702``), passed through raw.
+
+    Any other leading bytes — notably **lz4** (``04 22 4d 18``), which stdlib cannot inflate —
+    return ``None`` so the worker fails closed with an "unsupported ramdisk compression" error (lz4
+    tracked follow-up pending a vetted dependency). Arbitrary/short input returns ``None``, never
+    raises.
+
+    Args:
+        head: The first bytes of the sliced ramdisk region (at least 6 recommended).
+
+    Returns:
+        ``"gzip"`` / ``"xz"`` / ``"cpio"`` for a surfaced codec, else ``None``.
+    """
+    if head[:2] == b"\x1f\x8b":
+        return "gzip"
+    if head[:6] == b"\xfd7zXZ\x00":
+        return "xz"
+    if head[:6] in (b"070701", b"070702"):
+        return "cpio"
+    return None

@@ -9,6 +9,17 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Added
 
 
+- **`session_import` surfaces the Android boot-image ramdisk (ADR-085 / #380).** The androidboot
+  container loader (ADR-070) shipped the kernel region and deferred the ramdisk (a cpio filesystem).
+  New optional `container_region` (`kernel` default / `ramdisk`) selects which region to surface.
+  `container_region="ramdisk"` slices the page-aligned ramdisk window, codec-detects it (gzip / xz /
+  uncompressed cpio via the pure `core.androidboot.detect_ramdisk_codec`), and loads the
+  **raw-decompressed cpio bytes** as a flat binary — so `list_strings` / `search_strings` / the
+  `deobfuscate_strings` family recover the ramdisk's file names, `init.rc`, configs, keys and
+  strings. Reuses the ADR-070 streamed zip-bomb cap. **lz4** ramdisks (stdlib has no lz4) and a
+  structured cpio file-tree + per-file extraction (Scope B) are tracked follow-ups; an unsupported
+  codec or an absent ramdisk fails closed. The kernel path is unchanged (`container_region` defaults
+  to `kernel`). (#380)
 - **`deobfuscate_strings` recovers strings from self-modifying unpackers (ADR-084 / #399).** A
   probe established that Ghidra's p-code emulator **re-translates self-modified code on execution**
   — so the ADR-049 sandbox already runs an unpacker *and* the code it decodes into memory (still
