@@ -156,6 +156,11 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Changed
 
 
+- **Bump the worker-image pin to the ADR-089 dyld-discovery build; gate the #418/#419 live test.**
+  Advance the trusted worker digest to `sha256:d9878957…` — the CI-signed build that bakes the
+  ADR-089 `list_cache_components` tool — and add `test_list_cache_components.py` to the
+  live-regression hard-gate list, so cache listing + a slid-cache extraction are proven against the
+  shipped worker. (#418, #419)
 - **Bump the worker-image pin to the ADR-088 lz4-ramdisk build; gate the #414 live test.** Advance
   the trusted worker digest to `sha256:94975224…` — the CI-signed build that bakes the ADR-088 lz4
   ramdisk codecs **and the new `lz4` dependency** — and add `test_import_lz4_ramdisk.py` to the
