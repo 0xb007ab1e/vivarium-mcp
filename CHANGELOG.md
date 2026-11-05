@@ -9,6 +9,15 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Added
 
 
+- **`deobfuscate_strings` recovers interprocedural local decoders (ADR-082 / #398).** When a decode
+  loop delegates the per-byte transform to a helper (`for i: out[i] = transform(in[i], key)`), the
+  `INT_XOR`/`INT_ADD` lives in the **callee**, which the entry-only scan never visited — so detection
+  found no decode op even though the emulation *would* decode (it already steps into in-program
+  callees; that is why ADR-066 stubs exist). Detection now walks the entry function + its in-program
+  callees (BFS, cycle-safe) for the decode signals, bounded by new server-clamped `max_call_depth`
+  (default 2, `0`=entry-only) and `max_callees` (default 16). No new execution surface — the same
+  single bounded ADR-049 run. A decoder calling an **external/unresolved** helper faults →
+  not-recovered (fail closed); self-modifying + stateful decoders stay deferred. (#398)
 - **`deobfuscate_strings` detects ADD-const decoders, filtering address/counter adds (#401).** The
   `xor_decode` stage detection kept only constant `INT_XOR`, because a constant `INT_ADD` is
   overwhelmingly address arithmetic (`[base + disp]`) or a loop counter (`inc`) — indiscriminately

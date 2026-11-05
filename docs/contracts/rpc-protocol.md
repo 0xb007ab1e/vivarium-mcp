@@ -183,8 +183,10 @@ multi-stage (ADR-081): reads back every distinct write buffer (bounded by `max_s
 reports the printable one plus the ordered untrusted `stages[]{op, key}` XOR chain, recovering
 chained/multi-buffer local decoders; `xor` + value-feeding `add` ops detected (#401 — a constant
 `INT_ADD` is a decode stage only when its output feeds a `STORE` value, else it is address
-arithmetic / a counter and is filtered); interprocedural/self-modifying/stateful decoders fail
-closed / deferred),
+arithmetic / a counter and is filtered); interprocedural detection (ADR-082) spans the entry
+function + its in-program callees (bounded by `max_call_depth`≤8 / `max_callees`≤256; the emulation
+already steps into in-program callees) so a decoder whose transform lives in a helper is recovered;
+external/unresolved-call, self-modifying + stateful decoders fail closed),
 `stack_frame` (ADR-054 recovered stack layout — read-only; the function's locals/parameters with
 offsets, types, sizes from the Stack analyzer), `basic_blocks` (ADR-055 control-flow graph —
 read-only; each basic block's address range + intraprocedural successor edges from

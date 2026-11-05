@@ -813,6 +813,11 @@ class DeobfuscateStringsIn(_SessionScopedIn):
             stages reported and the number of distinct write buffers read back after the bounded
             emulation (chained/multi-stage local decoders). Server-clamped ``[1, 64]``; ignored by
             ``stack_string``.
+        max_call_depth: ``xor_decode`` only (ADR-082) — how deep the decode-op scan follows
+            in-program callees (interprocedural decoders: the per-byte transform lives in a helper
+            function). ``0`` = entry-only (the pre-ADR-082 behavior). Server-clamped ``[0, 8]``.
+        max_callees: ``xor_decode`` only (ADR-082) — the hard cap on the total number of distinct
+            functions scanned during the bounded call-graph walk (DoS). Server-clamped ``[1, 256]``.
     """
 
     function: str | None = Field(default=None, min_length=1, max_length=_MAX_NAME)
@@ -824,6 +829,8 @@ class DeobfuscateStringsIn(_SessionScopedIn):
     max_bytes: int = Field(default=256, ge=1, le=_MAX_LIMIT)
     max_steps: int = Field(default=100_000, ge=1, le=1_000_000)
     max_stages: int = Field(default=8, ge=1, le=64)
+    max_call_depth: int = Field(default=2, ge=0, le=8)
+    max_callees: int = Field(default=16, ge=1, le=256)
 
 
 class DecodeStage(_Out):
