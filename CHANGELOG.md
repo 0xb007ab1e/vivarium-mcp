@@ -130,6 +130,11 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Changed
 
 
+- **Bump the worker-image pin to the ADR-086 dyld build; gate the #369 live test.** Advance the
+  trusted worker digest to `sha256:f33d2cb7…` — the CI-signed build that bakes the ADR-086
+  `loader="dyld"` component-import support — and add `test_import_dyld.py` to the live-regression
+  hard-gate list, so a dyld shared-cache component is extracted + loaded via
+  `DyldCacheExtractLoader` (and the discovery listing proven) against the shipped worker. (#369)
 - **Bump the worker-image pin to the ADR-085 ramdisk build; gate the #380 ramdisk live test.**
   Advance the trusted worker digest to `sha256:9d2fe56c…` — the CI-signed build that bakes the
   ADR-085 androidboot `container_region="ramdisk"` support — and add
