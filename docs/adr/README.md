@@ -1,6 +1,6 @@
 # Architecture Decision Records (ADR) index
 
-This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-082).
+This directory holds the numbered, append-only decision records for Vivarium (ADR-001 … ADR-083).
 Each ADR captures one significant decision: its context, the decision, alternatives, and consequences.
 Records are **point-in-time** — a `Status:` of *Proposed* reflects the record when it was written; what
 actually shipped in each release is tracked in [`../../CHANGELOG.md`](../../CHANGELOG.md) and the
@@ -78,6 +78,7 @@ system-level view is in [`../architecture.md`](../architecture.md) and the STRID
 - **ADR-080** — Cross-binary corpus links (`SAME_AS`/`EQUIV` clone + family clustering in a dedicated `vivarium-corpus` index project) + client-side export-on-close — completes the ADR-079 §7 deferrals — **Accepted / Implemented** 2026-11-03 (#367): realized via shared hash-class nodes (cluster forms by upsert idempotency, no cross-binary query / no fan-out) + `export_session_and_close`.
 - **ADR-081** — Multi-stage / chained local decode recovery: extends `deobfuscate_strings` (`xor_decode`) to read back every distinct write buffer after the bounded ADR-049 emulation (`max_stages`-capped) and report the printable one plus the ordered `stages` XOR chain — recovers chained/multi-buffer local decoders the ADR-068 D4 MVP missed; interprocedural/self-modifying/stateful + `add` decoders stay deferred (fail-closed) — **Proposed** (#379).
 - **ADR-082** — Interprocedural local decode recovery: extends `deobfuscate_strings` (`xor_decode`) detection to span the entry function + its in-program callees (bounded by `max_call_depth`/`max_callees`, BFS, cycle-safe) — recovers a decoder whose per-byte transform lives in a called helper; the ADR-049 emulation already steps into in-program callees, so only detection widens (no new execution surface). External/unresolved-call, self-modifying + stateful decoders stay fail-closed — **Proposed** (#398).
+- **ADR-083** — Stateful / stream-cipher decode recovery: adds the opt-in `stream_decode` technique to `deobfuscate_strings` — relaxes detection to a VARIABLE key (a keystream, not a constant) so a self-contained stateful/stream cipher (RC4-like / rolling-key / LFSR) is recovered by the same bounded ADR-049 emulation + printable-changed gate (`technique="stream_decode"`, `encoding="stream"`, no key). Function-scoped only (whole-program rejected, CWE-400); external-keyed / self-modifying stay fail-closed — **Proposed** (#400).
 
 ### Read/analysis tools
 - **ADR-007** — Semantic-naming support tools (call graph, leaf-first ordering, function context).

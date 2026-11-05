@@ -9,6 +9,18 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Added
 
 
+- **`deobfuscate_strings` recovers self-contained stateful / stream-cipher decoders (ADR-083 /
+  #400).** A stream cipher XORs the ciphertext with an evolving **keystream** (a register value, not
+  a constant), so the keyed `xor_decode` family never detected it — even though the ADR-049
+  emulation reproduces the keystream and decrypts a self-contained cipher. New **opt-in**
+  `stream_decode` technique relaxes detection to a variable key and recovers the plaintext by the
+  same bounded emulation + printable-changed gate, reporting `technique="stream_decode"` /
+  `encoding="stream"` with **no `decode_key`** (a stream has no single key). It is **not** in the
+  default techniques and requires an explicit `function` (a whole-program `stream_decode` is
+  rejected — the variable-key relaxation would otherwise emulate a large fraction of functions,
+  CWE-400). Self-contained only: an external-keyed cipher produces garbage from the zero-initialised
+  state → not-recovered (fail closed); self-modifying unpackers stay deferred. No new execution
+  surface — the same single bounded ADR-049 run. (#400)
 - **`deobfuscate_strings` recovers interprocedural local decoders (ADR-082 / #398).** When a decode
   loop delegates the per-byte transform to a helper (`for i: out[i] = transform(in[i], key)`), the
   `INT_XOR`/`INT_ADD` lives in the **callee**, which the entry-only scan never visited — so detection
