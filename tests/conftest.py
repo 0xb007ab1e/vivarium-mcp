@@ -616,6 +616,15 @@ class FakeGhidraPort:
             truncated=False,
         )
 
+    def list_cache_components(self, sid: str, a: s.CacheComponentsIn) -> s.CacheComponentsOut:
+        """Return a bounded, deterministic dyld cache component listing (untrusted paths)."""
+        self._maybe_fail()
+        return s.CacheComponentsOut(
+            components=[_u("/usr/lib/libviv.dylib")],
+            total=1,
+            truncated=False,
+        )
+
     def list_symbols(self, sid: str, a: s.ListSymbolsIn) -> s.SymbolListOut:
         """Return a bounded, deterministic symbol page (untrusted names)."""
         self._maybe_fail()

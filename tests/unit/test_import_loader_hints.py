@@ -749,3 +749,41 @@ def test_dyld_discovery_import_params_thread_only_loader() -> None:
     adapter.import_binary("s", args)  # type: ignore[attr-defined]
     assert captured == [{"source_ref": "cache", "expected_sha256": None, "loader": "dyld"}]
     assert "dyld_component" not in captured[0]
+
+
+# --- 2e. list_cache_components discovery tool (ADR-089; #418) -------------------------------------
+
+
+def test_cache_components_in_accepts_source_ref_and_pagination() -> None:
+    """list_cache_components takes a source_ref + the standard pagination bounds."""
+    m = s.CacheComponentsIn.model_validate(
+        {"session_id": "s", "source_ref": "dyld_shared_cache_x86_64", "offset": 0, "limit": 50}
+    )
+    assert m.source_ref == "dyld_shared_cache_x86_64"
+    assert m.offset == 0 and m.limit == 50
+
+
+def test_cache_components_in_requires_source_ref() -> None:
+    """A missing source_ref fails closed (there is nothing to mount)."""
+    with pytest.raises(ValidationError):
+        s.CacheComponentsIn.model_validate({"session_id": "s"})
+
+
+def test_cache_components_import_params_thread_source_ref_and_page() -> None:
+    """The adapter threads {source_ref, offset, limit} to the worker (after confining the ref)."""
+    adapter, captured = _adapter_capturing_call()
+
+    def _cache_reply(
+        session_id: str, method: str, params: dict[str, object], **_kw: object
+    ) -> dict[str, object]:
+        captured.append(params)
+        return {"components": [], "total": 0, "truncated": False}
+
+    adapter._call = _cache_reply  # type: ignore[attr-defined]
+    adapter.list_cache_components(  # type: ignore[attr-defined]
+        "s",
+        s.CacheComponentsIn.model_validate(
+            {"session_id": "s", "source_ref": "cache", "offset": 0, "limit": 100}
+        ),
+    )
+    assert captured == [{"source_ref": "cache", "offset": 0, "limit": 100}]

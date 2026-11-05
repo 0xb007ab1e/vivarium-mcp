@@ -93,6 +93,7 @@ TIER1_TOOL_NAMES: tuple[str, ...] = (
     # strings / symbols / data / types
     "list_strings",
     "ramdisk_list",
+    "list_cache_components",
     "list_symbols",
     "get_symbol",
     "list_data",
@@ -765,6 +766,14 @@ def _handle_ramdisk_list(ctx: ToolContext, args: s.RamdiskListIn) -> s.RamdiskLi
     """List the cpio member tree of a loaded Android ramdisk (ADR-087; paginated/bounded)."""
     ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
     return ctx.port.ramdisk_list(args.session_id, args)
+
+
+def _handle_list_cache_components(
+    ctx: ToolContext, args: s.CacheComponentsIn
+) -> s.CacheComponentsOut:
+    """List a dyld shared cache's component dylibs (ADR-089; read-only, paginated/bounded)."""
+    ctx.sessions.authorize(args.session_id, caller=ctx.caller_id)
+    return ctx.port.list_cache_components(args.session_id, args)
 
 
 def _handle_list_symbols(ctx: ToolContext, args: s.ListSymbolsIn) -> s.SymbolListOut:
@@ -2096,6 +2105,7 @@ _HANDLERS: dict[str, tuple[Callable[[ToolContext, Any], Any], type[s._In]]] = {
     "xrefs_from": (_handle_xrefs_from, s.XrefsIn),
     "list_strings": (_handle_list_strings, s.ListStringsIn),
     "ramdisk_list": (_handle_ramdisk_list, s.RamdiskListIn),
+    "list_cache_components": (_handle_list_cache_components, s.CacheComponentsIn),
     "list_symbols": (_handle_list_symbols, s.ListSymbolsIn),
     "get_symbol": (_handle_get_symbol, s.GetSymbolIn),
     "list_data": (_handle_list_data, s.ListDataIn),
