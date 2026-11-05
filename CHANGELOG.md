@@ -139,6 +139,11 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Changed
 
 
+- **Bump the worker-image pin to the ADR-087 ramdisk-cpio build; gate the #415 live test.** Advance
+  the trusted worker digest to `sha256:b0cdebeb…` — the CI-signed build that bakes the ADR-087
+  `ramdisk_list` cpio file-tree tool — and add `test_ramdisk_list.py` to the live-regression
+  hard-gate list, so the cpio tree + a `read_bytes` per-file extract are proven against the shipped
+  worker. (#415)
 - **Bump the worker-image pin to the ADR-086 dyld build; gate the #369 live test.** Advance the
   trusted worker digest to `sha256:f33d2cb7…` — the CI-signed build that bakes the ADR-086
   `loader="dyld"` component-import support — and add `test_import_dyld.py` to the live-regression
