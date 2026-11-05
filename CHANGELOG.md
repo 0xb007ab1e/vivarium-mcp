@@ -119,6 +119,11 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Changed
 
 
+- **Bump the worker-image pin to the ADR-085 ramdisk build; gate the #380 ramdisk live test.**
+  Advance the trusted worker digest to `sha256:9d2fe56c…` — the CI-signed build that bakes the
+  ADR-085 androidboot `container_region="ramdisk"` support — and add
+  `test_import_androidboot_ramdisk.py` to the live-regression hard-gate list, so a gzip-cpio
+  ramdisk's content is recovered via `container_region="ramdisk"` against the shipped worker. (#380)
 - **Bump the worker-image pin to the ADR-084 unpack build; gate the #399 live test.** Advance the
   trusted worker digest to `sha256:8e9c4f02…` — the CI-signed build that bakes the ADR-084 opt-in
   `unpack` technique — and add `test_deobfuscate_unpack.py` to the live-regression hard-gate list,
