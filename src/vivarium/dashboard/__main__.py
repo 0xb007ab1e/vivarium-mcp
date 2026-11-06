@@ -147,18 +147,23 @@ def _select_executor() -> CommandExecutor | None:
     """Return an interactive executor iff explicitly enabled AND its safety preconditions hold.
 
     Fail closed: interactive requires ``VIVARIUM_DASHBOARD_INTERACTIVE`` set AND a state file
-    (``VIVARIUM_DASHBOARD_STATE``) AND an auth token (``VIVARIUM_DASHBOARD_TOKEN``). Missing any →
-    ``None`` (disabled; the command endpoint returns 503). The wired transport is read-only
-    (:class:`StateFileToolCaller`) — it spawns no worker; gated ops/writes are refused by the
-    executor + endpoint (ADR-076 / TB9).
+    (``VIVARIUM_DASHBOARD_STATE``) AND per-principal auth — either ``VIVARIUM_DASHBOARD_PRINCIPALS``
+    (a JSON ``{token: principal}`` map, ADR-017) or the legacy single ``VIVARIUM_DASHBOARD_TOKEN``.
+    Missing any → ``None`` (disabled; the command endpoint returns 503). The wired transport is
+    read-only (:class:`StateFileToolCaller`) — it spawns no worker; gated ops/writes are refused by
+    the executor + endpoint (ADR-076 / TB9).
     """
     if not os.environ.get("VIVARIUM_DASHBOARD_INTERACTIVE"):
         return None
     state_path = os.environ.get("VIVARIUM_DASHBOARD_STATE")
-    if not state_path or not os.environ.get("VIVARIUM_DASHBOARD_TOKEN"):
+    has_auth = os.environ.get("VIVARIUM_DASHBOARD_PRINCIPALS") or os.environ.get(
+        "VIVARIUM_DASHBOARD_TOKEN"
+    )
+    if not state_path or not has_auth:
         print(
             "warning: interactive requested but requires VIVARIUM_DASHBOARD_STATE + "
-            "VIVARIUM_DASHBOARD_TOKEN — interactive DISABLED (fail closed).",
+            "VIVARIUM_DASHBOARD_PRINCIPALS (or VIVARIUM_DASHBOARD_TOKEN) — interactive DISABLED "
+            "(fail closed).",
             file=sys.stderr,
         )
         return None
@@ -188,11 +193,14 @@ def main() -> None:
     from vivarium.dashboard.app import build_app
 
     host, port = _check_bind(os.environ.get("VIVARIUM_DASHBOARD_BIND", _DEFAULT_BIND))
-    if not os.environ.get("VIVARIUM_DASHBOARD_TOKEN"):
+    if not (
+        os.environ.get("VIVARIUM_DASHBOARD_PRINCIPALS")
+        or os.environ.get("VIVARIUM_DASHBOARD_TOKEN")
+    ):
         print(
-            "warning: VIVARIUM_DASHBOARD_TOKEN not set — relying on the tailnet/loopback bind for "
-            "access control (fine for local/tailnet dev; set a token or wire per-principal authz "
-            "before any wider exposure).",
+            "warning: no VIVARIUM_DASHBOARD_PRINCIPALS/VIVARIUM_DASHBOARD_TOKEN set — relying on "
+            "the tailnet/loopback bind for access control (fine for local/tailnet dev; set "
+            "per-principal auth before any wider exposure).",
             file=sys.stderr,
         )
     provider = _select_provider()

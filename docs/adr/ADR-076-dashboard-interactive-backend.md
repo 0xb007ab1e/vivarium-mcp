@@ -1,7 +1,8 @@
 # ADR-076: Dashboard interactive backend (Phase 2)
 
-- **Status:** **Partial — read-only path shipped + config-enablable** (proposed 2026-09-04; updated
-  2026-11-03, see "Status update" below). Phase 1 (author + visualize) is implemented (dashboard MVP
+- **Status:** **Partial — read-only path + §21 pre-exposure controls (per-principal auth / rate-limit
+  / audit) shipped, config-enablable** (proposed 2026-09-04; updated 2026-11-05 + 2026-11-03, see the
+  "Status update" sections below). Phase 1 (author + visualize) is implemented (dashboard MVP
   → live bridge → panels → VSCode UI → RE browser → interactive call graph → workflows catalog/Runs/
   builder, PRs #317–#322). This ADR is the design of record for Phase 2 — the **interactive command
   backend** — and for threat-model **TB9** (§21). The gating policy (`commands.py`) and a **read-only**
@@ -78,6 +79,31 @@ gated actions** requiring human approval.
   write path, widens attack surface, violates "reuse the server" + ADR-001.
 - **Keep author-only (Phase 1) permanently** — rejected: does not meet the goal's interactive/apply
   capabilities; TB9 is the sanctioned path to add them safely.
+
+## Status update (2026-11-05) — §21 pre-exposure controls implemented
+
+The three §21 pre-exposure prerequisites (the hard requirements before any compute executor or wider
+exposure) now land on the dashboard command surface, **reusing the server (D-alt-1), still
+default-off**:
+
+- **Per-principal auth (ADR-017).** The command route authenticates each request with the server's
+  `MultiTokenBearerAuthenticator` built from a `{token: principal}` map
+  (`VIVARIUM_DASHBOARD_PRINCIPALS`; the legacy single `VIVARIUM_DASHBOARD_TOKEN` maps to one
+  `dashboard` principal). Distinct tokens are distinct principals (the BOLA foundation). An
+  **interactive app built WITHOUT an authenticator fails closed at startup** (D2). Read-only GET
+  routes stay tailnet-gated (a browser cannot attach a bearer on navigation). mTLS/OAuth (ADR-019)
+  are a natural follow-up (the dashboard ASGI does not terminate mTLS today).
+- **App-layer rate limiter (API4).** `POST /api/command` is wrapped in the server's per-client
+  token-bucket `RateLimitMiddleware` (`429` on burst exhaustion), **scoped to the command path only**
+  so the UI's read-only GETs are never rate-limited (`VIVARIUM_DASHBOARD_COMMAND_RATE`/`_BURST`).
+- **Per-command audit (redacted).** Every command logs principal id / op / gating decision / HTTP
+  status to the `vivarium.dashboard.audit` logger — never the params' values or binary content
+  (master §5).
+
+The auth path is covered 100% (per-principal accept/reject, fail-closed startup, malformed-config
+rejection, rate-limit 429, redacted audit). **Still gated** (separate human approval): the
+compute-capable `WorkerExecutor` and any production enablement. mTLS/OAuth dashboard auth is the
+remaining §21 richness.
 
 ## Status update (2026-11-03)
 

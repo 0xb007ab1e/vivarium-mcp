@@ -9,6 +9,18 @@ All notable changes to **Vivarium** (formerly `ghidra-mcp`) are documented here.
 ### Added
 
 
+- **Dashboard interactive backend — §21 pre-exposure controls (ADR-076 / #368).** The interactive
+  command surface (`POST /api/command`, default-OFF) now carries the three hard prerequisites before
+  any compute executor or wider exposure, **reusing the server** (not reinventing): **per-principal
+  auth** via the server's `MultiTokenBearerAuthenticator` (`VIVARIUM_DASHBOARD_PRINCIPALS` = a
+  `{token: principal}` map; the legacy single `VIVARIUM_DASHBOARD_TOKEN` maps to one `dashboard`
+  principal; **interactive-without-auth fails closed at startup**, ADR-076 D2); an **app-layer rate
+  limiter** (the server's `RateLimitMiddleware`, `429` on burst) **scoped to the command path only**
+  so read-only GET navigation is never throttled (`VIVARIUM_DASHBOARD_COMMAND_RATE`/`_BURST`); and a
+  **redacted per-command audit log** (`vivarium.dashboard.audit`: principal/op/decision/status — never
+  params or binary content, master §5). The auth path is covered 100%. The compute-capable
+  `WorkerExecutor` and any production enablement remain **gated** (ADR-076); mTLS/OAuth dashboard auth
+  is a tracked follow-up. (#368)
 - **`list_cache_components` — dyld shared-cache discovery tool (ADR-089 / #418).** New read-only tool
   (catalog 80 → 81) that mounts a (server-confined, size-capped) dyld shared cache with
   `DyldCacheFileSystem` and lists its component dylib paths (bounded, paginated) — so a caller

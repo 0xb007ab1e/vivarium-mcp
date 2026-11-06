@@ -33,6 +33,10 @@ from vivarium.dashboard.models import (
 )
 from vivarium.dashboard.providers import DemoProvider
 
+#: A bearer token of valid length (>= the authenticator's 16-char minimum) for the interactive
+#: command tests (ADR-076 §21 per-principal auth; the authenticator rejects short tokens).
+_TOK = "dashboard-test-token-01"
+
 
 @pytest.fixture
 def client() -> TestClient:
@@ -287,19 +291,128 @@ def _noop_exec(cmd: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_command_endpoint_requires_auth() -> None:
-    """An executor wired but no token configured fails closed (interactive needs auth)."""
+    """Interactive without an authenticator fails closed AT STARTUP (ADR-076 D2); with an
+    authenticator, an unauthenticated command (no/bad bearer) is 403 (per-principal reject)."""
     import os
 
+    import pytest
+
     os.environ.pop("VIVARIUM_DASHBOARD_TOKEN", None)
-    c = TestClient(build_app(DemoProvider(), executor=_noop_exec))
-    assert c.post("/api/command", json={"op": "list_strings"}).status_code == 403
+    os.environ.pop("VIVARIUM_DASHBOARD_PRINCIPALS", None)
+    # executor wired (interactive) but no auth configured → build refuses to start (fail closed).
+    with pytest.raises(ValueError, match="requires per-principal auth"):
+        build_app(DemoProvider(), executor=_noop_exec)
+
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = _TOK
+    try:
+        c = TestClient(build_app(DemoProvider(), executor=_noop_exec))
+        # no bearer → not authenticated → 403 (never executes)
+        assert c.post("/api/command", json={"op": "list_strings"}).status_code == 403
+        # wrong bearer → still 403 (generic, oracle-free)
+        r = c.post(
+            "/api/command",
+            json={"op": "list_strings"},
+            headers={"authorization": "Bearer wrong-but-long-enough-token"},
+        )
+        assert r.status_code == 403
+    finally:
+        del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
+
+
+def test_command_endpoint_per_principal_auth() -> None:
+    """Distinct tokens authenticate as distinct principals (ADR-017 BOLA foundation)."""
+    import json
+    import os
+
+    seen: list[dict[str, Any]] = []
+
+    def _exec(cmd: dict[str, Any]) -> dict[str, Any]:
+        seen.append(cmd)
+        return {"ok": True}
+
+    os.environ["VIVARIUM_DASHBOARD_PRINCIPALS"] = json.dumps(
+        {"alice-token-sufficiently-long": "alice", "bob-token-sufficiently-long": "bob"}
+    )
+    try:
+        c = TestClient(build_app(DemoProvider(), executor=_exec))
+        for token in ("alice-token-sufficiently-long", "bob-token-sufficiently-long"):
+            r = c.post(
+                "/api/command",
+                json={"op": "list_strings"},
+                headers={"authorization": f"Bearer {token}"},
+            )
+            assert r.status_code == 200
+        # an unknown token is rejected (403), never executed
+        assert (
+            c.post(
+                "/api/command",
+                json={"op": "list_strings"},
+                headers={"authorization": "Bearer unknown-token-also-long"},
+            ).status_code
+            == 403
+        )
+        assert len(seen) == 2  # only the two valid principals ran
+    finally:
+        del os.environ["VIVARIUM_DASHBOARD_PRINCIPALS"]
+
+
+def test_command_route_is_rate_limited() -> None:
+    """The command surface is rate-limited (429 on burst exhaustion); GETs are NOT (ADR-076 §21)."""
+    import os
+
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = _TOK
+    os.environ["VIVARIUM_DASHBOARD_COMMAND_RATE"] = "0.001"  # effectively no refill during the test
+    os.environ["VIVARIUM_DASHBOARD_COMMAND_BURST"] = "3"
+    try:
+        c = TestClient(build_app(DemoProvider(), executor=_noop_exec))
+        hdr = {"authorization": f"Bearer {_TOK}"}
+        codes = [
+            c.post("/api/command", json={"op": "list_strings"}, headers=hdr).status_code
+            for _ in range(6)
+        ]
+        assert 429 in codes  # the burst is exhausted within 6 rapid commands
+        # read-only GET navigation is never rate-limited (many asset loads must always pass)
+        assert all(c.get("/api/health").status_code == 200 for _ in range(20))
+    finally:
+        for var in (
+            "VIVARIUM_DASHBOARD_TOKEN",
+            "VIVARIUM_DASHBOARD_COMMAND_RATE",
+            "VIVARIUM_DASHBOARD_COMMAND_BURST",
+        ):
+            os.environ.pop(var, None)
+
+
+def test_command_is_audit_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """Each command emits a redacted audit record (principal/op/decision/status; no params)."""
+    import logging
+    import os
+
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = _TOK
+    try:
+        c = TestClient(build_app(DemoProvider(), executor=_noop_exec))
+        with caplog.at_level(logging.INFO, logger="vivarium.dashboard.audit"):
+            c.post(
+                "/api/command",
+                json={"op": "list_strings", "params": {"secret": "do-not-log"}},
+                headers={"authorization": f"Bearer {_TOK}"},
+            )
+        rec = next(r for r in caplog.records if r.name == "vivarium.dashboard.audit")
+        fields = rec.__dict__  # the audit `extra` lands as LogRecord attributes
+        assert fields["dashboard_principal"] == "dashboard"  # the single-token principal
+        assert fields["dashboard_op"] == "list_strings"
+        assert fields["dashboard_decision"] == "allow"
+        assert fields["dashboard_status"] == 200
+        # the params VALUE is never logged (master §5 redaction)
+        assert "do-not-log" not in caplog.text
+    finally:
+        del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
 
 
 def test_command_endpoint_gates_and_executes() -> None:
     """With executor + token: read-only → executes; gated → 202 (not run); unknown → 400."""
     import os
 
-    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = "tok"  # noqa: S105 - test fixture
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = _TOK
     calls: list[dict[str, Any]] = []
 
     def _exec(cmd: dict[str, Any]) -> dict[str, Any]:
@@ -308,7 +421,7 @@ def test_command_endpoint_gates_and_executes() -> None:
 
     try:
         c = TestClient(build_app(DemoProvider(), executor=_exec))
-        hdr = {"authorization": "Bearer tok"}
+        hdr = {"authorization": f"Bearer {_TOK}"}
         # gated op → 202 needs-approval, executor NOT called
         r = c.post("/api/command", json={"op": "session_analyze"}, headers=hdr)
         assert r.status_code == 202 and r.json()["decision"] == "needs-approval"
@@ -326,10 +439,10 @@ def test_command_endpoint_invalid_json_and_bad_params() -> None:
     """Malformed body → 400 invalid-json; too many params → 400 deny (never dispatched)."""
     import os
 
-    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = "tok"  # noqa: S105 - test fixture
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = _TOK
     try:
         c = TestClient(build_app(DemoProvider(), executor=_noop_exec))
-        hdr = {"authorization": "Bearer tok"}
+        hdr = {"authorization": f"Bearer {_TOK}"}
         r = c.post("/api/command", content=b"not json", headers=hdr)
         assert r.status_code == 400 and r.json()["error"] == "invalid-json"
         big = {"op": "list_strings", "params": {str(i): i for i in range(40)}}
@@ -342,7 +455,7 @@ def test_command_endpoint_executor_failure_is_safe() -> None:
     """An executor exception collapses to a 500 that leaks no internals (fail closed)."""
     import os
 
-    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = "tok"  # noqa: S105 - test fixture
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = _TOK
 
     def _boom(cmd: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("secret internal detail")
@@ -352,7 +465,7 @@ def test_command_endpoint_executor_failure_is_safe() -> None:
         r = c.post(
             "/api/command",
             json={"op": "list_strings"},
-            headers={"authorization": "Bearer tok"},
+            headers={"authorization": f"Bearer {_TOK}"},
         )
         assert r.status_code == 500
         assert r.json() == {"error": "command-failed", "op": "list_strings"}
@@ -399,10 +512,10 @@ def test_readonly_executor_wires_into_endpoint() -> None:
             forwarded.append(op)
             return {"ok": op}
 
-    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = "tok"  # noqa: S105 - test fixture
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = _TOK
     try:
         c = TestClient(build_app(DemoProvider(), executor=ReadOnlyExecutor(catalog(), _Caller())))
-        hdr = {"authorization": "Bearer tok"}
+        hdr = {"authorization": f"Bearer {_TOK}"}
         r = c.post("/api/command", json={"op": "list_strings"}, headers=hdr)
         assert r.status_code == 200 and r.json()["result"] == {"ok": "list_strings"}
         # gated op stops at the endpoint (202) — never reaches the executor/transport
@@ -462,8 +575,8 @@ def test_endpoint_routes_compute_only_to_worker_executor() -> None:
         def call(self, op: str, params: dict[str, Any], /) -> dict[str, Any]:
             return {"ran": op}
 
-    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = "tok"  # noqa: S105 - test fixture
-    hdr = {"authorization": "Bearer tok"}
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = _TOK
+    hdr = {"authorization": f"Bearer {_TOK}"}
     try:
         # worker executor: compute (analyze) executes
         cw = TestClient(build_app(DemoProvider(), executor=WorkerExecutor(catalog(), _Caller())))
@@ -584,18 +697,18 @@ def test_bearer_token_gates_commands_not_viewing() -> None:
     """
     import os
 
-    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = "s3cret-demo"  # noqa: S105 - test fixture, not a secret
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = _TOK
     try:
         # read-only GET loads WITHOUT a token (so the browser can render the page over the tailnet)
         c = TestClient(build_app(DemoProvider(), executor=_noop_exec))
         assert c.get("/api/health").status_code == 200
         assert c.get("/").status_code == 200
         # the command surface (POST) requires the token
-        assert c.post("/api/command", json={"op": "list_strings"}).status_code == 401
+        assert c.post("/api/command", json={"op": "list_strings"}).status_code == 403
         r = c.post(
             "/api/command",
             json={"op": "list_strings"},
-            headers={"authorization": "Bearer s3cret-demo"},
+            headers={"authorization": f"Bearer {_TOK}"},
         )
         assert r.status_code == 200
     finally:
@@ -708,11 +821,12 @@ def test_main_runs_on_valid_bind(
     monkeypatch.setattr(uvicorn, "run", lambda app, **kw: calls.update(app=app, **kw))
     monkeypatch.setenv("VIVARIUM_DASHBOARD_BIND", "127.0.0.1:8799")
     monkeypatch.delenv("VIVARIUM_DASHBOARD_TOKEN", raising=False)
+    monkeypatch.delenv("VIVARIUM_DASHBOARD_PRINCIPALS", raising=False)
 
     main()
 
     assert (calls["host"], calls["port"]) == ("127.0.0.1", 8799)
-    assert "VIVARIUM_DASHBOARD_TOKEN not set" in capsys.readouterr().err
+    assert "set per-principal auth before any wider exposure" in capsys.readouterr().err
 
 
 def test_main_no_warning_with_token(
@@ -725,7 +839,7 @@ def test_main_no_warning_with_token(
 
     monkeypatch.setattr(uvicorn, "run", lambda app, **kw: None)
     monkeypatch.setenv("VIVARIUM_DASHBOARD_BIND", "127.0.0.1:8799")
-    monkeypatch.setenv("VIVARIUM_DASHBOARD_TOKEN", "t0ken")
+    monkeypatch.setenv("VIVARIUM_DASHBOARD_TOKEN", _TOK)
 
     main()
 
@@ -941,3 +1055,37 @@ def test_select_provider_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     assert _select_provider() is None
     monkeypatch.setenv("VIVARIUM_DASHBOARD_STATE", str(tmp_path / "s.json"))
     assert _select_provider() is not None
+
+
+def test_build_app_rejects_malformed_principals() -> None:
+    """A malformed VIVARIUM_DASHBOARD_PRINCIPALS fails closed at startup (auth path; §21)."""
+    import os
+
+    import pytest
+
+    try:
+        # not JSON at all → json.loads raises (ValueError family) → interactive refuses to start
+        os.environ["VIVARIUM_DASHBOARD_PRINCIPALS"] = "not json"
+        with pytest.raises(ValueError):
+            build_app(DemoProvider(), executor=_noop_exec)
+        # valid JSON but the wrong shape ({token: non-str}) → explicit shape rejection
+        os.environ["VIVARIUM_DASHBOARD_PRINCIPALS"] = '{"tok-sufficiently-long": 5}'
+        with pytest.raises(ValueError, match="must be a JSON object"):
+            build_app(DemoProvider(), executor=_noop_exec)
+    finally:
+        del os.environ["VIVARIUM_DASHBOARD_PRINCIPALS"]
+
+
+def test_rate_config_falls_back_on_bad_env() -> None:
+    """A non-numeric rate/burst env falls back to the safe defaults (never crashes startup)."""
+    import os
+
+    from vivarium.dashboard.app import _DEFAULT_BURST, _DEFAULT_RATE, _rate_config
+
+    os.environ["VIVARIUM_DASHBOARD_COMMAND_RATE"] = "not-a-number"
+    os.environ["VIVARIUM_DASHBOARD_COMMAND_BURST"] = "also-bad"
+    try:
+        assert _rate_config() == (_DEFAULT_RATE, _DEFAULT_BURST)
+    finally:
+        del os.environ["VIVARIUM_DASHBOARD_COMMAND_RATE"]
+        del os.environ["VIVARIUM_DASHBOARD_COMMAND_BURST"]

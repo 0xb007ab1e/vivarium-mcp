@@ -143,8 +143,13 @@ source:
 - **Dedicated STRIDE pass.** A browser surface is a **new trust boundary**. The MVP is scoped
   read-only + tailnet-only precisely so it ships behind that reduced surface; the full STRIDE pass
   over this TB (aligned with `docs/security/threat-model.md`) is required before production.
-- **Reuse the server's principals.** Production auth reuses the server's per-principal authZ
-  (ADR-017/019), never invents its own — the MVP bearer gate is an interim, tailnet-scoped control.
+- **Reuse the server's principals — DONE (ADR-076 §21, 2026-11-05).** The command surface now
+  authenticates with the server's `MultiTokenBearerAuthenticator` (`VIVARIUM_DASHBOARD_PRINCIPALS` =
+  a `{token: principal}` map; the legacy single token maps to one `dashboard` principal), is
+  rate-limited by the server's `RateLimitMiddleware` on `POST /api/command`, and emits a redacted
+  per-command audit log. Interactive-without-auth fails closed at startup. **Remaining:** mTLS/OAuth
+  (ADR-019) dashboard auth (the ASGI does not terminate mTLS today), and the gated compute
+  `WorkerExecutor` + production enablement.
 - **Direct live provider.** The file bridge is the first live path; a provider that taps the server
   directly (`session_status` + `$/progress` (ADR-030) + streaming jobs (ADR-040) + metrics
   (ADR-044) and `gh`/CI) is the next step — same `StatusProvider` interface, no UI change.
