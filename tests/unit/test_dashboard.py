@@ -1089,3 +1089,80 @@ def test_rate_config_falls_back_on_bad_env() -> None:
     finally:
         del os.environ["VIVARIUM_DASHBOARD_COMMAND_RATE"]
         del os.environ["VIVARIUM_DASHBOARD_COMMAND_BURST"]
+
+
+def test_unauth_command_rejected_before_body_parse(caplog: pytest.LogCaptureFixture) -> None:
+    """An unauthenticated command is 403 BEFORE the body is parsed; the attacker op is NOT logged.
+
+    Closes the review's CWE-400 (unbounded pre-auth parse) + CWE-117 (attacker op in the audit log):
+    with no bearer, the route returns 403 and the audit record carries op "-" (the body — including
+    a huge/newline op — is never read).
+    """
+    import logging
+    import os
+
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = _TOK
+    try:
+        c = TestClient(build_app(DemoProvider(), executor=_noop_exec))
+        with caplog.at_level(logging.INFO, logger="vivarium.dashboard.audit"):
+            r = c.post("/api/command", json={"op": "EVIL\nINJECTED" + "x" * 5000})
+        assert r.status_code == 403
+        rec = next(r for r in caplog.records if r.name == "vivarium.dashboard.audit")
+        assert rec.__dict__["dashboard_op"] == "-"  # attacker op never reaches the log
+        assert "EVIL" not in caplog.text and "INJECTED" not in caplog.text
+    finally:
+        del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
+
+
+def test_command_body_size_capped() -> None:
+    """An over-cap command body (large Content-Length) is rejected 413 before it is read (API4)."""
+    import os
+
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = _TOK
+    try:
+        c = TestClient(build_app(DemoProvider(), executor=_noop_exec))
+        oversized = b'{"op":"list_strings","params":{"x":"' + b"A" * (128 * 1024) + b'"}}'
+        r = c.post(
+            "/api/command",
+            content=oversized,
+            headers={"authorization": f"Bearer {_TOK}", "content-type": "application/json"},
+        )
+        assert r.status_code == 413
+    finally:
+        del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
+
+
+def test_audited_op_is_sanitized(caplog: pytest.LogCaptureFixture) -> None:
+    """An authed command's op is bound + control-char-stripped in the audit log (CWE-117)."""
+    import logging
+    import os
+
+    os.environ["VIVARIUM_DASHBOARD_TOKEN"] = _TOK
+    try:
+        c = TestClient(build_app(DemoProvider(), executor=_noop_exec))
+        with caplog.at_level(logging.INFO, logger="vivarium.dashboard.audit"):
+            # unknown op (→ 400 deny) carrying newlines + overlength; it must be sanitized/bounded
+            c.post(
+                "/api/command",
+                json={"op": "x\nnewline" + "y" * 200},
+                headers={"authorization": f"Bearer {_TOK}"},
+            )
+        rec = next(r for r in caplog.records if r.name == "vivarium.dashboard.audit")
+        logged_op = rec.__dict__["dashboard_op"]
+        assert "\n" not in logged_op and len(logged_op) <= 64
+    finally:
+        del os.environ["VIVARIUM_DASHBOARD_TOKEN"]
+
+
+def test_safe_op_bounds_and_sanitizes() -> None:
+    """_safe_op is total: caps length, strips control chars, and maps non-ops to '-' (CWE-117)."""
+    from vivarium.dashboard.app import _safe_op
+
+    assert _safe_op({"op": "list_strings"}) == "list_strings"
+    assert _safe_op({"op": "a\nb\tc"}) == "abc"  # control chars stripped
+    assert len(_safe_op({"op": "z" * 500})) == 64  # length-capped
+    assert _safe_op({"op": 123}) == "-"  # non-string op
+    assert _safe_op({"op": ""}) == "-"  # empty op
+    assert _safe_op({}) == "-"  # no op
+    assert _safe_op("not a dict") == "-"  # non-dict body
+    assert _safe_op({"op": "\n\n"}) == "-"  # all-stripped → "-"

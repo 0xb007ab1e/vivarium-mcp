@@ -54,7 +54,7 @@ from vivarium.dashboard.catalog import catalog
 from vivarium.dashboard.commands import INVALID_JSON, CommandExecutor, dispatch
 from vivarium.dashboard.providers import DemoProvider, StatusProvider
 from vivarium.server.auth import AuthContext, Authenticator, MultiTokenBearerAuthenticator
-from vivarium.server.http_middleware import RateLimitMiddleware
+from vivarium.server.http_middleware import RateLimitMiddleware, RequestSizeLimitMiddleware
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -75,6 +75,14 @@ _DEFAULT_BURST = 10
 
 #: The command surface path (the sole non-safe route; the only one authenticated + rate-limited).
 _COMMAND_PATH = "/api/command"
+
+#: Hard cap on a command request body (Content-Length) — a command is small (<= 32 params); a larger
+#: body is a DoS signal, rejected 413 before the body is read (TB9 / API4, reused server control).
+_MAX_COMMAND_BODY_BYTES = 64 * 1024
+
+#: Cap on the ``op`` string placed in the audit log — bound + control-char-stripped so an
+#: attacker-controlled op cannot bloat or forge a log line (CWE-117).
+_MAX_AUDIT_OP_LEN = 64
 
 #: Per-command audit logger. Emits principal/op/decision/status ONLY — never params or binary
 #: content (master §5 redaction). Routed by the host logging config.
@@ -246,8 +254,11 @@ def build_app(  # noqa: C901 - composition root: one nested handler per route (w
     async def command_route(request: Request) -> JSONResponse:
         """Interactive command endpoint (Phase 2 — ADR-076 / TB9). Default OFF + fail closed.
 
-        Order (ADR-076): disabled (503) → authenticate → parse → gate → (read-only) execute.
-        Authentication binds the command to a :class:`Principal`; a gated op is never executed here
+        Order (ADR-076): disabled (503) → authenticate → (reject 403 BEFORE reading the body) →
+        parse → gate → (read-only) execute. Auth binds the command to a :class:`Principal`; an
+        unauthenticated request is rejected 403 **before** the body is parsed, so an anonymous
+        caller cannot make the server read/parse an unbounded body (CWE-400) nor place an
+        attacker-controlled ``op`` in the audit log (CWE-117). A gated op is never executed here
         (202). Every outcome is audit-logged (principal/op/decision/status — redacted).
         """
         if executor is None:
@@ -255,18 +266,19 @@ def build_app(  # noqa: C901 - composition root: one nested handler per route (w
             _audit.info("command", extra=_audit_fields("-", "-", "disabled", 503))
             return JSONResponse({"error": "interactive-disabled"}, status_code=503)
         principal = authenticator.authenticate(_auth_context(request)) if authenticator else None
-        principal_id = principal.id if principal is not None else "-"
+        if principal is None:
+            # Reject BEFORE parsing the body — no unbounded read, no attacker op logged (defense in
+            # depth over the command-path size + rate limits).
+            _audit.info("command", extra=_audit_fields("-", "-", "unauthenticated", 403))
+            return JSONResponse({"error": "interactive-requires-auth"}, status_code=403)
         try:
             body: object = await request.json()
-        except Exception:  # any parse failure → the INVALID_JSON sentinel (handled after auth)
+        except Exception:  # any parse failure → the INVALID_JSON sentinel
             body = INVALID_JSON
-        status, payload = dispatch(catalog(), executor, principal is not None, body)
-        op = body.get("op") if isinstance(body, dict) else "-"
+        status, payload = dispatch(catalog(), executor, True, body)
         _audit.info(
             "command",
-            extra=_audit_fields(
-                principal_id, str(op) if op else "-", payload.get("decision"), status
-            ),
+            extra=_audit_fields(principal.id, _safe_op(body), payload.get("decision"), status),
         )
         return JSONResponse(payload, status_code=status)
 
@@ -298,8 +310,25 @@ def build_app(  # noqa: C901 - composition root: one nested handler per route (w
 
     base: ASGIApp = Starlette(routes=routes, middleware=[Middleware(SecurityHeadersMiddleware)])
     rate, burst = _rate_config()
-    limited = RateLimitMiddleware(base, rate_per_second=rate, burst=burst, clock=time.monotonic)
+    # Command path only: rate-limit (outer, DoS-first) → size-cap (413 before the body is read) →
+    # base. Reused server controls; GET navigation (via `_base`) touches neither.
+    sized = RequestSizeLimitMiddleware(base, max_body_bytes=_MAX_COMMAND_BODY_BYTES)
+    limited = RateLimitMiddleware(sized, rate_per_second=rate, burst=burst, clock=time.monotonic)
     return _CommandScopedRateLimit(base=base, limited=limited)
+
+
+def _safe_op(body: object) -> str:
+    """Bound + sanitize a command's ``op`` for the audit log (CWE-117: no log-line forgery/bloat).
+
+    Returns a printable-char-only, length-capped op, or ``"-"`` when the body has no usable op.
+    """
+    if not isinstance(body, dict):
+        return "-"
+    op = body.get("op")
+    if not isinstance(op, str) or not op:
+        return "-"
+    cleaned = "".join(ch for ch in op[:_MAX_AUDIT_OP_LEN] if ch.isprintable())
+    return cleaned or "-"
 
 
 def _audit_fields(principal_id: str, op: str, decision: object, status: int) -> dict[str, object]:
