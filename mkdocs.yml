@@ -113,5 +113,7 @@ nav:
   - Development:
       - CI/CD gates: ci-cd.md
   - Decision records (ADRs): adr/README.md
-  - Release notes (0.14.0): release-notes-0.14.0.md
+  - Release notes:
+      - "0.15.0": release-notes-0.15.0.md
+      - "0.14.0": release-notes-0.14.0.md
   - Archive (historical): archive/README.md
