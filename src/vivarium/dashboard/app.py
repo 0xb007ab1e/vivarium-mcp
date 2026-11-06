@@ -11,16 +11,33 @@ a later retrofit:
 - **Hardening headers** — ``X-Content-Type-Options: nosniff``, ``Referrer-Policy: no-referrer``,
   ``X-Frame-Options: DENY`` + ``frame-ancestors 'none'`` (clickjacking), a tight
   ``Permissions-Policy``.
-- **Read-only** — GET-only routes; the app holds no write path and cannot invoke a tool.
-- **Optional bearer gate** — if ``VIVARIUM_DASHBOARD_TOKEN`` is set, every request must present it
-  (constant-time compare); else the app relies on the tailnet bind (see ``__main__``) and warns.
+- **Read-only by default** — GET routes are the UI + read-only APIs; the sole command surface
+  (``POST /api/command``) is Phase-2 interactive (ADR-076 / TB9), default-OFF + fail-closed.
+
+Interactive command backend (ADR-076 Phase 2 / threat-model TB9) — the §21 pre-exposure controls:
+
+- **Per-principal auth (ADR-017/019 — reuse the server).** When interactive is enabled the command
+  route authenticates each request with the server's :class:`MultiTokenBearerAuthenticator` built
+  from a ``{token: principal-id}`` map — distinct tokens are distinct principals (BOLA-closed), and
+  an interactive app built WITHOUT an authenticator **fails closed at startup** (ADR-076 D2). The
+  read-only GET routes stay tailnet-gated (a browser cannot attach a bearer on navigation).
+- **App-layer rate limiter (TB9 / API4).** ``POST /api/command`` is wrapped in the server's
+  per-client token-bucket :class:`RateLimitMiddleware` (``429`` on exhaustion) — scoped to the
+  command path only, so the UI's read-only GETs are never rate-limited. This is a hard prerequisite
+  for ever enabling a compute executor.
+- **Per-command audit (redacted).** Every command logs principal id, op, gating decision, and HTTP
+  status to the ``vivarium.dashboard.audit`` logger — never the params' values or any
+  binary-derived content (master §5 redaction).
+
+The compute-capable ``WorkerExecutor`` and any production enablement remain **gated** (ADR-076).
 """
 
 from __future__ import annotations
 
-import hmac
 import json
+import logging
 import os
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
@@ -31,16 +48,45 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
-from starlette.types import ASGIApp
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from vivarium.dashboard.catalog import catalog
 from vivarium.dashboard.commands import INVALID_JSON, CommandExecutor, dispatch
 from vivarium.dashboard.providers import DemoProvider, StatusProvider
+from vivarium.server.auth import AuthContext, Authenticator, MultiTokenBearerAuthenticator
+from vivarium.server.http_middleware import RateLimitMiddleware, RequestSizeLimitMiddleware
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
-#: Env var name for an optional shared bearer token gating the whole dashboard.
+#: Env var: a single shared bearer token (legacy / single-principal). Mapped to the ``dashboard``
+#: principal for backward compatibility when ``_PRINCIPALS_ENV`` is unset.
 _TOKEN_ENV = "VIVARIUM_DASHBOARD_TOKEN"  # noqa: S105  # nosec B105 - env var name, not a secret
+
+#: Env var: a JSON object ``{"<token>": "<principal-id>"}`` mapping each bearer token to its
+#: principal (ADR-017 per-principal auth). Takes precedence over ``_TOKEN_ENV`` when both are set.
+_PRINCIPALS_ENV = "VIVARIUM_DASHBOARD_PRINCIPALS"  # nosec B105 - env var name
+
+#: Env vars: the command-route token-bucket rate (requests/sec) + burst. Conservative defaults — a
+#: human driving the UI issues a few commands at a time; a flood is a DoS signal (TB9 / API4).
+_RATE_ENV = "VIVARIUM_DASHBOARD_COMMAND_RATE"
+_BURST_ENV = "VIVARIUM_DASHBOARD_COMMAND_BURST"
+_DEFAULT_RATE = 5.0
+_DEFAULT_BURST = 10
+
+#: The command surface path (the sole non-safe route; the only one authenticated + rate-limited).
+_COMMAND_PATH = "/api/command"
+
+#: Hard cap on a command request body (Content-Length) — a command is small (<= 32 params); a larger
+#: body is a DoS signal, rejected 413 before the body is read (TB9 / API4, reused server control).
+_MAX_COMMAND_BODY_BYTES = 64 * 1024
+
+#: Cap on the ``op`` string placed in the audit log — bound + control-char-stripped so an
+#: attacker-controlled op cannot bloat or forge a log line (CWE-117).
+_MAX_AUDIT_OP_LEN = 64
+
+#: Per-command audit logger. Emits principal/op/decision/status ONLY — never params or binary
+#: content (master §5 redaction). Routed by the host logging config.
+_audit = logging.getLogger("vivarium.dashboard.audit")
 
 #: The strict, inline-free Content-Security-Policy. Everything is same-origin + external; no inline
 #: script/style is permitted, so injected UNTRUSTED content can never execute even if a render sink
@@ -80,37 +126,77 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
-#: HTTP methods that only READ. Read-only viewing is gated by the tailnet bind (the original
-#: posture); the token specifically protects the **command surface** (the sole non-safe route,
-#: ``POST /api/command``). Gating only mutating methods lets a browser LOAD the UI + read-only APIs
-#: over the tailnet (it cannot attach a bearer on navigation) while every command still needs auth.
-_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+class _CommandScopedRateLimit:
+    """Apply the token-bucket rate limiter ONLY to ``POST`` on the command path, else pass through.
 
-
-class BearerAuthMiddleware(BaseHTTPMiddleware):
-    """If a shared token is configured, require it on **mutating** requests (constant-time compare).
-
-    Read-only GET/HEAD/OPTIONS (the UI + read-only APIs) pass — gated by the tailnet/loopback bind,
-    the dashboard's primary access control. Non-safe methods (``POST /api/command`` — the
-    command surface, the only write/compute path) require the bearer token. A production deployment
-    reuses the server's per-principal authz (ADR-017/019) — a tracked follow-up.
+    Reuses the server's :class:`RateLimitMiddleware` (per-client bucket, ``429``) as the limiter for
+    the command surface, so the UI's read-only GET navigation (many asset loads) is never
+    rate-limited. For a command request the call is routed through the limiter (which rate-checks,
+    then invokes the base app); every other request goes straight to the base app.
     """
 
-    def __init__(self, app: ASGIApp, token: str | None) -> None:
-        """Store the optional expected token."""
-        super().__init__(app)
-        self._token = token
+    def __init__(self, base: ASGIApp, limited: ASGIApp) -> None:
+        """Store the unlimited base app and the same app wrapped by the limiter."""
+        self._base = base
+        self._limited = limited
 
-    async def dispatch(
-        self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
-    ) -> Response:
-        """Enforce the bearer token on mutating requests when configured; otherwise pass through."""
-        if self._token is not None and request.method not in _SAFE_METHODS:
-            presented = request.headers.get("authorization", "")
-            expected = f"Bearer {self._token}"
-            if not hmac.compare_digest(presented, expected):
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return await call_next(request)
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Route command POSTs through the limiter; everything else straight to the base app."""
+        if (
+            scope["type"] == "http"
+            and scope.get("method") == "POST"
+            and scope.get("path") == _COMMAND_PATH
+        ):
+            await self._limited(scope, receive, send)
+        else:
+            await self._base(scope, receive, send)
+
+
+def _build_authenticator() -> Authenticator | None:
+    """Build the command authenticator from config, or ``None`` when no credentials are configured.
+
+    ``_PRINCIPALS_ENV`` (a JSON ``{token: principal}`` map) takes precedence; else a lone
+    ``_TOKEN_ENV`` maps to the ``dashboard`` principal (backward compatibility). Returns ``None``
+    when neither is set (interactive then fails closed at :func:`build_app`). A malformed map or a
+    too-short token raises at construction — a misconfigured interactive dashboard refuses to start.
+
+    Returns:
+        A :class:`MultiTokenBearerAuthenticator`, or ``None`` when no token/map is set.
+    """
+    raw = os.environ.get(_PRINCIPALS_ENV)
+    if raw:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in parsed.items()
+        ):
+            raise ValueError(f"{_PRINCIPALS_ENV} must be a JSON object of {{token: principal-id}}")
+        return MultiTokenBearerAuthenticator(tokens=dict(parsed))
+    token = os.environ.get(_TOKEN_ENV)
+    if token:
+        return MultiTokenBearerAuthenticator(tokens={token: "dashboard"})
+    return None
+
+
+def _auth_context(request: Request) -> AuthContext:
+    """Build a transport-agnostic :class:`AuthContext` from the request (bearer header only)."""
+    return AuthContext(
+        authorization=request.headers.get("authorization"),
+        peer_certificate=None,
+        headers={k.lower(): v for k, v in request.headers.items()},
+    )
+
+
+def _rate_config() -> tuple[float, int]:
+    """Resolve the command-route rate/burst from config (clamped to sane positive values)."""
+    try:
+        rate = float(os.environ.get(_RATE_ENV, _DEFAULT_RATE))
+    except ValueError:
+        rate = _DEFAULT_RATE
+    try:
+        burst = int(os.environ.get(_BURST_ENV, _DEFAULT_BURST))
+    except ValueError:
+        burst = _DEFAULT_BURST
+    return (max(rate, 0.1), max(burst, 1))
 
 
 def _sse_format(data: dict[str, object]) -> bytes:
@@ -120,22 +206,34 @@ def _sse_format(data: dict[str, object]) -> bytes:
 
 def build_app(  # noqa: C901 - composition root: one nested handler per route (wiring, not logic)
     provider: StatusProvider | None = None, executor: CommandExecutor | None = None
-) -> Starlette:
+) -> ASGIApp:
     """Construct the dashboard ASGI app.
 
     Args:
         provider: The read-only data source. Defaults to the deterministic :class:`DemoProvider`.
         executor: OPTIONAL interactive command executor (Phase 2 — ADR-076 / TB9). Default ``None``
             keeps the app **read-only + fail-closed**: ``POST /api/command`` returns 503 (disabled)
-            and no execution path exists. A live executor is wired only by the (gated) integration,
-            and interactive requires auth (a token) — enforced fail-closed below.
+            and no execution path exists. When an executor IS wired (interactive enabled), a
+            per-principal authenticator is REQUIRED — otherwise this raises at startup (ADR-076 D2).
 
     Returns:
-        A configured :class:`starlette.applications.Starlette` app (hardened; GET-only unless an
-        interactive executor is wired).
+        The hardened ASGI app. GET routes are the UI + read-only APIs; the command POST is
+        authenticated + rate-limited + audited when interactive is enabled.
+
+    Raises:
+        ValueError: If ``executor`` is wired (interactive on) but no per-principal authenticator is
+            configured (``VIVARIUM_DASHBOARD_PRINCIPALS`` / ``VIVARIUM_DASHBOARD_TOKEN``) — an
+            interactive dashboard without auth fails closed at startup.
     """
     source: StatusProvider = provider if provider is not None else DemoProvider()
-    token = os.environ.get(_TOKEN_ENV) or None
+    # Auth only matters for the interactive command surface; a read-only dashboard (no executor)
+    # returns 503 before auth, so it never builds/requires an authenticator.
+    authenticator = _build_authenticator() if executor is not None else None
+    if executor is not None and authenticator is None:
+        raise ValueError(
+            "interactive dashboard (executor wired) requires per-principal auth — set "
+            f"{_PRINCIPALS_ENV} (a JSON {{token: principal}} map) or {_TOKEN_ENV}"
+        )
 
     async def health(_request: Request) -> JSONResponse:
         """Liveness — the dashboard process is up (does not assert upstream health in the MVP)."""
@@ -156,15 +254,32 @@ def build_app(  # noqa: C901 - composition root: one nested handler per route (w
     async def command_route(request: Request) -> JSONResponse:
         """Interactive command endpoint (Phase 2 — ADR-076 / TB9). Default OFF + fail closed.
 
-        Thin: parse the body (or a sentinel) and defer the disabled/auth/gate/execute decision to
-        :func:`commands.dispatch`. No executor wired ⇒ 503; no token ⇒ 403; gated op ⇒ 202
-        (not executed — human write-consent only); read-only ⇒ executed via the injected executor.
+        Order (ADR-076): disabled (503) → authenticate → (reject 403 BEFORE reading the body) →
+        parse → gate → (read-only) execute. Auth binds the command to a :class:`Principal`; an
+        unauthenticated request is rejected 403 **before** the body is parsed, so an anonymous
+        caller cannot make the server read/parse an unbounded body (CWE-400) nor place an
+        attacker-controlled ``op`` in the audit log (CWE-117). A gated op is never executed here
+        (202). Every outcome is audit-logged (principal/op/decision/status — redacted).
         """
+        if executor is None:
+            # Disabled interactive leaks nothing and never consults auth/parse (fail-closed first).
+            _audit.info("command", extra=_audit_fields("-", "-", "disabled", 503))
+            return JSONResponse({"error": "interactive-disabled"}, status_code=503)
+        principal = authenticator.authenticate(_auth_context(request)) if authenticator else None
+        if principal is None:
+            # Reject BEFORE parsing the body — no unbounded read, no attacker op logged (defense in
+            # depth over the command-path size + rate limits).
+            _audit.info("command", extra=_audit_fields("-", "-", "unauthenticated", 403))
+            return JSONResponse({"error": "interactive-requires-auth"}, status_code=403)
         try:
             body: object = await request.json()
-        except Exception:  # any parse failure → the INVALID_JSON sentinel (handled after auth)
+        except Exception:  # any parse failure → the INVALID_JSON sentinel
             body = INVALID_JSON
-        status, payload = dispatch(catalog(), executor, token is not None, body)
+        status, payload = dispatch(catalog(), executor, True, body)
+        _audit.info(
+            "command",
+            extra=_audit_fields(principal.id, _safe_op(body), payload.get("decision"), status),
+        )
         return JSONResponse(payload, status_code=status)
 
     async def session_events(request: Request) -> StreamingResponse:
@@ -189,12 +304,38 @@ def build_app(  # noqa: C901 - composition root: one nested handler per route (w
         Route("/api/sessions/{session_id}/events", session_events, methods=["GET"]),
         Route("/api/build", build, methods=["GET"]),
         Route("/api/catalog", catalog_route, methods=["GET"]),
-        Route("/api/command", command_route, methods=["POST"]),
+        Route(_COMMAND_PATH, command_route, methods=["POST"]),
         Mount("/", app=StaticFiles(directory=_STATIC_DIR, html=True), name="static"),
     ]
 
-    middleware = [
-        Middleware(SecurityHeadersMiddleware),
-        Middleware(BearerAuthMiddleware, token=token),
-    ]
-    return Starlette(routes=routes, middleware=middleware)
+    base: ASGIApp = Starlette(routes=routes, middleware=[Middleware(SecurityHeadersMiddleware)])
+    rate, burst = _rate_config()
+    # Command path only: rate-limit (outer, DoS-first) → size-cap (413 before the body is read) →
+    # base. Reused server controls; GET navigation (via `_base`) touches neither.
+    sized = RequestSizeLimitMiddleware(base, max_body_bytes=_MAX_COMMAND_BODY_BYTES)
+    limited = RateLimitMiddleware(sized, rate_per_second=rate, burst=burst, clock=time.monotonic)
+    return _CommandScopedRateLimit(base=base, limited=limited)
+
+
+def _safe_op(body: object) -> str:
+    """Bound + sanitize a command's ``op`` for the audit log (CWE-117: no log-line forgery/bloat).
+
+    Returns a printable-char-only, length-capped op, or ``"-"`` when the body has no usable op.
+    """
+    if not isinstance(body, dict):
+        return "-"
+    op = body.get("op")
+    if not isinstance(op, str) or not op:
+        return "-"
+    cleaned = "".join(ch for ch in op[:_MAX_AUDIT_OP_LEN] if ch.isprintable())
+    return cleaned or "-"
+
+
+def _audit_fields(principal_id: str, op: str, decision: object, status: int) -> dict[str, object]:
+    """Build the redacted audit ``extra`` for one command (no params/binary content; master §5)."""
+    return {
+        "dashboard_principal": principal_id,
+        "dashboard_op": op,
+        "dashboard_decision": decision if isinstance(decision, str) else "-",
+        "dashboard_status": status,
+    }
